@@ -10,7 +10,7 @@
     {
       "name": "setup-statusline",
       "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
-      "source": "./skills/setup-statusline",
+      "source": "./plugins/setup-statusline",
       "category": "productivity"
     }
   ]
