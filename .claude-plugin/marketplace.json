@@ -1,0 +1,12 @@
+{
+  "plugins": [
+    {
+      "name": "setup-statusline",
+      "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
+      "source": {
+        "source": "local",
+        "path": "skills/setup-statusline"
+      }
+    }
+  ]
+}
