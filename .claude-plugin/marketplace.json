@@ -1,12 +1,17 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kweiza-skills",
+  "description": "Custom skills collection by kweiza",
+  "owner": {
+    "name": "kweiza",
+    "email": "support@mintcinc.com"
+  },
   "plugins": [
     {
       "name": "setup-statusline",
       "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
-      "source": {
-        "source": "local",
-        "path": "skills/setup-statusline"
-      }
+      "source": "./skills/setup-statusline",
+      "category": "productivity"
     }
   ]
 }
