@@ -12,6 +12,12 @@
       "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
       "source": "./plugins/grafik-bar",
       "category": "productivity"
+    },
+    {
+      "name": "harness",
+      "description": "Kweiza Harness — Claude Code project setup with stack presets (init, add, list, update)",
+      "source": "./plugins/harness",
+      "category": "productivity"
     }
   ]
 }
