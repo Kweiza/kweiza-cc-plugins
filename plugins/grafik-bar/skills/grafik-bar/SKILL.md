@@ -7,9 +7,9 @@ argument-hint: "[optional: effort level - low/medium/high/max, default: high]"
 
 # Setup Status Line
 
-Claude Code status line을 그래픽 바와 함께 설정합니다.
+Set up Claude Code status line with graphical bars.
 
-## 표시 항목
+## Display Items
 
 - Login username (cyan)
 - Model name (magenta bold)
@@ -18,26 +18,26 @@ Claude Code status line을 그래픽 바와 함께 설정합니다.
 - 5-hour session limit (8-cell bar + reset countdown)
 - 7-day weekly limit (8-cell bar + reset countdown)
 
-## 색상 임계값
+## Color Thresholds
 
 - 0-39%: Green
 - 40-69%: Cyan
 - 70-89%: Yellow
 - 90-100%: Red
 
-## 반응형 레이아웃
+## Responsive Layout
 
-- Wide (>=120 cols): 한 줄
-- Medium (80-119): 두 줄
-- Narrow (<80): 세 줄
+- Wide (>=120 cols): single line
+- Medium (80-119): two lines
+- Narrow (<80): three lines
 
 ## Setup Instructions
 
-아래 두 가지를 수행하세요:
+Perform the following two steps:
 
-### Step 1: statusline-command.sh 생성
+### Step 1: Create statusline-command.sh
 
-`~/.claude/statusline-command.sh` 파일을 아래 내용으로 생성하세요:
+Create `~/.claude/statusline-command.sh` with the following content:
 
 ```bash
 #!/usr/bin/env bash
@@ -182,9 +182,9 @@ else
 fi
 ```
 
-### Step 2: settings.json에 statusLine 및 effortLevel 추가
+### Step 2: Add statusLine and effortLevel to settings.json
 
-`~/.claude/settings.json`을 읽어서 기존 설정을 유지하면서 아래 두 필드를 추가/업데이트하세요:
+Read `~/.claude/settings.json` and add/update the following two fields while preserving existing settings:
 
 ```json
 {
@@ -196,17 +196,17 @@ fi
 }
 ```
 
-- `$ARGUMENTS`가 있으면 (low/medium/high/max) 해당 값을 effortLevel로 설정
-- 없으면 기본값 "high" 사용
-- settings.json이 없으면 새로 생성
-- 기존 hooks, env 등 다른 설정은 절대 건드리지 않을 것
+- If `$ARGUMENTS` is provided (low/medium/high/max), use it as the effortLevel value
+- Otherwise default to "high"
+- Create settings.json if it doesn't exist
+- Never modify other existing settings (hooks, env, etc.)
 
-### Step 3: 완료 메시지
+### Step 3: Completion Message
 
-설정 완료 후 아래처럼 보고:
+After setup, display the following:
 
 ```
-Status line 설정 완료!
+Status line setup complete!
 
 Wide (>=120):
  aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
@@ -220,13 +220,13 @@ Narrow (<80):
  CTX ████▓░░░░░░░ 38%
  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
 
-Note: /effort max는 settings.json에 기록되지 않으므로 수동 설정 필요
+Note: /effort max is session-only and not saved to settings.json — set it manually if needed
 ```
 
-### 참고 사항
+### Notes
 
-- effort level은 settings.json의 `effortLevel` 필드에서 읽음
-- `/effort low|medium|high`는 settings.json을 자동 업데이트하므로 status line에 즉시 반영
-- `/effort max`는 세션 전용이라 settings.json에 기록되지 않음 (Claude Code 제한사항)
-- max를 표시하려면 settings.json의 effortLevel을 직접 "max"로 변경 필요
-- `jq`가 설치되어 있어야 함
+- Effort level is read from the `effortLevel` field in settings.json
+- `/effort low|medium|high` auto-updates settings.json, so the status line reflects changes immediately
+- `/effort max` is session-only and not written to settings.json (Claude Code limitation)
+- To display max, manually set effortLevel to "max" in settings.json
+- Requires `jq` to be installed
