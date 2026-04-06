@@ -1,5 +1,5 @@
 {
-  "name": "setup-statusline",
+  "name": "grafik-bar",
   "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
   "version": "1.0.0"
 }

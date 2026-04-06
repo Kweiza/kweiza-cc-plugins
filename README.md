@@ -6,11 +6,11 @@ Personal Claude Code skills marketplace.
 
 ```
 /plugin marketplace add kweiza/skills
-/plugin install setup-statusline@kweiza-skills
+/plugin install grafik-bar@kweiza-skills
 ```
 
 ## Skills
 
 | Skill | Description |
 |-------|-------------|
-| `setup-statusline` | Graphical status line with model, effort, context window, rate limits and responsive layout |
+| `grafik-bar` | Graphical status line with model, effort, context window, rate limits and responsive layout |

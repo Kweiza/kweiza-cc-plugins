@@ -8,9 +8,9 @@
   },
   "plugins": [
     {
-      "name": "setup-statusline",
+      "name": "grafik-bar",
       "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
-      "source": "./plugins/setup-statusline",
+      "source": "./plugins/grafik-bar",
       "category": "productivity"
     }
   ]
