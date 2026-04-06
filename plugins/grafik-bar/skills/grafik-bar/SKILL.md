@@ -11,6 +11,7 @@ Claude Code status line을 그래픽 바와 함께 설정합니다.
 
 ## 표시 항목
 
+- Login username (cyan)
 - Model name (magenta bold)
 - Reasoning effort level (thunder icons)
 - Context window usage (12-cell progress bar)
@@ -55,6 +56,8 @@ five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empt
 five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 week_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+user=$(echo "$input" | jq -r '.user.name // empty')
+[ -z "$user" ] && user=$(whoami 2>/dev/null || echo "")
 
 # --- ANSI colors ---
 RST='\033[0m'
@@ -113,6 +116,8 @@ effort_icon() {
 }
 
 # --- Build segments ---
+seg_user=""
+[ -n "$user" ] && seg_user="$(printf "${C_CYAN}${BOLD}${user}${RST}")"
 effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
 seg_model="$(printf "${C_MAGENTA}${BOLD}◈ ${model}${RST}")"
 seg_effort="$(printf "${C_YELLOW}$(effort_icon "$effort") ${effort_upper}${RST}")"
@@ -146,21 +151,29 @@ fi
 sep="  ${DOT}  "
 
 if (( cols >= 120 )); then
-  line=" ${seg_model}${sep}${seg_effort}"
+  line=" "
+  [ -n "$seg_user" ] && line+="${seg_user}${sep}"
+  line+="${seg_model}${sep}${seg_effort}"
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
   [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
   printf '%b\n' "$line"
 
 elif (( cols >= 80 )); then
-  printf '%b\n' " ${seg_model}${sep}${seg_effort}$([ -n "$seg_ctx" ] && printf "${sep}${seg_ctx}")"
+  line1=" "
+  [ -n "$seg_user" ] && line1+="${seg_user}${sep}"
+  line1+="${seg_model}${sep}${seg_effort}$([ -n "$seg_ctx" ] && printf "${sep}${seg_ctx}")"
+  printf '%b\n' "$line1"
   limits=""
   [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
   [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
 else
-  printf '%b\n' " ${seg_model}${sep}${seg_effort}"
+  line1=" "
+  [ -n "$seg_user" ] && line1+="${seg_user}${sep}"
+  line1+="${seg_model}${sep}${seg_effort}"
+  printf '%b\n' "$line1"
   [ -n "$seg_ctx" ] && printf '%b\n' " ${seg_ctx}"
   limits=""
   [ -n "$seg_5h" ] && limits+="${seg_5h}"
@@ -196,14 +209,14 @@ fi
 Status line 설정 완료!
 
 Wide (>=120):
- ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
+ aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
 
 Medium (80-119):
- ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%
+ aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%
  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
 
 Narrow (<80):
- ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH
+ aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH
  CTX ████▓░░░░░░░ 38%
  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
 
