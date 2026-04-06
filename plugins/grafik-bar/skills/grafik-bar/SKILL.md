@@ -56,8 +56,7 @@ five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empt
 five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 week_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
-user=$(echo "$input" | jq -r '.user.name // empty')
-[ -z "$user" ] && user=$(whoami 2>/dev/null || echo "")
+user=$(claude auth status 2>/dev/null | jq -r '.email // empty' 2>/dev/null)
 
 # --- ANSI colors ---
 RST='\033[0m'
@@ -116,8 +115,11 @@ effort_icon() {
 }
 
 # --- Build segments ---
-seg_user=""
-[ -n "$user" ] && seg_user="$(printf "${C_CYAN}${BOLD}${user}${RST}")"
+if [ -n "$user" ]; then
+  seg_user="$(printf "${C_CYAN}${BOLD}${user}${RST}")"
+else
+  seg_user="$(printf "${C_RED}login info unavailable${RST}")"
+fi
 effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
 seg_model="$(printf "${C_MAGENTA}${BOLD}◈ ${model}${RST}")"
 seg_effort="$(printf "${C_YELLOW}$(effort_icon "$effort") ${effort_upper}${RST}")"
@@ -151,18 +153,14 @@ fi
 sep="  ${DOT}  "
 
 if (( cols >= 120 )); then
-  line=" "
-  [ -n "$seg_user" ] && line+="${seg_user}${sep}"
-  line+="${seg_model}${sep}${seg_effort}"
+  line=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}"
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
   [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
   printf '%b\n' "$line"
 
 elif (( cols >= 80 )); then
-  line1=" "
-  [ -n "$seg_user" ] && line1+="${seg_user}${sep}"
-  line1+="${seg_model}${sep}${seg_effort}$([ -n "$seg_ctx" ] && printf "${sep}${seg_ctx}")"
+  line1=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}$([ -n "$seg_ctx" ] && printf "${sep}${seg_ctx}")"
   printf '%b\n' "$line1"
   limits=""
   [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
@@ -170,9 +168,7 @@ elif (( cols >= 80 )); then
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
 else
-  line1=" "
-  [ -n "$seg_user" ] && line1+="${seg_user}${sep}"
-  line1+="${seg_model}${sep}${seg_effort}"
+  line1=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}"
   printf '%b\n' "$line1"
   [ -n "$seg_ctx" ] && printf '%b\n' " ${seg_ctx}"
   limits=""
