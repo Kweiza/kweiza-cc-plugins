@@ -1,5 +1,5 @@
 ---
-name: setup
+name: grafik-bar
 description: "Claude Code status line setup - model, effort, context window, rate limits with responsive graphical bars"
 user-invocable: true
 argument-hint: "[optional: effort level - low/medium/high/max, default: high]"
