@@ -18,6 +18,12 @@
       "description": "Kweiza Harness — Claude Code project setup with stack presets (init, add, list, update)",
       "source": "./plugins/harness",
       "category": "productivity"
+    },
+    {
+      "name": "session-handoff",
+      "description": "End-of-session handoff — save progress, plan next session, write starter prompt",
+      "source": "./plugins/session-handoff",
+      "category": "productivity"
     }
   ]
 }

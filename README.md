@@ -8,6 +8,7 @@ Personal Claude Code skills marketplace.
 /plugin marketplace add kweiza/skills
 /plugin install grafik-bar@kweiza-skills
 /plugin install harness@kweiza-skills
+/plugin install session-handoff@kweiza-skills
 ```
 
 ## Plugins
@@ -30,3 +31,11 @@ Kweiza Harness — Claude Code project setup with stack presets.
 | `/harness-add <preset>` | Add a preset to existing project |
 | `/harness-list` | List available presets |
 | `/harness-update` | Sync with latest standards |
+
+### session-handoff
+
+End-of-session handoff — save progress, plan next session, write starter prompt.
+
+| Skill | Description |
+|-------|-------------|
+| `/session-handoff` | Wrap up session, save context, write next-session prompt |

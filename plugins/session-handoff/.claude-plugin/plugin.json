@@ -1,0 +1,5 @@
+{
+  "name": "session-handoff",
+  "description": "End-of-session handoff — save progress, plan next session, write starter prompt",
+  "version": "1.0.0"
+}
