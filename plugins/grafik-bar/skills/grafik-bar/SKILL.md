@@ -2,7 +2,7 @@
 name: grafik-bar
 description: "Claude Code status line setup - model, effort, context window, rate limits with responsive graphical bars"
 user-invocable: true
-argument-hint: "[optional: effort level - low/medium/high/max, default: high]"
+argument-hint: "[optional: effort level - low/medium/high/xhigh/max, default: max]"
 ---
 
 # Setup Status Line
@@ -13,7 +13,7 @@ Set up Claude Code status line with graphical bars.
 
 - Login username (cyan)
 - Model name (magenta bold)
-- Reasoning effort level (thunder icons)
+- Reasoning effort level — read live from the session (thunder icons, incl. xhigh/max)
 - Context window usage (12-cell progress bar)
 - 5-hour session limit (8-cell bar + reset countdown)
 - 7-day weekly limit (8-cell bar + reset countdown)
@@ -50,7 +50,11 @@ cols=$(tput cols </dev/tty 2>/dev/null || stty size </dev/tty 2>/dev/null | awk 
 
 # --- Extract fields ---
 model=$(echo "$input" | jq -r '.model.display_name // "Unknown Model"')
-effort=$(jq -r '.effortLevel // "normal"' ~/.claude/settings.json 2>/dev/null || echo "normal")
+# Effort: prefer the live session value from the status line payload, which
+# reflects mid-session /effort changes (including max). Fall back to settings.json
+# for older Claude Code versions; leave empty when the model has no effort param.
+effort=$(echo "$input" | jq -r '.effort.level // empty')
+[ -z "$effort" ] && effort=$(jq -r '.effortLevel // empty' ~/.claude/settings.json 2>/dev/null)
 ctx_used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
 five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
@@ -95,18 +99,22 @@ pct_color() {
 }
 
 format_reset() {
-  local epoch=$1 now delta h m
+  local epoch=$1 now delta d h m
   [ -z "$epoch" ] && return
   now=$(date +%s)
   delta=$(( epoch - now ))
   (( delta <= 0 )) && printf 'now' && return
-  h=$(( delta / 3600 )); m=$(( (delta % 3600) / 60 ))
-  (( h > 0 )) && printf '%dh%02dm' "$h" "$m" || printf '%dm' "$m"
+  d=$(( delta / 86400 )); h=$(( (delta % 86400) / 3600 )); m=$(( (delta % 3600) / 60 ))
+  if (( d > 0 )); then printf '%dd%dh%02dm' "$d" "$h" "$m"
+  elif (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
+  else printf '%dm' "$m"
+  fi
 }
 
 effort_icon() {
   case "$1" in
     max)    printf '🔥⚡⚡⚡' ;;
+    xhigh)  printf '⚡⚡⚡⚡' ;;
     high)   printf '⚡⚡⚡' ;;
     medium) printf '⚡⚡' ;;
     low)    printf '⚡' ;;
@@ -120,9 +128,13 @@ if [ -n "$user" ]; then
 else
   seg_user="$(printf "${C_RED}login info unavailable${RST}")"
 fi
-effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
 seg_model="$(printf "${C_MAGENTA}${BOLD}◈ ${model}${RST}")"
-seg_effort="$(printf "${C_YELLOW}$(effort_icon "$effort") ${effort_upper}${RST}")"
+
+seg_effort=""
+if [ -n "$effort" ]; then
+  effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
+  seg_effort="$(printf "${C_YELLOW}$(effort_icon "$effort") ${effort_upper}${RST}")"
+fi
 
 seg_ctx=""
 if [ -n "$ctx_used" ]; then
@@ -153,14 +165,17 @@ fi
 sep="  ${DOT}  "
 
 if (( cols >= 120 )); then
-  line=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}"
+  line=" ${seg_user}${sep}${seg_model}"
+  [ -n "$seg_effort" ] && line+="${sep}${seg_effort}"
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
   [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
   printf '%b\n' "$line"
 
 elif (( cols >= 80 )); then
-  line1=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}$([ -n "$seg_ctx" ] && printf "${sep}${seg_ctx}")"
+  line1=" ${seg_user}${sep}${seg_model}"
+  [ -n "$seg_effort" ] && line1+="${sep}${seg_effort}"
+  [ -n "$seg_ctx" ] && line1+="${sep}${seg_ctx}"
   printf '%b\n' "$line1"
   limits=""
   [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
@@ -168,7 +183,8 @@ elif (( cols >= 80 )); then
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
 else
-  line1=" ${seg_user}${sep}${seg_model}${sep}${seg_effort}"
+  line1=" ${seg_user}${sep}${seg_model}"
+  [ -n "$seg_effort" ] && line1+="${sep}${seg_effort}"
   printf '%b\n' "$line1"
   [ -n "$seg_ctx" ] && printf '%b\n' " ${seg_ctx}"
   limits=""
@@ -188,14 +204,15 @@ Read `~/.claude/settings.json` and add/update the following two fields while pre
     "type": "command",
     "command": "bash ~/.claude/statusline-command.sh"
   },
-  "effortLevel": "<argument or 'high'>"
+  "effortLevel": "<argument or 'max'>"
 }
 ```
 
-- If `$ARGUMENTS` is provided (low/medium/high/max), use it as the effortLevel value
-- Otherwise default to "high"
+- If `$ARGUMENTS` is provided (low/medium/high/xhigh/max), use it as the effortLevel value
+- Otherwise default to "max"
 - Create settings.json if it doesn't exist
 - Never modify other existing settings (hooks, env, etc.)
+- `effortLevel` sets the **default** effort for new sessions. The status line itself shows the **live** effort from each session's payload, so it stays correct even when you change effort mid-session.
 
 ### Step 3: Completion Message
 
@@ -205,24 +222,23 @@ After setup, display the following:
 Status line setup complete!
 
 Wide (>=120):
- aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
+ aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
 
 Medium (80-119):
- aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH  ·  CTX ████▓░░░░░░░ 38%
- 5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
+ aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38%
+ 5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
 
 Narrow (<80):
- aaron  ·  ◈ Opus 4.6 (1M context)  ·  ⚡⚡⚡ HIGH
+ aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX
  CTX ████▓░░░░░░░ 38%
- 5h ████░░░░ 52% ↺1h23m  ·  7d ██░░░░░░ 21% ↺4d11h
-
-Note: /effort max is session-only and not saved to settings.json — set it manually if needed
+ 5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
 ```
 
 ### Notes
 
-- Effort level is read from the `effortLevel` field in settings.json
-- `/effort low|medium|high` auto-updates settings.json, so the status line reflects changes immediately
-- `/effort max` is session-only and not written to settings.json (Claude Code limitation)
-- To display max, manually set effortLevel to "max" in settings.json
+- Effort level is read **live** from the status line payload (`.effort.level`), so it reflects the current session — including mid-session `/effort` changes and `max`/`xhigh` — with no manual settings edits
+- If the model exposes no effort parameter, the script falls back to the `effortLevel` field in settings.json, and hides the effort segment entirely when neither is available
+- `effortLevel` in settings.json now only sets the **default** effort for new sessions; it no longer has to match the live display
+- Effort icons: low `⚡` · medium `⚡⚡` · high `⚡⚡⚡` · xhigh `⚡⚡⚡⚡` · max `🔥⚡⚡⚡`
+- Reset countdowns show days when applicable (e.g. `↺4d11h23m`)
 - Requires `jq` to be installed
