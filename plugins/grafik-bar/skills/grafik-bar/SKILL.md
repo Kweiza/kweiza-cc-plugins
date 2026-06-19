@@ -19,6 +19,7 @@ Set up Claude Code status line with graphical bars.
 - Context window usage (12-cell progress bar)
 - 5-hour session limit (8-cell bar + reset countdown)
 - 7-day weekly limit (8-cell bar + reset countdown)
+- Session stats: cost (`$`), lines changed (`+added -removed`), elapsed time (`⏱`)
 
 ## Color Thresholds
 
@@ -71,6 +72,12 @@ cur_dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // .workspace.pr
 folder=""; [ -n "$ws_dir" ] && folder=$(basename "$ws_dir")
 branch=""; [ -n "$cur_dir" ] && branch=$(git --no-optional-locks -C "$cur_dir" branch --show-current 2>/dev/null)
 
+# Session stats (cost / lines changed / duration)
+cost=$(echo "$input" | jq -r '.cost.total_cost_usd // empty')
+lines_added=$(echo "$input" | jq -r '.cost.total_lines_added // empty')
+lines_removed=$(echo "$input" | jq -r '.cost.total_lines_removed // empty')
+dur_ms=$(echo "$input" | jq -r '.cost.total_duration_ms // empty')
+
 # --- ANSI colors ---
 RST='\033[0m'
 BOLD='\033[1m'
@@ -118,6 +125,17 @@ format_reset() {
   if (( d > 0 )); then printf '%dd' "$d"
   elif (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
   else printf '%dm' "$m"
+  fi
+}
+
+format_dur() {
+  local ms=$1 s h m sec
+  [ -z "$ms" ] && return
+  s=$(( ms / 1000 ))
+  h=$(( s / 3600 )); m=$(( (s % 3600) / 60 )); sec=$(( s % 60 ))
+  if (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
+  elif (( m > 0 )); then printf '%dm%02ds' "$m" "$sec"
+  else printf '%ds' "$sec"
   fi
 }
 
@@ -180,8 +198,33 @@ if [ -n "$week_pct" ]; then
   [ -n "$r" ] && seg_7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
+seg_cost=""
+if [ -n "$cost" ]; then
+  cost_disp=$(printf '%.2f' "$cost")
+  seg_cost="$(printf "${C_GREEN}\$${cost_disp}${RST}")"
+fi
+
+seg_lines=""
+if [ -n "$lines_added" ] || [ -n "$lines_removed" ]; then
+  seg_lines="$(printf "${C_GREEN}+${lines_added:-0}${RST} ${C_RED}-${lines_removed:-0}${RST}")"
+fi
+
+seg_dur=""
+if [ -n "$dur_ms" ]; then
+  dv=$(format_dur "$dur_ms")
+  [ -n "$dv" ] && seg_dur="$(printf "${C_GRAY}⏱${dv}${RST}")"
+fi
+
 # --- Responsive layout ---
 sep="  ${DOT}  "
+
+# Session stats group (cost · lines · duration)
+seg_stats=""
+for p in "$seg_cost" "$seg_lines" "$seg_dur"; do
+  [ -z "$p" ] && continue
+  [ -n "$seg_stats" ] && seg_stats+="${sep}"
+  seg_stats+="$p"
+done
 
 if (( cols >= 120 )); then
   line=" ${seg_user}"
@@ -192,6 +235,7 @@ if (( cols >= 120 )); then
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
   [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
+  [ -n "$seg_stats" ] && line+="${sep}${seg_stats}"
   printf '%b\n' "$line"
 
 elif (( cols >= 80 )); then
@@ -205,6 +249,7 @@ elif (( cols >= 80 )); then
   limits=""
   [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
   [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
+  [ -n "$seg_stats" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_stats}"; }
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
 else
@@ -220,6 +265,7 @@ else
   [ -n "$seg_5h" ] && limits+="${seg_5h}"
   [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
+  [ -n "$seg_stats" ] && printf '%b\n' " ${seg_stats}"
 fi
 ```
 
@@ -251,17 +297,18 @@ After setup, display the following:
 Status line setup complete!
 
 Wide (>=120):
- aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38.27%  ·  5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
+ aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38.27%  ·  5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d  ·  $0.42  ·  +120 -34  ·  ⏱1h12m
 
 Medium (80-119):
  aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38.27%
- 5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
+ 5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d  ·  $0.42  ·  +120 -34  ·  ⏱1h12m
 
 Narrow (<80):
  aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main
  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX
  CTX ████▓░░░░░░░ 38.27%
  5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
+ $0.42  ·  +120 -34  ·  ⏱1h12m
 ```
 
 ### Notes
@@ -270,6 +317,7 @@ Narrow (<80):
 - If the model exposes no effort parameter, the script falls back to the `effortLevel` field in settings.json, and hides the effort segment entirely when neither is available
 - `effortLevel` in settings.json now only sets the **default** effort for new sessions; it no longer has to match the live display
 - Workspace folder is the project root (`.workspace.project_dir`); git branch is read live via `git branch --show-current` and is hidden outside a repo or on a detached HEAD
+- Session stats come from the `.cost` block: cost (`$`, 2 decimals), lines changed (`+added -removed`), elapsed time (`⏱`); each segment is hidden when its field is absent
 - Effort icons: low `⚡` · medium `⚡⚡` · high `⚡⚡⚡` · xhigh `⚡⚡⚡⚡` · max `🔥⚡⚡⚡`
 - Usage percentages (CTX / 5h / 7d) show 2 decimals, rounded at the 3rd place (e.g. `38.27%`); the bars and colors still use the integer value
 - Reset countdowns over 24h show whole days only (e.g. `↺6d`); under 24h they show `↺1h23m` / `↺12m`
