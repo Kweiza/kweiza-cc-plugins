@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "grafik-bar",
-      "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
+      "description": "Graphical status line (model, effort, context, rate limits, workspace, git branch, session stats) — auto-installs via a SessionStart hook, no setup command needed",
       "source": "./plugins/grafik-bar",
       "category": "productivity"
     },

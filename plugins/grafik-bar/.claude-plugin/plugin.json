@@ -1,5 +1,5 @@
 {
   "name": "grafik-bar",
-  "description": "Graphical status line with model, effort, context window, rate limits and responsive layout",
-  "version": "1.0.0"
+  "description": "Graphical status line (model, effort, context, rate limits, workspace, git branch, session stats) — auto-installs via a SessionStart hook, no setup command needed",
+  "version": "2.0.0"
 }
