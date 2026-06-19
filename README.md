@@ -1,14 +1,14 @@
-# Claude Code Skills
+# Claude Code Plugins
 
-Personal Claude Code skills marketplace.
+Personal Claude Code plugins marketplace.
 
 ## Install
 
 ```
-/plugin marketplace add kweiza/skills
-/plugin install grafik-bar@kweiza-skills
-/plugin install harness@kweiza-skills
-/plugin install session-handoff@kweiza-skills
+/plugin marketplace add kweiza/kweiza-cc-plugins
+/plugin install grafik-bar@kweiza-cc-plugins
+/plugin install harness@kweiza-cc-plugins
+/plugin install session-handoff@kweiza-cc-plugins
 ```
 
 ## Plugins
