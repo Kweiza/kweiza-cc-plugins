@@ -22,8 +22,9 @@ Graphical status line: login, workspace folder, git branch, model, reasoning eff
 
 ### session-handoff
 
-End-of-session handoff — save progress, plan next session, write starter prompt.
+Session handoff — save progress to a durable file under `.claude/handoffs/`, plan the next session, and write a starter prompt. The handoff survives `/clear` and context resets because it lives in a file, not just the chat. Resume it in the next session with `/session-resume`.
 
 | Skill | Description |
 |-------|-------------|
-| `/session-handoff` | Wrap up session, save context, write next-session prompt |
+| `/session-handoff` | Wrap up session, save context to a handoff file + memory, write next-session prompt |
+| `/session-resume` | Reload a saved handoff to continue prior work — `list`, or pass a date/keyword to pick which one (default: most recent) |

@@ -128,28 +128,25 @@ fi
 seg_ctx=""
 if [ -n "$ctx_used" ]; then
   ctx_int=$(printf '%.0f' "$ctx_used")
-  ctx_disp=$(printf '%.2f' "$ctx_used")
   c=$(pct_color "$ctx_int")
-  seg_ctx="$(printf "${C_WHITE}CTX${RST} ${c}$(render_bar "$ctx_int" 12)${RST} ${c}${ctx_disp}%%${RST}")"
+  seg_ctx="$(printf "${C_WHITE}CTX${RST} ${c}$(render_bar "$ctx_int" 12)${RST} ${c}${ctx_int}%%${RST}")"
 fi
 
 seg_5h=""
 if [ -n "$five_pct" ]; then
   five_int=$(printf '%.0f' "$five_pct")
-  five_disp=$(printf '%.2f' "$five_pct")
   c=$(pct_color "$five_int")
   r=$(format_reset "$five_reset")
-  seg_5h="$(printf "${C_WHITE}5h${RST} ${c}$(render_bar "$five_int" 8)${RST} ${c}${five_disp}%%${RST}")"
+  seg_5h="$(printf "${C_WHITE}5h${RST} ${c}$(render_bar "$five_int" 8)${RST} ${c}${five_int}%%${RST}")"
   [ -n "$r" ] && seg_5h+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
 seg_7d=""
 if [ -n "$week_pct" ]; then
   week_int=$(printf '%.0f' "$week_pct")
-  week_disp=$(printf '%.2f' "$week_pct")
   c=$(pct_color "$week_int")
   r=$(format_reset "$week_reset")
-  seg_7d="$(printf "${C_WHITE}7d${RST} ${c}$(render_bar "$week_int" 8)${RST} ${c}${week_disp}%%${RST}")"
+  seg_7d="$(printf "${C_WHITE}7d${RST} ${c}$(render_bar "$week_int" 8)${RST} ${c}${week_int}%%${RST}")"
   [ -n "$r" ] && seg_7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
