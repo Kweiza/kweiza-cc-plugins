@@ -12,6 +12,8 @@ Set up Claude Code status line with graphical bars.
 ## Display Items
 
 - Login username (cyan)
+- Workspace folder name (blue bold, `⌂`)
+- Current git branch (green, `⎇`)
 - Model name (magenta bold)
 - Reasoning effort level — read live from the session (thunder icons, incl. xhigh/max)
 - Context window usage (12-cell progress bar)
@@ -28,8 +30,8 @@ Set up Claude Code status line with graphical bars.
 ## Responsive Layout
 
 - Wide (>=120 cols): single line
-- Medium (80-119): two lines
-- Narrow (<80): three lines
+- Medium (80-119): two lines (identity + model + effort + context, then limits)
+- Narrow (<80): identity (user + folder + branch), then model + effort, then context, then limits
 
 ## Setup Instructions
 
@@ -50,9 +52,10 @@ cols=$(tput cols </dev/tty 2>/dev/null || stty size </dev/tty 2>/dev/null | awk 
 
 # --- Extract fields ---
 model=$(echo "$input" | jq -r '.model.display_name // "Unknown Model"')
-# Effort: prefer the live session value from the status line payload, which
-# reflects mid-session /effort changes (including max). Fall back to settings.json
-# for older Claude Code versions; leave empty when the model has no effort param.
+# Effort: read the live session value from the status line payload (.effort.level),
+# which now emits every level — low/medium/high/xhigh/max — and reflects mid-session
+# /effort changes. Fall back to settings.json only for older Claude Code versions that
+# don't emit effort; leave empty when the model has no effort param.
 effort=$(echo "$input" | jq -r '.effort.level // empty')
 [ -z "$effort" ] && effort=$(jq -r '.effortLevel // empty' ~/.claude/settings.json 2>/dev/null)
 ctx_used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
@@ -62,6 +65,12 @@ week_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empt
 week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 user=$(claude auth status 2>/dev/null | jq -r '.email // empty' 2>/dev/null)
 
+# Workspace folder (project root) + current git branch
+ws_dir=$(echo "$input" | jq -r '.workspace.project_dir // .workspace.current_dir // .cwd // empty')
+cur_dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // .workspace.project_dir // empty')
+folder=""; [ -n "$ws_dir" ] && folder=$(basename "$ws_dir")
+branch=""; [ -n "$cur_dir" ] && branch=$(git --no-optional-locks -C "$cur_dir" branch --show-current 2>/dev/null)
+
 # --- ANSI colors ---
 RST='\033[0m'
 BOLD='\033[1m'
@@ -70,6 +79,7 @@ C_GREEN='\033[32m'
 C_YELLOW='\033[33m'
 C_RED='\033[31m'
 C_MAGENTA='\033[35m'
+C_BLUE='\033[34m'
 C_WHITE='\033[37m'
 C_GRAY='\033[90m'
 
@@ -105,7 +115,7 @@ format_reset() {
   delta=$(( epoch - now ))
   (( delta <= 0 )) && printf 'now' && return
   d=$(( delta / 86400 )); h=$(( (delta % 86400) / 3600 )); m=$(( (delta % 3600) / 60 ))
-  if (( d > 0 )); then printf '%dd%dh%02dm' "$d" "$h" "$m"
+  if (( d > 0 )); then printf '%dd' "$d"
   elif (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
   else printf '%dm' "$m"
   fi
@@ -130,6 +140,12 @@ else
 fi
 seg_model="$(printf "${C_MAGENTA}${BOLD}◈ ${model}${RST}")"
 
+seg_dir=""
+[ -n "$folder" ] && seg_dir="$(printf "${C_BLUE}${BOLD}⌂ ${folder}${RST}")"
+
+seg_branch=""
+[ -n "$branch" ] && seg_branch="$(printf "${C_GREEN}⎇ ${branch}${RST}")"
+
 seg_effort=""
 if [ -n "$effort" ]; then
   effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
@@ -139,25 +155,28 @@ fi
 seg_ctx=""
 if [ -n "$ctx_used" ]; then
   ctx_int=$(printf '%.0f' "$ctx_used")
+  ctx_disp=$(printf '%.2f' "$ctx_used")
   c=$(pct_color "$ctx_int")
-  seg_ctx="$(printf "${C_WHITE}CTX${RST} ${c}$(render_bar "$ctx_int" 12)${RST} ${c}${ctx_int}%%${RST}")"
+  seg_ctx="$(printf "${C_WHITE}CTX${RST} ${c}$(render_bar "$ctx_int" 12)${RST} ${c}${ctx_disp}%%${RST}")"
 fi
 
 seg_5h=""
 if [ -n "$five_pct" ]; then
   five_int=$(printf '%.0f' "$five_pct")
+  five_disp=$(printf '%.2f' "$five_pct")
   c=$(pct_color "$five_int")
   r=$(format_reset "$five_reset")
-  seg_5h="$(printf "${C_WHITE}5h${RST} ${c}$(render_bar "$five_int" 8)${RST} ${c}${five_int}%%${RST}")"
+  seg_5h="$(printf "${C_WHITE}5h${RST} ${c}$(render_bar "$five_int" 8)${RST} ${c}${five_disp}%%${RST}")"
   [ -n "$r" ] && seg_5h+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
 seg_7d=""
 if [ -n "$week_pct" ]; then
   week_int=$(printf '%.0f' "$week_pct")
+  week_disp=$(printf '%.2f' "$week_pct")
   c=$(pct_color "$week_int")
   r=$(format_reset "$week_reset")
-  seg_7d="$(printf "${C_WHITE}7d${RST} ${c}$(render_bar "$week_int" 8)${RST} ${c}${week_int}%%${RST}")"
+  seg_7d="$(printf "${C_WHITE}7d${RST} ${c}$(render_bar "$week_int" 8)${RST} ${c}${week_disp}%%${RST}")"
   [ -n "$r" ] && seg_7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
@@ -165,7 +184,10 @@ fi
 sep="  ${DOT}  "
 
 if (( cols >= 120 )); then
-  line=" ${seg_user}${sep}${seg_model}"
+  line=" ${seg_user}"
+  [ -n "$seg_dir" ] && line+="${sep}${seg_dir}"
+  [ -n "$seg_branch" ] && line+="${sep}${seg_branch}"
+  line+="${sep}${seg_model}"
   [ -n "$seg_effort" ] && line+="${sep}${seg_effort}"
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
@@ -173,7 +195,10 @@ if (( cols >= 120 )); then
   printf '%b\n' "$line"
 
 elif (( cols >= 80 )); then
-  line1=" ${seg_user}${sep}${seg_model}"
+  line1=" ${seg_user}"
+  [ -n "$seg_dir" ] && line1+="${sep}${seg_dir}"
+  [ -n "$seg_branch" ] && line1+="${sep}${seg_branch}"
+  line1+="${sep}${seg_model}"
   [ -n "$seg_effort" ] && line1+="${sep}${seg_effort}"
   [ -n "$seg_ctx" ] && line1+="${sep}${seg_ctx}"
   printf '%b\n' "$line1"
@@ -183,9 +208,13 @@ elif (( cols >= 80 )); then
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
 else
-  line1=" ${seg_user}${sep}${seg_model}"
-  [ -n "$seg_effort" ] && line1+="${sep}${seg_effort}"
+  line1=" ${seg_user}"
+  [ -n "$seg_dir" ] && line1+="${sep}${seg_dir}"
+  [ -n "$seg_branch" ] && line1+="${sep}${seg_branch}"
   printf '%b\n' "$line1"
+  line2=" ${seg_model}"
+  [ -n "$seg_effort" ] && line2+="${sep}${seg_effort}"
+  printf '%b\n' "$line2"
   [ -n "$seg_ctx" ] && printf '%b\n' " ${seg_ctx}"
   limits=""
   [ -n "$seg_5h" ] && limits+="${seg_5h}"
@@ -222,16 +251,17 @@ After setup, display the following:
 Status line setup complete!
 
 Wide (>=120):
- aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38%  ·  5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
+ aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38.27%  ·  5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
 
 Medium (80-119):
- aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38%
- 5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
+ aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX  ·  CTX ████▓░░░░░░░ 38.27%
+ 5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
 
 Narrow (<80):
- aaron  ·  ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX
- CTX ████▓░░░░░░░ 38%
- 5h ████░░░░ 52% ↺1h23m  ·  7d █▓░░░░░░ 21% ↺4d11h23m
+ aaron  ·  ⌂ kweiza-cc-plugins  ·  ⎇ main
+ ◈ Opus 4.8 (1M context)  ·  🔥⚡⚡⚡ MAX
+ CTX ████▓░░░░░░░ 38.27%
+ 5h ████░░░░ 52.40% ↺1h23m  ·  7d █▓░░░░░░ 21.08% ↺6d
 ```
 
 ### Notes
@@ -239,6 +269,8 @@ Narrow (<80):
 - Effort level is read **live** from the status line payload (`.effort.level`), so it reflects the current session — including mid-session `/effort` changes and `max`/`xhigh` — with no manual settings edits
 - If the model exposes no effort parameter, the script falls back to the `effortLevel` field in settings.json, and hides the effort segment entirely when neither is available
 - `effortLevel` in settings.json now only sets the **default** effort for new sessions; it no longer has to match the live display
+- Workspace folder is the project root (`.workspace.project_dir`); git branch is read live via `git branch --show-current` and is hidden outside a repo or on a detached HEAD
 - Effort icons: low `⚡` · medium `⚡⚡` · high `⚡⚡⚡` · xhigh `⚡⚡⚡⚡` · max `🔥⚡⚡⚡`
-- Reset countdowns show days when applicable (e.g. `↺4d11h23m`)
+- Usage percentages (CTX / 5h / 7d) show 2 decimals, rounded at the 3rd place (e.g. `38.27%`); the bars and colors still use the integer value
+- Reset countdowns over 24h show whole days only (e.g. `↺6d`); under 24h they show `↺1h23m` / `↺12m`
 - Requires `jq` to be installed
