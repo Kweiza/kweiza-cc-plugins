@@ -1,5 +1,5 @@
 {
   "name": "grafik-bar",
   "description": "Graphical status line (model, effort, context, rate limits, workspace, git branch, session stats) — auto-installs via a SessionStart hook, no setup command needed",
-  "version": "2.0.0"
+  "version": "2.0.1"
 }

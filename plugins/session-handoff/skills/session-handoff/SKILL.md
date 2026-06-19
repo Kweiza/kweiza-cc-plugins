@@ -7,7 +7,7 @@ argument-hint: "[optional: notes about what to focus on next]"
 
 # Session Handoff
 
-Wrap up the current session and prepare a clean handoff for the next one. Nothing is lost, and the next session starts immediately productive.
+Wrap up the current session and write a durable handoff so the next session — yours, another model, or another agent — starts immediately productive. The handoff is saved to a **file** so it survives `/clear` and context resets regardless of what's still in the chat. Resume it later with `/session-resume`.
 
 ## When to Use
 
@@ -18,7 +18,16 @@ Wrap up the current session and prepare a clean handoff for the next one. Nothin
 
 ## Process
 
-Perform ALL of the following steps in order:
+Perform ALL of the following steps in order.
+
+First, capture the timestamp and repo state you'll reuse below:
+
+```bash
+date '+%Y-%m-%d %H:%M'                    # → STAMP (e.g. 2026-06-19 14:30)
+git rev-parse --is-inside-work-tree 2>/dev/null   # "true" if this is a git repo
+```
+
+If **not** a git repo, skip all git commands below and note "(non-git session)" wherever git state is requested.
 
 ### Step 1: Summarize This Session
 
@@ -28,9 +37,10 @@ Review the full conversation and produce a structured summary:
 - List each major task completed (with file paths and commit SHAs where relevant)
 - Note key decisions made and why
 
-**What changed:**
-- Run `git log --oneline` to capture commits from this session
-- Run `git diff --stat HEAD~N` (where N = number of session commits) for a file change overview
+**What changed (git repos):**
+- `git log --oneline @{u}..HEAD` — commits not yet pushed (falls back: `git log --oneline -15` if no upstream)
+- `git diff --stat @{u}..HEAD` — committed file changes since upstream
+- `git status --short` and `git diff --stat` — **uncommitted** work (easy to miss; capture it)
 - Note any config/settings changes made outside the repo
 
 **What's unfinished or blocked:**
@@ -38,72 +48,88 @@ Review the full conversation and produce a structured summary:
 - Known issues discovered but not fixed
 - Questions that need answers before proceeding
 
-### Step 2: Save to Memory
+### Step 2: Write the Handoff File
 
-Save a **project memory** if this session produced context that future sessions need and that is NOT derivable from git log or reading the code. If nothing qualifies, skip this step.
+This is the durable artifact `/session-resume` reads. Write it even if you also save a memory.
 
-Format:
+Path: `.claude/handoffs/<YYYY-MM-DD-HHMM>-<topic-slug>.md` (create the dir if needed; `<topic-slug>` is 2–4 kebab-case words). Use this exact structure so resume can parse it:
+
+~~~markdown
+# Session Handoff — <STAMP>
+
+**Branch:** <branch> · **Last commit:** <sha> <subject>
+**Repo:** <repo path, or "(non-git session)">
+
+## Summary
+<Step 1: what was accomplished + key decisions>
+
+## Unfinished / Blocked
+<Step 1: in-progress, known issues, open questions>
+
+## Next Session — Priorities
+1. <most important task — specific file paths + context>
+2. <second task>
+
+## Starter Prompt
+```
+<the Step 5 starter prompt — ready to paste>
+```
+~~~
+
+### Step 3: Save to Memory (if it qualifies)
+
+Save a **project memory** only if this session produced context future sessions need that is NOT derivable from git log, the handoff file, or reading the code. If nothing qualifies, skip.
+
+Write the file to your project memory directory (the path given in your memory instructions, e.g. `~/.claude/projects/<project-slug>/memory/`) using the format that matches the **existing** memory files there:
+
 ```markdown
 ---
-name: Session handoff YYYY-MM-DD — [topic]
-description: [one-line summary of what was accomplished and what's next]
+name: session-handoff-<YYYY-MM-DD>-<topic-slug>
+description: <one-line summary of what was accomplished and what's next>
 type: project
 ---
 
-[Key decisions, context, or state the next session needs]
+<Key decisions, context, or state the next session needs>
 
-**Why:** [what drove these decisions]
-**Next steps:** [what should happen next]
+**Why:** <what drove these decisions>
+**Next steps:** <what should happen next>
 ```
 
-### Step 3: Update Project Docs (if needed)
+**CRITICAL — then add a one-line pointer to `MEMORY.md` in that same directory:**
+```
+- [Session handoff <YYYY-MM-DD> — <topic>](session-handoff-<YYYY-MM-DD>-<topic-slug>.md) — <hook>
+```
+`MEMORY.md` is the index loaded into future sessions. **A memory file with no `MEMORY.md` entry will never load** — skipping this defeats the purpose. Match the `name:` (kebab-case slug) and `type:` placement to the other files already in the directory rather than this template if they differ.
 
-Check if any of the following need updating:
+### Step 4: Update Project Docs (if needed)
+
+Update only if there's a real change — don't touch docs just to touch them:
 - `CLAUDE.md` — new build commands, changed conventions, new project structure
 - `.claude/rules/` — new or updated rules
 
-Only update if there's a real change. Don't touch docs just to touch them.
-
-### Step 4: Plan Next Session
-
-Based on what's unfinished and any `$ARGUMENTS` provided:
-
-**Priority items for next session:**
-1. [Most important task — with specific file paths and context]
-2. [Second task]
-3. [etc.]
-
-**Context the next session needs:**
-- Current branch and its state
-- Any in-progress work to continue
-- External dependencies or blockers
-
 ### Step 5: Write Starter Prompt
 
-Write a **copy-pasteable prompt** the user can paste into the next session. It must:
+Write a **copy-pasteable prompt** for the next session (also embedded in the handoff file from Step 2). It must:
 - Give full context without requiring the previous conversation
 - Reference specific files, branches, and tasks
 - Be actionable — the new session starts working immediately
+- Include the current git branch and last commit SHA (or "(non-git session)")
 
-~~~
-```
-[Starter prompt — ready to paste]
-```
-~~~
-
-Keep it under 500 words. Include the current git branch and last commit SHA.
+Keep it under 500 words. Show it to the user in a fenced block, and tell them they can instead just run `/session-resume` next session to reload it from the file.
 
 ### Step 6: Final Checklist
 
-- [ ] All work is committed (`git status`)
-- [ ] All work is pushed (`git log --oneline origin/main..HEAD`)
-- [ ] No sensitive data in uncommitted files
-- [ ] Memory saved (or confirmed nothing to save)
+- [ ] Handoff file written to `.claude/handoffs/` (report its path)
+- [ ] All work committed, or uncommitted work is intentional and noted (`git status --short`)
+- [ ] Pushed, or unpushed commits are intentional and noted (`git log --oneline @{u}..HEAD`)
+- [ ] No sensitive data in uncommitted files or the handoff file
+- [ ] Memory saved **and indexed in MEMORY.md** (or confirmed nothing to save)
 - [ ] Starter prompt written
 
 Report checklist results to the user.
 
 ## Notes
 
-- If `$ARGUMENTS` provided, treat as guidance for next session focus
-- The starter prompt must work even without memory access or prior context
+- If `$ARGUMENTS` provided, treat as guidance for the next session's focus (weave into Priorities and the starter prompt).
+- The handoff file and starter prompt must work even without memory access or prior context.
+- Pair skill: **`/session-resume`** loads a saved handoff to start the next session.

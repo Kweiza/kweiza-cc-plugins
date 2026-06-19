@@ -15,7 +15,7 @@
     },
     {
       "name": "session-handoff",
-      "description": "End-of-session handoff — save progress, plan next session, write starter prompt",
+      "description": "Session handoff — save progress to a durable file, plan next session, write a starter prompt; resume it later with /session-resume",
       "source": "./plugins/session-handoff",
       "category": "productivity"
     }
