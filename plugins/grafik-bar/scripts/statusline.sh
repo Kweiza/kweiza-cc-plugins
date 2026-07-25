@@ -77,7 +77,7 @@ format_reset() {
   delta=$(( epoch - now ))
   (( delta <= 0 )) && printf 'now' && return
   d=$(( delta / 86400 )); h=$(( (delta % 86400) / 3600 )); m=$(( (delta % 3600) / 60 ))
-  if (( d > 0 )); then printf '%dd' "$d"
+  if (( d > 0 )); then printf '%dd%dh%02dm' "$d" "$h" "$m"
   elif (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
   else printf '%dm' "$m"
   fi
