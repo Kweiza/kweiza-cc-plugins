@@ -450,8 +450,12 @@ func TestAutoRefreshHasSSEAndMetaFallback(t *testing.T) {
 	_, html := f.get("")
 	// SSE 가 있으면 SSE.
 	mustContain(t, html, "new EventSource(path)", "SSE 경로가 없다")
-	// html/template 이 JS 문자열 안의 '/' 를 이스케이프한다(같은 문자열이다).
-	mustContain(t, html, `var path = "\/events";`, "SSE 엔드포인트가 페이지에 없다")
+	mustContain(t, html, `var path = "events";`, "SSE 엔드포인트가 페이지에 없다")
+	// ★ **상대경로여야 한다.** 문자열이 아니라 그 성질을 단정한다 —
+	// 절대경로면 리버스 프록시의 경로 접두 뒤에서 브라우저가 원점의 /events 를 찾아가
+	// 구독이 조용히 실패하고, 그러면 화면은 뜨는데 영원히 안 갱신된다
+	// (스트림이 안 열렸으니 메타 리프레시 폴백도 안 켜진다).
+	mustNotContain(t, html, `var path = "\/`, "SSE 경로가 절대경로다 — 경로 접두 뒤에서 구독이 죽는다")
 	// 없으면(스크립트가 아예 안 돌면) 메타 리프레시 폴백.
 	mustContain(t, html, `<noscript><meta http-equiv="refresh" content="7">`,
 		"스크립트 없이도 갱신되는 폴백이 없다")
