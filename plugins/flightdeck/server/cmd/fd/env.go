@@ -63,32 +63,63 @@ func ResolveStateDir(get func(string) (string, bool), home string) StateDir {
 
 func (s StateDir) sub(name string) string { return filepath.Join(s.Path, name) }
 
-// MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도 같아야 한다.
+// MachineIDPath 는 machine-id 파일 자리를 고른다. 순수 함수다.
 //
-// 없으면 만들어 상태 디렉토리에 적는다. **적기에 실패해도 값을 낸다** — 조정이
-// 파일 쓰기 실패로 죽으면 이 도구의 존재 이유가 사라진다. 다만 사유를 함께 돌려주므로
-// 호출부가 그 사실을 침묵하지 않는다.
-func MachineID(sd StateDir) (id string, warn string) {
-	path := sd.sub("machine-id")
+// ★ **상태 디렉토리를 일부러 안 쓴다.** 그 자리는 ResolveStateDir 이 CLAUDE_PLUGIN_DATA·
+// XDG_STATE_HOME 으로 고르는데, 그 둘은 **채널마다 있고 없다** — Claude Code 가 훅·MCP
+// 프로세스에는 넣어 주고 사용자 셸에는 안 넣는다. 그래서 machine-id 파일이 두 벌이 됐고
+// 같은 머신이 서로 다른 id 를 갖게 됐다(실물 확인: 파일 두 벌, 값 두 개).
+// 그러면 세션 정체 3중키의 첫 축이 갈려 **한 Claude 세션이 보드에 카드 세 장**으로 뜬다.
+//
+// 두 축은 요구가 정반대다. 상태 디렉토리는 "열화 상태(캐시·아웃박스)가 플러그인 갱신을
+// 넘어 살아남는가"라 환경 의존이 **설계 의도**다(설계 §7). machine id 는 "같은 머신이면
+// 같은가"라 환경 의존이 **곧 결함**이다. 둘을 한 디렉토리에 뭉갠 것이 이 사고의 전부다.
+//
+// FD_STATE_DIR 만 남긴다 — 채널이 아니라 **사람이** 명시 지정하는 축이라 프로세스마다
+// 갈리지 않고, 시험이 진짜 홈에 machine-id 를 적지 않게 막는 유일한 자리이기도 하다.
+//
+// 옛 두 자리의 값을 **물려받지 않는다.** 물려받으려면 후보 목록을 훑어야 하는데
+// 그 목록이 다시 채널 환경에서 오므로, 채택 순서가 채널마다 갈려 같은 결함이 되살아난다.
+// 이 머신의 id 가 한 번 바뀌는 대신 다시는 안 갈린다.
+func MachineIDPath(get func(string) (string, bool), home string) (path, source string) {
+	if v, ok := get("FD_STATE_DIR"); ok && strings.TrimSpace(v) != "" {
+		return filepath.Join(filepath.Clean(strings.TrimSpace(v)), "machine-id"), "FD_STATE_DIR (명시 지정)"
+	}
+	if strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".flightdeck", "machine-id"), "~/.flightdeck — 채널 환경과 무관한 고정 자리"
+	}
+	return filepath.Join(os.TempDir(), "flightdeck", "machine-id"),
+		"임시 디렉토리 — HOME 이 없다. 재부팅하면 머신 id 가 바뀌어 세션이 갈린다"
+}
+
+// MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도, 그리고
+// **어느 채널에서 불러도** 같아야 한다.
+//
+// 없으면 만들어 적는다. **적기에 실패해도 값을 낸다** — 조정이 파일 쓰기 실패로 죽으면
+// 이 도구의 존재 이유가 사라진다. 다만 사유를 함께 돌려주므로 호출부가 침묵하지 않는다.
+// source 는 어느 자리에서 읽었는지다 — fd doctor 가 그것을 찍어야 값이 갈렸을 때
+// 사람이 원인에 도달할 수 있다(이번에는 그 줄이 없어 /proc 을 뒤져야 했다).
+func MachineID(get func(string) (string, bool), home string) (id, source, warn string) {
+	path, source := MachineIDPath(get, home)
 	if b, err := os.ReadFile(path); err == nil {
 		if v := strings.TrimSpace(string(b)); v != "" {
-			return v, ""
+			return v, source, ""
 		}
 	}
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		// 난수가 없으면 시각으로라도 만든다. 유일성은 떨어지지만 값이 없는 것보다 낫다.
-		return fmt.Sprintf("m-%d", time.Now().UnixNano()),
+		return fmt.Sprintf("m-%d", time.Now().UnixNano()), source,
 			"난수를 못 읽어 시각 기반 id 를 만들었다: " + err.Error()
 	}
 	id = "m-" + hex.EncodeToString(buf)
-	if err := os.MkdirAll(sd.Path, 0o755); err != nil {
-		return id, "상태 디렉토리를 못 만들어 machine-id 가 이 실행에서만 유효하다: " + err.Error()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return id, source, "machine-id 디렉토리를 못 만들어 이 실행에서만 유효하다: " + err.Error()
 	}
 	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
-		return id, "machine-id 를 못 적어 다음 실행에 다른 값이 된다: " + err.Error()
+		return id, source, "machine-id 를 못 적어 다음 실행에 다른 값이 된다: " + err.Error()
 	}
-	return id, ""
+	return id, source, ""
 }
 
 // ProjectCoord 는 이 실행이 어느 프로젝트의 어느 워크트리인지다.
