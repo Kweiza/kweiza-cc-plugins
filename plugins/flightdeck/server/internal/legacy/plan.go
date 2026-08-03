@@ -74,6 +74,11 @@ type PlannedPart struct {
 	Key      string
 	Value    string // JSON
 	Evidence string
+	// Digest 는 **판정 당시의 입력**이다(= judged 블록의 코드 sha).
+	// 이것이 비면 UI 의 낡음 대조가 "대조할 축이 없다"로 죽는다 —
+	// 설계 §3 이 "input_digest 가 현재 트리와 다르면 UI 가 자동으로 낡음을 붙인다"고
+	// 약속한 자리라, 근거 문자열에 이미 있는 sha 를 여기 함께 넣어 그 약속을 살린다.
+	Digest string
 }
 
 // PlanOptions 는 판정에 필요한 바깥 값이다.
@@ -317,6 +322,7 @@ func PlanImport(sc Scan, opt PlanOptions) ImportPlan {
 					Key:      "part:" + pt.Name,
 					Value:    partValueJSON(pt),
 					Evidence: PartEvidence(judged, pt),
+					Digest:   judged.SHA,
 				})
 			}
 			p.Notes = append(p.Notes, "진척 `parts` 는 snapshot(method='manual')로 들어간다 — "+

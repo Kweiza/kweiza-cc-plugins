@@ -135,7 +135,8 @@ func Apply(ctx context.Context, st *store.Store, p ImportPlan, projectPath strin
 		for _, pp := range p.Parts {
 			if err := tx.PutSnapshot(model.Snapshot{
 				Project: p.Project, Key: pp.Key, Value: pp.Value,
-				Method: model.SnapshotManual, Evidence: pp.Evidence, ComputedAt: now,
+				Method: model.SnapshotManual, Evidence: pp.Evidence,
+				InputDigest: pp.Digest, ComputedAt: now,
 			}); err != nil {
 				return fmt.Errorf("진척 스냅숏 저장 실패(%s): %w", clip(pp.Key, 80), err)
 			}

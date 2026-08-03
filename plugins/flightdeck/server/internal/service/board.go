@@ -95,10 +95,14 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 		if limit <= 0 {
 			limit = 20
 		}
-		if view.Blocked, err = s.st.ListJudgmentsByKind(ctx, project, model.JudgmentBlocked, limit); err != nil {
+		// ★ 여기서도 **같은 함수**를 부른다. 앞선 판은 이 자리가 직접 질의해서
+		//   RecentNotes 만 고쳤을 때 훅으로 나가는 경로가 그대로 넘쳤다 —
+		//   판정을 두 자리에 두면 한쪽만 고치는 순간 조용히 어긋난다는 것을
+		//   이 파일이 스스로 실증한 셈이다.
+		if view.Blocked, err = s.liveNotesOfKind(ctx, project, model.JudgmentBlocked, limit); err != nil {
 			return BoardView{}, err
 		}
-		if view.Asks, err = s.st.ListJudgmentsByKind(ctx, project, model.JudgmentAsk, limit); err != nil {
+		if view.Asks, err = s.liveNotesOfKind(ctx, project, model.JudgmentAsk, limit); err != nil {
 			return BoardView{}, err
 		}
 	}
@@ -121,16 +125,51 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 //
 // **누가 남겼는지로 거르지 않는다.** "내가 쓴 것은 알림이 아니다"는 표시 계층의 판정이고,
 // 그 축을 여기서 접으면 같은 목록을 다른 '나'로 다시 볼 수 없다.
+// liveNotesOfKind 는 **지금 살아 있는 세션이 남긴** 그 종류의 판단이다.
+//
+// ★ 알림이 답하는 질문은 "지금 누가 나에게 무엇을 요청했나"이지 "무슨 일이 있었나"가 아니다.
+// 생존 범위가 없으면 이관 직후 옛 판단 수십 건이 전부 "미확인"으로 잡혀 매 프롬프트에 실린다 —
+// 실제로 그렇게 났다(ask 36 + blocked 36, 제목이 옛 절 이름이라 **전부 같은 문구**였다).
+// 그러면 이 채널은 첫날부터 노이즈가 되고, 노이즈가 된 채널은 아무도 안 읽는다.
+// 지난 일은 사라지지 않는다 — 판단 검색(설계 §6 ⑥)이 그 자리다.
+func (s *Service) liveNotesOfKind(ctx context.Context, project string,
+	kind model.JudgmentKind, limit int) ([]model.Judgment, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	live, err := s.st.ListLive(ctx, project, s.now().Add(-s.window))
+	if err != nil {
+		return nil, err
+	}
+	alive := make(map[string]bool, len(live))
+	for _, sess := range live {
+		alive[sess.Session.ID] = true
+	}
+	// 살아 있는 것만 남기므로 넉넉히 읽고 거른다.
+	js, err := s.st.ListJudgmentsByKind(ctx, project, kind, limit*4)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Judgment, 0, limit)
+	for _, j := range js {
+		if !alive[j.SessionID] {
+			continue
+		}
+		if out = append(out, j); len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// RecentNotes 는 프로젝트의 최근 ask·blocked 판단이다(종류별 limit 건).
 func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([]model.Judgment, error) {
 	if strings.TrimSpace(project) == "" {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 20
-	}
 	var out []model.Judgment
 	for _, k := range []model.JudgmentKind{model.JudgmentAsk, model.JudgmentBlocked} {
-		js, err := s.st.ListJudgmentsByKind(ctx, project, k, limit)
+		js, err := s.liveNotesOfKind(ctx, project, k, limit)
 		if err != nil {
 			return nil, err
 		}
