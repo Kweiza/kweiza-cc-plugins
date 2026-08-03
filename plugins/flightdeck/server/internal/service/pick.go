@@ -101,11 +101,30 @@ func SetupCommands(projectPath, defaultBranch, itemID string) []string {
 		defaultBranch = "main"
 	}
 	dir := WorktreeDir(itemID)
+	// ★ 경로를 인용한다. 이 문자열의 소비자는 사람이 아니라 **에이전트의 Bash 도구**다 —
+	// pick 응답이 "이걸 실행해라"로 읽히도록 만들어져 있다.
+	//
+	// itemID 는 ValidateItemID 로 막는데 같은 줄의 projectPath 는 검증도 인용도 없었다.
+	// 그 비대칭이 위험한 이유는 한쪽만 막은 가드가 **막는다고 믿게 만들기** 때문이다.
+	// 악의가 없어도 경로에 공백 하나만 있으면 cd 가 조용히 다른 디렉토리로 가고,
+	// 그 뒤 worktree 가 엉뚱한 저장소에 브랜치를 만든다.
+	//
+	// 검증만으로 끝내지 않는다 — 공백은 정당한 경로 문자라 거절할 수 없고, 인용만이 그 축을 덮는다.
+	p := shellQuote(projectPath)
 	return []string{
-		fmt.Sprintf("cd %s", projectPath),
-		fmt.Sprintf("git worktree add %s -b %s %s", dir, itemID, defaultBranch),
-		fmt.Sprintf("cd %s/%s", projectPath, dir),
+		"cd " + p,
+		fmt.Sprintf("git worktree add %s -b %s %s", shellQuote(dir), itemID, shellQuote(defaultBranch)),
+		"cd " + shellQuote(projectPath+"/"+dir),
 	}
+}
+
+// shellQuote 는 POSIX 셸의 작은따옴표 인용이다.
+//
+// 작은따옴표 안에서는 어떤 문자도 특별하지 않다. 유일한 예외가 작은따옴표 자신이라
+// 그것만 `'\”` 로 닫고-이스케이프-열기 한다. 이 규칙이면 개행·세미콜론·달러·백틱이
+// 전부 리터럴이 된다 — 메타문자 목록을 유지보수할 필요가 없다는 것이 이 방식의 값어치다.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Pick 은 항목 하나를 추천하거나 선점한다.

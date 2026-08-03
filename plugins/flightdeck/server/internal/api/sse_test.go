@@ -103,7 +103,7 @@ func TestSSEDeliversEventAndCleansUpOnDisconnect(t *testing.T) {
 	sess := e.openSession("cc-sse")
 	for i, br := range readers {
 		frame := readFrame(t, br)
-		if !strings.Contains(frame, "event: session.open") {
+		if !strings.Contains(frame, `"kind":"session.open"`) {
 			t.Fatalf("%d번 구독자가 받은 프레임이 다르다:\n%s", i, frame)
 		}
 		if !strings.Contains(frame, `"session_id":"`+sess+`"`) {
