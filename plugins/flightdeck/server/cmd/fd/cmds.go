@@ -1,0 +1,461 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/kweiza/flightdeck/internal/mcpsrv"
+	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/service"
+)
+
+// 클라이언트 서브명령 — **전부 REST 를 친다.** 서비스 계층을 직접 부르지 않는다.
+//
+// 이유는 하나다: 다른 머신에서도 같은 바이너리가 돌아야 한다. 직접 부르면
+// 서버 머신에서만 도는 명령이 생기고, 그 비대칭은 반드시 사고가 된다.
+
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	return fs
+}
+
+// TakeFirstPositional 은 맨 앞의 위치 인자를 떼어낸다. 순수 함수다.
+//
+// ★ 표준 flag 패키지는 **첫 비플래그 인자에서 파싱을 멈춘다.** 그래서
+// `fd finish <id> --body …` 를 그대로 넘기면 --body 가 플래그가 아니라 위치 인자가 되고,
+// 본문이 빈 채로 거절당한다 — 사용자에게는 "본문을 줬는데 안 받는다"로 보인다.
+// 이 함수가 그 순서를 양쪽 다 받게 만든다: 앞에 와도 뒤에 와도 같은 뜻이다.
+func TakeFirstPositional(args []string) (pos string, rest []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
+// runStatus 는 `fd status` 다. 서버 상태 배너 + 보드.
+func (a *App) runStatus(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("status")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	a.cli.Flush(ctx)
+	banner, _ := a.ServerBanner(ctx)
+	if banner != "" {
+		fmt.Fprintln(out, banner)
+	}
+	// ★ 세션을 먼저 연다. 그것이 **프로젝트를 등록하는 유일한 경로**라서다 —
+	//   안 열면 처음 쓰는 저장소에서 보드가 404 로 끊기고, 그 404 는
+	//   "프로젝트가 없다"라고만 말해 무엇을 해야 하는지 알려주지 않는다.
+	//   실패해도 진행한다: 조회는 세션 없이도 성립한다.
+	self, serr := a.sessionID(ctx, "")
+	if serr != nil {
+		a.log.Warn("status: 세션 좌표를 못 얻었다", "reason", clip(serr.Error(), 200))
+	}
+	v, staleBanner, err := a.Board(ctx, self)
+	if err != nil {
+		if staleBanner != "" && banner == "" {
+			fmt.Fprintln(out, staleBanner)
+		}
+		fmt.Fprintf(out, "보드를 못 냈다: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, mcpsrv.RenderBoard(v, mcpsrv.BoardRenderOptions{Self: self, Now: a.now(), Detail: true}))
+	return 0
+}
+
+// runOpen 은 `fd open` 이다.
+func (a *App) runOpen(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("open")
+	label := fs.String("label", "", "표시용 라벨(어떤 필터의 축도 아니다)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id(비면 환경에서 읽는다)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	a.cli.Flush(ctx)
+	cc := a.ccSessionID(*session)
+	if cc == "" {
+		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다). 지어내지 않는다.")
+		return 1
+	}
+	res, stale, err := a.OpenSession(ctx, cc, *label)
+	if err != nil {
+		fmt.Fprintf(out, "세션 열기 실패: %v\n", err)
+		return 1
+	}
+	if stale {
+		fmt.Fprintln(out, StaleBanner(a.now(), a.cli.Cache.LastContact(), a.cli.URL))
+	}
+	verb := "재개"
+	if res.Created {
+		verb = "신규"
+	}
+	fmt.Fprintf(out, "세션 %s(%s) · 프로젝트 %s · 브랜치 %s\n",
+		verb, res.Session.ID, res.Project.ID, orDash(res.Branch))
+	if len(res.Claims) > 0 {
+		fmt.Fprintf(out, "이미 쥐고 있는 항목: %s\n", strings.Join(res.Claims, " "))
+	}
+	fmt.Fprintln(out, mcpsrv.FormatFreshness(res.Derived))
+	return 0
+}
+
+// runBeat 는 `fd beat` 다. 훅이 부르는 것과 같은 경로다.
+func (a *App) runBeat(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("beat")
+	kind := fs.String("kind", "mcp", "prompt|tool|mcp|commit|push")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	var paths stringList
+	fs.Var(&paths, "path", "이번에 만진 경로(여러 번 줄 수 있다)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "신호를 못 보냈다: %v\n", err)
+		return 1
+	}
+	res, err := a.cli.Write(ctx, "beat",
+		"/api/v1/sessions/"+urlPath(sess)+"/signals", beatReq{Kind: *kind, Paths: paths})
+	if err != nil {
+		fmt.Fprintf(out, "신호를 못 보냈다: %v\n", err)
+		return 1
+	}
+	if !res.Sent {
+		fmt.Fprintf(out, "%s: %s\n", res.Mode, res.Reason)
+		return 0
+	}
+	fmt.Fprintf(out, "신호 %s 기록(경로 %d)\n", *kind, len(paths))
+	return 0
+}
+
+// runNote 는 `fd note` 다. **오프라인에서도 성공한다**(아웃박스).
+func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("note")
+	kind := fs.String("kind", "", "handoff|decision|blocked|ask|now|rejected|not-done|verified|draft")
+	title := fs.String("title", "", "제목")
+	body := fs.String("body", "", "본문(비면 stdin 에서 읽는다)")
+	item := fs.String("item", "", "연결할 항목 id")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	text := *body
+	if strings.TrimSpace(text) == "" {
+		if b, err := io.ReadAll(a.stdin); err == nil {
+			text = string(b)
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Fprintln(out, "판단 본문이 비었다 — 무엇을 왜 그렇게 했는지가 이 표의 존재 이유다. 한 줄이라도 남겨라.")
+		return 2
+	}
+	a.cli.Flush(ctx)
+	sess, _ := a.sessionID(ctx, *session) // 세션을 못 얻어도 판단은 남긴다(세션 없는 판단이 없는 판단보다 낫다)
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "note", "/api/v1/judgments", noteReq{
+		Project: a.proj.ID, SessionID: sess, Kind: *kind,
+		Title: *title, Body: text, ItemID: *item,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "판단을 못 남겼다: %v\n", err)
+		return 1
+	}
+	if !res.Sent {
+		fmt.Fprintf(out, "서버 미도달 — 아웃박스에 쌓았다(%s).\n%s\n", res.Mode, res.Reason)
+		return 0
+	}
+	var nr service.NoteResult
+	if err := json.Unmarshal(res.Body, &nr); err != nil {
+		fmt.Fprintf(out, "저장은 됐으나 응답 해석 실패: %v\n", err)
+		return 0
+	}
+	fmt.Fprintln(out, mcpsrv.RenderNote(nr))
+	return 0
+}
+
+// runNext 는 `fd next` 다. **선점하지 않는다.**
+func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("next")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	a.cli.Flush(ctx)
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "추천을 못 받았다: %v\n", err)
+		return 1
+	}
+	path := fmt.Sprintf("/api/v1/items/next?project=%s&session_id=%s", urlValue(a.proj.ID), urlValue(sess))
+	rr, err := a.cli.Read(ctx, path)
+	if err != nil {
+		if rr.Banner != "" {
+			fmt.Fprintln(out, rr.Banner)
+		}
+		fmt.Fprintf(out, "추천을 못 받았다: %v\n", err)
+		return 1
+	}
+	if !rr.Fresh {
+		fmt.Fprintln(out, rr.Banner)
+		fmt.Fprintln(out, "아래는 캐시된 추천이다 — **선점은 아직 아무것도 안 됐다.**")
+	}
+	var res service.PickResult
+	if err := json.Unmarshal(rr.Body, &res); err != nil {
+		fmt.Fprintf(out, "추천 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, mcpsrv.RenderPick(res, a.now()))
+	return 0
+}
+
+// runPick 은 `fd pick <id>` 다. **오프라인에서는 거절된다.**
+func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("pick")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id>")
+		return 2
+	}
+	a.cli.Flush(ctx)
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "선점하지 못했다: %v\n", err)
+		return 1
+	}
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "pick", "/api/v1/items/"+urlPath(itemID)+"/claim",
+		claimReq{Project: a.proj.ID, SessionID: sess})
+	if err != nil {
+		fmt.Fprintf(out, "선점하지 못했다: %v\n", err)
+		return 1
+	}
+	var pr service.PickResult
+	if err := json.Unmarshal(res.Body, &pr); err != nil {
+		fmt.Fprintf(out, "선점 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, mcpsrv.RenderPick(pr, a.now()))
+	return 0
+}
+
+// runAdd 는 `fd add` 다.
+func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("add")
+	id := fs.String("id", "", "항목 id(브랜치 이름·워크트리 디렉토리로 그대로 쓰인다)")
+	title := fs.String("title", "", "제목")
+	body := fs.String("body", "", "본문")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	var paths, labels, afterItems, afterSHAs stringList
+	fs.Var(&paths, "path", "이 항목이 만질 경로")
+	fs.Var(&labels, "label", "표시용 라벨")
+	fs.Var(&afterItems, "after-item", "선행 항목 id")
+	fs.Var(&afterSHAs, "after-sha", "랜딩된 선행 sha")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	var after []afterWire
+	for _, v := range afterItems {
+		after = append(after, afterWire{Item: v})
+	}
+	for _, v := range afterSHAs {
+		after = append(after, afterWire{SHA: v})
+	}
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "add", "/api/v1/items", addReq{
+		Project: a.proj.ID, SessionID: sess, ID: *id, Title: *title, Body: *body,
+		Paths: paths, Labels: labels, After: after,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "항목을 못 만들었다: %v\n", err)
+		return 1
+	}
+	// 응답은 항목을 `{"item": …}` 로 감싼다(internal/api). 감싸지 않은 것으로 읽으면
+	// 필드가 전부 0값이 되고 **등록은 됐는데 화면이 빈 줄을 내는** 모양이 된다.
+	var wrap struct {
+		Item model.Item `json:"item"`
+	}
+	if err := json.Unmarshal(res.Body, &wrap); err != nil {
+		fmt.Fprintf(out, "등록은 됐으나 응답 해석 실패: %v\n", err)
+		return 0
+	}
+	it := wrap.Item
+	if strings.TrimSpace(it.ID) == "" {
+		fmt.Fprintf(out, "등록은 됐으나 응답에서 항목을 못 찾았다 — 응답 형식이 바뀌었다: %s\n",
+			clip(string(res.Body), 300))
+		return 1
+	}
+	fmt.Fprintf(out, "항목 %s 등록 — %s (선행 %d · 경로 %d)\n", it.ID, it.Title, len(it.After), len(it.Paths))
+	return 0
+}
+
+// runFinish 는 `fd finish <id>` 다.
+func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("finish")
+	outcome := fs.String("outcome", "done", "done|dropped")
+	title := fs.String("title", "", "판단 제목")
+	body := fs.String("body", "", "핸드오프 본문(비면 stdin)")
+	closeReason := fs.String("close-reason", "", "dropped 면 필수")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "끝낼 항목 id 를 줘라: fd finish <item-id>")
+		return 2
+	}
+	text := *body
+	if strings.TrimSpace(text) == "" {
+		if b, err := io.ReadAll(a.stdin); err == nil {
+			text = string(b)
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Fprintln(out, "판단 본문(body)이 비어 있어 끝낼 수 없다.")
+		fmt.Fprintln(out, service.HandoffGuidance)
+		return 2
+	}
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "마무리하지 못했다: %v\n", err)
+		return 1
+	}
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "finish", "/api/v1/items/"+urlPath(itemID)+"/finish", finishReq{
+		Project: a.proj.ID, SessionID: sess, Outcome: *outcome,
+		Title: *title, Body: text, CloseReason: *closeReason,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "마무리하지 못했다: %v\n", err)
+		return 1
+	}
+	var fr service.FinishResult
+	if err := json.Unmarshal(res.Body, &fr); err != nil {
+		fmt.Fprintf(out, "마무리는 됐으나 응답 해석 실패: %v\n", err)
+		return 0
+	}
+	fmt.Fprintln(out, mcpsrv.RenderFinish(fr))
+	return 0
+}
+
+// runAlloc 은 `fd alloc <counter>` 다.
+func (a *App) runAlloc(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("alloc")
+	name, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if name == "" {
+		name = fs.Arg(0)
+	}
+	if strings.TrimSpace(name) == "" {
+		fmt.Fprintln(out, "카운터 이름을 줘라: fd alloc <counter>")
+		return 2
+	}
+	res, err := a.cli.Write(ctx, "alloc",
+		"/api/v1/counters/"+urlPath(name)+"/next", counterReq{Project: a.proj.ID})
+	if err != nil {
+		fmt.Fprintf(out, "발번하지 못했다: %v\n", err)
+		return 1
+	}
+	var ar allocResp
+	if err := json.Unmarshal(res.Body, &ar); err != nil {
+		fmt.Fprintf(out, "발번 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "%d\n", ar.Value)
+	return 0
+}
+
+// runDoctor 는 `fd doctor` 다. 서버 축과 **이 머신의 축**을 함께 낸다.
+func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("doctor")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cwd, cwdErr := os.Getwd()
+	fmt.Fprintln(out, "■ 이 머신")
+	for _, ax := range service.ProbePlatform(a.env, cwd, cwdErr) {
+		if ax.Observed {
+			fmt.Fprintf(out, "  ✓ %-24s %s\n", ax.Name, clip(ax.Value, 120))
+		} else {
+			fmt.Fprintf(out, "  ✗ %-24s 관측 안 됨 — %s\n", ax.Name, clip(ax.Detail, 160))
+		}
+	}
+	fmt.Fprintf(out, "  상태 디렉토리 %s (%s)\n", a.sd.Path, a.sd.Source)
+	fmt.Fprintf(out, "  프로젝트 %s · 주 저장소 %s · 워크트리 %s\n", a.proj.ID, a.proj.Path, a.proj.Worktree)
+	fmt.Fprintf(out, "  좌표 판정: %s\n", a.proj.Detail)
+	if pend, err := a.cli.Outbox.List(); err != nil {
+		fmt.Fprintf(out, "  ! 아웃박스를 못 읽었다: %v\n", err)
+	} else {
+		fmt.Fprintf(out, "  아웃박스 대기 %d건\n", len(pend))
+	}
+	if a.notice != "" {
+		fmt.Fprintf(out, "  ! %s\n", a.notice)
+	}
+
+	// 서버 절. **REST 에 진단 엔드포인트가 없으므로**(설계 §6 의 표에 없다)
+	// /healthz 가 낼 수 있는 것만 낸다. 없는 축을 있는 척 지어내지 않는다.
+	h, herr := a.cli.Healthz(ctx)
+	if herr != nil {
+		fmt.Fprintln(out, RenderHealth(h, false, a.cli.URL))
+		fmt.Fprintf(out, "    사유: %v\n", herr)
+		return 1
+	}
+	fmt.Fprintln(out, RenderHealth(h, true, a.cli.URL))
+	fmt.Fprintln(out, "  프로젝트별 git 도달성은 서버 표면에 없다 — 이 도구는 그 축을 재지 않았다.")
+	return 0
+}
+
+// sessionID 는 이 실행이 붙을 세션 id 다.
+//
+// 세션 열기는 3중키로 멱등이므로(store.OpenSession) 매번 불러도 새 세션이 안 생긴다.
+// 그래서 "세션 id 를 어디 적어 두고 재사용"하는 기구를 만들지 않는다 —
+// 적어 둔 값은 원본이 움직이는 순간 조용히 거짓이 된다.
+func (a *App) sessionID(ctx context.Context, fromFlag string) (string, error) {
+	if v, ok := a.env("FD_SESSION"); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v), nil
+	}
+	cc := a.ccSessionID(fromFlag)
+	if cc == "" {
+		return "", fmt.Errorf("CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다)")
+	}
+	res, _, err := a.OpenSession(ctx, cc, "")
+	if err != nil {
+		return "", err
+	}
+	return res.Session.ID, nil
+}
+
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(못 읽음)"
+	}
+	return s
+}
+
+// urlPath 는 경로 성분 하나를 이스케이프한다. 항목 id 에 '/' 가 허용되므로 필요하다.
+func urlPath(s string) string {
+	return strings.ReplaceAll(urlValue(s), "+", "%20")
+}

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# fd — flightdeck 런처.
+#
+# 바이너리를 커밋하지 않는다. 이 스크립트가 캐시된 바이너리를 찾고, 없거나 낡았으면
+# server/ 에서 빌드해 넣은 뒤 exec 한다.
+#
+# ★ **Go 가 없어도 종료코드 0 이다.** 이 스크립트는 훅에서 불리고, 훅이 실패로 끊기면
+#   세션이 안 뜬다. 안내는 stderr 로 낸다 — stdout 은 훅 계약과 MCP 프레임이 쓰는 자리라
+#   한 줄이라도 섞이면 그 둘이 통째로 깨진다.
+#
+# ★ 캐시는 ${CLAUDE_PLUGIN_DATA} 에 둔다. ${CLAUDE_PLUGIN_ROOT} 에는 플러그인 **버전이
+#   들어가서** 갱신될 때마다 경로가 바뀌고, 그러면 매번 다시 빌드하게 된다.
+
+set -uo pipefail
+
+# ★ dirname 을 쓰지 않는다. PATH 가 비어 있으면 그 외부 명령이 없어서
+#   "소스를 못 찾았다"는 **엉뚱한 사유**가 나온다(실제 원인은 Go 부재인데).
+#   cd·pwd 는 셸 내장이라 PATH 와 무관하게 돈다.
+self="${BASH_SOURCE[0]}"
+here="$(cd "${self%/*}" 2>/dev/null && pwd)" || here="."
+plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$here/.." && pwd)}"
+src="$plugin_root/server"
+
+# ── 상태 디렉토리 — Go 쪽 ResolveStateDir 과 같은 우선순위 ──────────────────
+if [ -n "${FD_STATE_DIR:-}" ]; then
+  state="$FD_STATE_DIR"
+elif [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
+  state="$CLAUDE_PLUGIN_DATA/flightdeck"
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+  state="$XDG_STATE_HOME/flightdeck"
+else
+  state="${HOME:-/tmp}/.local/state/flightdeck"
+fi
+bin="$state/bin/fd"
+
+note() { printf 'flightdeck: %s\n' "$1" >&2; }
+
+# ── 이미 빌드된 것이 최신이면 그대로 쓴다 ─────────────────────────────────
+# 판정은 mtime 이다: 바이너리보다 새로운 소스가 하나라도 있으면 다시 빌드한다.
+# 해시로 하면 매 훅마다 전 파일을 읽게 되고, 훅은 프롬프트마다 돈다.
+needs_build=1
+if [ -x "$bin" ]; then
+  newer="$(find "$src" \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' -o -name '*.sql' -o -name '*.gohtml' \) \
+            -newer "$bin" -print -quit 2>/dev/null || true)"
+  if [ -z "$newer" ]; then
+    needs_build=0
+  fi
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+  if [ ! -d "$src" ]; then
+    note "소스를 못 찾았다($src) — 플러그인 설치가 반쪽이다. 조정 기능 없이 세션은 계속된다."
+    exit 0
+  fi
+  if ! command -v go >/dev/null 2>&1; then
+    note "Go 툴체인이 없어 fd 를 빌드하지 못했다."
+    note "  이 세션은 조정 기능 없이 그대로 진행된다(훅은 세션을 막지 않는다)."
+    note "  쓰려면: Go 1.25 이상을 설치하고 아무 세션이나 다시 시작해라 — 첫 훅이 자동으로 빌드한다."
+    note "  이미 빌드된 바이너리를 쓰려면 그 경로를 $bin 에 두면 된다."
+    exit 0
+  fi
+  mkdir -p "$state/bin" || { note "상태 디렉토리를 못 만들었다($state)"; exit 0; }
+  tmp="$bin.$$"
+  # CGO 0 — 정적 바이너리라 어느 컨테이너·머신에도 그대로 옮겨진다(외부 의존은 sqlite 순수 Go 구현뿐).
+  if ! build_log="$(cd "$src" && CGO_ENABLED=0 go build -o "$tmp" ./cmd/fd 2>&1)"; then
+    note "빌드에 실패했다. 조정 기능 없이 세션은 계속된다. 원인:"
+    printf '%s\n' "$build_log" | tail -20 >&2
+    rm -f "$tmp"
+    exit 0
+  fi
+  # 원자 교체 — 다른 세션이 같은 순간에 이 바이너리를 exec 하고 있을 수 있다.
+  if ! mv -f "$tmp" "$bin"; then
+    note "빌드한 바이너리를 제자리에 못 놨다($bin)"
+    rm -f "$tmp"
+    exit 0
+  fi
+fi
+
+if [ ! -x "$bin" ]; then
+  note "빌드는 됐다는데 실행 가능한 바이너리가 없다($bin)"
+  exit 0
+fi
+
+exec "$bin" "$@"

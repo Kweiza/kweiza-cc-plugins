@@ -1,0 +1,204 @@
+package service
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kweiza/flightdeck/internal/model"
+)
+
+// newRepoWithWorktree 는 저장소 하나와 브랜치 하나짜리 워크트리를 만든다.
+// 워크트리는 저장소 **밖**에 둔다 — 안에 두면 주 워크트리의 status 에 미추적으로 떠서
+// 시험이 무엇을 재고 있는지 흐려진다.
+func newRepoWithWorktree(t *testing.T, branch string) (repo, wt string) {
+	t.Helper()
+	repo = newRepo(t)
+	wt = filepath.Join(filepath.Dir(repo), "wt-"+branch)
+	runGit(t, repo, "worktree", "add", "-q", "-b", branch, wt)
+	return repo, wt
+}
+
+func TestBoardSurvivesDirectoryWithoutGitAndSaysSo(t *testing.T) {
+	s, _ := newSvc(t)
+	dir := tmpBase(t) // git 저장소가 아니다
+	sess := openSession(t, s, "p", dir, dir, "cc-1", "트랙2")
+
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID, IncludeQueue: true})
+	if err != nil {
+		t.Fatalf("git 이 없다고 보드가 죽으면 안 된다: %v", err)
+	}
+
+	// ① 조정은 산다 — 세션 행이 그대로 나온다.
+	if len(view.Sessions) != 1 {
+		t.Fatalf("세션 %d건, 기대 1건 — DB 만으로 완결되는 축이 파생 실패에 끌려 죽었다", len(view.Sessions))
+	}
+	card := view.Sessions[0]
+	if card.View.Session.ID != sess.Session.ID || !card.IsSelf {
+		t.Fatalf("세션 카드가 틀렸다: %+v", card)
+	}
+
+	// ② 그리고 침묵하지 않는다.
+	if !view.Freshness.Stale || view.Freshness.Source != "db" {
+		t.Fatalf("파생 실패가 신선도에 안 나타났다: %+v", view.Freshness)
+	}
+	if len(view.Failures) == 0 {
+		t.Fatalf("실패 사유가 비었다")
+	}
+	var axes []string
+	for _, f := range view.Failures {
+		axes = append(axes, f.Axis)
+	}
+	if !contains(axes, "worktrees") {
+		t.Fatalf("못 읽은 축이 이름으로 안 나왔다: %v", axes)
+	}
+	if card.DeriveError == "" {
+		t.Fatalf("세션 카드에 파생 실패 표시가 없다 — 어느 세션의 값이 반쪽인지 알 수 없다")
+	}
+
+	// ③ 파생을 지어내지 않는다.
+	if card.BranchKnown || card.AheadKnown || card.View.Branch != "" {
+		t.Fatalf("못 읽은 파생을 안다고 표시했다: %+v", card)
+	}
+	// ④ 발자국 없음을 명시한다.
+	if card.View.HasFootprint {
+		t.Fatalf("발자국이 없는데 있다고 했다: %v", card.View.Paths)
+	}
+}
+
+func TestBoardDerivesBranchAheadAndUnionOfPaths(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	// 브랜치에 커밋 하나 — change_set 축
+	writeFile(t, wt, "pipeline/run.py", "print(1)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "add pipeline")
+	// 미커밋 하나 — 커밋 전 의도를 나르는 유일한 축
+	writeFile(t, wt, "docs/plan.md", "초안\n")
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	// 훅이 준 발자국(절대경로) — footprint 축
+	if err := s.Beat(ctx(), sess.Session.ID, model.SignalTool,
+		[]string{filepath.Join(wt, "tools", "x.sh")}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	// 아무것도 안 만지는 세션 — 조사·판정만 하는 세션이 이 모양이다
+	idle := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if view.Freshness.Source != "git" || view.Freshness.Stale {
+		t.Fatalf("git 을 다 읽었는데 신선도가 %+v 다 (실패: %+v)", view.Freshness, view.Failures)
+	}
+
+	byID := map[string]SessionCard{}
+	for _, c := range view.Sessions {
+		byID[c.View.Session.ID] = c
+	}
+	work := byID[sess.Session.ID]
+	if !work.BranchKnown || work.View.Branch != "feat" {
+		t.Fatalf("브랜치 파생이 틀렸다: %+v (%s)", work, work.DeriveError)
+	}
+	if !work.AheadKnown || work.View.AheadMain != 1 {
+		t.Fatalf("ahead 파생이 틀렸다: known=%v ahead=%d", work.AheadKnown, work.View.AheadMain)
+	}
+	// footprint ∪ change_set ∪ 미커밋 이 한 축으로 합쳐진다.
+	//
+	// ★ 미커밋 항목이 "docs/plan.md" 가 아니라 "docs/" 인 것은 git 이 **미추적 디렉토리를
+	//   한 줄로 접기** 때문이다(실물로 확인했다). 손실이 아니다 — judge.PathsOverlap 이
+	//   성분 단위로 보므로 "docs/" 는 "docs/plan.md" 의 조상으로 겹친다.
+	//   여기서 파일 단위로 펼치려 들면 status 를 두 번 부르게 되고, 그 두 벌이 표류한다.
+	for _, want := range []string{"pipeline/run.py", "docs/", "tools/x.sh"} {
+		if !contains(work.View.Paths, want) {
+			t.Fatalf("경로 %q 가 빠졌다: %v", want, work.View.Paths)
+		}
+	}
+	if !work.View.HasFootprint {
+		t.Fatalf("경로가 있는데 발자국 없음으로 표시됐다")
+	}
+
+	// ★ 커밋도 편집도 안 하는 세션은 경로 축에서 아무도 안 막는다.
+	//   **안 막는다는 사실이 화면에 있어야 한다**(설계 §5).
+	rest := byID[idle.Session.ID]
+	if rest.View.HasFootprint || len(rest.View.Paths) != 0 {
+		t.Fatalf("발자국이 없어야 하는 세션에 경로가 있다: %v", rest.View.Paths)
+	}
+	if !rest.BranchKnown || rest.View.Branch != "main" {
+		t.Fatalf("주 워크트리의 브랜치가 안 잡혔다: %+v", rest)
+	}
+}
+
+func TestBoardCarriesSignalsWithoutJudgingLiveness(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-1", "트랙2")
+	if err := s.Beat(ctx(), sess.Session.ID, model.SignalPrompt, nil); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	sig := view.Sessions[0].View.Signals
+	if _, ok := sig[model.SignalPrompt]; !ok {
+		t.Fatalf("prompt 신호 시각이 없다: %v", sig)
+	}
+	if _, ok := sig[model.SignalCommit]; ok {
+		t.Fatalf("관측하지 않은 commit 신호가 생겼다 — 넷을 합치면 반드시 오판한다")
+	}
+	// 창을 좁혀도 "죽었다"가 생기지 않는다. 목록에서 빠질 뿐이고, 그 판단은 호출자의 창이다.
+	narrow, err := s.Board(ctx(), "p", BoardOptions{Window: 1})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if len(narrow.Sessions) != 0 {
+		t.Fatalf("1나노초 창에는 아무도 안 걸려야 한다: %d건", len(narrow.Sessions))
+	}
+}
+
+func TestBoardIncludesQueueAndNotesOnlyWhenAsked(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-1", "")
+	addItem(t, s, "p", "batch7", []string{"pipeline/"}, nil)
+	if _, err := s.Note(ctx(), NoteInput{
+		Project: "p", SessionID: sess.Session.ID, Kind: model.JudgmentBlocked,
+		Body: "계약 개정 대기",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	plain, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if len(plain.OpenItems) != 0 || len(plain.Blocked) != 0 {
+		t.Fatalf("요청하지 않은 절이 실렸다(토큰 예산): items=%d blocked=%d",
+			len(plain.OpenItems), len(plain.Blocked))
+	}
+
+	full, err := s.Board(ctx(), "p", BoardOptions{IncludeQueue: true, IncludeNotes: true})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if len(full.OpenItems) != 1 || full.OpenItems[0].ID != "batch7" {
+		t.Fatalf("큐가 안 실렸다: %+v", full.OpenItems)
+	}
+	if len(full.Blocked) != 1 || !strings.Contains(full.Blocked[0].Body, "계약 개정") {
+		t.Fatalf("막힘이 안 실렸다: %+v", full.Blocked)
+	}
+	if full.Sessions[0].View.LastNote == nil {
+		t.Fatalf("세션의 마지막 판단이 안 실렸다")
+	}
+}
+
+func TestBoardRefusesUnknownProject(t *testing.T) {
+	s, _ := newSvc(t)
+	if _, err := s.Board(ctx(), "없는프로젝트", BoardOptions{}); err == nil {
+		t.Fatalf("미등록 프로젝트는 파생 실패가 아니라 설정 오류다 — 접지 말고 올려야 한다")
+	}
+}
