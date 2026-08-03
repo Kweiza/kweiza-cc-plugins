@@ -73,9 +73,11 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
 		s.ID, s.Project, s.MachineID, s.Worktree, s.CCSessionID, nullStr(s.Label),
 		string(s.State), fmtTime(s.OpenedAt)); err != nil {
-		return model.Session{}, false, fmt.Errorf(
-			"세션 등록 실패(project=%q machine=%q worktree=%q): %w",
-			clip(project, 64), clip(machineID, 64), clip(worktree, 200), err)
+		return model.Session{}, false, writeErr(err, writeTarget{
+			Target: TargetSession, Project: project, ID: s.ID,
+			RefHint: fmt.Sprintf("프로젝트 %s · 머신 %s", clip(project, 64), clip(machineID, 64)),
+		}, "세션 등록 실패(project=%q machine=%q worktree=%q)",
+			clip(project, 64), clip(machineID, 64), clip(worktree, 200))
 	}
 	return s, true, nil
 }
@@ -263,8 +265,11 @@ func (t *Tx) AddWorkspace(w model.Workspace) error {
 		  project = excluded.project, is_primary = excluded.is_primary`,
 		w.SessionID, w.Project, w.Path, primary)
 	if err != nil {
-		return fmt.Errorf("워크스페이스 등록 실패(session_id=%q path=%q): %w",
-			clip(w.SessionID, 64), clip(w.Path, 200), err)
+		return writeErr(err, writeTarget{
+			Target: TargetSessionWorkspace, Project: w.Project, ID: w.SessionID,
+			RefHint: fmt.Sprintf("세션 %s · 프로젝트 %s", clip(w.SessionID, 64), clip(w.Project, 64)),
+		}, "워크스페이스 등록 실패(session_id=%q path=%q)",
+			clip(w.SessionID, 64), clip(w.Path, 200))
 	}
 	return nil
 }
@@ -319,8 +324,11 @@ func (t *Tx) Beat(sessionID string, kind model.SignalKind, at time.Time) error {
 		WHERE excluded.at > signal.at`,
 		sessionID, string(kind), fmtTime(at))
 	if err != nil {
-		return fmt.Errorf("신호 기록 실패(session_id=%q kind=%q): %w",
-			clip(sessionID, 64), clip(string(kind), 32), err)
+		return writeErr(err, writeTarget{
+			Target: TargetSignal, ID: sessionID,
+			RefHint: "세션 " + clip(sessionID, 64),
+		}, "신호 기록 실패(session_id=%q kind=%q)",
+			clip(sessionID, 64), clip(string(kind), 32))
 	}
 	return nil
 }
@@ -383,8 +391,11 @@ func (t *Tx) Touch(sessionID, path string, origin model.FootprintOrigin, at time
 		WHERE excluded.last_at > footprint.last_at`,
 		sessionID, path, string(origin), ts, ts)
 	if err != nil {
-		return fmt.Errorf("발자국 기록 실패(session_id=%q path=%q origin=%q): %w",
-			clip(sessionID, 64), clip(path, 200), clip(string(origin), 32), err)
+		return writeErr(err, writeTarget{
+			Target: TargetFootprint, ID: sessionID,
+			RefHint: "세션 " + clip(sessionID, 64),
+		}, "발자국 기록 실패(session_id=%q path=%q origin=%q)",
+			clip(sessionID, 64), clip(path, 200), clip(string(origin), 32))
 	}
 	return nil
 }
@@ -467,8 +478,10 @@ func (t *Tx) UpsertRefState(r model.RefState) error {
 		  sha = excluded.sha, subject = excluded.subject, at = excluded.at`,
 		r.Project, r.Ref, r.SHA, nullStr(r.Subject), fmtTime(r.At))
 	if err != nil {
-		return fmt.Errorf("ref 상태 기록 실패(project=%q ref=%q): %w",
-			clip(r.Project, 64), clip(r.Ref, 200), err)
+		return writeErr(err, writeTarget{
+			Target: TargetRefState, Project: r.Project, ID: r.Ref,
+			RefHint: "프로젝트 " + clip(r.Project, 64),
+		}, "ref 상태 기록 실패(project=%q ref=%q)", clip(r.Project, 64), clip(r.Ref, 200))
 	}
 	return nil
 }
@@ -520,8 +533,11 @@ func (t *Tx) UpsertChangeSet(c model.ChangeSet) error {
 		  paths = excluded.paths, computed_at = excluded.computed_at`,
 		c.Project, c.BaseSHA, c.HeadSHA, string(buf), fmtTime(c.ComputedAt))
 	if err != nil {
-		return fmt.Errorf("변경집합 기록 실패(project=%q %s..%s): %w",
-			clip(c.Project, 64), clip(c.BaseSHA, 12), clip(c.HeadSHA, 12), err)
+		return writeErr(err, writeTarget{
+			Target: TargetChangeSet, Project: c.Project, ID: c.BaseSHA + ".." + c.HeadSHA,
+			RefHint: "프로젝트 " + clip(c.Project, 64),
+		}, "변경집합 기록 실패(project=%q %s..%s)",
+			clip(c.Project, 64), clip(c.BaseSHA, 12), clip(c.HeadSHA, 12))
 	}
 	return nil
 }

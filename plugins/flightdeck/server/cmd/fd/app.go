@@ -71,13 +71,23 @@ const sessionCachePath = "/local/session"
 // stale=true 로 온 결과의 세션 id 는 지금 서버에 없을 수도 있다 — 그래서 그 사실을
 // 호출부가 배너로 나른다. 조용히 쓰면 "등록됐다"는 거짓이 화면에 남는다.
 func (a *App) OpenSession(ctx context.Context, ccSession, label string) (res service.SessionResult, stale bool, err error) {
-	in := openReq{
+	return a.openSession(ctx, openReq{
 		Project: a.proj.ID, ProjectPath: a.proj.Path, MachineID: a.machine,
 		Hostname: a.host, Worktree: a.proj.Worktree, CCSessionID: ccSession, Label: label,
-	}
+	})
+}
+
+// openSession 은 **주어진 정체 그대로** 세션을 연다.
+//
+// 좌표를 인자로 받는 갈래가 따로 있는 이유: MCP 서버는 자기 정체를 스스로 관측하고
+// (mcpsrv.ResolveIdentity — 설계 §13), 그 값이 이 App 의 좌표와 다를 수 있다.
+// 여기서 조용히 App 의 좌표로 갈아 끼우면 도구가 관측한 정체와 원장에 남는 정체가
+// 갈라지고, 그 어긋남은 어느 화면에도 안 뜬다.
+func (a *App) openSession(ctx context.Context, in openReq) (res service.SessionResult, stale bool, err error) {
+	ccSession := in.CCSessionID
 	// 세션 열기는 **고정 키를 쓰지 않는다** — 응답에 지금 상태(신규 여부·선점 목록)가
 	// 실려 있어 고정하면 낡은 답이 재생된다. 중복 등록은 3중키가 이미 막는다.
-	raw, werr := a.cli.do(ctx, "POST", "/api/v1/sessions", in, FreshKey(a.cli.Session))
+	raw, _, werr := a.cli.do(ctx, "POST", "/api/v1/sessions", in, FreshKey(a.cli.Session))
 	if werr == nil {
 		if uerr := json.Unmarshal(raw, &res); uerr != nil {
 			return res, false, fmt.Errorf("세션 응답 해석 실패: %w", uerr)

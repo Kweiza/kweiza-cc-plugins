@@ -128,7 +128,10 @@ func New(st *store.Store, log *slog.Logger, opts ...Option) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	log = log.With("service.name", "flightdeck")
+	// ★ service.name 을 여기서 덧칠하지 않는다 — 그 필드는 프로세스 진입점 하나가 건다.
+	//   라이브러리 계층이 각자 덧칠하면 JSON 한 줄에 같은 키가 여러 번 들어가고,
+	//   중복 키의 처리는 파서마다 다르다(마지막이 이기기도, 첫째가 이기기도 한다).
+	//   그러면 수집기 판올림 한 번에 "어느 프로세스가 무엇을 했나"가 조용히 사라진다.
 	s := &Service{
 		st:     st,
 		log:    log,

@@ -39,6 +39,9 @@ import (
 	"github.com/kweiza/flightdeck/internal/store"
 )
 
+// ★ 이 서버는 DB 를 열지 않는다. 조정 서버에 붙는 통로는 Backend 하나뿐이고,
+// 운영 배선은 그 REST 구현이다(backend.go 의 주석에 왜인지 있다).
+
 // maxFrameBytes 는 한 프레임의 상한이다. 판단 본문이 크므로 넉넉하게 두되,
 // 상한 자체는 있어야 한다 — 없으면 깨진 스트림 하나가 메모리를 통째로 먹는다.
 const maxFrameBytes = 4 << 20 // 4MiB
@@ -48,7 +51,7 @@ const tailNoteLimit = 3
 
 // Server 는 stdio MCP 서버 하나다.
 type Server struct {
-	svc *service.Service
+	be  Backend
 	log *slog.Logger
 	now func() time.Time
 
@@ -103,11 +106,16 @@ func WithClock(f func() time.Time) Option {
 //
 // 매 호출마다 다시 읽지 않는 이유: 한 프로세스는 한 세션의 것이고(claude 가 세션마다 띄운다),
 // 중간에 바뀌었다면 그것은 정체가 흔들린 것이라 조용히 따라가면 안 되는 사건이다.
-func New(svc *service.Service, log *slog.Logger, opts ...Option) *Server {
+func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	log = log.With("service.name", "flightdeck-mcp")
+	// ★ 여기서 service.name 을 덧칠하지 않는다.
+	//
+	// 진입점이 이미 그 키를 걸어 두므로 여기서 또 걸면 JSON 한 줄에 같은 키가 **두 값으로** 실린다.
+	// 중복 키 처리는 파서마다 달라(마지막이 이기기도, 첫째가 이기기도, 배열로 접기도)
+	// 수집기 판올림 한 번에 "MCP 프로세스가 무엇을 했나"가 통째로 사라질 수 있다.
+	// 이름은 프로세스 진입점(runMCP)이 정한다 — 로거를 **새로 만들어서**.
 
 	cwd, cwdErr := os.Getwd()
 	host, hostErr := os.Hostname()
@@ -124,7 +132,7 @@ func New(svc *service.Service, log *slog.Logger, opts ...Option) *Server {
 	}
 	id := ResolveIdentity(b.getenv, b.cwd, b.cwdErr, b.hostname, b.hostErr)
 
-	s := &Server{svc: svc, log: log, now: b.now, id: id}
+	s := &Server{be: be, log: log, now: b.now, id: id}
 	if len(id.Missing) > 0 {
 		// 기동 로그에도 남긴다. 배너는 도구를 부른 세션만 보고,
 		// 아무도 안 부르면 "왜 조정이 안 되나"에 답할 자리가 로그뿐이다.
@@ -143,8 +151,8 @@ func New(svc *service.Service, log *slog.Logger, opts ...Option) *Server {
 func (s *Server) Identity() Identity { return s.id }
 
 // Run 은 stdio 위에서 MCP 서버를 돌린다. EOF 면 nil 을 낸다(정상 종료).
-func Run(ctx context.Context, svc *service.Service, in io.Reader, out io.Writer, log *slog.Logger) error {
-	return New(svc, log).Serve(ctx, in, out)
+func Run(ctx context.Context, be Backend, in io.Reader, out io.Writer, log *slog.Logger) error {
+	return New(be, log).Serve(ctx, in, out)
 }
 
 // frame 은 읽어 들인 줄 하나다. 오류도 값으로 나른다 —
@@ -342,7 +350,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			s.log.ErrorContext(ctx, "세션 열기 실패", "mode", name, "error", err.Error())
 			return textResult(s.withTail(ctx, s.errText(name, err), tailOpts{}), true)
 		}
-		if err := s.svc.Beat(ctx, sessionID, model.SignalMCP, nil); err != nil {
+		if err := s.be.Beat(ctx, sessionID, model.SignalMCP, nil); err != nil {
 			// 신호 실패는 도구 실패가 아니다. 삼키지 않고 로그에 남기되 진행한다 —
 			// 조정의 본체(누가 무엇을 집었나)는 이 신호 없이도 성립한다.
 			s.log.WarnContext(ctx, "mcp 신호 기록 실패",
@@ -389,7 +397,7 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	if s.sessionID != "" {
 		return s.sessionID, nil
 	}
-	res, err := s.svc.OpenSession(ctx, service.OpenSessionInput{
+	res, err := s.be.OpenSession(ctx, service.OpenSessionInput{
 		Project:     s.id.ProjectID,
 		ProjectPath: s.id.ProjectPath,
 		MachineID:   s.id.MachineID,
@@ -397,6 +405,15 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 		Worktree:    s.id.Worktree,
 		CCSessionID: s.id.CCSessionID,
 	})
+	// 서버가 죽었어도 이 머신에 캐시된 마지막 세션이 있으면 그 좌표로 진행한다 —
+	// 여기서 끊으면 아웃박스에 쌓아야 할 판단까지 함께 죽는다(설계 §7 L1 의 open 처방).
+	// **조용히 쓰지 않는다**: 그 세션이 지금 서버에 없을 수도 있다는 사실을 로그에 남기고,
+	// 이 호출의 실제 열화 결과는 도구 응답 본문이 배너로 나른다.
+	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) && res.Session.ID != "" {
+		s.log.WarnContext(ctx, "캐시된 세션 좌표로 진행한다",
+			"session_id", clip(res.Session.ID, 64), "mode", string(deg.Mode), "reason", deg.Reason)
+		err = nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -416,12 +433,22 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	if err := decodeArgs(raw, &a); err != nil {
 		return textResult(s.withTail(ctx, s.errText("board", err), tailOpts{}), true)
 	}
-	view, err := s.svc.Board(ctx, s.id.ProjectID, service.BoardOptions{
+	// ★ IncludeNotes 는 detail 과 무관하게 항상 참이다. 꼬리의 알림 축이 이 응답에서 오고,
+	//   따로 부르면 같은 보드를 두 번 파생하게 된다(git 을 두 번 훑는다).
+	//   기본(brief) 표시에는 이 필드가 안 실리므로 출력은 그대로다 — boardBriefFoot 이 그 증거다.
+	view, err := s.be.Board(ctx, s.id.ProjectID, service.BoardOptions{
 		Self:         sessionID,
 		IncludeQueue: true,
-		IncludeNotes: a.Detail,
+		IncludeNotes: true,
 	})
+	notice := ""
+	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) {
+		notice, err = RenderDegraded(deg), nil
+	}
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "board", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("board", err), tailOpts{}), true)
 	}
 
@@ -432,18 +459,23 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 			mine = c.View.Paths
 		}
 	}
+	notes := append(append([]model.Judgment(nil), view.Asks...), view.Blocked...)
 	tail := s.tail(ctx, tailOpts{
 		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID),
 		observed: true,
+		notes:    notes,
+		haveNote: true,
 	})
 	if sessionID == "" {
 		tail = s.tail(ctx, tailOpts{
 			observed:     false,
 			overlapsNote: "내 세션이 없어 '내 경로'가 없다 — 겹침을 계산할 좌표가 없다",
+			notes:        notes,
+			haveNote:     true,
 		})
 	}
 	return textResult(RenderBoard(view, BoardRenderOptions{
-		Self: sessionID, Detail: a.Detail, Now: s.now(), Tail: tail,
+		Self: sessionID, Detail: a.Detail, Now: s.now(), Tail: tail, Notice: notice,
 	}), false)
 }
 
@@ -474,14 +506,23 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 				"웹 대시보드의 '선점 회수' 버튼(사유 필수)을 쓴다."), tailOpts{}), true)
 	}
 
-	res, err := s.svc.Pick(ctx, service.PickInput{
+	res, err := s.be.Pick(ctx, service.PickInput{
 		Project: s.id.ProjectID, SessionID: sessionID, ItemID: strings.TrimSpace(a.ItemID),
 	})
+	// 추천(item_id 없음)은 읽기라 캐시 처방이 온다. 값을 버리지 않고 배너와 함께 낸다 —
+	// 다만 **선점은 아무것도 안 됐다**는 사실을 그 배너가 말한다(선점의 처방은 거절이다).
+	notice := ""
+	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) {
+		notice, err = RenderDegraded(deg)+"\n\n", nil
+	}
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "pick", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
 	}
 	tail := s.tail(ctx, tailOpts{overlaps: res.Overlaps, observed: true})
-	return textResult(RenderPick(res, s.now())+"\n\n"+tail, false)
+	return textResult(notice+RenderPick(res, s.now())+"\n\n"+tail, false)
 }
 
 func (s *Server) toolNote(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
@@ -489,13 +530,16 @@ func (s *Server) toolNote(ctx context.Context, sessionID string, raw json.RawMes
 	if err := decodeArgs(raw, &a); err != nil {
 		return textResult(s.withTail(ctx, s.errText("note", err), tailOpts{}), true)
 	}
-	res, err := s.svc.Note(ctx, service.NoteInput{
+	res, err := s.be.Note(ctx, service.NoteInput{
 		Project: s.id.ProjectID, SessionID: sessionID,
 		Kind:  model.JudgmentKind(strings.TrimSpace(a.Kind)),
 		Title: a.Title, Body: a.Body, ItemID: strings.TrimSpace(a.ItemID),
 		Supersedes: strings.TrimSpace(a.Supersedes),
 	})
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "note", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("note", err), tailOpts{}), true)
 	}
 	return textResult(s.withTail(ctx, RenderNote(res), tailOpts{}), false)
@@ -506,12 +550,15 @@ func (s *Server) toolAdd(ctx context.Context, sessionID string, raw json.RawMess
 	if err := decodeArgs(raw, &a); err != nil {
 		return textResult(s.withTail(ctx, s.errText("add", err), tailOpts{}), true)
 	}
-	it, err := s.svc.AddItem(ctx, service.AddItemInput{
+	it, err := s.be.AddItem(ctx, service.AddItemInput{
 		Project: s.id.ProjectID, SessionID: sessionID,
 		ID: strings.TrimSpace(a.ID), Title: a.Title, Body: a.Body,
 		Paths: a.Paths, Labels: a.Labels, After: toAfter(a.After),
 	})
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "add", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("add", err), tailOpts{}), true)
 	}
 	return textResult(s.withTail(ctx, RenderAdd(it), tailOpts{}), false)
@@ -532,7 +579,7 @@ func (s *Server) toolFinish(ctx context.Context, sessionID string, raw json.RawM
 			Paths: f.Paths, Labels: f.Labels, After: toAfter(f.After),
 		})
 	}
-	res, err := s.svc.Finish(ctx, service.FinishInput{
+	res, err := s.be.Finish(ctx, service.FinishInput{
 		Project: s.id.ProjectID, SessionID: sessionID,
 		ItemID:  strings.TrimSpace(a.ItemID),
 		Outcome: model.ItemState(strings.TrimSpace(a.Outcome)),
@@ -540,6 +587,9 @@ func (s *Server) toolFinish(ctx context.Context, sessionID string, raw json.RawM
 		Followups: fs,
 	})
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "finish", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("finish", err), tailOpts{}), true)
 	}
 	return textResult(s.withTail(ctx, RenderFinish(res), tailOpts{}), false)
@@ -551,8 +601,11 @@ func (s *Server) toolAlloc(ctx context.Context, sessionID string, raw json.RawMe
 		return textResult(s.withTail(ctx, s.errText("alloc", err), tailOpts{}), true)
 	}
 	name := strings.TrimSpace(a.CounterName)
-	n, err := s.svc.Alloc(ctx, s.id.ProjectID, name)
+	n, err := s.be.Alloc(ctx, s.id.ProjectID, name)
 	if err != nil {
+		if r, ok := s.degradedResult(ctx, "alloc", err); ok {
+			return r
+		}
 		return textResult(s.withTail(ctx, s.errText("alloc", err), tailOpts{}), true)
 	}
 	_ = sessionID // 발번의 원장 행은 프로젝트 귀속이다(service 가 그렇게 남긴다)
@@ -595,6 +648,11 @@ func decodeArgs(raw json.RawMessage, dst any) error {
 // RefusedError 는 **처방까지** 낸다 — 그것이 이 계층이 규율을 나르는 방식이다.
 // 그 밖의 오류는 원인 전문을 싣는다. 상태 코드만 남기면 무엇이 틀렸는지 영영 모른다.
 func (s *Server) errText(tool string, err error) string {
+	// 열화는 실패가 아니라 **다른 사실**이다. 여기까지 오는 경로가 있다(세션 열기 실패 등) —
+	// 그때 "note 실패: ..." 로 뭉개면 무엇이 됐고 무엇이 안 됐는지가 사라진다.
+	if deg, ok := AsDegraded(err); ok {
+		return RenderDegraded(deg)
+	}
 	var ref *service.RefusedError
 	if errors.As(err, &ref) {
 		return RenderRefusal(ref.What, ref.Reason, ref.Guidance)
@@ -617,6 +675,30 @@ type tailOpts struct {
 	overlaps     []judge.Overlap
 	observed     bool   // 이 도구가 경로 축을 **실제로** 읽었나
 	overlapsNote string // 안 읽었으면 왜
+
+	// notes·haveNote — 이 도구가 알림 축을 **이미 읽어 왔다면** 그 값이다.
+	// board 가 그렇다: 같은 보드 응답에 실려 오므로 다시 부르면 조정 서버가
+	// 같은 파생을 두 번 한다. haveNote 를 불리언으로 따로 두는 이유는
+	// "0건을 읽어 왔다"와 "안 읽어 왔다"가 nil 슬라이스로는 구분되지 않아서다.
+	notes    []model.Judgment
+	haveNote bool
+}
+
+// degradedResult 는 열화 오류를 도구 결과로 옮긴다. 열화가 아니면 ok=false 다.
+//
+// isError 판정을 여기서 하지 않고 DegradedIsError(순수 함수)에 두는 이유:
+// "아웃박스에 쌓았다"를 실패로 내면 세션이 판단이 사라진 줄 알고 다시 쓰고,
+// "선점 못 했다"를 성공으로 내면 남의 항목 위에서 일한다 — 둘 다 이 도구가 없애려는 사고다.
+func (s *Server) degradedResult(ctx context.Context, tool string, err error) (toolResult, bool) {
+	deg, ok := AsDegraded(err)
+	if !ok {
+		return toolResult{}, false
+	}
+	isErr := DegradedIsError(deg.Mode)
+	s.log.WarnContext(ctx, "열화 결과를 냈다",
+		"mode", tool, "reason", deg.Reason, "status", string(deg.Mode),
+		"project", s.id.ProjectID)
+	return textResult(s.withTail(ctx, RenderDegraded(deg), tailOpts{}), isErr), true
 }
 
 func (s *Server) withTail(ctx context.Context, body string, o tailOpts) string {
@@ -631,6 +713,11 @@ func (s *Server) tail(ctx context.Context, o tailOpts) string {
 		Overlaps:         o.overlaps,
 		OverlapsObserved: o.observed,
 		OverlapsNote:     o.overlapsNote,
+	}
+	if o.haveNote {
+		// 이 도구가 이미 읽어 온 것이다. 같은 값을 다시 부르지 않는다.
+		in.Notes, in.NotesObserved = FilterNotes(o.notes, s.currentSession(), tailNoteLimit), true
+		return RenderTail(in)
 	}
 	notes, err := s.recentNotes(ctx)
 	if err != nil {
@@ -647,35 +734,23 @@ func (s *Server) tail(ctx context.Context, o tailOpts) string {
 // 근사했다는 사실을 꼬리 문구가 그대로 말한다 — 침묵하면 읽는 쪽이
 // "확인한 것은 빠진다"고 믿게 되고, 그 믿음이 §10 의 알림 확인율을 거짓으로 만든다.
 //
-// 저장 계층을 직접 읽는 이유: 서비스 계층에 "남이 남긴 최근 알림" 접근자가 없고,
-// 그것을 만드는 것은 이 담당 밖이다. 읽기 전용이라 조합 판정을 두 벌로 만들지 않는다.
+// 저장 계층을 직접 읽지 않는다. 앞선 판은 svc.Store() 로 SQLite 를 직접 열었는데,
+// 그 통로가 있는 한 이 서버는 **서버 머신에서만** 돌 수 있었다(설계 원칙 ③ 위반).
+// 지금은 Backend 하나가 유일한 통로다.
 func (s *Server) recentNotes(ctx context.Context) ([]model.Judgment, error) {
 	if s.id.ProjectID == "" {
 		return nil, nil
 	}
-	st := s.svc.Store()
-	if st == nil {
-		return nil, errors.New("저장 계층이 없다")
+	all, err := s.be.RecentNotes(ctx, s.id.ProjectID, 20)
+	// 캐시된 알림은 **없는 것보다 낫다.** 낡았다는 사실은 이 응답의 본문(열화 배너)이
+	// 이미 말하고 있고, 여기서 오류로 접으면 서버가 죽은 순간 꼬리가 통째로 침묵한다.
+	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) {
+		err = nil
 	}
-	self := s.currentSession()
-	var all []model.Judgment
-	for _, k := range []model.JudgmentKind{model.JudgmentAsk, model.JudgmentBlocked} {
-		js, err := st.ListJudgmentsByKind(ctx, s.id.ProjectID, k, 20)
-		if err != nil {
-			return nil, err
-		}
-		for _, j := range js {
-			if j.SessionID == self && self != "" {
-				continue // 자기가 쓴 것은 알림이 아니다
-			}
-			all = append(all, j)
-		}
+	if err != nil {
+		return nil, err
 	}
-	all = SortJudgmentsNewest(all)
-	if len(all) > tailNoteLimit {
-		all = all[:tailNoteLimit]
-	}
-	return all, nil
+	return FilterNotes(all, s.currentSession(), tailNoteLimit), nil
 }
 
 func (s *Server) currentSession() string {

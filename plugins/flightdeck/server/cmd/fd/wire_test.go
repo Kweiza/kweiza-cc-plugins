@@ -146,7 +146,7 @@ func TestEventsAliasIsReachable(t *testing.T) {
 	defer cancel()
 	// SSE 는 끝나지 않는 응답이라 타임아웃으로 끊는다. 여기서 보는 것은
 	// "그 경로가 404 가 아니다"뿐이다 — 별칭이 죽으면 화면이 조용히 폴백으로 내려간다.
-	_, err := cli.do(ctx, "GET", "/events?project="+h.project, nil, "")
+	_, _, err := cli.do(ctx, "GET", "/events?project="+h.project, nil, "")
 	if err != nil && !strings.Contains(err.Error(), "context deadline") &&
 		!strings.Contains(err.Error(), "Client.Timeout") {
 		t.Fatalf("/events 별칭이 살아 있지 않다: %v", err)

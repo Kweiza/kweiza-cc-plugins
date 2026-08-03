@@ -113,8 +113,12 @@ func (t *Tx) AcquireResource(project, resource string, h Holder) (model.Resource
 				clip(project, 64), clip(resource, 64), h, err, qErr)
 		}
 		// 살아 있는 점유자가 없는데 삽입이 실패했다 = 배타 위반이 아닌 다른 오류(FK·CHECK 등).
-		return model.ResourceHold{}, fmt.Errorf("자원 획득 실패(project=%q resource=%q holder=%s): %w",
-			clip(project, 64), clip(resource, 64), h, err)
+		// 등록 안 된 프로젝트·세션으로 잡으면 여기로 오고, 그것은 호출자가 고칠 거리다.
+		return model.ResourceHold{}, writeErr(err, writeTarget{
+			Target: TargetResourceHold, Project: project, ID: resource,
+			RefHint: fmt.Sprintf("프로젝트 %s · %s", clip(project, 64), h),
+		}, "자원 획득 실패(project=%q resource=%q holder=%s)",
+			clip(project, 64), clip(resource, 64), h)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
@@ -294,8 +298,10 @@ func (t *Tx) NextCounter(project, name string) (int64, error) {
 		ON CONFLICT(project, name) DO UPDATE SET value = value + 1
 		RETURNING value`, project, name).Scan(&v)
 	if err != nil {
-		return 0, fmt.Errorf("발번 실패(project=%q name=%q): %w",
-			clip(project, 64), clip(name, 64), err)
+		return 0, writeErr(err, writeTarget{
+			Target: TargetCounter, Project: project, ID: name,
+			RefHint: "프로젝트 " + clip(project, 64),
+		}, "발번 실패(project=%q name=%q)", clip(project, 64), clip(name, 64))
 	}
 	return v, nil
 }

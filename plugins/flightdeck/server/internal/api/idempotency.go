@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 멱등 — 모든 쓰기는 Idempotency-Key 를 받는다(설계 §6).
@@ -45,6 +49,73 @@ func JudgeIdempotencyKey(method, key string) IdemVerdict {
 		}
 	}
 	return IdemVerdict{OK: true, Reason: "키가 있다"}
+}
+
+// PersistVerdict 는 이 쓰기의 멱등 기억을 **재기동 너머로** 남길지의 판정이다.
+// 사유를 항상 채운다 — 사유가 없으면 "안 남기기로 했다"와 "이 라우트를 아예 안 본다"가
+// 구분되지 않고, 라우트가 하나 늘 때 조용히 뒤엣것이 된다.
+type PersistVerdict struct {
+	Persist bool
+	Reason  string
+}
+
+// JudgePersistIdempotency 는 라우트 하나를 판정한다. 순수 함수다.
+//
+// ★ 축은 하나다: **재생을 놓치면 중복이 영구히 남는가.**
+//
+// 메모리 표는 프로세스가 죽으면 통째로 사라진다. 그런데 그 조합이 나는 상황이
+// 정확히 설계 §7 이 겨냥한 시나리오다 — 서버가 죽어 아웃박스가 쌓이고, 살아나서
+// 재생이 돈다. 그때 서버는 방금 재기동해 기억이 비어 있다.
+//
+// 그래서 **중복이 안 지워지는 쓰기만** DB 로 내린다. 나머지(신호·발자국·세션 열기·
+// 워크스페이스·스냅숏)는 전부 upsert 라 두 번 들어와도 같은 한 행이고, 남기면
+// 이득 없이 초당 오는 쓰기가 표를 채운다. 선점은 정반대 이유로 안 남긴다 —
+// 응답이 **지금 상태**라 재생하면 남이 반납한 뒤에도 옛 거절이 나간다.
+//
+// r.Pattern 을 쓰지 않는 이유: 이 판정은 라우터 **앞**에서 필요하고, 그 시점에는
+// ServeMux 가 아직 패턴을 안 채웠다. 그래서 경로 조각을 직접 본다.
+func JudgePersistIdempotency(method, path string) PersistVerdict {
+	if !isWrite(method) {
+		return PersistVerdict{Reason: "읽기 요청이라 재생할 부작용이 없다"}
+	}
+	seg := pathSegments(path)
+	post := strings.EqualFold(strings.TrimSpace(method), http.MethodPost)
+
+	switch {
+	case post && len(seg) == 3 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "items":
+		return PersistVerdict{Persist: true,
+			Reason: "항목은 (project,id) 가 PK 라 두 번 들어오면 한쪽이 거절되고, " +
+				"재기동 뒤의 재시도는 그 거절을 '만들지 못했다'로 받는다"}
+
+	case post && len(seg) == 5 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "items" && seg[4] == "finish":
+		return PersistVerdict{Persist: true,
+			Reason: "종료는 판단 저장과 후속 항목 등록을 함께 한다 — 판단은 추가 전용이라 중복이 안 지워진다"}
+
+	case post && len(seg) == 3 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "judgments":
+		return PersistVerdict{Persist: true,
+			Reason: "판단은 추가 전용이다(UPDATE·DELETE 를 트리거가 막는다) — 중복이 들어가면 되돌릴 방법이 없다"}
+
+	case post && len(seg) == 5 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "counters" && seg[4] == "next":
+		return PersistVerdict{Persist: true,
+			Reason: "발번은 되돌릴 수 없다 — 재생을 놓치면 같은 요청이 번호를 하나 더 태운다"}
+	}
+	return PersistVerdict{
+		Reason: "중복이 영구히 남지 않는 쓰기다(upsert 이거나 응답이 지금 상태다) — " +
+			"메모리 표로 충분하고, 남기면 이득 없이 표만 큰다"}
+}
+
+// pathSegments 는 경로를 빈 조각 없이 자른다. 순수 함수다.
+//
+// 문자열 접두 검사(strings.HasPrefix)를 쓰지 않는 이유: `/api/v1/itemsXYZ` 가
+// `/api/v1/items` 로 읽히는 것을 원리적으로 막지 못한다. 경계는 구조로 잡는다.
+func pathSegments(path string) []string {
+	var out []string
+	for _, s := range strings.Split(path, "/") {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // isWrite 는 부작용이 있는 메서드인지 본다.
@@ -107,16 +178,34 @@ type idemEntry struct {
 	cached bool // 5xx 는 저장하지 않는다 — 일시 장애를 영구 응답으로 굳히면 안 된다
 }
 
-// idemStore 는 키 → 결과 표다. 메모리 전용이다.
+// idemStore 는 키 → 결과 표다. **두 층이다.**
 //
-// 재기동하면 비는데, 그것이 옳다: 서버가 죽었다 살아난 뒤의 재시도는
-// **상태가 실제로 어떤지 모르는 상황**이라 재생이 아니라 새 처리가 맞다.
+//	메모리 — 전부. 같은 프로세스 안의 재시도와 동시 요청을 여기서 접는다
+//	DB     — 중복이 영구히 남는 쓰기만(JudgePersistIdempotency 가 고른다)
+//
+// 앞 판은 메모리 하나뿐이었고, 그 주석은 "재기동하면 비는 것이 옳다"고 적혀 있었다.
+// 그 판단이 틀렸다: 재기동 직후가 바로 클라이언트 아웃박스 재생이 도는 순간이고,
+// 판단은 추가 전용이라 그때 들어간 중복은 되돌릴 수 없다.
 type idemStore struct {
 	mu      sync.Mutex
 	entries map[string]*idemEntry
 	ttl     time.Duration
 	max     int
 	now     func() time.Time
+
+	// db 가 nil 이면 메모리 전용으로 돈다(시험이 그 축을 대조로 쓴다).
+	db  idemBacking
+	log *slog.Logger
+}
+
+// idemBacking 은 멱등 기록의 영속 계층이다.
+//
+// 인터페이스로 둔 이유는 시험이 **실패하는 저장소**를 끼울 수 있어야 하기 때문이다 —
+// 저장이 실패했을 때 요청을 죽이지 않고 사유를 남기는지가 이 계층의 규율이고,
+// 실물 DB 로는 그 축을 만들 수 없다.
+type idemBacking interface {
+	GetIdemRecord(ctx context.Context, key string) (store.IdemRecord, error)
+	PutIdemRecord(ctx context.Context, r store.IdemRecord, ttl time.Duration, max int) error
 }
 
 func newIdemStore(ttl time.Duration, max int, now func() time.Time) *idemStore {
@@ -126,14 +215,62 @@ func newIdemStore(ttl time.Duration, max int, now func() time.Time) *idemStore {
 	if max <= 0 {
 		max = 4096
 	}
-	return &idemStore{entries: map[string]*idemEntry{}, ttl: ttl, max: max, now: now}
+	return &idemStore{
+		entries: map[string]*idemEntry{}, ttl: ttl, max: max, now: now,
+		log: slog.Default(),
+	}
+}
+
+// loadPersisted 는 DB 에 남은 기록을 찾는다. 없으면 (nil, nil).
+//
+// ★ 조회 실패는 **삼키지 않되 요청을 죽이지도 않는다.** 영속 계층이 고장 나도
+// 메모리 층은 여전히 같은 프로세스 안의 재시도를 막으므로 진행이 옳고,
+// 다만 그 사이 "재기동을 넘는 보장"이 꺼져 있다는 사실은 로그에 남아야 한다.
+func (s *idemStore) loadPersisted(ctx context.Context, key string) *idemEntry {
+	if s.db == nil {
+		return nil
+	}
+	rec, err := s.db.GetIdemRecord(ctx, key)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound):
+		return nil
+	default:
+		s.log.WarnContext(ctx, "멱등 기록 조회 실패 — 재기동을 넘는 멱등 보장이 이 요청에는 없다",
+			"error", err.Error())
+		return nil
+	}
+	e := &idemEntry{
+		fingerprint: rec.Fingerprint,
+		done:        make(chan struct{}),
+		at:          rec.At,
+		status:      rec.Status,
+		body:        rec.Body,
+		ctype:       rec.ContentType,
+		cached:      true,
+	}
+	close(e.done)
+	return e
 }
 
 // begin 은 키를 선점하거나 기존 결과를 돌려준다.
 //
 // 돌려주는 것 셋 중 하나다 — 새로 처리하라(entry, false, nil) ·
 // 기존 결과를 재생하라(entry, true, nil) · 충돌이다(nil, false, err).
-func (s *idemStore) begin(ctx context.Context, key, fingerprint string) (*idemEntry, bool, *IdemMatch) {
+//
+// persist 는 이 라우트가 재기동을 넘겨야 하는가다(JudgePersistIdempotency 의 판정).
+func (s *idemStore) begin(ctx context.Context, key, fingerprint string, persist bool) (*idemEntry, bool, *IdemMatch) {
+	// ★ DB 를 **먼저** 본다. 메모리가 비어 있는 유일한 이유가 재기동이고,
+	//   그 순간이 바로 이 층이 존재하는 이유다.
+	if persist {
+		if e := s.loadPersisted(ctx, key); e != nil {
+			m := JudgeIdemMatch(e.fingerprint, fingerprint)
+			if m.Conflict {
+				return nil, false, &m
+			}
+			return e, true, &m
+		}
+	}
 	for {
 		s.mu.Lock()
 		s.evictLocked()
@@ -173,7 +310,12 @@ func (s *idemStore) begin(ctx context.Context, key, fingerprint string) (*idemEn
 }
 
 // finish 는 처리 결과를 저장하고 대기자를 깨운다.
-func (s *idemStore) finish(key string, e *idemEntry, status int, ctype string, body []byte) {
+//
+// 5xx 는 어느 층에도 저장하지 않는다 — 일시 장애를 영구 응답으로 굳히면
+// 하류가 복구된 뒤에도 같은 실패만 돌려주게 된다. 이 정책은 앞 판 그대로다.
+func (s *idemStore) finish(ctx context.Context, key string, e *idemEntry,
+	status int, ctype string, body []byte, persist bool) {
+
 	s.mu.Lock()
 	e.status, e.ctype, e.body = status, ctype, body
 	e.cached = status < 500
@@ -182,6 +324,21 @@ func (s *idemStore) finish(key string, e *idemEntry, status int, ctype string, b
 	}
 	s.mu.Unlock()
 	e.closeOnce.Do(func() { close(e.done) })
+
+	if !persist || s.db == nil || !e.cached {
+		return
+	}
+	// ★ 저장 실패로 요청을 죽이지 않는다 — 처리는 이미 끝났고 응답도 나갔다.
+	//   다만 삼키지도 않는다: 이 줄이 없으면 "재기동을 넘는 보장이 꺼졌다"는 사실이
+	//   중복 판단이 실제로 들어갈 때까지 아무 데도 안 남는다.
+	rec := store.IdemRecord{
+		Key: key, Fingerprint: e.fingerprint, Status: status,
+		ContentType: ctype, Body: body, At: s.now(),
+	}
+	if err := s.db.PutIdemRecord(ctx, rec, s.ttl, s.max); err != nil {
+		s.log.WarnContext(ctx, "멱등 기록 저장 실패 — 재기동하면 이 쓰기의 재시도가 중복이 된다",
+			"error", err.Error(), "status", status)
+	}
 }
 
 // evictLocked 는 만료·초과분을 걷어낸다. 호출자가 잠금을 쥐고 있어야 한다.

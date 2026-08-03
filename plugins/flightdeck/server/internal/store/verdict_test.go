@@ -53,16 +53,22 @@ func TestPlanMigration(t *testing.T) {
 	}
 }
 
-// DB 가 더 낮은데 올릴 경로가 없으면 거절이다.
-// 지금은 v1 뿐이라 도달 경로가 없지만, 조용히 통과시키면
-// v2 를 넣는 순간 "모르는 구 스키마 위에서 도는" 상태가 침묵으로 열린다.
-func TestPlanMigrationRejectsOlderDBWithoutUpgradePath(t *testing.T) {
+// DB 가 더 낮으면 증분을 얹는다. **백업은 반드시 뜬다** —
+// 기존 데이터 위의 변경이라 나쁜 마이그레이션이 1인 운영에서 복구 불가 사건이 된다.
+//
+// ★ "올릴 경로가 있는가"는 **여기서 판정하지 않는다.** 그것은 증분 목록을 봐야 알 수 있어
+// 이 함수를 순수하지 않게 만든다. 경로 없음의 거절은 UpgradeSteps 가 하고,
+// 그 축은 migrate_test.go 의 TestUpgradeSteps 가 사유까지 단정한다.
+func TestPlanMigrationUpgradesOlderDBWithBackup(t *testing.T) {
 	p := PlanMigration(true, 1, 40, 3)
-	if p.Action != MigrateReject {
+	if p.Action != MigrateUpgrade {
 		t.Errorf("db=1 code=3 인데 %q 를 냈다(사유: %s)", p.Action, p.Reason)
 	}
-	if !strings.Contains(p.Reason, "업그레이드 경로가 없다") {
-		t.Errorf("사유가 이유를 말하지 않는다: %q", p.Reason)
+	if !p.Backup {
+		t.Errorf("기존 데이터 위에 증분을 얹는데 백업을 안 뜬다(사유: %s)", p.Reason)
+	}
+	if !strings.Contains(p.Reason, "증분을 얹는다") {
+		t.Errorf("사유가 무엇을 할지 말하지 않는다: %q", p.Reason)
 	}
 }
 
@@ -79,7 +85,7 @@ func TestPlanMigrationAlwaysGivesReason(t *testing.T) {
 							hasTable, dbVer, objects, code, p)
 					}
 					switch p.Action {
-					case MigrateNone, MigrateApply, MigrateReject:
+					case MigrateNone, MigrateApply, MigrateUpgrade, MigrateReject:
 					default:
 						t.Fatalf("알 수 없는 판정 %q", p.Action)
 					}
@@ -104,15 +110,19 @@ func TestPlanMigrationNeverOpensFutureDB(t *testing.T) {
 	}
 }
 
-// 표 밖 케이스 ③: 백업 없이 기존 데이터 위에 스키마를 적용하는 조합이 있으면 안 된다.
-func TestPlanMigrationNeverAppliesOverDataWithoutBackup(t *testing.T) {
+// 표 밖 케이스 ③: 백업 없이 기존 데이터 위에 스키마를 쓰는 조합이 있으면 안 된다.
+// **증분(upgrade)도 같은 축이다** — 기존 데이터 위의 변경이라는 점이 같다.
+func TestPlanMigrationNeverWritesOverDataWithoutBackup(t *testing.T) {
 	for _, hasTable := range []bool{false, true} {
-		for dbVer := 0; dbVer <= 2; dbVer++ {
+		for dbVer := 0; dbVer <= 4; dbVer++ {
 			for _, objects := range []int{0, 1, 2, 99} {
-				p := PlanMigration(hasTable, dbVer, objects, 1)
-				if p.Action == MigrateApply && objects > 1 && !p.Backup {
-					t.Errorf("객체 %d개 위에 백업 없이 적용한다: hasTable=%v db=%d (사유: %s)",
-						objects, hasTable, dbVer, p.Reason)
+				for _, code := range []int{1, 2, 3} {
+					p := PlanMigration(hasTable, dbVer, objects, code)
+					writes := p.Action == MigrateApply || p.Action == MigrateUpgrade
+					if writes && objects > 1 && !p.Backup {
+						t.Errorf("객체 %d개 위에 백업 없이 %q 한다: hasTable=%v db=%d code=%d (사유: %s)",
+							objects, p.Action, hasTable, dbVer, code, p.Reason)
+					}
 				}
 			}
 		}
