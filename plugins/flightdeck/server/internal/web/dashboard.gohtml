@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+{{/* SSE 가 없어도 페이지가 성립한다 — 스크립트가 없으면 이 메타 리프레시가 폴백이다.
+     스크립트가 있으면 아래 <script> 가 SSE 를 걸고, 실패하면 같은 주기로 새로고침한다. */}}
+<noscript><meta http-equiv="refresh" content="{{.Refresh}}"></noscript>
+<style>
+:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1c1b19; --dim:#5f5c56; --line:#e0ddd6;
+        --card:#ffffff; --warn:#8a5a00; --crit:#8f1d1d; --ok:#1f6b3a; --accent:#2f5fb3; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#16181c; --fg:#e6e4e0; --dim:#9a978f; --line:#2c3037; --card:#1c1f24;
+          --warn:#e0a33a; --crit:#f08a8a; --ok:#77d39b; --accent:#8fb2f0; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 ui-sans-serif,system-ui,
+       "Noto Sans KR","Apple SD Gothic Neo",sans-serif; }
+header { padding:14px 18px; border-bottom:1px solid var(--line); }
+h1 { font-size:16px; margin:0 0 4px; letter-spacing:.02em; }
+h2 { font-size:15px; margin:0; }
+h3 { font-size:13px; margin:14px 0 6px; color:var(--dim); }
+main { padding:0 18px 40px; max-width:1400px; }
+section { margin:18px 0; padding:12px 14px; background:var(--card);
+          border:1px solid var(--line); border-radius:6px; }
+.shead { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; justify-content:space-between; }
+.derived { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
+.dim { color:var(--dim); }
+.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+.err { color:var(--crit); font-size:13px; margin:6px 0; }
+.notice { color:var(--ok); font-size:13px; margin:6px 0; }
+.empty { color:var(--dim); font-size:13px; margin:8px 0; }
+.tier { color:var(--dim); font-size:12px; margin:4px 0 8px; }
+nav a { color:var(--accent); margin-right:10px; text-decoration:none; }
+nav a.on { font-weight:700; text-decoration:underline; }
+.cards { display:grid; gap:10px; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); }
+.card { border:1px solid var(--line); border-radius:5px; padding:10px; }
+.card.self { border-color:var(--accent); }
+.k { color:var(--dim); font-size:12px; }
+.sig { display:flex; flex-wrap:wrap; gap:10px; font-size:12px; font-variant-numeric:tabular-nums; }
+.sig .off { color:var(--dim); }
+.paths { font-size:12px; margin:6px 0 0; padding-left:16px; }
+.none { color:var(--warn); font-size:12px; }
+table { border-collapse:collapse; width:100%; font-size:13px; }
+th, td { text-align:left; border-bottom:1px solid var(--line); padding:5px 8px; vertical-align:top; }
+th { color:var(--dim); font-weight:600; font-size:12px; }
+.bar { display:inline-block; height:8px; background:var(--accent); border-radius:2px; vertical-align:middle; }
+form.write { margin:10px 0 0; padding:10px; border:1px dashed var(--line); border-radius:5px;
+             display:flex; flex-wrap:wrap; gap:8px; align-items:end; }
+form.write label { font-size:12px; color:var(--dim); display:flex; flex-direction:column; gap:3px; }
+input, select, button { font:inherit; padding:4px 6px; background:var(--bg); color:var(--fg);
+                        border:1px solid var(--line); border-radius:4px; }
+button { cursor:pointer; }
+button[disabled] { cursor:not-allowed; opacity:.55; }
+.lv-crit { color:var(--crit); font-weight:600; }
+.lv-warn { color:var(--warn); }
+.lv-ok { color:var(--ok); }
+.lv-unknown { color:var(--dim); }
+.stale { color:var(--warn); font-weight:600; }
+.note { border-left:2px solid var(--line); padding-left:8px; margin:8px 0; }
+.note .body { white-space:pre-wrap; font-size:12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>{{.Title}}</h1>
+  <div class="derived">{{.Now}} · {{.HealthLine}} · 디스크: <span class="lv-{{.Disk.Level}}">{{.Disk.Text}}</span></div>
+  {{if .Projects}}
+  <nav>프로젝트:
+    {{range .Projects}}<a class="{{if eq .ID $.Project.ID}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a>{{end}}
+  </nav>
+  {{end}}
+</header>
+
+{{with .Notice}}<p class="notice" style="padding:0 18px">{{.}}</p>{{end}}
+{{with .Error}}<p class="err" style="padding:0 18px">{{.}}</p>{{end}}
+
+{{if .HasProject}}
+<main>
+
+{{/* ─────────────────────────── ① 지금 ─────────────────────────── */}}
+<section id="now">
+  <div class="shead">
+    <h2>① 지금 — 살아 있는 세션</h2>
+    <span class="derived">{{.Live.Window}} · {{.Live.Derived}}</span>
+  </div>
+  {{template "pfail" .Live.Panel}}
+  {{with .Live.Empty}}<p class="empty">{{.}}</p>{{end}}
+  <div class="cards">
+    {{range .Live.Sessions}}
+    <div class="card{{if .IsSelf}} self{{end}}">
+      <div><b>{{if .Label}}{{.Label}}{{else}}(라벨 없음){{end}}</b>
+        <span class="k mono">{{.Short}}</span>
+        <span class="k">· {{.State}}{{if .BlockedWhy}} ({{.BlockedWhy}}){{end}}</span>
+        {{if .OpenedAge}}<span class="k">· 열림 {{.OpenedAge}}</span>{{end}}
+      </div>
+      <div class="k mono">{{.Worktree}}</div>
+      <div class="k">
+        브랜치: {{if .Branch}}<span class="mono">{{.Branch}}</span>{{end}}{{with .BranchNote}}<span class="none">{{.}}</span>{{end}}
+        · main 대비: {{if .Ahead}}{{.Ahead}}{{end}}{{with .AheadNote}}<span class="none">{{.}}</span>{{end}}
+      </div>
+      <div class="sig">
+        {{range .Signals}}
+        <span class="{{if not .Known}}off{{end}}">{{.Label}} {{.Age}}</span>
+        {{end}}
+      </div>
+      <div class="k">발자국: {{if .HasPaths}}{{.Footprint}}{{else}}<span class="none">{{.Footprint}}</span>{{end}}</div>
+      {{if .Paths}}
+      <ul class="paths mono">
+        {{range .Paths}}<li>{{.}}</li>{{end}}
+        {{if .MorePaths}}<li class="dim">외 {{.MorePaths}}건</li>{{end}}
+      </ul>
+      {{end}}
+      <div class="k">선점: {{if .Claims}}<span class="mono">{{join ", " .Claims}}</span>{{else}}없음{{end}}</div>
+      {{with .LastNote}}
+      <div class="note"><span class="k">최근 판단 [{{.Kind}}] {{.At}} ({{.Age}})</span>
+        <div class="body">{{if .Title}}{{.Title}} — {{end}}{{.Body}}</div></div>
+      {{end}}
+      {{with .DeriveError}}<div class="err">파생 결손: {{.}}</div>{{end}}
+    </div>
+    {{end}}
+  </div>
+
+  {{/* 쓰기 ① — 선점 회수. 사유 필수. 회수 행위 자체가 판단(decision)으로 원장에 남는다 */}}
+  <form class="write" method="post" action="actions/reclaim">
+    <input type="hidden" name="project" value="{{.Project.ID}}">
+    <label>회수할 선점
+      <select name="item" required {{if not .Live.Targets}}disabled{{end}}>
+        {{range .Live.Targets}}<option value="{{.ItemID}}">{{.ItemID}} ← {{.Holder}} ({{.Live}}{{if .Since}}, {{.Since}}부터{{end}})</option>{{end}}
+        {{if not .Live.Targets}}<option>회수할 선점이 없다</option>{{end}}
+      </select>
+    </label>
+    <label>사유(필수)
+      <input name="reason" required minlength="4" maxlength="2000" size="46"
+             placeholder="무엇을 보고 회수하는가 — 신호 나이·발자국·선점 시각을 근거로">
+    </label>
+    <button type="submit" {{if not .Live.Targets}}disabled{{end}}>선점 회수</button>
+    <span class="k">근거 다섯 축은 위 카드에 있다. 회수는 사람만 하고, 사유는 원장에 남는다.</span>
+  </form>
+</section>
+
+{{/* ─────────────────────── ② 미확인 결과 ─────────────────────── */}}
+<section id="unacked">
+  <div class="shead">
+    <h2>② 미확인 결과</h2>
+    <span class="derived">{{.Unacked.Derived}}</span>
+  </div>
+  <p class="tier">{{.Unacked.Tier}}</p>
+  {{template "pfail" .Unacked.Panel}}
+  {{with .Unacked.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Unacked.Jobs}}
+  <table>
+    <tr><th>잡</th><th>종류</th><th>항목</th><th>상태</th><th>실패 종류</th><th>끝난 시각</th><th>로그 꼬리</th></tr>
+    {{range .Unacked.Jobs}}
+    <tr><td class="mono">{{.ID}}</td><td>{{.Kind}}</td><td class="mono">{{.ItemID}}</td>
+        <td>{{.State}}</td><td>{{.FailKind}}</td><td>{{.Ended}}</td><td class="mono">{{.LogTail}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{/* 쓰기 ④ — 잡 우회 기록. Tier B 라 자리만 낸다. 지우면 "없다"와 "안 본다"가 구분되지 않는다 */}}
+  <p><button type="button" disabled title="Tier B — 러너가 서면 열린다">잡 우회 기록(사유 필수) · Tier B</button></p>
+</section>
+
+{{/* ──────────────────────────── ③ 큐 ──────────────────────────── */}}
+<section id="queue">
+  <div class="shead">
+    <h2>③ 큐</h2>
+    <span class="derived">{{.Queue.Derived}}</span>
+  </div>
+  {{template "pfail" .Queue.Panel}}
+  {{with .Queue.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Queue.Items}}
+  <table>
+    <tr><th>항목</th><th>제목</th><th>상태</th><th>선점</th><th>경로</th><th>선행(의존)</th><th>기대는 항목</th></tr>
+    {{range .Queue.Items}}
+    <tr>
+      <td class="mono">{{.ID}}</td>
+      <td>{{.Title}}<div class="k">{{.Body}}</div>
+        {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</td>
+      <td>{{.State}}</td>
+      <td class="mono">{{if .Holder}}{{.Holder}}{{if .Since}}<div class="k">{{.Since}}부터</div>{{end}}{{else}}—{{end}}</td>
+      <td class="mono">{{if .Paths}}{{join " · " .Paths}}{{else}}<span class="none">경로 선언 없음</span>{{end}}</td>
+      <td>{{if .After}}{{range .After}}<div>{{.}}</div>{{end}}{{else}}<span class="dim">없음</span>{{end}}</td>
+      <td>{{if lt .Dependents 0}}<span class="none">못 읽음</span>{{else}}{{.Dependents}}{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+
+  <h3>탈락 사유 분포 {{with .Queue.Window}}<span class="dim">— {{.}}</span>{{end}}</h3>
+  {{with .Queue.StatsErr}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Queue.Stats.Reasons}}
+  <p class="k">판정 {{.Queue.Stats.Evals}}회 · 추천 있음 {{.Queue.Stats.Picked}}회 · 적격 0건 {{.Queue.Stats.None}}회 · 탈락 줄 {{.Queue.Stats.Total}}
+    · 적격이나 추천 순위 밖 {{.Queue.Stats.NotTop}}건(not-top 은 거르는 축이 아니라 분포에서 뺀다)</p>
+  <table>
+    <tr><th>사유 코드</th><th>건수</th><th>예시 항목</th><th>상세 한 줄</th></tr>
+    {{range .Queue.Stats.Reasons}}
+    <tr><td class="mono">{{.Reason}}</td>
+        <td>{{.Count}} <span class="bar" style="width:{{.Count}}px"></span></td>
+        <td class="mono">{{join ", " .Items}}</td>
+        <td class="k">{{.Example}}</td></tr>
+    {{end}}
+  </table>
+  {{else}}{{if not .Queue.StatsErr}}<p class="empty">탈락 줄이 0건이다 — 판정은 돌았고 아무도 탈락하지 않았다.</p>{{end}}{{end}}
+
+  {{/* 쓰기 ② — 항목 폐기. 사유 필수. close_reason 과 판단 양쪽에 남는다 */}}
+  <form class="write" method="post" action="actions/drop">
+    <input type="hidden" name="project" value="{{.Project.ID}}">
+    <label>폐기할 항목
+      <select name="item" required {{if not .Queue.Targets}}disabled{{end}}>
+        {{range .Queue.Targets}}<option value="{{.}}">{{.}}</option>{{end}}
+        {{if not .Queue.Targets}}<option>폐기할 항목이 없다</option>{{end}}
+      </select>
+    </label>
+    <label>사유(필수)
+      <input name="reason" required minlength="4" maxlength="2000" size="46"
+             placeholder="왜 안 하기로 했는가 — 이 문장이 나중에 유일한 근거다">
+    </label>
+    <button type="submit" {{if not .Queue.Targets}}disabled{{end}}>항목 폐기</button>
+  </form>
+</section>
+
+{{/* ─────────────────────── ④ 랜딩 이력 ─────────────────────── */}}
+<section id="landing">
+  <div class="shead">
+    <h2>④ 랜딩 이력</h2>
+    <span class="derived">{{.Landing.Derived}}</span>
+  </div>
+  <p class="tier">{{.Landing.Tier}}</p>
+  {{template "pfail" .Landing.Panel}}
+  {{with .Landing.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Landing.Closed}}
+  <table>
+    <tr><th>항목</th><th>제목</th><th>결과</th><th>랜딩 sha</th><th>종료</th><th>사유</th></tr>
+    {{range .Landing.Closed}}
+    <tr><td class="mono">{{.ID}}</td><td>{{.Title}}</td><td>{{.State}}</td>
+        <td class="mono">{{if .Holder}}{{.Holder}}{{else}}<span class="dim">—</span>{{end}}</td>
+        <td>{{.Since}}</td><td class="k">{{.Body}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+
+  <h3>스냅숏 — 재계산이 불가능한 수치</h3>
+  <p class="k">{{.Landing.Current}}</p>
+  {{with .Landing.SnapErr}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Landing.Snapshots}}
+  <table>
+    <tr><th>키</th><th>값</th><th>방법</th><th>판정 시각</th><th>낡음</th><th>근거</th></tr>
+    {{range .Landing.Snapshots}}
+    <tr><td class="mono">{{.Key}}</td><td><b>{{.Value}}</b></td><td>{{.Method}}</td><td>{{.Computed}}</td>
+        <td>{{if .Verdict.Warn}}<span class="stale">{{.Verdict.Reason}}</span>{{else}}<span class="lv-ok">{{.Verdict.Reason}}</span>{{end}}</td>
+        <td class="k">{{.Evidence}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{/* 쓰기 ③ — 레인 정지/재개. Tier B 라 자리만 낸다 */}}
+  <p><button type="button" disabled title="Tier B — 러너가 서면 열린다">레인 정지/재개(사유 필수) · Tier B</button></p>
+</section>
+
+{{/* ─────────────────────────── ⑤ 막힘 ─────────────────────────── */}}
+<section id="blocked">
+  <div class="shead">
+    <h2>⑤ 막힘</h2>
+    <span class="derived">{{.Blocked.Derived}}</span>
+  </div>
+  {{template "pfail" .Blocked.Panel}}
+  <p class="k">자원 임계 — 디스크: <span class="lv-{{.Blocked.Disk.Level}}">{{.Blocked.Disk.Text}}</span>
+    <span class="dim">(임계 경고는 자원에만 붙인다. 세션에는 안 붙인다 — 상시 점등된 경고는 판별력이 0이다.)</span></p>
+  {{with .Blocked.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Blocked.Held}}
+  <h3>쥐어진 자원</h3>
+  <table>
+    <tr><th>자원</th><th>점유자</th><th>획득</th><th>경과</th></tr>
+    {{range .Blocked.Held}}
+    <tr><td class="mono">{{.Resource}}</td><td class="mono">{{.Holder}}</td><td>{{.Since}}</td><td>{{.Age}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{if .Blocked.Sessions}}
+  <h3>blocked 상태 세션</h3>
+  {{range .Blocked.Sessions}}
+  <div class="note"><span class="k mono">{{.Short}}</span> {{.Label}} — {{if .BlockedWhy}}{{.BlockedWhy}}{{else}}<span class="none">사유 없음</span>{{end}}</div>
+  {{end}}
+  {{end}}
+  {{if .Blocked.Notes}}
+  <h3>막힘 판단(blocked)</h3>
+  {{range .Blocked.Notes}}{{template "note" .}}{{end}}
+  {{end}}
+  {{if .Blocked.Asks}}
+  <h3>요청(ask) — 남이 건드리면 곤란한 것</h3>
+  {{range .Blocked.Asks}}{{template "note" .}}{{end}}
+  {{end}}
+</section>
+
+{{/* ─────────────────────── ⑥ 판단 검색 ─────────────────────── */}}
+<section id="search">
+  <div class="shead">
+    <h2>⑥ 판단 검색</h2>
+    <span class="derived">{{.Search.Derived}}</span>
+  </div>
+  <form method="get" action="./">
+    <input type="hidden" name="project" value="{{.Project.ID}}">
+    <input type="search" name="q" value="{{.Search.Query}}" size="40" placeholder="판단 전문 검색(FTS5)">
+    <button type="submit">검색</button>
+  </form>
+  <p class="k">{{.Search.Mode}}</p>
+  {{template "pfail" .Search.Panel}}
+  {{with .Search.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{range .Search.Results}}{{template "note" .}}{{end}}
+</section>
+
+</main>
+{{end}}
+
+<script>
+// 자동 갱신: SSE 가 있으면 SSE, 없으면 시간 폴백. 스크립트가 아예 안 돌면 <noscript> 의 메타 리프레시가 받는다.
+(function () {
+  var ms = {{.Refresh}} * 1000;
+  var path = "{{.SSEPath}}";
+  function later() { window.setTimeout(function () { window.location.reload(); }, ms); }
+  if (!path || !window.EventSource) { later(); return; }
+  var es, opened = false;
+  try { es = new EventSource(path); } catch (e) { later(); return; }
+  es.onopen = function () { opened = true; };
+  es.onmessage = function () { window.location.reload(); };
+  es.onerror = function () {
+    // 열린 적이 없으면 서버에 SSE 가 없는 것이다 — 끊고 폴백으로 넘어간다.
+    if (!opened) { es.close(); later(); }
+  };
+})();
+</script>
+</body>
+</html>
+
+{{define "pfail"}}
+  {{with .Err}}<p class="err">{{.}}</p>{{end}}
+  {{if .Fail}}
+  <details class="k"><summary>못 읽은 파생 {{len .Fail}}축</summary>
+    <ul>{{range .Fail}}<li><span class="mono">{{.Axis}}</span> — {{.Detail}}</li>{{end}}</ul>
+  </details>
+  {{end}}
+{{end}}
+
+{{define "note"}}
+<div class="note">
+  <span class="k">[{{.Kind}}] {{.At}}{{if .Age}} ({{.Age}}){{end}}
+    {{if .Session}}· 세션 <span class="mono">{{.Session}}</span>{{end}}
+    {{if .Links}}· {{join ", " .Links}}{{end}}</span>
+  {{if .Title}}<div><b>{{.Title}}</b></div>{{end}}
+  <div class="body">{{.Body}}</div>
+</div>
+{{end}}

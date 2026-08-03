@@ -1,0 +1,222 @@
+package mcpsrv
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+// 소비자 좌표계 = **도구 응답에 실리는 배너 문구와 거절 사유**다.
+// 구현의 개념(Identity 필드)이 아니라 그 문자열로 단정한다.
+
+func env(pairs map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := pairs[k]
+		return v, ok
+	}
+}
+
+func TestResolveIdentity(t *testing.T) {
+	cases := []struct {
+		name        string
+		env         map[string]string
+		cwd         string
+		cwdErr      error
+		host        string
+		hostErr     error
+		wantMissing []string
+		wantProject string
+		wantWork    string
+	}{
+		{
+			name:        "실측된 정상 환경",
+			env:         map[string]string{EnvSessionID: "uuid-1", EnvProjectDir: "/home/a/proj"},
+			cwd:         "/home/a/proj",
+			host:        "box",
+			wantMissing: nil,
+			wantProject: "proj",
+			wantWork:    "/home/a/proj",
+		},
+		{
+			name:        "세션 id 만 없다",
+			env:         map[string]string{EnvProjectDir: "/home/a/proj"},
+			cwd:         "/home/a/proj",
+			host:        "box",
+			wantMissing: []string{EnvSessionID},
+			wantProject: "proj",
+			wantWork:    "/home/a/proj",
+		},
+		{
+			name:        "PROJECT_DIR 이 없어 cwd 로 좌표를 만든다",
+			env:         map[string]string{EnvSessionID: "uuid-1"},
+			cwd:         "/home/a/other",
+			host:        "box",
+			wantMissing: []string{EnvProjectDir},
+			wantProject: "other",
+			wantWork:    "/home/a/other",
+		},
+		{
+			name:        "워크트리에서 띄워 cwd 와 PROJECT_DIR 이 다르다 — cwd 가 이긴다",
+			env:         map[string]string{EnvSessionID: "u", EnvProjectDir: "/home/a/proj"},
+			cwd:         "/home/a/proj/.flightdeck/worktrees/x",
+			host:        "box",
+			wantProject: "proj",
+			wantWork:    "/home/a/proj/.flightdeck/worktrees/x",
+		},
+
+		// ── 표 밖 케이스 ──
+		{
+			name:        "빈 문자열 환경변수는 '있다'가 아니다",
+			env:         map[string]string{EnvSessionID: "   ", EnvProjectDir: ""},
+			cwd:         "/home/a/proj",
+			host:        "box",
+			wantMissing: []string{EnvSessionID, EnvProjectDir},
+			wantProject: "proj",
+			wantWork:    "/home/a/proj",
+		},
+		{
+			name:        "cwd 도 PROJECT_DIR 도 없다 — 좌표가 통째로 없다",
+			env:         map[string]string{EnvSessionID: "u"},
+			cwdErr:      errors.New("getwd: no such file or directory"),
+			host:        "box",
+			wantMissing: []string{"cwd", EnvProjectDir, "project"},
+			wantProject: "",
+			wantWork:    "",
+		},
+		{
+			name:        "cwd 가 루트라 좌표가 못 된다",
+			env:         map[string]string{EnvSessionID: "u"},
+			cwd:         "/",
+			host:        "box",
+			wantMissing: []string{EnvProjectDir, "project"},
+			wantProject: "",
+			wantWork:    "/",
+		},
+		{
+			name:        "cwd 가 상대경로다 — 워크트리로 못 쓴다",
+			env:         map[string]string{EnvSessionID: "u"},
+			cwd:         "relative/dir",
+			host:        "box",
+			wantMissing: []string{"cwd", EnvProjectDir},
+			wantProject: "dir",
+			wantWork:    "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			id := ResolveIdentity(env(c.env), c.cwd, c.cwdErr, c.host, c.hostErr)
+			if id.ProjectID != c.wantProject {
+				t.Fatalf("ProjectID = %q, 기대 %q", id.ProjectID, c.wantProject)
+			}
+			if id.Worktree != c.wantWork {
+				t.Fatalf("Worktree = %q, 기대 %q", id.Worktree, c.wantWork)
+			}
+			if len(id.Missing) != len(c.wantMissing) {
+				t.Fatalf("결손 축 = %v, 기대 %v", id.Missing, c.wantMissing)
+			}
+			for _, want := range c.wantMissing {
+				found := false
+				for _, got := range id.Missing {
+					if got == want {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("결손 축에 %q 가 없다: %v", want, id.Missing)
+				}
+			}
+		})
+	}
+}
+
+func TestBannerNamesEveryMissingAxis(t *testing.T) {
+	id := ResolveIdentity(env(map[string]string{}), "", errors.New("getwd 실패"), "", nil)
+	b := id.Banner()
+	// 소비자 좌표계: 이 문자열이 도구 응답 꼬리에 그대로 실린다.
+	for _, want := range []string{EnvSessionID, EnvProjectDir, "cwd", "project", "안 되는 것", "지어내지 않는다"} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("배너에 %q 가 없다:\n%s", want, b)
+		}
+	}
+	// hostname 결손은 경고이지 거절이 아니다 — 그 사실도 화면에 있어야 한다.
+	if !strings.Contains(b, "unknown-machine") {
+		t.Fatalf("hostname 대체값을 배너가 안 알린다:\n%s", b)
+	}
+
+	full := ResolveIdentity(env(map[string]string{
+		EnvSessionID: "u", EnvProjectDir: "/home/a/proj",
+	}), "/home/a/proj", nil, "box", nil)
+	if got := full.Banner(); got != "" {
+		t.Fatalf("정체가 온전한데 배너가 났다:\n%s", got)
+	}
+}
+
+func TestGateTool(t *testing.T) {
+	full := ResolveIdentity(env(map[string]string{
+		EnvSessionID: "u", EnvProjectDir: "/home/a/proj",
+	}), "/home/a/proj", nil, "box", nil)
+	noSession := ResolveIdentity(env(map[string]string{
+		EnvProjectDir: "/home/a/proj",
+	}), "/home/a/proj", nil, "box", nil)
+	noProject := ResolveIdentity(env(map[string]string{
+		EnvSessionID: "u",
+	}), "", errors.New("없다"), "box", nil)
+
+	cases := []struct {
+		name, tool string
+		id         Identity
+		wantOK     bool
+		wantIn     string
+	}{
+		{"정상 · pick", "pick", full, true, "3중키가 전부 있다"},
+		{"정상 · board", "board", full, true, "세션 귀속이 없어도"},
+		{"세션 없음 · note 거절", "note", noSession, false, EnvSessionID},
+		{"세션 없음 · add 거절", "add", noSession, false, EnvSessionID},
+		{"세션 없음 · finish 거절", "finish", noSession, false, EnvSessionID},
+		{"세션 없음 · board 는 통과", "board", noSession, true, "세션 귀속이 없어도"},
+		{"세션 없음 · alloc 은 통과", "alloc", noSession, true, "세션 귀속이 없어도"},
+		{"프로젝트 없음 · board 도 거절", "board", noProject, false, "프로젝트 좌표가 없다"},
+
+		// ── 표 밖 케이스 ──
+		{"표에 없는 도구", "status", full, false, "이 서버에 없다"},
+		{"빈 이름", "", full, false, "이 서버에 없다"},
+		{"전체 이름을 그대로 준 경우", "mcp__plugin_flightdeck_fd__pick", full, false, "이 서버에 없다"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ok, reason := GateTool(c.tool, c.id)
+			if ok != c.wantOK {
+				t.Fatalf("GateTool(%q) ok=%v, 기대 %v (사유: %s)", c.tool, ok, c.wantOK, reason)
+			}
+			if reason == "" {
+				t.Fatal("사유가 비었다 — 다중 조건 판정은 불리언이 아니라 사유를 낸다")
+			}
+			if !strings.Contains(reason, c.wantIn) {
+				t.Fatalf("사유에 %q 가 없다: %s", c.wantIn, reason)
+			}
+		})
+	}
+}
+
+func TestProjectIDFor(t *testing.T) {
+	cases := []struct{ name, dir, cwd, want string }{
+		{"PROJECT_DIR 우선", "/a/b/proj", "/a/b/proj/wt", "proj"},
+		{"PROJECT_DIR 없으면 cwd", "", "/a/b/other", "other"},
+		{"끝 슬래시", "/a/b/proj/", "", "proj"},
+
+		// ── 표 밖 케이스 ──
+		{"둘 다 없다", "", "", ""},
+		{"루트", "/", "", ""},
+		{"점", ".", "", ""},
+		{"루트지만 cwd 는 쓸 수 있다", "/", "/a/b/c", "c"},
+		{"공백만", "   ", "  ", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ProjectIDFor(c.dir, c.cwd); got != c.want {
+				t.Fatalf("ProjectIDFor(%q,%q) = %q, 기대 %q", c.dir, c.cwd, got, c.want)
+			}
+		})
+	}
+}

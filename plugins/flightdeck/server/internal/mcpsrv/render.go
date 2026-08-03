@@ -1,0 +1,676 @@
+package mcpsrv
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/kweiza/flightdeck/internal/judge"
+	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/service"
+)
+
+// 표시 — 응답은 **사람이 읽는 텍스트**다.
+//
+// JSON 을 그대로 뱉지 않는다. 이 자리의 소비자는 에이전트이고, 에이전트는 읽고 판단한다.
+// 다만 기계가 세는 값(탈락 사유 코드 등)은 문자열 안에 **그대로 보이게** 둔다 —
+// 사람 말로 풀어 쓰면 §10 의 사유 분포를 응답에서 셀 수 없게 된다.
+//
+// 이 파일의 함수는 전부 순수 함수다. 표시 판정이 핸들러 본문에 흩어지면
+// 시험이 그 로직의 사본을 단정하게 되고, 그러면 변이가 조용히 새어 나간다.
+
+// BoardTokenBudget 은 board 기본 출력의 상한이다(설계 §6: "기본 1,200토큰").
+//
+// 기존 도구가 첫 명령에서 신호 6%짜리 출력을 내던 것이 이 제품이 고치려는 결함이다.
+// detail=true 일 때만 이 상한을 푼다.
+const BoardTokenBudget = 1200
+
+// EstimateTokens 는 문자열의 토큰 수 **상한**을 어림한다. 순수 함수다.
+//
+// ★ 호스트의 토크나이저가 아니다. 그것을 정확히 재려면 의존을 하나 더 넣어야 하고,
+// 여기서 필요한 것은 정확한 값이 아니라 **자라지 않는다는 보장**이다.
+// 그래서 넉넉하게 잡는다: ASCII 는 0.3토큰/자, 그 밖(한글·기호)은 1.5토큰/자.
+// 실제보다 크게 나오므로 이 어림으로 상한을 지키면 실제 값도 지켜진다.
+func EstimateTokens(s string) int {
+	tenths := 0
+	for _, r := range s {
+		if r < 128 {
+			tenths += 3
+		} else {
+			tenths += 15
+		}
+	}
+	return (tenths + 9) / 10
+}
+
+// FormatAge 는 경과 시간을 사람이 읽는 짧은 말로 만든다. 순수 함수다.
+//
+// 음수는 "0초"다 — 시계가 어긋난 것이고, 그것을 "-3초 전"으로 내면
+// 읽는 쪽이 데이터 손상으로 오해한다. 어긋남 자체는 파생 신선도가 나른다.
+func FormatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d초", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d분", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d시간 %d분", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%d일 %d시간", int(d.Hours())/24, int(d.Hours())%24)
+	}
+}
+
+// ShortID 는 ULID 를 화면용으로 줄인다. 순수 함수다.
+// 절대 이 값으로 다시 조회하지 않는다 — 표시 전용이다.
+func ShortID(id string) string {
+	rs := []rune(id)
+	if len(rs) <= 8 {
+		return id
+	}
+	return string(rs[:8]) + "…"
+}
+
+// FormatFreshness 는 파생 신선도 한 줄이다. 순수 함수다.
+//
+// 설계 §6: 모든 패널에 "(파생: git@14:31, 12초 전)" 이 붙는다.
+// 서버가 죽었을 때 마지막 상태가 현재 사실인 척하는 것을 구조로 막는 축이다.
+func FormatFreshness(d service.Derived) string {
+	f := d.Freshness
+	state := "최신"
+	if f.Stale {
+		state = "낡음"
+	}
+	s := fmt.Sprintf("파생 %s@%s %s", f.Source, f.ObservedAt.UTC().Format("15:04:05"), state)
+	if n := len(d.Failures); n > 0 {
+		s += fmt.Sprintf(" · 못 읽은 축 %d개", n)
+	}
+	return s
+}
+
+// renderFailures 는 파생 실패를 축 이름과 원인 전문으로 낸다.
+// 침묵하면 빈 필드가 "값이 0이다"로 읽힌다.
+func renderFailures(d service.Derived, limit int) []string {
+	if len(d.Failures) == 0 {
+		return nil
+	}
+	out := []string{fmt.Sprintf("못 읽은 파생 %d축:", len(d.Failures))}
+	for i, f := range d.Failures {
+		if limit > 0 && i >= limit {
+			out = append(out, fmt.Sprintf("  … %d축 더", len(d.Failures)-limit))
+			break
+		}
+		out = append(out, fmt.Sprintf("  · %s — %s", f.Axis, clip(f.Detail, 200)))
+	}
+	return out
+}
+
+// signalOrder 는 신호를 찍는 순서다. 고정 — 같은 입력에 같은 줄이어야 눈으로 비교된다.
+var signalOrder = []model.SignalKind{
+	model.SignalPrompt, model.SignalTool, model.SignalMCP, model.SignalCommit, model.SignalPush,
+}
+
+// FormatSignals 는 신호 넷(다섯)의 나이를 나란히 낸다. 순수 함수다.
+//
+// ★ **합치지 않는다.** 하나로 접으면 "에이전트가 긴 도구를 돌리는 중"과
+// "사람이 읽기만 하는 중" 둘 중 하나를 반드시 오판한다(설계 §4).
+// 그리고 "죽었다"를 만들지 않는다 — 나이를 숫자로만 낸다.
+func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
+	var parts []string
+	for _, k := range signalOrder {
+		at, ok := sig[k]
+		if !ok {
+			continue // 키 부재는 "그 종류가 한 번도 안 왔다"다. 0값으로 채우지 않는다
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", k, FormatAge(now.Sub(at))))
+	}
+	if len(parts) == 0 {
+		return "신호 없음"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// formatPaths 는 경로를 몇 개까지만 보여준다.
+func formatPaths(paths []string, limit int) string {
+	if len(paths) == 0 {
+		return "발자국 없음"
+	}
+	if limit <= 0 || len(paths) <= limit {
+		return fmt.Sprintf("경로 %d: %s", len(paths), strings.Join(paths, ", "))
+	}
+	return fmt.Sprintf("경로 %d: %s +%d", len(paths), strings.Join(paths[:limit], ", "), len(paths)-limit)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// board
+// ─────────────────────────────────────────────────────────────────────────────
+
+// BoardRenderOptions 는 보드 한 장의 표시 인자다.
+type BoardRenderOptions struct {
+	Self   string
+	Detail bool
+	Now    time.Time
+	// Budget 은 토큰 상한이다. 0 이면 BoardTokenBudget, Detail 이면 무시한다.
+	Budget int
+	// Tail 은 응답 꼬리다. **예산 안에 함께 든다** — 꼬리를 예산 밖에 두면
+	// 상한이 지켜졌다는 시험이 실제 응답 길이를 안 보는 것이 된다.
+	Tail string
+}
+
+// RenderBoard 는 보드 한 장을 사람이 읽는 텍스트로 만든다. 순수 함수다.
+//
+// 기본 출력은 BoardTokenBudget 안이다. 넘치면 세션 블록을 자르고
+// **잘랐다는 사실과 남은 건수를 찍는다** — 조용히 자르면 "세션이 셋뿐"과
+// "셋만 보여준다"가 구분되지 않는다.
+func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
+	now := opt.Now
+	if now.IsZero() {
+		now = v.At
+	}
+	pathLimit := 3
+	if opt.Detail {
+		pathLimit = 0
+	}
+
+	head := []string{
+		fmt.Sprintf("보드 · %s · %s · %s",
+			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
+		fmt.Sprintf("살아 있는 세션 %d건 (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
+			len(v.Sessions), FormatAge(v.Window)),
+	}
+
+	blocks := make([]string, 0, len(v.Sessions))
+	for _, c := range v.Sessions {
+		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail))
+	}
+
+	var foot []string
+	if len(v.Sessions) == 0 {
+		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
+	}
+	if opt.Detail {
+		foot = append(foot, boardDetailFoot(v)...)
+	} else {
+		foot = append(foot, boardBriefFoot(v)...)
+	}
+	if opt.Detail {
+		foot = append(foot, renderFailures(v.Derived, 0)...)
+	} else if len(v.Derived.Failures) > 0 {
+		foot = append(foot, fmt.Sprintf("파생 %d축을 못 읽었다 — detail=true 로 축 이름과 원인을 본다",
+			len(v.Derived.Failures)))
+	}
+
+	if opt.Detail {
+		return joinAll(head, blocks, foot, opt.Tail)
+	}
+
+	budget := opt.Budget
+	if budget <= 0 {
+		budget = BoardTokenBudget
+	}
+	fixed := joinAll(head, nil, foot, opt.Tail)
+	used := EstimateTokens(fixed)
+	kept := 0
+	for _, b := range blocks {
+		cost := EstimateTokens(b) + 1
+		// 잘랐다는 줄의 몫을 미리 뗀다 — 그 줄이 예산을 넘겨 버리면
+		// "잘랐다"는 사실 자체가 잘려 나간다.
+		reserve := 0
+		if kept < len(blocks)-1 {
+			reserve = 24
+		}
+		if used+cost+reserve > budget {
+			break
+		}
+		used += cost
+		kept++
+	}
+	if kept == len(blocks) {
+		return joinAll(head, blocks, foot, opt.Tail)
+	}
+	shown := append([]string(nil), blocks[:kept]...)
+	shown = append(shown, fmt.Sprintf("… 세션 %d건을 예산(%d토큰) 때문에 접었다 — detail=true 로 전부 본다",
+		len(blocks)-kept, budget))
+	return joinAll(head, shown, foot, opt.Tail)
+}
+
+func joinAll(head, blocks, foot []string, tail string) string {
+	var parts []string
+	parts = append(parts, strings.Join(head, "\n"))
+	if len(blocks) > 0 {
+		parts = append(parts, strings.Join(blocks, "\n"))
+	}
+	if len(foot) > 0 {
+		parts = append(parts, strings.Join(foot, "\n"))
+	}
+	if strings.TrimSpace(tail) != "" {
+		parts = append(parts, tail)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// boardCard 는 세션 하나의 블록이다.
+func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool) string {
+	v := c.View
+	mark := " "
+	if c.IsSelf {
+		mark = "*"
+	}
+	label := v.Session.Label
+	if strings.TrimSpace(label) == "" {
+		label = "(꼬리표 없음)"
+	}
+
+	// ★ 브랜치는 0값과 "못 읽었다"를 가른다. 그 구분이 없으면
+	//   git 이 죽은 화면과 브랜치가 main 과 같은 화면이 똑같이 보인다.
+	branch := "브랜치 ?(못 읽음)"
+	if c.BranchKnown {
+		branch = v.Branch
+		if branch == "" {
+			branch = "(분리 HEAD)"
+		}
+		if c.AheadKnown {
+			branch += fmt.Sprintf(" +%d", v.AheadMain)
+		}
+	}
+
+	state := string(v.Session.State)
+	if v.Session.State == model.SessionBlocked && v.Session.BlockedWhy != "" {
+		state += "(" + clip(v.Session.BlockedWhy, 80) + ")"
+	}
+
+	claims := "선점 없음"
+	if len(v.Claims) > 0 {
+		claims = "선점 " + strings.Join(v.Claims, ", ")
+	}
+
+	lines := []string{
+		fmt.Sprintf("%s%s %s · %s · %s · %s",
+			mark, ShortID(v.Session.ID), label, branch, state, formatPaths(v.Paths, pathLimit)),
+		fmt.Sprintf("   %s | %s", FormatSignals(v.Signals, now), claims),
+	}
+	if !v.HasFootprint {
+		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
+		lines[1] += " | 경로 축에서 아무도 안 막는다"
+	}
+	if detail {
+		if c.DeriveError != "" {
+			lines = append(lines, "   파생 결손: "+clip(c.DeriveError, 200))
+		}
+		if v.LastNote != nil {
+			lines = append(lines, fmt.Sprintf("   마지막 판단 [%s] %s (%s 전)",
+				v.LastNote.Kind, clip(firstLine(v.LastNote.Title, v.LastNote.Body), 80),
+				FormatAge(now.Sub(v.LastNote.At))))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func boardBriefFoot(v service.BoardView) []string {
+	var out []string
+	if len(v.OpenItems) > 0 {
+		ids := make([]string, 0, 3)
+		for i, it := range v.OpenItems {
+			if i >= 3 {
+				break
+			}
+			ids = append(ids, it.ID)
+		}
+		line := fmt.Sprintf("큐 열림 %d건: %s", len(v.OpenItems), strings.Join(ids, ", "))
+		if len(v.OpenItems) > 3 {
+			line += fmt.Sprintf(" +%d", len(v.OpenItems)-3)
+		}
+		out = append(out, line)
+	} else {
+		out = append(out, "큐 열림 0건")
+	}
+	if len(v.Held) > 0 {
+		out = append(out, "자원 점유: "+heldLine(v.Held))
+	}
+	return out
+}
+
+func boardDetailFoot(v service.BoardView) []string {
+	var out []string
+	out = append(out, fmt.Sprintf("큐 열림 %d건", len(v.OpenItems)))
+	for _, it := range v.OpenItems {
+		line := fmt.Sprintf("  · %s — %s", it.ID, clip(it.Title, 90))
+		if len(it.Paths) > 0 {
+			line += " [" + strings.Join(it.Paths, ", ") + "]"
+		}
+		out = append(out, line)
+	}
+	if len(v.Held) > 0 {
+		out = append(out, "자원 점유: "+heldLine(v.Held))
+	} else {
+		out = append(out, "자원 점유 없음")
+	}
+	if len(v.Blocked) > 0 {
+		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
+		for _, j := range v.Blocked {
+			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
+		}
+	}
+	if len(v.Asks) > 0 {
+		out = append(out, fmt.Sprintf("요청(ask) %d건", len(v.Asks)))
+		for _, j := range v.Asks {
+			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
+		}
+	}
+	return out
+}
+
+func heldLine(held []model.ResourceHold) string {
+	parts := make([]string, 0, len(held))
+	for _, h := range held {
+		holder := ShortID(h.SessionID)
+		if h.SessionID == "" {
+			holder = "job:" + h.JobID
+		}
+		parts = append(parts, fmt.Sprintf("%s ← %s", h.Resource, holder))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func firstLine(title, body string) string {
+	if strings.TrimSpace(title) != "" {
+		return title
+	}
+	if i := strings.IndexByte(body, '\n'); i >= 0 {
+		return body[:i]
+	}
+	return body
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pick
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderPick 은 pick 한 번의 결과다. 순수 함수다.
+//
+// 꼬리에 **브랜치 이름과 워크트리 준비 명령**을 낸다(설계 §6).
+// 명령을 못 만들었으면 그 사실과 사유를 낸다 — 침묵하면 "명령이 없는 도구"로 읽힌다.
+func RenderPick(r service.PickResult, now time.Time) string {
+	var b strings.Builder
+
+	switch r.Mode {
+	case service.PickRecommended:
+		b.WriteString("pick · 추천 1건 — **아직 선점하지 않았다**\n")
+	case service.PickClaimed:
+		b.WriteString("pick · 선점했다\n")
+	case service.PickResumed:
+		b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
+	default:
+		b.WriteString("pick · 적격 0건\n")
+	}
+	fmt.Fprintf(&b, "사유: %s\n", r.Reason)
+	if r.Scope != "" {
+		fmt.Fprintf(&b, "범위: %s\n", r.Scope)
+	}
+
+	if r.Item != nil {
+		it := *r.Item
+		fmt.Fprintf(&b, "\n▸ %s — %s [%s]\n", it.ID, it.Title, it.State)
+		if len(it.Paths) > 0 {
+			fmt.Fprintf(&b, "경로: %s\n", strings.Join(it.Paths, ", "))
+		}
+		if len(it.After) > 0 {
+			fmt.Fprintf(&b, "선행: %s\n", formatAfter(it.After))
+		}
+		if strings.TrimSpace(it.Body) != "" {
+			fmt.Fprintf(&b, "본문:\n%s\n", indent(clip(it.Body, 4000), "  "))
+		}
+	}
+
+	if r.Claim != nil {
+		fmt.Fprintf(&b, "선점 시각: %s (%s 전)\n",
+			r.Claim.At.UTC().Format("2006-01-02 15:04 UTC"), FormatAge(now.Sub(r.Claim.At)))
+	}
+
+	if r.Branch != "" {
+		fmt.Fprintf(&b, "\n브랜치: %s\n", r.Branch)
+		if len(r.Setup) > 0 {
+			b.WriteString("워크트리 준비:\n")
+			for _, c := range r.Setup {
+				fmt.Fprintf(&b, "  %s\n", c)
+			}
+		} else {
+			b.WriteString("워크트리 준비 명령을 만들지 않았다 — " +
+				"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않거나 프로젝트 경로가 없다.\n")
+		}
+	}
+
+	// 연결된 판단. 지정 선점·재개는 **전문**이고 추천은 제목만이다(설계 §6).
+	// 추천은 아직 안 집은 항목이라 전문을 실으면 후보마다 컨텍스트를 태우게 된다.
+	if len(r.Notes) > 0 {
+		full := r.Mode == service.PickClaimed || r.Mode == service.PickResumed
+		fmt.Fprintf(&b, "\n연결된 판단 %d건%s:\n", len(r.Notes), map[bool]string{true: " (전문)", false: " (제목만 — 집으면 전문이 온다)"}[full])
+		for _, j := range r.Notes {
+			fmt.Fprintf(&b, "  [%s] %s · %s\n", j.Kind,
+				j.At.UTC().Format("2006-01-02 15:04"), clip(firstLine(j.Title, j.Body), 100))
+			if full && strings.TrimSpace(j.Body) != "" {
+				b.WriteString(indent(clip(j.Body, 4000), "    ") + "\n")
+			}
+		}
+	}
+
+	if len(r.Rejected) > 0 {
+		fmt.Fprintf(&b, "\n탈락 사유 %d줄 (사유 코드 그대로):\n", len(r.Rejected))
+		for _, rj := range r.Rejected {
+			fmt.Fprintf(&b, "  %-20s %-24s %s\n", rj.Reason, clip(rj.Item, 24), clip(rj.Detail, 120))
+		}
+	}
+
+	if lines := renderFailures(r.Derived, 6); len(lines) > 0 {
+		b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
+	}
+	fmt.Fprintf(&b, "\n%s", FormatFreshness(r.Derived))
+	return b.String()
+}
+
+func formatAfter(after []model.After) string {
+	parts := make([]string, 0, len(after))
+	for _, a := range after {
+		switch {
+		case a.Item != "":
+			parts = append(parts, "item:"+a.Item)
+		case a.SHA != "":
+			parts = append(parts, "sha:"+a.SHA)
+		case a.Job != "":
+			parts = append(parts, "job:"+a.Job)
+		default:
+			parts = append(parts, "(빈 선행 — 스키마 CHECK 를 우회해 들어왔다)")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+func indent(s, pad string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// note · add · finish · alloc
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderNote 는 판단 저장 확인과 이 노트를 읽을 세션 수다. 순수 함수다.
+func RenderNote(r service.NoteResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "note · [%s] 저장했다 (판단 %s · %d자)\n",
+		r.Judgment.Kind, r.Judgment.ID, len([]rune(r.Judgment.Body)))
+	if r.Judgment.Supersedes != "" {
+		fmt.Fprintf(&b, "정정: %s 를 대체한다 — 옛 행은 그대로 남는다(추가 전용)\n", r.Judgment.Supersedes)
+	}
+	if len(r.Recipients) == 0 {
+		b.WriteString("지금 이 노트를 읽을 다른 세션이 없다 — 다음에 여는 세션이 board 에서 본다.\n")
+		return b.String()
+	}
+	ids := make([]string, 0, len(r.Recipients))
+	for _, id := range r.Recipients {
+		ids = append(ids, ShortID(id))
+	}
+	fmt.Fprintf(&b, "지금 살아 있는 세션 %d건이 읽는다: %s\n", len(ids), strings.Join(ids, ", "))
+	return b.String()
+}
+
+// RenderAdd 는 항목 등록 확인이다. 순수 함수다.
+func RenderAdd(it model.Item) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "add · %s 를 큐에 넣었다 [%s]\n", it.ID, it.State)
+	fmt.Fprintf(&b, "제목: %s\n", it.Title)
+	if len(it.Paths) > 0 {
+		fmt.Fprintf(&b, "경로 %d: %s\n", len(it.Paths), strings.Join(it.Paths, ", "))
+	} else {
+		b.WriteString("경로 0 — 경로가 없으면 이 항목은 겹침 축에 안 잡힌다.\n")
+	}
+	if len(it.After) > 0 {
+		fmt.Fprintf(&b, "선행 %d: %s\n", len(it.After), formatAfter(it.After))
+	}
+	fmt.Fprintf(&b, "이 id 가 그대로 브랜치 이름이 된다: %s\n", it.ID)
+	return b.String()
+}
+
+// RenderFinish 는 마무리 결과다. 순수 함수다.
+func RenderFinish(r service.FinishResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "finish · %s 를 %s 로 닫았다\n", r.Item.ID, r.Item.State)
+	if r.Item.CloseReason != "" {
+		fmt.Fprintf(&b, "폐기 사유: %s\n", clip(r.Item.CloseReason, 300))
+	}
+	fmt.Fprintf(&b, "판단 %s 저장 (%s · %d자)\n",
+		r.Judgment.ID, r.Judgment.Kind, len([]rune(r.Judgment.Body)))
+	if len(r.Followups) > 0 {
+		ids := make([]string, 0, len(r.Followups))
+		for _, f := range r.Followups {
+			ids = append(ids, f.ID)
+		}
+		fmt.Fprintf(&b, "후속 %d건 등록: %s (판단과 FK 로 이어졌다)\n", len(ids), strings.Join(ids, ", "))
+	} else {
+		b.WriteString("후속 0건 — 이번에 나온 후속이 정말 없다면 그대로 두고, 있다면 지금 add 로 넣어라.\n")
+	}
+	if len(r.Released) > 0 {
+		fmt.Fprintf(&b, "자원 반납: %s\n", strings.Join(r.Released, ", "))
+	}
+	b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
+	return b.String()
+}
+
+// RenderAlloc 은 발번 결과다. 순수 함수다.
+func RenderAlloc(counter string, n int64) string {
+	return fmt.Sprintf("alloc · %s = %d\n"+
+		"원자 발번이라 같은 번호가 두 번 나오지 않는다 — 락으로는 못 지키던 자리다.\n", counter, n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 꼬리 — 미확인 알림과 겹침은 **모든** 응답에 붙는다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TailInput 은 응답 꼬리에 실을 사실이다.
+//
+// Observed 축이 둘 다 따로 있는 이유: "겹침 0건"과 "이 도구는 경로 축을 안 읽었다"는
+// 다른 사실이다. 뭉개면 도구가 자기가 무엇을 안 보는지 모르는 채 초록불을 내게 된다 —
+// 이 제품이 겨냥하는 뿌리 원인 중 하나가 정확히 그것이다.
+type TailInput struct {
+	Banner           string
+	Now              time.Time
+	Notes            []model.Judgment
+	NotesObserved    bool
+	NotesError       string
+	Overlaps         []judge.Overlap
+	OverlapsObserved bool
+	OverlapsNote     string // 안 읽었으면 왜 안 읽었나
+}
+
+// RenderTail 은 응답 꼬리를 만든다. 순수 함수다.
+func RenderTail(in TailInput) string {
+	var lines []string
+	lines = append(lines, "── 꼬리 ──")
+
+	switch {
+	case in.NotesError != "":
+		lines = append(lines, "알림: 못 읽었다 — "+clip(in.NotesError, 200))
+	case !in.NotesObserved:
+		lines = append(lines, "알림: 이 응답은 알림 축을 읽지 않았다.")
+	case len(in.Notes) == 0:
+		lines = append(lines, "알림: 다른 세션이 남긴 ask·blocked 가 없다.")
+	default:
+		lines = append(lines, fmt.Sprintf(
+			"알림 %d건 (Tier A 에는 확인 원장이 없다 — '미확인'을 '최근'으로 근사한다)", len(in.Notes)))
+		for _, j := range in.Notes {
+			lines = append(lines, fmt.Sprintf("  · [%s] %s %s 전 — %s",
+				j.Kind, ShortID(j.SessionID), FormatAge(in.Now.Sub(j.At)),
+				clip(firstLine(j.Title, j.Body), 140)))
+		}
+	}
+
+	switch {
+	case !in.OverlapsObserved:
+		note := in.OverlapsNote
+		if note == "" {
+			note = "이 도구는 경로 축을 읽지 않았다 — board 나 pick 이 그 축을 읽는다"
+		}
+		lines = append(lines, "겹침: "+note)
+	case len(in.Overlaps) == 0:
+		lines = append(lines, "겹침: 없음 — 살아 있는 세션 어느 것과도 경로가 안 겹친다.")
+	default:
+		lines = append(lines, fmt.Sprintf("겹침 %d건 (거르지 않고 알린다):", len(in.Overlaps)))
+		for _, o := range in.Overlaps {
+			pairs := make([]string, 0, len(o.Pairs))
+			for i, p := range o.Pairs {
+				if i >= 4 {
+					pairs = append(pairs, fmt.Sprintf("+%d", len(o.Pairs)-4))
+					break
+				}
+				pairs = append(pairs, fmt.Sprintf("%s↔%s", p[0], p[1]))
+			}
+			label := o.Label
+			if label == "" {
+				label = "(꼬리표 없음)"
+			}
+			lines = append(lines, fmt.Sprintf("  · %s %s: %s",
+				ShortID(o.SessionID), label, strings.Join(pairs, ", ")))
+		}
+	}
+
+	if strings.TrimSpace(in.Banner) != "" {
+		lines = append(lines, in.Banner)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// SortJudgmentsNewest 는 판단을 최신순으로 정렬한 사본을 낸다. 순수 함수다.
+func SortJudgmentsNewest(js []model.Judgment) []model.Judgment {
+	out := append([]model.Judgment(nil), js...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.After(out[j].At)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 거절
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderRefusal 은 거절 하나를 사람이 읽는 텍스트로 만든다. 순수 함수다.
+//
+// ★ **처방을 함께 낸다.** 사유만 주고 처방을 안 주면 에이전트는 무엇을 고쳐야 하는지
+// 모른 채 같은 호출을 반복한다. finish 를 body 없이 부른 세션이 여기서
+// "무엇을 적어야 하는가 넷"을 받는다 — 규율 산문을 도구 설명이 아니라
+// **필요할 때 그 자리에서** 싣는다는 것이 이 자리의 전부다.
+func RenderRefusal(what, reason, guidance string) string {
+	s := fmt.Sprintf("%s 거절: %s", what, reason)
+	if strings.TrimSpace(guidance) != "" {
+		s += "\n" + guidance
+	}
+	return s
+}

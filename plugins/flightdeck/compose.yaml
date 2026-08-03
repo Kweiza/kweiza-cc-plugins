@@ -1,0 +1,45 @@
+# flightdeck — 컨테이너 1개, 러너 0, 시크릿 0(설계 §2 Tier A).
+#
+# 띄우는 법:  docker compose up -d
+# 보는 법:    http://<서버머신>:7420
+# 세션 쪽:    export FD_URL=http://<서버머신>:7420
+
+services:
+  flightdeck:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: flightdeck:local
+    container_name: flightdeck
+    # ★ 컨테이너 크래시의 처방(설계 §7). 다만 재시작만으로는 부족하다 —
+    #   포트 선점·DB 손상은 재시작해도 같은 자리에서 죽으므로,
+    #   서버가 **사유를 남기고 종료**하고 그 줄이 `docker logs` 에 남는다.
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 로 묶지 않는다: 다른 머신의 세션이 붙는 것이 이 제품의 전부다.
+      # 대신 FD_TOKEN 을 주면 루프백 밖에서는 토큰이 필요해진다.
+      - "7420:7420"
+    volumes:
+      # DB · 판단 백업 · 로그. **DB 와 백업을 같은 볼륨에 두는 것은 Tier A 의 한계다**
+      # (설계 §7 은 분리를 요구한다) — 백업 잡이 생기는 시점에 별도 볼륨으로 가른다.
+      - ~/.flightdeck:/data
+    environment:
+      FD_ADDR: ":7420"
+      FD_DB: "/data/fd.db"
+      # 토큰을 비우면 인증이 꺼진다. **그 사실을 /healthz 가 알린다** —
+      # 조용히 열어 두면 잠겨 있다고 믿는 상태로 노출된다.
+      FD_TOKEN: "${FD_TOKEN:-}"
+      FD_LOG: "${FD_LOG:-info}"
+    healthcheck:
+      # 이미지의 HEALTHCHECK 와 같은 판정이다. 여기 다시 적는 이유는
+      # compose 로만 띄운 사람이 이미지 정의를 안 보기 때문이다.
+      test: ["CMD", "/usr/local/bin/fd", "doctor"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
