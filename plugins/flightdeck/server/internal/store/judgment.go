@@ -42,8 +42,14 @@ func (t *Tx) AddJudgment(j model.Judgment) (model.Judgment, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, nullStr(j.Project), nullStr(j.SessionID), fmtTime(j.At),
 		string(j.Kind), nullStr(j.Title), j.Body, nullStr(j.Supersedes)); err != nil {
-		return j, fmt.Errorf("판단 저장 실패(id=%q kind=%q session=%q): %w",
-			clip(j.ID, 64), clip(string(j.Kind), 32), clip(j.SessionID, 64), err)
+		// ★ 등록 안 된 프로젝트로 판단을 쓰면 여기서 FK 위반이 난다. 항목 id 중복과 **같은 형태**다 —
+		//   호출자가 고칠 거리인데 500 으로 나가면 "서버가 고장났다"로 읽힌다.
+		return j, writeErr(err, writeTarget{
+			Target: TargetJudgment, Project: j.Project, ID: j.ID,
+			RefHint: fmt.Sprintf("프로젝트 %s · 세션 %s · supersedes %s",
+				clip(j.Project, 64), clip(j.SessionID, 64), clip(j.Supersedes, 64)),
+		}, "판단 저장 실패(id=%q kind=%q session=%q)",
+			clip(j.ID, 64), clip(string(j.Kind), 32), clip(j.SessionID, 64))
 	}
 	for _, l := range j.Links {
 		if l.TargetKind == "" || l.TargetID == "" {
@@ -53,8 +59,11 @@ func (t *Tx) AddJudgment(j model.Judgment) (model.Judgment, error) {
 		if _, err := t.tx.ExecContext(t.ctx,
 			`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
 			j.ID, l.TargetKind, l.TargetID); err != nil {
-			return j, fmt.Errorf("판단 링크 저장 실패(judgment=%q target=%s/%s): %w",
-				clip(j.ID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
+			return j, writeErr(err, writeTarget{
+				Target: TargetJudgmentLink, Project: j.Project, ID: j.ID,
+				RefHint: fmt.Sprintf("판단 %s", clip(j.ID, 64)),
+			}, "판단 링크 저장 실패(judgment=%q target=%s/%s)",
+				clip(j.ID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64))
 		}
 	}
 	return j, nil
@@ -286,8 +295,11 @@ func (t *Tx) PutSnapshot(s model.Snapshot) error {
 		  input_digest = excluded.input_digest, computed_at = excluded.computed_at`,
 		s.Project, s.Key, s.Value, string(s.Method),
 		nullStr(s.Evidence), nullStr(s.InputDigest), fmtTime(s.ComputedAt)); err != nil {
-		return fmt.Errorf("스냅숏 저장 실패(project=%q key=%q method=%q): %w",
-			clip(s.Project, 64), clip(s.Key, 64), clip(string(s.Method), 32), err)
+		return writeErr(err, writeTarget{
+			Target: TargetSnapshot, Project: s.Project, ID: s.Key,
+			RefHint: "프로젝트 " + clip(s.Project, 64),
+		}, "스냅숏 저장 실패(project=%q key=%q method=%q)",
+			clip(s.Project, 64), clip(s.Key, 64), clip(string(s.Method), 32))
 	}
 	return nil
 }

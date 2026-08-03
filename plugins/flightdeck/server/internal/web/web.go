@@ -89,8 +89,11 @@ func Handler(svc *service.Service) http.Handler { return New(svc) }
 // New 는 옵션을 받는 생성자다.
 func New(svc *service.Service, opts ...Option) http.Handler {
 	h := &handler{
-		svc:     svc,
-		log:     slog.Default().With("service.name", "flightdeck"),
+		svc: svc,
+		// ★ service.name 을 여기서 덧칠하지 않는다 — 그 필드는 프로세스 진입점 하나가 건다.
+		//   라이브러리가 각자 덧칠하면 JSON 한 줄에 같은 키가 두 번 들어가고,
+		//   중복 키의 처리는 파서마다 다르다.
+		log:     slog.Default(),
 		now:     func() time.Time { return time.Now().UTC() },
 		refresh: defaultRefresh,
 		ssePath: defaultSSEPath,
@@ -110,8 +113,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.Serv
 
 func (h *handler) notFound(w http.ResponseWriter, r *http.Request) {
 	// 4xx 는 로그 의무가 없다(경로 오타 한 번에 로그가 증폭된다).
-	http.Error(w, "flightdeck 대시보드에 그런 경로가 없다: "+Clip(r.URL.Path, 200)+
-		"\n대시보드는 / 한 장이다.", http.StatusNotFound)
+	//
+	// ★ **요청 경로를 본문에 되비추지 않는다.** 같은 서버의 api 쪽 404(handleUnmatched)가
+	//   그 규율로 서 있는데 여기만 반대면, 그 비대칭 자체가 결함의 신호다 —
+	//   지금은 text/plain + nosniff 라 XSS 가 아니지만, 이 응답이 한 번 HTML 로 바뀌거나
+	//   누가 이 문자열을 다른 표면으로 옮기는 날 그 자리가 반사형 노출 통로가 된다.
+	//   그리고 "어느 경로였나"는 소비자가 이미 안다 — 자기가 친 것이다.
+	http.Error(w, "flightdeck 대시보드에 그런 경로가 없다.\n대시보드는 / 한 장이다.",
+		http.StatusNotFound)
 }
 
 // dashboard 는 화면 한 장을 낸다.

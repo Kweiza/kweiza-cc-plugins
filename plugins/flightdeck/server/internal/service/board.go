@@ -113,6 +113,32 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	return view, nil
 }
 
+// RecentNotes 는 프로젝트의 최근 ask·blocked 판단이다(종류별 limit 건).
+//
+// Board 를 통째로 부르지 않고 이 축만 여는 이유: 이것을 부르는 자리(MCP 응답 꼬리)는
+// 세션 카드도 큐도 안 쓰는데, Board 는 그것을 내려고 git 을 여러 번 읽는다.
+// 꼬리 하나 때문에 매 도구 호출이 저장소 전체를 훑게 두면 첫 명령이 그만큼 느려진다.
+//
+// **누가 남겼는지로 거르지 않는다.** "내가 쓴 것은 알림이 아니다"는 표시 계층의 판정이고,
+// 그 축을 여기서 접으면 같은 목록을 다른 '나'로 다시 볼 수 없다.
+func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([]model.Judgment, error) {
+	if strings.TrimSpace(project) == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	var out []model.Judgment
+	for _, k := range []model.JudgmentKind{model.JudgmentAsk, model.JudgmentBlocked} {
+		js, err := s.st.ListJudgmentsByKind(ctx, project, k, limit)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, js...)
+	}
+	return out, nil
+}
+
 // sessionCards 는 살아 있는 세션 각각에 파생 사실을 붙인다.
 //
 // 붙이는 것은 셋이다 — 브랜치·HEAD(워크트리 목록) · ahead(기본 브랜치 대비) ·

@@ -158,6 +158,11 @@ type BoardRenderOptions struct {
 	// Tail 은 응답 꼬리다. **예산 안에 함께 든다** — 꼬리를 예산 밖에 두면
 	// 상한이 지켜졌다는 시험이 실제 응답 길이를 안 보는 것이 된다.
 	Tail string
+	// Notice 는 이 보드가 어떻게 나온 값인지다(열화 배너). 비면 아무것도 안 찍는다.
+	//
+	// **맨 위**에 온다. 아래로 밀면 낡은 스냅숏을 먼저 읽고 그것을 현재 사실로 믿은 뒤에야
+	// 배너를 보게 되고, 그때는 이미 판단이 끝나 있다. 예산에도 함께 든다.
+	Notice string
 }
 
 // RenderBoard 는 보드 한 장을 사람이 읽는 텍스트로 만든다. 순수 함수다.
@@ -175,12 +180,16 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		pathLimit = 0
 	}
 
-	head := []string{
+	var head []string
+	if strings.TrimSpace(opt.Notice) != "" {
+		head = append(head, opt.Notice)
+	}
+	head = append(head,
 		fmt.Sprintf("보드 · %s · %s · %s",
 			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
 		fmt.Sprintf("살아 있는 세션 %d건 (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
 			len(v.Sessions), FormatAge(v.Window)),
-	}
+	)
 
 	blocks := make([]string, 0, len(v.Sessions))
 	for _, c := range v.Sessions {

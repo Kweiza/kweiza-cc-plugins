@@ -49,6 +49,7 @@ func TestOfflineNoteQueuesAndReplaysExactlyOnce(t *testing.T) {
 	}
 
 	// ③ 재연결. 아무 명령이나 돌면 Flush 가 먼저 돈다.
+	sent := append([]OutboxEntry(nil), pend...) // ④에서 **같은 키로 다시 쌓기** 위해 보관한다
 	h.up()
 	if code, out := h.run("", "status"); code != 0 {
 		t.Fatalf("재연결 후 status 실패(%d): %s", code, out)
@@ -60,16 +61,54 @@ func TestOfflineNoteQueuesAndReplaysExactlyOnce(t *testing.T) {
 	bodies := js[0].Body + "|" + js[1].Body
 	mustContain(t, "재생된 판단", bodies, "첫째 판단", "둘째 판단")
 
-	// ④ 다시 돌려도 늘지 않는다(아웃박스가 비었고, 서버도 멱등이다).
-	if code, _ := h.run("", "status"); code != 0 {
-		t.Fatal("두 번째 status 실패")
-	}
-	if got := len(h.judgments(model.JudgmentDecision)); got != 2 {
-		t.Fatalf("재생을 두 번 돌렸더니 판단이 %d건이 됐다", got)
-	}
 	pend, err = ob.List()
 	if err != nil || len(pend) != 0 {
 		t.Fatalf("재생 뒤에도 아웃박스에 %d건 남았다(err=%v)", len(pend), err)
+	}
+
+	// ④ **서버를 재기동한 뒤 같은 키로 실제로 다시 보낸다.**
+	//
+	// ★ 앞 판의 이 자리는 거짓 초록이었다: 아웃박스가 비어 있어 재전송이 **아예 안 일어났고**,
+	//   그래서 "판단이 2건 그대로"는 멱등의 근거가 아니라 "아무 일도 안 일어남"의 근거였다.
+	//   그 상태에서는 서버가 재기동으로 멱등 기억을 통째로 잃어도 시험이 초록이다.
+	//
+	//   그리고 이 조합이 실제로 나는 상황이다 — 서버가 죽어 아웃박스가 쌓이고, 살아나서
+	//   재생이 돈다. 그때 서버는 방금 재기동해 메모리 기억이 비어 있다.
+	for _, e := range sent {
+		if err := ob.Append(e); err != nil {
+			t.Fatalf("아웃박스 재주입 실패: %v", err)
+		}
+	}
+	// ── 대조 전제 ①: 정말 다시 쌓였는가(같은 키로) ──
+	again, err := ob.List()
+	if err != nil {
+		t.Fatalf("아웃박스 조회 실패: %v", err)
+	}
+	if len(again) != 2 {
+		t.Fatalf("전제가 깨졌다 — 재주입 뒤 아웃박스가 %d건이다. 이 상태로는 아래 단정이 무의미하다", len(again))
+	}
+	for i := range again {
+		if again[i].Key != sent[i].Key {
+			t.Fatalf("전제가 깨졌다 — 재주입한 키가 다르다(%q vs %q): 키가 다르면 멱등이 아니라 새 요청이다",
+				again[i].Key, sent[i].Key)
+		}
+	}
+
+	// 서버 재기동. 멱등 기억이 프로세스 메모리뿐이면 여기서 사라진다.
+	h.down()
+	h.up()
+
+	if code, out := h.run("", "status"); code != 0 {
+		t.Fatalf("재기동 후 status 실패(%d): %s", code, out)
+	}
+	// ── 본 판정: 판단은 추가 전용이라 중복이 들어가면 되돌릴 수 없다 ──
+	if got := len(h.judgments(model.JudgmentDecision)); got != 2 {
+		t.Fatalf("서버를 재기동한 뒤 같은 키로 다시 보냈더니 판단이 %d건이 됐다 — "+
+			"멱등 기억이 재기동을 못 넘겼다(판단은 추가 전용이라 되돌릴 수 없다)", got)
+	}
+	pend, err = ob.List()
+	if err != nil || len(pend) != 0 {
+		t.Fatalf("재기동 뒤 재생에서 아웃박스에 %d건 남았다(err=%v)", len(pend), err)
 	}
 }
 

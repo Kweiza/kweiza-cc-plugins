@@ -109,12 +109,13 @@ func TestIdempotentRetryReturnsSameResult(t *testing.T) {
 	// ★ 대조: 키가 다르면 같은 요청이 그대로 하류에 닿아 **다른 결과**가 나온다.
 	//   이 단정이 없으면 위 두 줄이 "그냥 두 번 성공했다"와 구분되지 않는다.
 	//
-	// 알려진 틈: 항목 id 중복은 지금 500 으로 나간다(저장 계층이 그 제약 위반을 타입 있는
-	// 오류로 안 올려 준다). 표면에서 문자열로 알아내려 하면 드라이버 문구에 결합되므로
-	// 일부러 안 했다 — 응답이 내부를 안 흘리는 것은 아래 시험이 지킨다.
+	// 그 "다른 결과"는 409(duplicate)다 — 저장 계층이 제약 위반을 타입 있는 오류로
+	// 올리고 ClassifyError 가 그것을 접는다. 500 이 아닌 것이 중요하다:
+	// 500 은 멱등 표에 저장되지 않는 등급이라 재시도가 계속 하류로 들어간다.
+	// 그 축의 전문은 conflict_test.go 가 본다.
 	third := e.do(http.MethodPost, "/api/v1/items", body, withKey("cc-1:8"))
-	if third.Code == http.StatusCreated {
-		t.Fatalf("다른 키인데도 같은 항목이 또 만들어졌다: %s", third.Body.String())
+	if third.Code != http.StatusConflict {
+		t.Fatalf("다른 키로 온 같은 항목이 %d 다 — 409 를 기대했다: %s", third.Code, third.Body.String())
 	}
 	if strings.Contains(strings.ToLower(third.Body.String()), "unique") {
 		t.Fatalf("제약 위반 문구가 응답에 새어 나왔다: %s", third.Body.String())

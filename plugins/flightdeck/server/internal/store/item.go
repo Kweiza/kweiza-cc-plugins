@@ -138,8 +138,13 @@ func (t *Tx) AddItem(it model.Item) error {
 		it.Project, it.ID, it.Title, it.Body, pathsJSON, labelsJSON,
 		string(it.State), nullStr(it.CloseReason), nullStr(it.LandedRef),
 		fmtTime(it.CreatedAt), nullTimePtr(it.ClosedAt)); err != nil {
-		return fmt.Errorf("항목 등록 실패(project=%q id=%q): %w",
-			clip(it.Project, 64), clip(it.ID, 64), err)
+		// 중복 id 는 오타·재등록에서 흔한 **정상적인 거절**이다 — 타입 있는 오류로 올려야
+		// 표면이 409 로 접고 처방을 낼 수 있다. 그대로 올리면 500 이 되고,
+		// 500 은 멱등 표에 안 남아 재시도가 계속 하류로 들어간다.
+		return writeErr(err, writeTarget{
+			Target: TargetItem, Project: it.Project, ID: it.ID,
+			RefHint: "프로젝트 " + clip(it.Project, 64),
+		}, "항목 등록 실패(project=%q id=%q)", clip(it.Project, 64), clip(it.ID, 64))
 	}
 
 	for i, a := range it.After {
@@ -185,7 +190,10 @@ func (t *Tx) addAfter(project, itemID string, a model.After) error {
 	if _, err := t.tx.ExecContext(t.ctx, `
 		INSERT INTO item_after(project, item_id, dep_item, dep_job, dep_sha) VALUES (?, ?, ?, ?, ?)`,
 		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA)); err != nil {
-		return fmt.Errorf("선행 조건 등록 실패: %w", err)
+		return writeErr(err, writeTarget{
+			Target: TargetItemAfter, Project: project, ID: itemID,
+			RefHint: fmt.Sprintf("항목 %s/%s", clip(project, 64), clip(itemID, 64)),
+		}, "선행 조건 등록 실패(project=%q item=%q)", clip(project, 64), clip(itemID, 64))
 	}
 	if a.Item != "" {
 		if err := t.bumpDependents(project, a.Item, +1); err != nil {
@@ -564,8 +572,13 @@ func (t *Tx) ClaimItem(project, itemID, sessionID string) (model.Claim, error) {
 		ON CONFLICT(project, item_id) DO UPDATE SET
 		  session_id = excluded.session_id, at = excluded.at, released_at = NULL, force_reason = NULL`,
 		project, itemID, sessionID, fmtTime(now)); err != nil {
-		return model.Claim{}, fmt.Errorf("선점 기록 실패(project=%q item=%q session=%q): %w",
-			clip(project, 64), clip(itemID, 64), clip(sessionID, 64), err)
+		// 등록 안 된 session_id 로 선점하면 여기서 FK 위반이 난다 — 항목 id 중복과 같은 형태다.
+		return model.Claim{}, writeErr(err, writeTarget{
+			Target: TargetClaim, Project: project, ID: itemID,
+			RefHint: fmt.Sprintf("항목 %s/%s · 세션 %s",
+				clip(project, 64), clip(itemID, 64), clip(sessionID, 64)),
+		}, "선점 기록 실패(project=%q item=%q session=%q)",
+			clip(project, 64), clip(itemID, 64), clip(sessionID, 64))
 	}
 	if err := t.SetItemState(project, itemID, model.ItemClaimed, ""); err != nil {
 		return model.Claim{}, err

@@ -101,18 +101,25 @@ func newClient(sd StateDir, get func(string) (string, bool), log *slog.Logger) *
 }
 
 // do 는 요청 하나를 보낸다. 미도달은 ErrUnreachable 로, 상태코드 거절은 APIError 로 가른다.
-func (c *Client) do(ctx context.Context, method, path string, body any, idem string) ([]byte, error) {
+// do 는 요청 하나를 보낸다. 세 번째 반환값은 **서버가 이 요청을 재생으로 접었는가**다.
+//
+// ★ 이 값을 버리면 안 된다. 쓰기 중 일부는 **내용 해시**로 멱등 키를 만들므로
+// (같은 세션이 같은 본문을 두 번 쓰면 같은 키가 된다) 서버가 첫 응답을 그대로 돌려준다.
+// 그 사실을 안 나르면 도구가 "저장했다"고 말하는데 원장에는 아무것도 안 늘어난다 —
+// 판단은 파생 불가한 유일한 자산이고 추가 전용이라, 삼켜진 노트는 영영 안 보인다.
+// 그리고 판별할 방법이 하나도 없다: 응답 문구도 판단 id 도 첫 호출과 글자 그대로 같다.
+func (c *Client) do(ctx context.Context, method, path string, body any, idem string) ([]byte, bool, error) {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("요청 직렬화 실패: %w", err)
+			return nil, false, fmt.Errorf("요청 직렬화 실패: %w", err)
 		}
 		rdr = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.URL+path, rdr)
 	if err != nil {
-		return nil, fmt.Errorf("요청 생성 실패: %w", err)
+		return nil, false, fmt.Errorf("요청 생성 실패: %w", err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -125,20 +132,20 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idem str
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrUnreachable, clip(c.URL+path, 200), err)
+		return nil, false, fmt.Errorf("%w: %s: %v", ErrUnreachable, clip(c.URL+path, 200), err)
 	}
 	defer resp.Body.Close()
 	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if rerr != nil {
-		return nil, fmt.Errorf("%w: 응답 본문 읽기 실패: %v", ErrUnreachable, rerr)
+		return nil, false, fmt.Errorf("%w: 응답 본문 읽기 실패: %v", ErrUnreachable, rerr)
 	}
 	if resp.StatusCode >= 400 {
 		if Unreachable(nil, resp.StatusCode) {
-			return nil, fmt.Errorf("%w: 상태 %d: %s", ErrUnreachable, resp.StatusCode, clip(string(raw), 300))
+			return nil, false, fmt.Errorf("%w: 상태 %d: %s", ErrUnreachable, resp.StatusCode, clip(string(raw), 300))
 		}
-		return nil, parseAPIError(resp.StatusCode, path, raw)
+		return nil, false, parseAPIError(resp.StatusCode, path, raw)
 	}
-	return raw, nil
+	return raw, resp.Header.Get("Idempotency-Replayed") == "true", nil
 }
 
 // Read 는 읽기 요청이다. 성공하면 캐시하고, **미도달이면 캐시를 배너와 함께** 낸다.
@@ -152,7 +159,7 @@ type ReadResult struct {
 }
 
 func (c *Client) Read(ctx context.Context, path string) (ReadResult, error) {
-	raw, err := c.do(ctx, http.MethodGet, path, nil, "")
+	raw, _, err := c.do(ctx, http.MethodGet, path, nil, "")
 	if err == nil {
 		now := c.Now()
 		if cerr := c.Cache.Put(path, raw, now); cerr != nil {
@@ -184,10 +191,15 @@ func (c *Client) Read(ctx context.Context, path string) (ReadResult, error) {
 // Write 는 쓰기 요청이다. 미도달일 때의 처방은 **JudgeOffline 이 정한다** —
 // 이 함수가 직접 판정하면 그 표가 본문에 흩어지고 시험이 사본을 단정하게 된다.
 type WriteResult struct {
-	Body   []byte
-	Sent   bool
-	Mode   OfflineMode
-	Reason string // Sent=false 일 때 무엇을 했고 왜인지. 항상 채운다
+	Body []byte
+	Sent bool
+	// Replayed 는 서버가 이 요청을 **재생으로 접었는가**다.
+	// 참이면 **새로 만들어진 것이 없다** — 소비자는 반드시 문구를 갈라야 한다.
+	// 쓰기 중 일부는 내용 해시로 멱등 키를 만들므로(같은 세션이 같은 본문을 두 번 쓰면 같은 키)
+	// 이 축을 삼키면 도구가 "저장했다"고 말하는데 원장은 그대로다.
+	Replayed bool
+	Mode     OfflineMode
+	Reason   string // Sent=false 일 때 무엇을 했고 왜인지. 항상 채운다
 }
 
 func (c *Client) Write(ctx context.Context, cmd, path string, body any) (WriteResult, error) {
@@ -197,8 +209,14 @@ func (c *Client) Write(ctx context.Context, cmd, path string, body any) (WriteRe
 	}
 	key := c.KeyFor(cmd, path, buf)
 
-	raw, err := c.do(ctx, http.MethodPost, path, body, key)
+	raw, replayed, err := c.do(ctx, http.MethodPost, path, body, key)
 	if err == nil {
+		if replayed {
+			// 같은 키가 이미 있었다 = 이 호출은 아무것도 새로 만들지 않았다.
+			// 문구를 가르는 것이 전부다 — 삼키면 "저장했다"가 거짓이 된다.
+			return WriteResult{Body: raw, Sent: true, Replayed: true, Mode: "",
+				Reason: "서버에 같은 요청이 이미 있었다 — 첫 응답을 그대로 돌려준다(새로 만든 것은 없다)"}, nil
+		}
 		return WriteResult{Body: raw, Sent: true, Mode: "", Reason: "서버가 받았다"}, nil
 	}
 	if !Unreachable(err, 0) {
@@ -247,7 +265,7 @@ func (c *Client) Flush(ctx context.Context) ReplayResult {
 			// 해석 불가한 줄은 보낼 수 없다. 버리지 않고 남긴 채 사유를 올린다.
 			return fmt.Errorf("본문 해석 실패: %w", uerr)
 		}
-		_, err := c.do(ctx, http.MethodPost, e.Path, body, e.Key)
+		_, _, err := c.do(ctx, http.MethodPost, e.Path, body, e.Key)
 		return err
 	})
 	if err != nil {
@@ -279,7 +297,7 @@ type healthzResponse struct {
 
 func (c *Client) Healthz(ctx context.Context) (healthzResponse, error) {
 	var h healthzResponse
-	raw, err := c.do(ctx, http.MethodGet, "/healthz", nil, "")
+	raw, _, err := c.do(ctx, http.MethodGet, "/healthz", nil, "")
 	if err != nil {
 		return h, err
 	}

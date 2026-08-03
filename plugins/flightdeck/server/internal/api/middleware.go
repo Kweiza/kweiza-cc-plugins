@@ -241,7 +241,9 @@ func (s *server) withIdempotency(next http.Handler) http.Handler {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 
 		fp := Fingerprint(r.Method, r.URL.Path, body)
-		entry, replay, m := s.idem.begin(r.Context(), key, fp)
+		// 이 라우트가 재기동을 넘겨야 하는가. 판정은 순수 함수가 하고 사유를 함께 낸다.
+		pv := JudgePersistIdempotency(r.Method, r.URL.Path)
+		entry, replay, m := s.idem.begin(r.Context(), key, fp, pv.Persist)
 		if m != nil && m.Conflict {
 			s.met.incConflict()
 			s.writeError(w, r, Classified{
@@ -276,7 +278,11 @@ func (s *server) withIdempotency(next http.Handler) http.Handler {
 
 		rec := &bodyRecorder{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			s.idem.finish(key, entry, rec.status, rec.Header().Get("Content-Type"), rec.body.Bytes())
+			// ★ 요청 컨텍스트의 취소를 떼고 저장한다. 클라이언트가 응답을 받자마자 끊으면
+			//   그 컨텍스트가 죽는데, 그때 저장을 건너뛰면 **끊는 클라이언트일수록**
+			//   멱등 기억이 안 남는다 — 재시도하는 쪽이 정확히 그 클라이언트다.
+			s.idem.finish(context.WithoutCancel(r.Context()), key, entry,
+				rec.status, rec.Header().Get("Content-Type"), rec.body.Bytes(), pv.Persist)
 		}()
 		next.ServeHTTP(rec, r)
 	})

@@ -6,7 +6,8 @@
 // 점유자를 담은 오류로 옮길 뿐이다. 앱에서 먼저 조회해 판정하면 그 사이에 남이 잡는다.
 //
 // 판정이 필요한 자리는 전부 **순수 함수**로 빼고 시험이 그 함수를 직접 부른다
-// (PlanMigration·JudgeClaim·ValidateSnapshot·ValidateHolder·ValidateFinish).
+// (PlanMigration·UpgradeSteps·JudgeClaim·JudgeConstraintCode·ValidateSnapshot·
+// ValidateHolder·ValidateFinish·ValidateIdemRecord).
 // 판정이 함수 본문에 흩어지면 시험이 그 로직의 사본을 단정하게 되고, 그러면 변이가 조용히 샌다.
 // 그리고 다중 조건은 불리언이 아니라 **사유**를 돌려준다 — 사유가 없으면
 // "조건 A 때문에 탈락"과 "이 축을 아예 안 본다"가 구분되지 않는다.
@@ -31,9 +32,35 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
+//go:embed migrations/002_idempotency.sql
+var migration002 string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 1
+const SchemaVersion = 2
+
+// BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
+//
+// ★ 빈 DB 도 "schema.sql → 증분 전부"를 거쳐 올라간다. 신규 DB 를 위해 schema.sql 에
+// 같은 표를 한 번 더 적으면 그 표의 정의가 두 벌이 되고, 두 벌은 반드시 표류한다 —
+// 그때 신규 설치와 업그레이드가 **다른 모양의 DB** 를 갖게 되는데 그 차이는
+// 문제가 터지기 전까지 아무 데도 안 보인다. 정의는 한 자리에만 둔다.
+const BaseSchemaVersion = 1
+
+// Migration 은 증분 하나다.
+type Migration struct {
+	To   int    // 적용 뒤의 버전
+	Name string // 로그에 남길 이름
+	SQL  string
+}
+
+// migrations 는 BaseSchemaVersion 위에 순서대로 얹는 증분 전부다.
+//
+// ★ 트랜잭션 안에서 돌 수 있어야 한다 — PRAGMA journal_mode 같은 문을 넣으면 안 된다.
+// (schema.sql 은 그것 때문에 트랜잭션 밖에서 돈다.)
+var migrations = []Migration{
+	{To: 2, Name: "멱등 기록을 DB 로", SQL: migration002},
+}
 
 // timeLayout 은 저장용 시각 표기다.
 //
@@ -277,9 +304,10 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 type MigrationAction string
 
 const (
-	MigrateNone   MigrationAction = "none"   // 이미 맞다
-	MigrateApply  MigrationAction = "apply"  // 스키마를 적용한다
-	MigrateReject MigrationAction = "reject" // 열지 않는다
+	MigrateNone    MigrationAction = "none"    // 이미 맞다
+	MigrateApply   MigrationAction = "apply"   // 스키마를 새로 적용한다(그 뒤 증분이 따라온다)
+	MigrateUpgrade MigrationAction = "upgrade" // 기존 DB 에 증분을 얹는다
+	MigrateReject  MigrationAction = "reject"  // 열지 않는다
 )
 
 // MigrationPlan 은 판정 결과다. Reason 은 **항상** 채운다 —
@@ -347,12 +375,14 @@ func PlanMigration(hasVersionTable bool, dbVersion, objectCount, codeVersion int
 		}
 
 	case dbVersion < codeVersion:
-		// v1 뿐이라 여기 오는 경로는 아직 없다. 그래도 조용히 통과시키지 않는다 —
-		// 업그레이드 경로가 없는데 연다는 것은 "모르는 구 스키마 위에서 돈다"는 뜻이다.
+		// ★ 여기서 경로 유무를 판정하지 않는다 — 그것은 증분 목록을 봐야 알 수 있어
+		//   이 함수가 순수하지 않게 된다. 실제 경로 해석은 UpgradeSteps 가 하고,
+		//   빠진 단이 있으면 **거기서** 사유를 담아 거절한다.
+		//   백업은 무조건 뜬다: 나쁜 마이그레이션은 1인 운영에서 복구 불가 사건이다.
 		return MigrationPlan{
-			Action: MigrateReject, Backup: false,
-			Reason: fmt.Sprintf("DB 스키마 버전이 %d 이고 이 바이너리는 %d 를 기대하는데 "+
-				"%d→%d 업그레이드 경로가 없다", dbVersion, codeVersion, dbVersion, codeVersion),
+			Action: MigrateUpgrade, Backup: true,
+			Reason: fmt.Sprintf("DB 스키마 버전이 %d 이고 이 바이너리는 %d 를 기대한다 "+
+				"— %d→%d 증분을 얹는다(적용 전에 백업한다)", dbVersion, codeVersion, dbVersion, codeVersion),
 		}
 
 	default:
@@ -361,6 +391,76 @@ func PlanMigration(hasVersionTable bool, dbVersion, objectCount, codeVersion int
 			Reason: fmt.Sprintf("스키마 버전 %d 로 이미 맞다", dbVersion),
 		}
 	}
+}
+
+// UpgradeSteps 는 from 에서 to 까지 얹을 증분을 순서대로 고른다. 순수 함수다.
+//
+// ★ 한 단이라도 빠지면 **사유를 담아 거절한다.** 조용히 건너뛰면 "모르는 구 스키마 위에서
+// 도는" 상태가 침묵으로 열리고, 그 침묵은 그 표를 처음 읽는 질의가 죽을 때까지 안 보인다.
+// 사유에 무엇이 있는지까지 적는 이유: "1→3 경로가 없다"만으로는 2가 없는 것인지
+// 3이 없는 것인지 운영자가 못 가린다.
+func UpgradeSteps(from, to int, avail []Migration) ([]Migration, error) {
+	if from > to {
+		return nil, fmt.Errorf("내려가는 마이그레이션은 없다(%d→%d)", from, to)
+	}
+	have := map[int]Migration{}
+	var haveList []int
+	for _, m := range avail {
+		have[m.To] = m
+		haveList = append(haveList, m.To)
+	}
+	var out []Migration
+	for v := from + 1; v <= to; v++ {
+		m, ok := have[v]
+		if !ok {
+			return nil, fmt.Errorf("%d→%d 업그레이드 경로가 없다 — %d 로 올리는 증분이 없다(가진 증분: %v)",
+				from, to, v, haveList)
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// applyUpgrades 는 증분을 순서대로 얹는다. **한 단이 한 트랜잭션이다** —
+// 중간에 끊겨도 얹힌 단까지는 버전 기록과 실제 스키마가 일치하고,
+// 그러면 다음 기동이 남은 단부터 이어서 얹는다.
+func (s *Store) applyUpgrades(ctx context.Context, from int) error {
+	steps, err := UpgradeSteps(from, SchemaVersion, migrations)
+	if err != nil {
+		s.log.Error("업그레이드 경로가 없어 DB 를 열지 않는다",
+			"path", s.path, "db_version", from, "code_version", SchemaVersion, "error", err.Error())
+		return fmt.Errorf("스키마 거절: %w", err)
+	}
+	for _, m := range steps {
+		start := time.Now()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("증분 %d(%s) 트랜잭션 시작 실패(path=%q): %w", m.To, m.Name, s.path, err)
+		}
+		if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				return fmt.Errorf("증분 %d(%s) 적용 실패(path=%q): %w (롤백도 실패: %v)",
+					m.To, m.Name, s.path, err, rbErr)
+			}
+			return fmt.Errorf("증분 %d(%s) 적용 실패(path=%q): %w", m.To, m.Name, s.path, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`,
+			m.To, fmtTime(time.Now())); err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				return fmt.Errorf("증분 %d(%s) 버전 기록 실패(path=%q): %w (롤백도 실패: %v)",
+					m.To, m.Name, s.path, err, rbErr)
+			}
+			return fmt.Errorf("증분 %d(%s) 버전 기록 실패(path=%q): %w", m.To, m.Name, s.path, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("증분 %d(%s) 커밋 실패(path=%q): %w", m.To, m.Name, s.path, err)
+		}
+		s.log.Info("증분 적용 완료",
+			"path", s.path, "version", m.To, "reason", m.Name,
+			"duration", time.Since(start).Seconds())
+	}
+	return nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -421,9 +521,32 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`,
-			SchemaVersion, fmtTime(time.Now()),
+			BaseSchemaVersion, fmtTime(time.Now()),
 		); err != nil {
 			return fmt.Errorf("schema_version 기록 실패(스키마는 적용됨, path=%q): %w", s.path, err)
+		}
+		// ★ 신규 DB 도 증분을 그대로 탄다. 신규용으로 schema.sql 에 같은 표를 또 적으면
+		//   정의가 두 벌이 되고, 신규 설치와 업그레이드가 다른 모양의 DB 를 갖게 된다.
+		if err := s.applyUpgrades(ctx, BaseSchemaVersion); err != nil {
+			return err
+		}
+		s.log.Info("마이그레이션 완료",
+			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())
+		return nil
+
+	case MigrateUpgrade:
+		start := time.Now()
+		s.log.Info("마이그레이션 시작",
+			"path", s.path, "from", dbVersion, "to", SchemaVersion, "backup", plan.Backup, "reason", plan.Reason)
+		if plan.Backup {
+			backupPath, err := s.backup(ctx)
+			if err != nil {
+				return err
+			}
+			s.log.Info("마이그레이션 전 백업 완료", "path", s.path, "backup", backupPath)
+		}
+		if err := s.applyUpgrades(ctx, dbVersion); err != nil {
+			return err
 		}
 		s.log.Info("마이그레이션 완료",
 			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())

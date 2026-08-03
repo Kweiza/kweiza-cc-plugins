@@ -77,7 +77,9 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 
 	switch args[0] {
 	case "mcp":
-		return runMCP(ctx, env, log, stdin, stdout)
+		// ★ MCP 는 자기 이름의 로거를 **새로 만든다.** 기존 로거에 덧칠하면
+		// JSON 한 줄에 service.name 이 두 값으로 실린다(중복 키 처리는 파서마다 다르다).
+		return runMCP(ctx, app, newLoggerNamed(env, stderr, "flightdeck-mcp"), stdin, stdout)
 
 	case "hook":
 		if len(args) < 2 {
@@ -112,9 +114,20 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 	}
 }
 
-// newLogger 는 구조화 로거다. **stderr 로만 낸다** —
+// newLogger 는 이 프로세스의 구조화 로거다. **stderr 로만 낸다** —
 // stdout 은 MCP 프로토콜과 훅 계약이 쓰는 자리라 한 줄이라도 섞이면 그 둘이 통째로 깨진다.
 func newLogger(env func(string) (string, bool), stderr io.Writer) *slog.Logger {
+	return newLoggerNamed(env, stderr, "flightdeck")
+}
+
+// newLoggerNamed 는 service.name 을 골라 로거를 **새로 만든다.**
+//
+// ★ 이 파일이 그 필드를 거는 **유일한 자리**다(설계 규율: 라이브러리 계층 api·service·web 은
+// 받은 로거를 그대로 쓴다). 이름이 달라야 하는 프로세스는 기존 로거에 덧칠하지 않고
+// 여기서 새로 만든다 — 덧칠하면 JSON 한 줄에 같은 키가 **다른 값으로** 두 번 들어가고,
+// 중복 키의 처리는 파서마다 다르다. 그러면 수집기 판올림 한 번에
+// "어느 프로세스가 무엇을 했나"라는 축이 조용히 사라진다.
+func newLoggerNamed(env func(string) (string, bool), stderr io.Writer, service string) *slog.Logger {
 	level := slog.LevelInfo
 	if v, ok := env("FD_LOG"); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -127,5 +140,5 @@ func newLogger(env func(string) (string, bool), stderr io.Writer) *slog.Logger {
 		}
 	}
 	return slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level})).
-		With("service.name", "flightdeck")
+		With("service.name", service)
 }

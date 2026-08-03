@@ -8,8 +8,9 @@
 //  3. 관측을 남긴다 — 액세스 로그 1줄 · /metrics · SSE
 //  4. **오류에서 내부 좌표를 걷어낸다**(원인 전문은 로그로, 고칠 거리는 응답으로)
 //
-// 판정은 전부 순수 함수(JudgeAuth·JudgeIdempotencyKey·JudgeIdemMatch·ClassifyError·
-// RoutePattern·RenderMetrics·EncodeSSE)에 있고 시험이 그 함수를 직접 부른다.
+// 판정은 전부 순수 함수(JudgeAuth·JudgeIdempotencyKey·JudgeIdemMatch·
+// JudgePersistIdempotency·ClassifyError·ConflictAdvice·RoutePattern·RenderMetrics·
+// EncodeSSE)에 있고 시험이 그 함수를 직접 부른다.
 // 판정이 핸들러 본문에 흩어지면 시험이 그 로직의 **사본**을 단정하게 되고 변이가 조용히 샌다.
 package api
 
@@ -119,10 +120,13 @@ func NewServer(svc *service.Service, opt Options) http.Handler {
 // 만들 수 없는 축이 있고, 그 축을 시험용 사슬로 따로 조립하면 시험이 사본을 단정하게 된다.
 func newServer(svc *service.Service, opt Options) *server {
 	opt = opt.withDefaults()
-	log := opt.Log.With("service.name", "flightdeck")
+	// ★ service.name 을 여기서 덧칠하지 않는다. 그 필드는 **프로세스 진입점 하나**가 건다
+	//   (cmd/fd 의 newLoggerNamed). 라이브러리 계층이 각자 덧칠하면 JSON 한 줄에 같은 키가
+	//   여러 번 들어가고, 중복 키의 처리는 파서마다 다르다 — 수집기 판올림 한 번에
+	//   "어느 프로세스가 무엇을 했나"라는 축이 조용히 사라진다.
 	s := &server{
 		svc:  svc,
-		log:  log,
+		log:  opt.Log,
 		opt:  opt,
 		hub:  NewHub(opt.SSEBuffer),
 		met:  newMetrics(),
@@ -130,8 +134,13 @@ func newServer(svc *service.Service, opt Options) *server {
 		lim:  newLimiter(opt.RatePerMinute, opt.Burst, opt.Clock),
 		now:  opt.Clock,
 	}
+	s.idem.log = opt.Log
 	if svc != nil {
 		s.st = svc.Store()
+		// 멱등 기록의 영속 계층. Store 가 없으면(시험의 대조 조립) 메모리 전용으로 돈다.
+		if s.st != nil {
+			s.idem.db = s.st
+		}
 	}
 	return s
 }
@@ -206,7 +215,7 @@ func Serve(ctx context.Context, addr string, h http.Handler, log *slog.Logger) e
 	if log == nil {
 		log = slog.Default()
 	}
-	log = log.With("service.name", "flightdeck")
+	// service.name 은 진입점이 이미 걸어 두었다 — 여기서 다시 걸면 한 줄에 두 번 찍힌다.
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
