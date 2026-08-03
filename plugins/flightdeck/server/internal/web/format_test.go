@@ -362,3 +362,21 @@ func TestClipStripsControlCharacters(t *testing.T) {
 		t.Fatalf("양끝 공백이 남았다: %q", got)
 	}
 }
+
+// 스모크가 잡은 것: 0초짜리 미래가 "시계 어긋남"으로 렌더됐다.
+// 서버가 시각을 찍고 렌더까지 가는 왕복만으로 몇 밀리초가 뒤집히므로,
+// 그 경우에 가장 큰 경고가 붙으면 경고가 상시 점등돼 판별력이 0이 된다.
+func TestSubSecondFutureIsNoiseNotSkew(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Millisecond, -300 * time.Millisecond, -999 * time.Millisecond} {
+		if got := Age(d); strings.Contains(got, "어긋남") {
+			t.Errorf("Age(%v) = %q — 초 미만의 음수는 잡음이지 시계 어긋남이 아니다", d, got)
+		}
+	}
+	// 그래도 **진짜 어긋남은 여전히 말한다.** 접어 버리면 시계가 틀어진 머신의 세션이
+	// "방금"으로 보여 가장 이상한 상태가 가장 정상으로 읽힌다.
+	for _, d := range []time.Duration{-3 * time.Second, -2 * time.Hour} {
+		if got := Age(d); !strings.Contains(got, "어긋남") {
+			t.Errorf("Age(%v) = %q — 이 크기는 어긋남으로 말해야 한다", d, got)
+		}
+	}
+}
