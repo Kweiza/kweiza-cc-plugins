@@ -21,6 +21,41 @@ week_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empt
 week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 user=$(claude auth status 2>/dev/null | jq -r '.email // empty' 2>/dev/null)
 
+# Fable weekly usage: not in the statusline stdin payload — only the claude.ai
+# usage API exposes it, as a weekly_scoped limit with scope.model "Fable".
+# Cache the response and refresh in the background so rendering never blocks.
+FABLE_CACHE="${TMPDIR:-/tmp}/grafik-bar-usage-$(id -u).json"
+FABLE_CACHE_TTL=300
+fetch_usage() {
+  local tok
+  tok=$(jq -r '.claudeAiOauth.accessToken // empty' ~/.claude/.credentials.json 2>/dev/null)
+  [ -z "$tok" ] && return 1
+  curl -sf -m 4 "https://api.anthropic.com/api/oauth/usage" \
+    -H "Authorization: Bearer $tok" \
+    -H "anthropic-beta: oauth-2025-04-20" > "${FABLE_CACHE}.tmp" 2>/dev/null \
+    && mv "${FABLE_CACHE}.tmp" "$FABLE_CACHE"
+}
+cache_age=$(( $(date +%s) - $(stat -c %Y "$FABLE_CACHE" 2>/dev/null || echo 0) ))
+if (( cache_age > FABLE_CACHE_TTL )); then
+  if [ -s "$FABLE_CACHE" ]; then
+    ( fetch_usage & ) >/dev/null 2>&1
+  else
+    fetch_usage >/dev/null 2>&1
+  fi
+fi
+fable_pct="" fable_reset=""
+if [ -s "$FABLE_CACHE" ]; then
+  fable_pct=$(jq -r '[.limits[]? | select(.kind == "weekly_scoped"
+    and ((.scope.model.display_name // "") | test("fable"; "i")))]
+    | first | .percent // empty' "$FABLE_CACHE" 2>/dev/null)
+  if [ -n "$fable_pct" ]; then
+    fable_reset_iso=$(jq -r '[.limits[]? | select(.kind == "weekly_scoped"
+      and ((.scope.model.display_name // "") | test("fable"; "i")))]
+      | first | .resets_at // empty' "$FABLE_CACHE" 2>/dev/null)
+    [ -n "$fable_reset_iso" ] && fable_reset=$(date -d "$fable_reset_iso" +%s 2>/dev/null)
+  fi
+fi
+
 # Workspace folder (project root) + current git branch
 ws_dir=$(echo "$input" | jq -r '.workspace.project_dir // .workspace.current_dir // .cwd // empty')
 cur_dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // .workspace.project_dir // empty')
@@ -150,6 +185,15 @@ if [ -n "$week_pct" ]; then
   [ -n "$r" ] && seg_7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
 fi
 
+seg_f7d=""
+if [ -n "$fable_pct" ]; then
+  fable_int=$(printf '%.0f' "$fable_pct")
+  c=$(pct_color "$fable_int")
+  r=$(format_reset "$fable_reset")
+  seg_f7d="$(printf "${C_WHITE}F7d${RST} ${c}$(render_bar "$fable_int" 8)${RST} ${c}${fable_int}%%${RST}")"
+  [ -n "$r" ] && seg_f7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
+fi
+
 seg_cost=""
 if [ -n "$cost" ]; then
   cost_disp=$(printf '%.2f' "$cost")
@@ -187,6 +231,7 @@ if (( cols >= 120 )); then
   [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
   [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
   [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
+  [ -n "$seg_f7d" ] && line+="${sep}${seg_f7d}"
   [ -n "$seg_stats" ] && line+="${sep}${seg_stats}"
   printf '%b\n' "$line"
 
@@ -201,6 +246,7 @@ elif (( cols >= 80 )); then
   limits=""
   [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
   [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
+  [ -n "$seg_f7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_f7d}"; }
   [ -n "$seg_stats" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_stats}"; }
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
 
@@ -216,6 +262,7 @@ else
   limits=""
   [ -n "$seg_5h" ] && limits+="${seg_5h}"
   [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
+  [ -n "$seg_f7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_f7d}"; }
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
   [ -n "$seg_stats" ] && printf '%b\n' " ${seg_stats}"
 fi
