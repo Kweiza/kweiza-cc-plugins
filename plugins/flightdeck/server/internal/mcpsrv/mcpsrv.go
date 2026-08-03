@@ -66,12 +66,14 @@ type Server struct {
 type Option func(*builder)
 
 type builder struct {
-	getenv   func(string) (string, bool)
-	cwd      string
-	cwdErr   error
-	hostname string
-	hostErr  error
-	now      func() time.Time
+	projectID   string
+	projectPath string
+	getenv      func(string) (string, bool)
+	cwd         string
+	cwdErr      error
+	hostname    string
+	hostErr     error
+	now         func() time.Time
 }
 
 // WithEnv 는 환경 조회를 바꾼다. nil 은 무시한다.
@@ -131,6 +133,25 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 		o(b)
 	}
 	id := ResolveIdentity(b.getenv, b.cwd, b.cwdErr, b.hostname, b.hostErr)
+	// ★ 프로젝트 좌표는 **주입이 이긴다.**
+	//
+	// 이 패키지가 스스로 푸는 규칙(경로의 마지막 성분)은 워크트리에서 틀린다:
+	// `.claude/worktrees/track2` 에서 띄운 세션이 프로젝트를 `track2` 로 보고,
+	// 그러면 **워크트리마다 유령 프로젝트가 생긴다**. 실물로 재현했다 —
+	// 같은 워크트리에서 CLI 는 `kweiza-cc-plugins`, MCP 는 `wt-probe` 를 봤다.
+	// 워크트리로 일하는 것이 이 제품의 핵심 흐름이라 그 자리에서 바로 깨지는 규칙이다.
+	//
+	// 옳은 규칙은 `git rev-parse --git-common-dir` 로 주 저장소를 찾는 것인데,
+	// 그것은 이미 진입점(cmd/fd)이 푼다. **같은 판정을 두 자리에 두지 않는다** —
+	// 이 레포는 알림 축에서 그것을 한 번 겪었고 한쪽만 고쳐 조용히 어긋났다.
+	//
+	// 주입이 없으면(이 패키지를 단독으로 쓰는 경우) 옛 규칙으로 떨어지되 **그 사실을 남긴다.**
+	if b.projectID != "" {
+		id.ProjectID, id.ProjectPath = b.projectID, b.projectPath
+	} else if id.ProjectID != "" {
+		id.Warnings = append(id.Warnings,
+			"프로젝트 좌표를 경로의 마지막 성분으로 정했다 — 워크트리에서는 주 저장소와 다를 수 있다")
+	}
 
 	s := &Server{be: be, log: log, now: b.now, id: id}
 	if len(id.Missing) > 0 {
@@ -759,4 +780,12 @@ func (s *Server) currentSession() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessionID
+}
+
+// WithProject 는 프로젝트 좌표를 **주입**한다.
+//
+// 진입점이 git 으로 이미 푼 값을 그대로 쓴다 — 이 패키지가 다시 풀면 규칙이 두 벌이 되고,
+// 두 벌은 반드시 표류한다. 워크트리에서 실제로 그렇게 갈렸다.
+func WithProject(id, path string) Option {
+	return func(b *builder) { b.projectID, b.projectPath = id, path }
 }
