@@ -1,7 +1,7 @@
 id: alert-channel
 title: 알림 채널 실체(메신저 봇 API 인가 SMTP 인가)
 repo: code
-paths: deploy/k3s/base/observability/
+paths: deploy/orch/base/observability/
 track: 7
 needs: none
 after: 

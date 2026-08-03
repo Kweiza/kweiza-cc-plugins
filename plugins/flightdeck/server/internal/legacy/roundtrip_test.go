@@ -253,7 +253,7 @@ func TestApplyMakesJudgmentLinkFK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("진척 스냅숏이 없다: %v", err)
 	}
-	if sn.Method != model.SnapshotManual || !strings.Contains(sn.Evidence, "76cffa6") {
+	if sn.Method != model.SnapshotManual || !strings.Contains(sn.Evidence, "5e83926") {
 		t.Errorf("스냅숏 근거가 전수 판정 좌표를 안 담았다: method=%q evidence=%q", sn.Method, clip(sn.Evidence, 120))
 	}
 

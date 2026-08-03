@@ -144,7 +144,7 @@ func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{
-		Project: model.Project{ID: "context-platform", Path: "/home/a/p", DefaultBranch: "main"},
+		Project: model.Project{ID: "sample-platform", Path: "/home/a/p", DefaultBranch: "main"},
 		At:      t0, Window: 8 * time.Hour,
 		Derived: service.Derived{Freshness: model.Freshness{Source: "git", ObservedAt: t0}},
 	}
