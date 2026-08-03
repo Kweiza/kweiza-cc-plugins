@@ -68,6 +68,7 @@ type Option func(*builder)
 type builder struct {
 	projectID   string
 	projectPath string
+	machineID   string
 	getenv      func(string) (string, bool)
 	cwd         string
 	cwdErr      error
@@ -151,6 +152,17 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	} else if id.ProjectID != "" {
 		id.Warnings = append(id.Warnings,
 			"프로젝트 좌표를 경로의 마지막 성분으로 정했다 — 워크트리에서는 주 저장소와 다를 수 있다")
+	}
+
+	// 머신 id 도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고 같은 사고를 겪었다.
+	//
+	// 주입이 없으면 옛 규칙(hostname)으로 떨어지되 **그 사실을 남긴다** — 침묵하면
+	// "주입이 끊겼다"와 "원래 그렇다"가 구분되지 않고, 그 침묵이 이번 결함을 오래 살렸다.
+	if b.machineID != "" {
+		id.MachineID = b.machineID
+	} else if id.MachineID != "" {
+		id.Warnings = append(id.Warnings,
+			"머신 id 를 hostname 으로 정했다 — 진입점이 보관하는 안정 id 와 달라 세션이 갈린다")
 	}
 
 	s := &Server{be: be, log: log, now: b.now, id: id}
@@ -788,4 +800,14 @@ func (s *Server) currentSession() string {
 // 두 벌은 반드시 표류한다. 워크트리에서 실제로 그렇게 갈렸다.
 func WithProject(id, path string) Option {
 	return func(b *builder) { b.projectID, b.projectPath = id, path }
+}
+
+// WithMachine 은 머신 id 를 **주입**한다. WithProject 와 같은 자리, 같은 이유다.
+//
+// 이 패키지가 스스로 푸는 규칙(hostname)은 진입점의 규칙(상태에 보관하는 안정 id)과 다르다.
+// 그래서 같은 머신이 채널마다 다른 id 를 갖고, 세션 정체 3중키의 첫 축이 갈려
+// **한 Claude 세션이 보드에 카드 여러 장으로 뜬다**(실물로 재현했다 — 3장).
+// 프로젝트 축이 먼저 같은 사고를 겪고 주입으로 고쳤는데 머신 축만 그 교정에서 빠져 있었다.
+func WithMachine(id string) Option {
+	return func(b *builder) { b.machineID = strings.TrimSpace(id) }
 }

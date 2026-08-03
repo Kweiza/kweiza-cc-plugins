@@ -16,22 +16,23 @@ import (
 
 // App 은 클라이언트 한 실행분의 좌표다. 서브명령·훅·MCP 가 전부 이것을 공유한다.
 type App struct {
-	env     func(string) (string, bool)
-	log     *slog.Logger
-	sd      StateDir
-	cli     *Client
-	proj    ProjectCoord
-	machine string
-	notice  string // 도구가 스스로 못 한 것. 침묵하지 않는다
-	host    string
-	stdin   io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
-	now     func() time.Time
+	env        func(string) (string, bool)
+	log        *slog.Logger
+	sd         StateDir
+	cli        *Client
+	proj       ProjectCoord
+	machine    string
+	notice     string // 도구가 스스로 못 한 것. 침묵하지 않는다
+	machineSrc string // machine-id 를 읽은 자리. doctor 가 찍는다 — 값이 갈리면 여기가 원인이다
+	host       string
+	stdin      io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
+	now        func() time.Time
 }
 
 func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin io.Reader) *App {
-	home, _ := os.UserHomeDir()
+	home := homeDir(env)
 	sd := ResolveStateDir(env, home)
-	mid, warn := MachineID(sd)
+	mid, midSrc, warn := MachineID(env, home)
 	host, herr := os.Hostname()
 	if herr != nil {
 		host = "unknown"
@@ -39,15 +40,29 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 	}
 	a := &App{
 		env: env, log: log, sd: sd,
-		cli:     newClient(sd, env, log),
-		proj:    resolveProject(env, cwd),
-		machine: mid,
-		notice:  warn,
-		host:    host,
-		stdin:   stdin,
-		now:     func() time.Time { return time.Now().UTC() },
+		cli:        newClient(sd, env, log),
+		proj:       resolveProject(env, cwd),
+		machine:    mid,
+		machineSrc: midSrc,
+		notice:     warn,
+		host:       host,
+		stdin:      stdin,
+		now:        func() time.Time { return time.Now().UTC() },
 	}
 	return a
+}
+
+// homeDir 는 홈 디렉토리다. **주입된 환경이 먼저다.**
+//
+// os.UserHomeDir 는 프로세스 환경을 직접 읽으므로 시험이 그것을 못 바꾼다. 그 상태로
+// machine-id 자리를 홈에 두면 시험이 **사용자의 진짜 machine-id 를 읽고 쓴다** —
+// 시험이 운영 상태를 오염시키고, 그 오염은 다음 세션에서야 드러난다.
+func homeDir(get func(string) (string, bool)) string {
+	if v, ok := get("HOME"); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	h, _ := os.UserHomeDir()
+	return h
 }
 
 // ccSessionID 는 이 세션의 Claude Code UUID 다.

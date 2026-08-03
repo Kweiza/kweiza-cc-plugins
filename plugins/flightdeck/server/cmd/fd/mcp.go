@@ -59,7 +59,13 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 	// ★ 프로젝트 좌표를 **여기서 넘긴다.** mcpsrv 가 스스로 풀면 경로의 마지막 성분이 되고,
 	// 워크트리에서 그것은 워크트리 이름이라 유령 프로젝트가 생긴다(실물로 재현했다).
 	// 옳은 규칙(git 주 저장소)은 App 이 이미 풀어 뒀으므로 그 값을 그대로 쓴다.
-	srv := mcpsrv.New(newMCPBackend(app), log, mcpsrv.WithProject(app.proj.ID, app.proj.Path))
+	//
+	// 머신 id 도 같은 이유로 넘긴다. mcpsrv 가 스스로 풀면 hostname 이 되는데, 진입점은
+	// 상태에 보관하는 안정 id 를 쓴다 — 그 둘이 달라 **한 세션이 보드에 카드 3장**으로 떴다.
+	// 이 프로세스는 이미 App 을 들고 있으므로 값을 새로 만들 필요가 애초에 없었다.
+	srv := mcpsrv.New(newMCPBackend(app), log,
+		mcpsrv.WithProject(app.proj.ID, app.proj.Path),
+		mcpsrv.WithMachine(app.machine))
 	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())
 		return 1

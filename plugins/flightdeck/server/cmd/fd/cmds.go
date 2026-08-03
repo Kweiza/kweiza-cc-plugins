@@ -416,6 +416,10 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 		}
 	}
 	fmt.Fprintf(out, "  상태 디렉토리 %s (%s)\n", a.sd.Path, a.sd.Source)
+	// 머신 id 는 세션 정체 3중키의 첫 축이다. **값만 찍으면 부족하고 읽은 자리를 함께 찍는다** —
+	// 이 축이 채널마다 갈려 한 세션이 카드 세 장으로 떴을 때, 값이 다르다는 것보다
+	// "어느 파일에서 왔나"가 원인에 이르는 열쇠였다(그 줄이 없어 /proc 을 뒤져야 했다).
+	fmt.Fprintf(out, "  머신 %s (%s)\n", a.machine, a.machineSrc)
 	fmt.Fprintf(out, "  프로젝트 %s · 주 저장소 %s · 워크트리 %s\n", a.proj.ID, a.proj.Path, a.proj.Worktree)
 	fmt.Fprintf(out, "  좌표 판정: %s\n", a.proj.Detail)
 	if pend, err := a.cli.Outbox.List(); err != nil {
@@ -445,6 +449,11 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 // 세션 열기는 3중키로 멱등이므로(store.OpenSession) 매번 불러도 새 세션이 안 생긴다.
 // 그래서 "세션 id 를 어디 적어 두고 재사용"하는 기구를 만들지 않는다 —
 // 적어 둔 값은 원본이 움직이는 순간 조용히 거짓이 된다.
+//
+// ★ 그 멱등은 **3중키가 채널 간에 안정할 때만** 채널을 넘는다. 안정하지 않았던 적이 있다:
+// 머신 축을 훅·CLI 는 상태 디렉토리의 파일에서, MCP 는 hostname 에서 만들어
+// 한 Claude 세션이 보드에 카드 세 장으로 떴다. 저장층은 내내 옳았고 클라이언트가 갈렸다.
+// 지금은 MachineID 가 고정 자리를 쓰고 mcpsrv 가 주입을 받는다(env.go · mcp.go).
 func (a *App) sessionID(ctx context.Context, fromFlag string) (string, error) {
 	if v, ok := a.env("FD_SESSION"); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v), nil
