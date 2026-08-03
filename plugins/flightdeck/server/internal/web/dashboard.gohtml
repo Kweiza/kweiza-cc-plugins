@@ -188,14 +188,14 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <tr class="fold-row">
       <td class="mono">{{.ID}}</td>
       <td>{{.Title}}<div class="k">{{.Body}}</div>
-        {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</tbody></td>
+        {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</td>
       <td>{{.State}}</td>
       <td class="mono">{{if .Holder}}{{.Holder}}{{if .Since}}<div class="k">{{.Since}}부터</div>{{end}}{{else}}—{{end}}</td>
       <td class="mono">{{if .Paths}}{{join " · " .Paths}}{{else}}<span class="none">경로 선언 없음</span>{{end}}</td>
       <td>{{if .After}}{{range .After}}<div>{{.}}</div>{{end}}{{else}}<span class="dim">없음</span>{{end}}</td>
       <td>{{if lt .Dependents 0}}<span class="none">못 읽음</span>{{else}}{{.Dependents}}{{end}}</td>
     </tr>
-    {{end}}
+    {{end}}</tbody>
   </table>
   {{end}}
 
@@ -246,9 +246,9 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <tr><th>항목</th><th>제목</th><th>결과</th><th>랜딩 sha</th><th>종료</th><th>사유</th></tr>
     <tbody class="fold">{{range .Landing.Closed}}
     <tr class="fold-row"><td class="mono">{{.ID}}</td><td>{{.Title}}</td><td>{{.State}}</td>
-        <td class="mono">{{if .Holder}}{{.Holder}}{{else}}<span class="dim">—</span>{{end}}</tbody></td>
+        <td class="mono">{{if .Holder}}{{.Holder}}{{else}}<span class="dim">—</span>{{end}}</td>
         <td>{{.Since}}</td><td class="k">{{.Body}}</td></tr>
-    {{end}}
+    {{end}}</tbody>
   </table>
   {{end}}
 
