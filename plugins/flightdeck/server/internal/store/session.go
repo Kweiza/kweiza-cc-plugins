@@ -120,7 +120,7 @@ func (t *Tx) sessionByTriple(machineID, worktree, ccSessionID string) (model.Ses
 		machineID, worktree, ccSessionID)
 	s, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return s, fmt.Errorf("3중키에 해당하는 세션이 %w", ErrNotFound)
+		return s, notFoundNote(NFSession, "3중키(머신·워크트리·cc 세션)에 해당하는")
 	}
 	if err != nil {
 		return s, fmt.Errorf("세션 3중키 조회 실패(machine=%q worktree=%q): %w",
@@ -133,7 +133,7 @@ func getSession(ctx context.Context, q dbtx, id string) (model.Session, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+sessionCols+` FROM session WHERE id = ?`, id)
 	s, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return s, fmt.Errorf("세션 %q 가 %w", clip(id, 64), ErrNotFound)
+		return s, notFound(NFSession, "", id)
 	}
 	if err != nil {
 		return s, fmt.Errorf("세션 조회 실패(session_id=%q): %w", clip(id, 64), err)
@@ -184,7 +184,7 @@ func (t *Tx) SetSessionState(id string, state model.SessionState, why string) er
 		return fmt.Errorf("세션 상태 갱신 결과 확인 실패(session_id=%q): %w", clip(id, 64), err)
 	}
 	if n == 0 {
-		return fmt.Errorf("세션 %q 가 %w", clip(id, 64), ErrNotFound)
+		return notFound(NFSession, "", id)
 	}
 	return nil
 }
@@ -243,6 +243,33 @@ func (s *Store) ListLive(ctx context.Context, project string, since time.Time) (
 		// Branch·BranchSHA·AheadMain·LastNote 는 git 리더와 J 계층이 채우는 축이라
 		// 여기서 비워 둔다. 0값과 "안 봤다"를 뭉개지 않으려면 채우는 쪽이 하나여야 한다.
 		out = append(out, v)
+	}
+	return out, nil
+}
+
+// ListSessions 는 프로젝트의 **모든** 세션을 상태와 무관하게 낸다.
+//
+// ListLive 와 나란히 두는 이유: 되쓰기는 끝난 세션 카드까지 되돌려야 한다.
+// ListLive 는 `state <> 'done'` 이고 신호 나이로도 거르므로, 되쓰기가 그것을 쓰면
+// 끝난 카드가 통째로 사라진다 — 게시판과 달리 이관 산출물은 이력이 자산이다.
+func (s *Store) ListSessions(ctx context.Context, project string) ([]model.Session, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+sessionCols+` FROM session WHERE project = ? ORDER BY opened_at, id`, project)
+	if err != nil {
+		return nil, fmt.Errorf("세션 전수 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+
+	var out []model.Session
+	for rows.Next() {
+		sess, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("세션 행 해석 실패: %w", err)
+		}
+		out = append(out, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("세션 목록 순회 실패: %w", err)
 	}
 	return out, nil
 }
@@ -500,7 +527,7 @@ func (s *Store) GetRefState(ctx context.Context, project, ref string) (model.Ref
 		`SELECT project, ref, sha, subject, at FROM ref_state WHERE project = ? AND ref = ?`,
 		project, ref).Scan(&r.Project, &r.Ref, &r.SHA, &subject, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return r, fmt.Errorf("ref %q(project=%q)의 관측이 %w", clip(ref, 200), clip(project, 64), ErrNotFound)
+		return r, notFound(NFRefState, project, ref)
 	}
 	if err != nil {
 		return r, fmt.Errorf("ref 상태 조회 실패(project=%q ref=%q): %w", clip(project, 64), clip(ref, 200), err)
@@ -556,8 +583,7 @@ func (s *Store) GetChangeSet(ctx context.Context, project, baseSHA, headSHA stri
 		WHERE project = ? AND base_sha = ? AND head_sha = ?`, project, baseSHA, headSHA).
 		Scan(&c.Project, &c.BaseSHA, &c.HeadSHA, &raw, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c, fmt.Errorf("변경집합(project=%q %s..%s)이 %w",
-			clip(project, 64), clip(baseSHA, 12), clip(headSHA, 12), ErrNotFound)
+		return c, notFound(NFChangeSet, project, clip(baseSHA, 12)+".."+clip(headSHA, 12))
 	}
 	if err != nil {
 		return c, fmt.Errorf("변경집합 조회 실패(project=%q %s..%s): %w",

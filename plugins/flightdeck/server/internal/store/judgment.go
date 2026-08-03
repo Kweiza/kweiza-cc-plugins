@@ -126,7 +126,7 @@ func (s *Store) GetJudgment(ctx context.Context, id string) (model.Judgment, err
 	row := s.db.QueryRowContext(ctx, `SELECT `+judgmentCols+` FROM judgment WHERE id = ?`, id)
 	j, err := scanJudgment(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return j, fmt.Errorf("판단 %q 가 %w", clip(id, 64), ErrNotFound)
+		return j, notFound(NFJudgment, "", id)
 	}
 	if err != nil {
 		return j, fmt.Errorf("판단 조회 실패(id=%q): %w", clip(id, 64), err)
@@ -321,7 +321,7 @@ func (s *Store) GetSnapshot(ctx context.Context, project, key string) (model.Sna
 		FROM snapshot WHERE project = ? AND key = ?`, project, key).
 		Scan(&sn.Project, &sn.Key, &sn.Value, &method, &evidence, &digest, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return sn, fmt.Errorf("스냅숏 %s/%s 가 %w", clip(project, 64), clip(key, 64), ErrNotFound)
+		return sn, notFound(NFSnapshot, project, key)
 	}
 	if err != nil {
 		return sn, fmt.Errorf("스냅숏 조회 실패(project=%q key=%q): %w",

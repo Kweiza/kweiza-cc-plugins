@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/gitreader"
@@ -69,6 +70,37 @@ type Service struct {
 	git    GitFactory
 	window time.Duration
 	getenv func(string) (string, bool)
+
+	// derives 는 **세션 카드 파생을 실제로 돌린 횟수**의 누산기다. DeriveStats 참조.
+	derives      atomic.Uint64
+	deriveCards  atomic.Uint64
+	deriveMicros atomic.Uint64
+}
+
+// DeriveStats 는 세션 카드 파생의 누적 비용이다.
+//
+// ★ 이 축이 왜 있나. 세션 카드 파생은 요청 1건당 `git worktree list` + 세션마다
+// ChangedPaths·UncommittedPaths 를 돌린다 — 저장소 전수 훑기다. 그런데 그 비용은
+// 어느 화면에도 안 떴다. 무엇이 그것을 얼마나 자주 돌리는지 모르면
+// "세션·워크트리가 늘면 느려진다"가 **느려진 뒤에야** 보인다(설계 §10:
+// 계측이 어떤 처방이 나았는지 판정할 유일한 축이다).
+//
+// 요청 단위 지표(flightdeck_request_duration_seconds)와 **다른 축**이다. 그쪽은
+// 라우트별 총 시간이고 이쪽은 그중 git 파생이 먹은 몫이라, 둘을 겹쳐 봐야
+// "느린 것이 파생인가 다른 것인가"가 갈린다.
+type DeriveStats struct {
+	Runs    uint64  // 파생을 돌린 횟수
+	Cards   uint64  // 그동안 만든 세션 카드 수(= 저장소를 훑은 세션 수)
+	Seconds float64 // 파생에 든 시간 합
+}
+
+// DeriveStats 는 지금까지의 누적치다. 추가 전용이라 재설정 수단을 두지 않는다.
+func (s *Service) DeriveStats() DeriveStats {
+	return DeriveStats{
+		Runs:    s.derives.Load(),
+		Cards:   s.deriveCards.Load(),
+		Seconds: float64(s.deriveMicros.Load()) / 1e6,
+	}
 }
 
 // Option 은 Service 의 선택 설정이다.

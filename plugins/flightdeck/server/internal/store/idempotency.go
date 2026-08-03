@@ -104,7 +104,7 @@ func (s *Store) GetIdemRecord(ctx context.Context, key string) (IdemRecord, erro
 		SELECT key, fingerprint, status, ctype, body, at FROM idempotency WHERE key = ?`, key).
 		Scan(&r.Key, &r.Fingerprint, &r.Status, &r.ContentType, &r.Body, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return r, fmt.Errorf("멱등 기록 %q 가 %w", clip(key, 64), ErrNotFound)
+		return r, notFound(NFIdempotency, "", key)
 	}
 	if err != nil {
 		return r, fmt.Errorf("멱등 기록 조회 실패(key=%q): %w", clip(key, 64), err)

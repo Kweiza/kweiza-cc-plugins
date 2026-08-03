@@ -269,7 +269,7 @@ func (t *Tx) DeleteItem(project, itemID string) error {
 			clip(project, 64), clip(itemID, 64), err)
 	}
 	if n == 0 {
-		return fmt.Errorf("항목 %s/%s 가 %w", clip(project, 64), clip(itemID, 64), ErrNotFound)
+		return notFound(NFItem, project, itemID)
 	}
 	// item_after 는 FK ON DELETE CASCADE 로 함께 사라진다. 역인덱스는 FK 가 없으므로 손으로 되돌린다.
 	for _, a := range afters {
@@ -323,8 +323,12 @@ func scanItem(sc interface{ Scan(...any) error }) (model.Item, error) {
 }
 
 func afterOf(ctx context.Context, q dbtx, project, itemID string) ([]model.After, error) {
+	// ORDER BY rowid = 삽입 순서다. 정렬을 안 걸면 SQLite 가 우연히 그 순서를 내주는 것에
+	// 기대게 되고, 그러면 되쓰기 산출물의 줄 순서가 판 바뀔 때 조용히 흔들린다 —
+	// 원본과 diff 로 대조하는 것이 그 산출물의 존재 이유라 순서가 곧 계약이다.
 	rows, err := q.QueryContext(ctx,
-		`SELECT dep_item, dep_job, dep_sha FROM item_after WHERE project = ? AND item_id = ?`,
+		`SELECT dep_item, dep_job, dep_sha FROM item_after
+		 WHERE project = ? AND item_id = ? ORDER BY rowid`,
 		project, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("선행 조건 조회 실패(project=%q item=%q): %w",
@@ -351,7 +355,7 @@ func getItem(ctx context.Context, q dbtx, project, itemID string) (model.Item, e
 		`SELECT `+itemCols+` FROM item WHERE project = ? AND id = ?`, project, itemID)
 	it, err := scanItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return it, fmt.Errorf("항목 %s/%s 가 %w", clip(project, 64), clip(itemID, 64), ErrNotFound)
+		return it, notFound(NFItem, project, itemID)
 	}
 	if err != nil {
 		return it, fmt.Errorf("항목 조회 실패(project=%q id=%q): %w",
@@ -403,6 +407,40 @@ func (s *Store) ListOpen(ctx context.Context, project string) ([]model.Item, err
 	return out, nil
 }
 
+// ListItems 는 프로젝트의 **모든** 항목을 상태와 무관하게 낸다.
+//
+// ListOpen 과 나란히 두는 이유: 되쓰기(`fd export --to-legacy`)는 done·dropped 까지
+// 옛 디렉토리(done/·dropped/)로 되돌려야 한다. ListOpen 으로 대신하면 종료된 항목이
+// 통째로 안 나가고, 그 사실은 되쓴 트리를 원본과 대조하기 전에는 안 보인다.
+func (s *Store) ListItems(ctx context.Context, project string) ([]model.Item, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+itemCols+` FROM item WHERE project = ? ORDER BY created_at, id`, project)
+	if err != nil {
+		return nil, fmt.Errorf("항목 전수 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+
+	var out []model.Item
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, fmt.Errorf("항목 행 해석 실패: %w", err)
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("항목 목록 순회 실패: %w", err)
+	}
+	// 선행 조건은 행 순회가 끝난 뒤에 채운다(ListOpen 과 같은 이유 — 같은 커넥션에서
+	// rows 를 열어 둔 채 다른 질의를 던지면 드라이버에 따라 막힌다).
+	for i := range out {
+		if out[i].After, err = afterOf(ctx, s.db, out[i].Project, out[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // ValidateFinish 는 종료 인자가 성립하는지 본다.
 // dropped 에 사유가 없으면 나중에 왜 버렸는지 되짚을 수 없다(스키마 CHECK 와 같은 규율,
 // 다만 여기가 1차 방어다 — DB 제약 위반 문구는 무엇이 빠졌는지 말하지 않는다).
@@ -431,7 +469,7 @@ func (t *Tx) SetItemState(project, itemID string, state model.ItemState, closeRe
 			return fmt.Errorf("항목 상태 갱신 실패(project=%q id=%q state=%q): %w",
 				clip(project, 64), clip(itemID, 64), state, err)
 		}
-		return affectedOne(res, "항목", project, itemID)
+		return affectedOne(res, NFItem, project, itemID)
 	case model.ItemDone, model.ItemDropped:
 		if err := ValidateFinish(state, closeReason); err != nil {
 			return err
@@ -444,7 +482,7 @@ func (t *Tx) SetItemState(project, itemID string, state model.ItemState, closeRe
 			return fmt.Errorf("항목 종료 실패(project=%q id=%q state=%q): %w",
 				clip(project, 64), clip(itemID, 64), state, err)
 		}
-		if err := affectedOne(res, "항목", project, itemID); err != nil {
+		if err := affectedOne(res, NFItem, project, itemID); err != nil {
 			return err
 		}
 		// ★ 종료하면 선점도 함께 반납한다.
@@ -491,7 +529,7 @@ func (t *Tx) SetLandedRef(project, itemID, sha string) error {
 	}
 	// 없는 항목에 조용히 성공하면 이 함수를 만든 이유가 통째로 무너진다 —
 	// "남의 커밋이 박히던 결함"을 고치려다 **아무 데도 안 박히면서 성공으로 보고**하게 된다.
-	return affectedOne(res, "항목", project, itemID)
+	return affectedOne(res, NFItem, project, itemID)
 }
 
 // SetLandedRef 는 단발 트랜잭션으로 감싼 것이다.
@@ -509,14 +547,14 @@ func (s *Store) SetLandedRef(ctx context.Context, project, itemID, sha string) e
 // SetItemState·SetLandedRef 는 안 봐서 **없는 항목 id 에 nil(성공)을 돌려주고 있었다.**
 // 항목 id 오타 하나에 도구가 성공을 보고하고 원장에는 아무것도 안 남는다.
 // 가드를 넣을 때는 같은 자원을 만지는 다른 명령을 반드시 함께 훑어야 한다.
-func affectedOne(res sql.Result, what, project, id string) error {
+func affectedOne(res sql.Result, what NotFoundKind, project, id string) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("%s 갱신 결과 확인 실패(project=%q id=%q): %w",
 			what, clip(project, 64), clip(id, 64), err)
 	}
 	if n == 0 {
-		return fmt.Errorf("%s %q/%q 가 %w", what, clip(project, 64), clip(id, 64), ErrNotFound)
+		return notFound(what, project, id)
 	}
 	return nil
 }
@@ -610,7 +648,7 @@ func claimRow(ctx context.Context, q dbtx, project, itemID string) (model.Claim,
 		FROM claim WHERE project = ? AND item_id = ?`, project, itemID).
 		Scan(&c.Project, &c.ItemID, &c.SessionID, &at, &released, &force)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c, fmt.Errorf("항목 %s/%s 의 선점이 %w", clip(project, 64), clip(itemID, 64), ErrNotFound)
+		return c, notFound(NFClaim, project, itemID)
 	}
 	if err != nil {
 		return c, fmt.Errorf("선점 조회 실패(project=%q item=%q): %w",
@@ -694,8 +732,7 @@ func (t *Tx) ForceReleaseClaim(project, itemID, reason string) error {
 			clip(project, 64), clip(itemID, 64), err)
 	}
 	if n == 0 {
-		return fmt.Errorf("항목 %s/%s 에 살아 있는 선점이 %w",
-			clip(project, 64), clip(itemID, 64), ErrNotFound)
+		return notFound(NFLiveClaim, project, itemID)
 	}
 	if _, err := t.tx.ExecContext(t.ctx,
 		`UPDATE item SET state = 'open' WHERE project = ? AND id = ? AND state = 'claimed'`,

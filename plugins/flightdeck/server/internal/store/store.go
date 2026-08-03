@@ -299,6 +299,54 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 // ─────────────────────────────────────────────────────────────────────────────
 // 마이그레이션 — 판정은 순수 함수, 실행만 여기
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// ⚠ **설계 §7 과 어긋난 자리다. 다음 세션이 "설계대로 돼 있다"고 믿지 않게 여기 적는다.**
+//
+// §7 의 "나쁜 스키마 변경으로 크래시루프" 행은 처방을 셋으로 적었다:
+//
+//	① 마이그레이션을 **별도 one-shot 컨테이너로 분리**
+//	② 기동 전 DB 백업
+//	③ 롤백 명령
+//
+// 지금 구현이 만족하는 것은 **②뿐이다.**
+//
+//   - ①이 없다: 적용이 Open() 안에 있고 Open() 은 `fd serve` 기동 경로다. 그래서 나쁜 증분은
+//     "서버가 안 뜬다"로 나타나고, 그때 고칠 수단도 같은 바이너리를 다시 띄우는 것뿐이다.
+//   - ③이 없다: 되돌리는 서브명령이 없다. 되돌릴 길은 백업 파일 손 복사뿐이다.
+//
+// **지금 이 구조를 유지하기로 한 판단과 근거**(2026-08-03):
+// 증분이 한 단(002)이고 순수 가산이라 실질 위험이 낮다. 반면 적용을 기동에서 떼면
+// **모든 명령**(fail-open 훅 4종 포함)이 "스키마가 아직 안 올라간 DB" 를 만나는 새 경로가 생기고,
+// 훅은 정의상 조용히 죽으므로 그 경로의 실패가 침묵한다. 제거하는 위험보다 새로 만드는 위험이 크다.
+//
+// **이 판단이 뒤집히는 조건**: 증분이 파괴적(컬럼 삭제·타입 변경·데이터 이행)이 되는 순간.
+// 그때는 `fd migrate [--to N]` / `fd migrate --rollback` 으로 적용을 기동에서 분리한다.
+// 그 전까지 ③의 자리는 RollbackHint 가 **문구로** 메운다 — 명령이 없다면 적어도
+// 절차가 실패한 그 자리에 있어야 한다.
+
+// RollbackHint 는 마이그레이션이 깨졌을 때 되돌리는 절차를 낸다. 순수 함수다.
+//
+// ★ 이 문구가 오류와 로그에 실린다. 앞선 판은 업그레이드 경로에서 백업 경로를
+// **지역 변수로 버려서**, 정확히 §7 이 겨냥한 상황(다음 증분이 깨지는 날)에
+// 오류가 "무엇을 얹다 실패했다"만 말하고 **어디로 되돌리는지는 말하지 못했다.**
+// 적용 경로(MigrateApply)는 backup=%q 를 실었는데 업그레이드 경로는 안 실었다 —
+// 같은 상황을 다루는 두 경로가 다르게 생겼으면 한쪽이 틀린 것이다.
+//
+// -wal·-shm 을 함께 지우라고 적는 이유: 백업은 VACUUM INTO 로 뜬 **독립된 일관 사본**이라
+// WAL 이 딸려 있지 않다. 옛 -wal 을 남긴 채 .db 만 갈아 끼우면 SQLite 가 그 WAL 을
+// 되살려 얹고, 그러면 되돌렸다고 믿는 순간 반쯤 적용된 상태가 부활한다.
+func RollbackHint(dbPath, backupPath string) string {
+	if strings.TrimSpace(backupPath) == "" {
+		return "이번 기동은 백업을 뜨지 않았다(빈 DB 이거나 메모리 DB 다) — 되돌릴 파일이 없다. " +
+			"옛 백업은 " + clip(dbPath, 200) + ".bak-* 에 있다."
+	}
+	db := clip(dbPath, 200)
+	return fmt.Sprintf("되돌리려면 서버를 멈추고: cp -f %q %q && rm -f %q %q "+
+		"(백업은 VACUUM INTO 로 뜬 일관 사본이라 WAL 이 없다 — 옛 -wal 을 남기면 "+
+		"반쯤 적용된 상태가 되살아난다). "+
+		"적용을 기동에서 떼는 별도 one-shot 단계와 되돌리기 서브명령은 아직 없다(설계 §7 대비 미구현).",
+		clip(backupPath, 200), db, db+"-wal", db+"-shm")
+}
 
 // MigrationAction 은 여는 시점에 무엇을 할지다.
 type MigrationAction string
@@ -517,7 +565,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		//   그것은 트랜잭션 안에서 못 돈다. 중간에 끊기면 남는 것은 위 백업뿐이고,
 		//   그 상태는 PlanMigration 이 다음 기동에서 dbVersion==0 으로 잡아 다시 적용한다.
 		if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
-			return fmt.Errorf("스키마 적용 실패(path=%q, backup=%q): %w", s.path, backupPath, err)
+			s.log.Error("스키마 적용 실패 — 되돌리는 절차를 함께 낸다",
+				"path", s.path, "reason", RollbackHint(s.path, backupPath), "error", err.Error())
+			return fmt.Errorf("스키마 적용 실패(path=%q): %w — %s", s.path, err, RollbackHint(s.path, backupPath))
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`,
@@ -528,7 +578,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		// ★ 신규 DB 도 증분을 그대로 탄다. 신규용으로 schema.sql 에 같은 표를 또 적으면
 		//   정의가 두 벌이 되고, 신규 설치와 업그레이드가 다른 모양의 DB 를 갖게 된다.
 		if err := s.applyUpgrades(ctx, BaseSchemaVersion); err != nil {
-			return err
+			return s.rollbackable(err, backupPath)
 		}
 		s.log.Info("마이그레이션 완료",
 			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())
@@ -538,15 +588,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		start := time.Now()
 		s.log.Info("마이그레이션 시작",
 			"path", s.path, "from", dbVersion, "to", SchemaVersion, "backup", plan.Backup, "reason", plan.Reason)
+		// ★ backupPath 를 블록 밖에 둔다. 앞선 판은 이 자리에서 `:=` 로 선언해 **버렸고**,
+		//   그래서 아래 실패가 어디로 되돌리는지 말하지 못했다 —
+		//   정확히 설계 §7 이 겨냥한 상황에서 유일한 탈출구의 좌표가 사라진 것이다.
+		var backupPath string
 		if plan.Backup {
-			backupPath, err := s.backup(ctx)
+			backupPath, err = s.backup(ctx)
 			if err != nil {
 				return err
 			}
 			s.log.Info("마이그레이션 전 백업 완료", "path", s.path, "backup", backupPath)
 		}
 		if err := s.applyUpgrades(ctx, dbVersion); err != nil {
-			return err
+			return s.rollbackable(err, backupPath)
 		}
 		s.log.Info("마이그레이션 완료",
 			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())
@@ -555,6 +609,17 @@ func (s *Store) migrate(ctx context.Context) error {
 	default:
 		return fmt.Errorf("알 수 없는 마이그레이션 판정: %q (%s)", plan.Action, plan.Reason)
 	}
+}
+
+// rollbackable 은 마이그레이션 실패에 **되돌리는 절차**를 붙인다.
+//
+// 두 경로(신규 적용·증분 업그레이드)가 같은 문구를 쓰게 하려고 헬퍼로 뺐다 —
+// 두 벌로 두면 한쪽만 고쳐지고, 그 비대칭이 다시 "어디로 되돌리나"를 지운다.
+func (s *Store) rollbackable(err error, backupPath string) error {
+	hint := RollbackHint(s.path, backupPath)
+	s.log.Error("마이그레이션 실패 — 되돌리는 절차를 함께 낸다",
+		"path", s.path, "reason", hint, "error", err.Error())
+	return fmt.Errorf("%w — %s", err, hint)
 }
 
 func (s *Store) hasTable(ctx context.Context, name string) (bool, error) {

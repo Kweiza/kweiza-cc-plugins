@@ -32,6 +32,7 @@ type harness struct {
 	st      *store.Store
 	svc     *service.Service
 	state   string
+	db      string // SQLite 파일. **재기동을 넘어 살아남는 유일한 것**이라 좌표를 들고 있는다
 	project string
 	token   string // 빈 문자열이면 인증 꺼짐. newHarnessAuth 가 채운다
 	env     map[string]string
@@ -48,27 +49,22 @@ func newHarness(t *testing.T) *harness { return newHarnessAuth(t, "") }
 func newHarnessAuth(t *testing.T, token string) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "fd.db"))
-	if err != nil {
-		t.Fatalf("DB 를 못 열었다: %v", err)
-	}
-	t.Cleanup(func() {
-		if cerr := st.Close(); cerr != nil {
-			t.Errorf("DB 닫기 실패: %v", cerr)
-		}
-	})
-	quiet := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	svc := service.New(st, quiet)
-	h := buildHandler(svc, web.New(svc, web.WithLogger(quiet)), api.Options{Log: quiet, Token: token})
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-
 	hs := &harness{
-		t: t, srv: srv, st: st, svc: svc,
+		t:       t,
 		token:   token,
 		state:   filepath.Join(dir, "state"),
+		db:      filepath.Join(dir, "fd.db"),
 		project: "testproj",
 	}
+	hs.openStore()
+	t.Cleanup(hs.closeStore) // srv.Close 보다 **먼저** 등록한다 — 정리는 LIFO 라 나중에 돈다
+
+	quiet := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	h := buildHandler(hs.svc, web.New(hs.svc, web.WithLogger(quiet)), api.Options{Log: quiet, Token: token})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	hs.srv = srv
+
 	hs.env = map[string]string{
 		"FD_URL":                 srv.URL,
 		"FD_STATE_DIR":           hs.state,
@@ -77,6 +73,56 @@ func newHarnessAuth(t *testing.T, token string) *harness {
 		"CLAUDE_CODE_SESSION_ID": "cc-session-uuid-1",
 	}
 	return hs
+}
+
+// openStore 는 DB 파일 하나를 열고 그 위에 서비스를 새로 만든다.
+//
+// 파일 경로를 필드로 들고 있는 이유: 재기동을 **볼륨은 같고 프로세스는 새로**로
+// 흉내 내려면 같은 파일을 다시 열 수 있어야 한다(restartProcess).
+func (h *harness) openStore() {
+	h.t.Helper()
+	st, err := store.Open(h.db)
+	if err != nil {
+		h.t.Fatalf("DB 를 못 열었다(%s): %v", h.db, err)
+	}
+	h.st = st
+	h.svc = service.New(st, quietLogger())
+}
+
+// closeStore 는 지금 열려 있는 DB 를 닫는다. 두 번 불러도 안전하다.
+func (h *harness) closeStore() {
+	if h.st == nil {
+		return
+	}
+	st := h.st
+	h.st, h.svc = nil, nil
+	if err := st.Close(); err != nil {
+		h.t.Errorf("DB 닫기 실패: %v", err)
+	}
+}
+
+// restartProcess 는 **컨테이너 교체**다 — 볼륨(DB 파일)은 그대로, 프로세스는 새로.
+// 설계 §7 의 "컨테이너 크래시 → restart: unless-stopped" 가 그리는 조건이 이것이다.
+//
+// up() 과 무엇이 다른가를 정확히 적는다. 뭉개면 이 갈래가 무엇을 지키는지 아무도 모른다.
+//
+//   - up() 은 **HTTP 표면만** 새로 만든다. 같은 *store.Store 와 *service.Service 를
+//     그대로 재사용하므로, 저장 계층 객체가 들고 있는 프로세스 상태는 살아남는다.
+//   - restartProcess() 는 거기에 더해 **DB 파일을 닫고 다시 연다.** 그래서 남는 것이
+//     디스크에 커밋된 것뿐이다.
+//
+// ★ 실측으로 확인한 것: 멱등 표의 **메모리 층**은 up() 도 이미 새로 만든다
+// (api.NewServer 가 매번 idemStore 를 새로 만든다). 그래서 "메모리 전용 멱등"이라는
+// 변이는 두 갈래 모두 빨간불을 낸다 — 이 갈래가 그 변이 때문에 필요한 것은 아니다.
+// 이 갈래가 **추가로** 닫는 것은 DB 파일을 실제로 다시 열어야만 보이는 축이다:
+// 기록이 정말 디스크에 커밋됐는가 · 저장 계층 객체에 얹힌 캐시가 답을 대신하고 있지 않은가.
+// 그리고 이쪽이 운영의 실제 조건이므로, 같은 값이면 더 강한 쪽을 쓴다.
+func (h *harness) restartProcess() {
+	h.t.Helper()
+	h.down()
+	h.closeStore()
+	h.openStore()
+	h.up()
 }
 
 // down 은 서버를 죽인다. 열화(L1) 경로 시험의 전제다.
@@ -119,8 +165,18 @@ func (h *harness) up() {
 // run 은 fd 한 번을 돌리고 종료코드와 stdout 을 낸다.
 func (h *harness) run(stdin string, args ...string) (int, string) {
 	h.t.Helper()
+	return h.runEnv(h.env, stdin, args...)
+}
+
+// runEnv 는 **다른 환경으로** fd 한 번을 돌린다.
+//
+// 상태 디렉토리를 고르는 축(FD_STATE_DIR·CLAUDE_PLUGIN_DATA·XDG_STATE_HOME)은
+// 하네스가 FD_STATE_DIR 로 고정해 두므로, 그 우선순위 자체를 시험하려면
+// 환경을 바꿔 끼울 자리가 필요하다. 전역 환경을 흔들지 않는 것이 이 갈래의 존재 이유다.
+func (h *harness) runEnv(env map[string]string, stdin string, args ...string) (int, string) {
+	h.t.Helper()
 	var out, errb bytes.Buffer
-	code := run(args, envOf(h.env), strings.NewReader(stdin), &out, &errb)
+	code := run(args, envOf(env), strings.NewReader(stdin), &out, &errb)
 	return code, out.String()
 }
 

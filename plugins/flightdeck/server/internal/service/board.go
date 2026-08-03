@@ -144,10 +144,21 @@ func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([
 // 붙이는 것은 셋이다 — 브랜치·HEAD(워크트리 목록) · ahead(기본 브랜치 대비) ·
 // 경로(footprint ∪ change_set ∪ 미커밋). 셋 다 실패해도 세션 행은 남는다.
 func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
+	// ★ 이 함수가 이 서버에서 가장 비싼 일이다 — `git worktree list` 한 번 + 살아 있는
+	//   세션마다 ChangedPaths·UncommittedPaths. 그 비용을 세는 자리를 여기 둔다.
+	//   호출부에 두면 호출부가 늘 때마다 계측이 조용히 빠진다(실제로 그 모양으로
+	//   MCP 꼬리가 도구 호출마다 이 파생을 한 번씩 더 돌리고 있었고, 아무 화면에도 안 떴다).
+	start := time.Now()
+	defer func() {
+		s.derives.Add(1)
+		s.deriveMicros.Add(uint64(time.Since(start).Microseconds()))
+	}()
+
 	live, err := s.st.ListLive(ctx, proj.ID, cut)
 	if err != nil {
 		return nil, err
 	}
+	s.deriveCards.Add(uint64(len(live)))
 
 	var g GitReader
 	var wts map[string]string // 워크트리 경로 → 브랜치

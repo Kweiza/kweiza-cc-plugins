@@ -88,6 +88,13 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // handleMetrics 는 프로메테우스 텍스트 포맷을 직접 쓴다(의존성 0).
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := s.met.snapshot(s.hub.Count(), s.hub.Dropped())
+	// 파생 비용은 service 계층이 센다(비싼 일이 거기 있으므로). 표면은 옮기기만 한다.
+	// svc 가 nil 인 조립이 시험에 있으므로 그 축은 0 으로 남긴다 — 0 과 "안 잰다"를
+	// 여기서 가르지 않는 이유는, 그 조립에는 파생을 돌릴 경로 자체가 없어서다.
+	if s.svc != nil {
+		d := s.svc.DeriveStats()
+		snap.DeriveRuns, snap.DeriveCards, snap.DeriveSeconds = d.Runs, d.Cards, d.Seconds
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.WriteString(w, RenderMetrics(snap)); err != nil {
@@ -135,6 +142,41 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, r, http.StatusOK, view)
+}
+
+// handleNotices 는 **응답 꼬리에 실을 알림만** 낸다(최근 ask·blocked).
+//
+// ★ 이 표면이 왜 따로 있나. MCP 도구는 응답마다 꼬리에 미확인 알림을 붙이는데(설계 §6),
+// 그 값을 가져올 표면이 dashboard.json 뿐이었다. 그래서 **도구 호출 1회마다**
+// 세션 카드 파생(git worktree list · ChangedPaths · UncommittedPaths)이 통째로 한 번 더 돌았다.
+// 지금은 8~60ms 라 무해하지만, 세션·워크트리가 늘면 모든 도구 응답 지연에
+// 저장소 전수 훑기가 얹힌다.
+//
+// dashboard.json 에 "파생을 건너뛰는 인자"를 더하는 쪽도 정당했지만 이쪽을 골랐다.
+// 이유는 **비대칭이 이미 결함을 가리키고 있어서**다: service 계층에는 이 축만 여는
+// RecentNotes 가 진작 있었고(그 함수 주석이 바로 이 비용을 이유로 든다),
+// 없는 것은 그것을 밖으로 내는 REST 표면 하나뿐이었다. 인자를 더하면
+// "무엇을 부르는가"가 여전히 화면 표면이라 /metrics 의 라우트 라벨에서 두 트래픽이
+// 계속 한 덩어리로 남는다 — 표면을 가르면 그 라벨이 그대로 계측 축이 된다.
+func (s *server) handleNotices(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.requireQuery(w, r, "project", "알림은 프로젝트 안에서만 좌표가 있다.")
+	if !ok {
+		return
+	}
+	limit, err := queryInt(r, "limit", 0)
+	if err != nil {
+		s.writeError(w, r, badRequest("bad_limit", "limit 이 정수가 아니다", "예: limit=20"))
+		return
+	}
+	// **거르지 않은 것을 낸다.** "내가 쓴 것은 알림이 아니다"는 표시 계층의 판정이고
+	// (mcpsrv.FilterNotes), 그 축을 여기서 접으면 같은 목록을 다른 '나'로 다시 볼 수 없다.
+	// 그래서 self·session_id 인자를 두지 않는다 — 결과를 안 바꾸는 인자는 만들지 않는다.
+	notes, err := s.svc.RecentNotes(r.Context(), project, limit)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]any{"notes": notes})
 }
 
 // handleEvents 는 SSE 구독이다.

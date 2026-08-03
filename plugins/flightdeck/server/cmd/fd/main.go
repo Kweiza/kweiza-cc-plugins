@@ -40,6 +40,11 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd alloc <counter>                      원자 발번
   fd doctor                               이 머신과 서버의 축을 실제로 잰다
 
+  fd import --from-code <레포> [--from-docs <레포>] [--apply]
+                                          옛 도구 산출물을 옮긴다. **기본값은 예행**이고
+                                          --apply 가 있어야 쓴다. 원본은 읽기만 한다
+  fd export --to-legacy --out <디렉토리>   옛 형식으로 되쓴다(완전 왕복은 아니다 — 출력이 목록을 낸다)
+
 환경: FD_URL(기본 http://127.0.0.1:7420) · FD_TOKEN · FD_PROJECT · FD_STATE_DIR · FD_LOG
 `
 
@@ -108,6 +113,10 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runAlloc(ctx, args[1:], stdout)
 	case "doctor":
 		return app.runDoctor(ctx, args[1:], stdout)
+	case "import":
+		return app.runImport(ctx, args[1:], stdout)
+	case "export":
+		return app.runExport(ctx, args[1:], stdout)
 	default:
 		fmt.Fprintf(stderr, "모르는 명령: %s\n\n%s", clip(args[0], 40), usage)
 		return 2

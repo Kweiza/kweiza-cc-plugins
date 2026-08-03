@@ -1,0 +1,11 @@
+# 빌드 산출물 — 플러그인은 소스만 배포하고 bin/fd 런처가 필요할 때 빌드한다.
+# 20MB 바이너리는 한 번 커밋되면 히스토리에서 빼기가 매우 비싸다.
+plugins/flightdeck/server/fd
+plugins/*/server/fd
+
+# Go
+*.test
+*.out
+
+# 편집기·OS
+.DS_Store

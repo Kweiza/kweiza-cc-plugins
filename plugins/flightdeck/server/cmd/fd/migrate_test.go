@@ -1,0 +1,195 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// 이관 CLI 의 소비자 좌표계는 **stdout 과 파일시스템**이다.
+// "DB 를 안 건드린다"는 주장은 mtime·크기로만 확인할 수 있다 —
+// 코드를 읽어 "여기서 안 열잖아"라고 단정하면 그 단정은 다음 판올림에서 조용히 거짓이 된다.
+
+// fixtureRoot 는 internal/legacy 의 실물 픽스처다.
+// 이 시험이 그것을 다시 쓰는 이유: CLI 는 **경로 두 개를 받아 도는 것**이 계약이고,
+// 손으로 만든 임시 트리를 쓰면 실제 원본의 모양(쉼표 paths·비규약 절)을 못 본다.
+const fixtureRoot = "../../internal/legacy/testdata/legacy"
+
+func fixtureArgs() (code, docs string) {
+	return filepath.Join(fixtureRoot, "code"), filepath.Join(fixtureRoot, "docs")
+}
+
+// ★ 예행은 DB 를 **한 바이트도** 안 건드린다.
+func TestImportDryRunDoesNotTouchDB(t *testing.T) {
+	h := newHarness(t)
+	code, docs := fixtureArgs()
+
+	// 대조 전제 ①: DB 파일이 실제로 있고 크기가 0이 아니어야 한다.
+	// 파일이 없으면 "안 건드렸다"는 단정이 "만들지도 않았다"와 구분되지 않는다.
+	before, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("전제가 깨졌다 — DB 파일이 없다: %v", err)
+	}
+	if before.Size() == 0 {
+		t.Fatal("전제가 깨졌다 — DB 파일 크기가 0이다")
+	}
+
+	rc, out := h.run("", "import", "--from-code", code, "--from-docs", docs,
+		"--project", h.project, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("예행이 실패했다(rc=%d):\n%s", rc, out)
+	}
+	mustContain(t, "예행 출력", out,
+		"DB 를 한 바이트도 건드리지 않았다", "건수 대조", "--apply")
+
+	after, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("예행 뒤 DB 파일이 사라졌다: %v", err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("예행이 DB 를 건드렸다 — 크기 %d→%d · mtime %s→%s",
+			before.Size(), after.Size(), before.ModTime(), after.ModTime())
+	}
+
+	// 대조 전제 ②: 이 실행이 정말 무언가 읽긴 했는가.
+	// 아무것도 못 읽고 0건으로 끝났다면 "안 건드렸다"는 공허하다.
+	if !strings.Contains(out, "queue/items/dash-real-data-render.md") {
+		t.Errorf("예행이 원본을 읽지 못한 것으로 보인다 — 거절 목록이 비었다:\n%s", out)
+	}
+}
+
+// DB 파일이 아예 없을 때도 예행은 만들지 않는다(WAL·마이그레이션·백업 전부).
+func TestImportDryRunDoesNotCreateDB(t *testing.T) {
+	h := newHarness(t)
+	code, docs := fixtureArgs()
+	fresh := filepath.Join(t.TempDir(), "nested", "new.db")
+
+	rc, out := h.run("", "import", "--from-code", code, "--from-docs", docs,
+		"--project", h.project, "--db", fresh)
+	if rc != 0 {
+		t.Fatalf("예행이 실패했다(rc=%d):\n%s", rc, out)
+	}
+	for _, p := range []string{fresh, fresh + "-wal", fresh + "-shm", filepath.Dir(fresh)} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("예행이 %s 를 만들었다 — 예행은 아무것도 안 남겨야 한다", p)
+		}
+	}
+}
+
+// --apply 가 있어야 실제로 쓴다. 그리고 원본은 그대로다.
+func TestImportApplyWritesAndLeavesSourceUntouched(t *testing.T) {
+	h := newHarness(t)
+	code, docs := fixtureArgs()
+
+	// 원본 트리의 지문을 먼저 뜬다. 이관이 원본에 쓰면 되돌리기 근거가 통째로 무너진다.
+	beforeSrc := treeFingerprint(t, fixtureRoot)
+
+	h.closeStore() // 같은 파일을 두 프로세스가 여는 상황을 만들지 않는다
+	rc, out := h.run("", "import", "--from-code", code, "--from-docs", docs,
+		"--project", h.project, "--db", h.db, "--apply")
+	if rc != 0 {
+		t.Fatalf("적용이 실패했다(rc=%d):\n%s", rc, out)
+	}
+	mustContain(t, "적용 출력", out, "아래대로 DB 에 넣었다", "넣음: 세션")
+
+	if got := treeFingerprint(t, fixtureRoot); got != beforeSrc {
+		t.Error("이관이 원본 트리를 건드렸다 — 되돌리기(DB 삭제 + 재실행)가 성립하지 않게 된다")
+	}
+
+	h.openStore()
+	items, err := h.st.ListItems(t.Context(), h.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 {
+		t.Fatal("--apply 인데 항목이 하나도 안 들어갔다")
+	}
+	for _, it := range items {
+		if it.ID == "dash-real-data-render" {
+			t.Error("쉼표 paths 로 거절한 항목이 DB 에 들어갔다")
+		}
+	}
+}
+
+// --apply 와 --dry-run 을 함께 주면 아무것도 하지 않는다.
+// 둘 중 하나를 골라 진행하면 그 선택이 어디에도 안 남는다.
+func TestImportRefusesContradictoryFlags(t *testing.T) {
+	h := newHarness(t)
+	code, _ := fixtureArgs()
+	rc, out := h.run("", "import", "--from-code", code, "--apply", "--dry-run",
+		"--project", h.project, "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("모순된 인자를 받았다:\n%s", out)
+	}
+	mustContain(t, "거절 사유", out, "어느 쪽인지 알 수 없으므로")
+}
+
+// 되쓰기는 --out 없이는 안 돈다 — 기본값이 원본이면 언젠가 원본 위에 쓴다.
+func TestExportRequiresExplicitOutDir(t *testing.T) {
+	h := newHarness(t)
+	rc, out := h.run("", "export", "--to-legacy", "--project", h.project, "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("--out 없이 돌았다:\n%s", out)
+	}
+	mustContain(t, "거절 사유", out, "원본 위에 쓰지 않기 위해서다")
+}
+
+// 되쓰기 출력은 **무엇이 안 돌아오는지**를 반드시 낸다.
+func TestExportPrintsRoundTripLosses(t *testing.T) {
+	h := newHarness(t)
+	code, docs := fixtureArgs()
+	h.closeStore()
+	if rc, out := h.run("", "import", "--from-code", code, "--from-docs", docs,
+		"--project", h.project, "--db", h.db, "--apply"); rc != 0 {
+		t.Fatalf("이관 실패(rc=%d):\n%s", rc, out)
+	}
+	outDir := filepath.Join(t.TempDir(), "legacy-out")
+	rc, out := h.run("", "export", "--to-legacy", "--out", outDir,
+		"--project", h.project, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("되쓰기 실패(rc=%d):\n%s", rc, out)
+	}
+	mustContain(t, "되쓰기 출력", out,
+		"왕복에서 돌아오지 않는 것", "branch", "head", "pid", "status.html")
+
+	if _, err := os.Stat(filepath.Join(outDir, ".claude", "sessions", "7.md")); err != nil {
+		t.Errorf("세션 카드가 안 나왔다: %v", err)
+	}
+	h.openStore()
+}
+
+// treeFingerprint 는 트리의 경로·크기·내용 해시를 하나로 접는다.
+// mtime 은 넣지 않는다 — 읽기만 해도 atime 정책에 따라 흔들려 거짓 양성이 난다.
+func treeFingerprint(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		b.WriteString(p)
+		b.WriteByte('\x00')
+		b.WriteString(hashOf(data))
+		b.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("원본 지문을 못 떴다: %v", err)
+	}
+	return b.String()
+}
+
+func hashOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}

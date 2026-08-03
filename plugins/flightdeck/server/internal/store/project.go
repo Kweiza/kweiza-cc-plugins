@@ -63,7 +63,7 @@ func getProject(ctx context.Context, q dbtx, id string) (model.Project, error) {
 		FROM project WHERE id = ?`, id).
 		Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch, &config, &fromSHA, &created)
 	if errors.Is(err, sql.ErrNoRows) {
-		return p, fmt.Errorf("프로젝트 %q 가 %w", clip(id, 64), ErrNotFound)
+		return p, notFound(NFProject, "", id)
 	}
 	if err != nil {
 		return p, fmt.Errorf("프로젝트 조회 실패(id=%q): %w", clip(id, 64), err)
@@ -161,7 +161,7 @@ func (s *Store) GetMachine(ctx context.Context, id string) (model.Machine, error
 		`SELECT id, hostname, first_seen, last_seen FROM machine WHERE id = ?`, id).
 		Scan(&m.ID, &m.Hostname, &first, &last)
 	if errors.Is(err, sql.ErrNoRows) {
-		return m, fmt.Errorf("머신 %q 가 %w", clip(id, 64), ErrNotFound)
+		return m, notFound(NFMachine, "", id)
 	}
 	if err != nil {
 		return m, fmt.Errorf("머신 조회 실패(id=%q): %w", clip(id, 64), err)

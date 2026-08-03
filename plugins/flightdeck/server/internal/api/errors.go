@@ -105,11 +105,20 @@ func ClassifyError(err error) Classified {
 		return ConflictAdvice(conflict)
 	}
 
+	var missing *store.NotFoundError
+	if errors.As(err, &missing) {
+		return NotFoundAdvice(missing)
+	}
+
 	if errors.Is(err, store.ErrNotFound) {
+		// 좌표를 안 들고 오는 없음이다(하류가 아직 문자열로만 만든 경우).
+		// **일반 문구로 접는 것은 마지막 수단이다** — 여기로 오는 오류가 늘면
+		// 404 가 다시 사유를 하나로 합류시키므로, 새 없음은 store.NotFoundError 로 만든다.
 		return Classified{
-			Status:  http.StatusNotFound,
-			Code:    "not_found",
-			Message: "요청한 대상이 없다 — 좌표(프로젝트·항목·세션 id)를 확인해라",
+			Status:   http.StatusNotFound,
+			Code:     "not_found",
+			Message:  "요청한 대상이 없다 — 좌표(프로젝트·항목·세션 id)를 확인해라",
+			Guidance: "무엇이 없었는지가 이 응답에 없다. request_id 로 서버 로그를 봐라.",
 		}
 	}
 
@@ -119,6 +128,66 @@ func ClassifyError(err error) Classified {
 		Message:  "서버 내부 오류다. 원인 전문은 서버 로그에 있다",
 		Guidance: "이 응답의 request_id 로 로그를 찾아라 — 응답에는 내부 좌표를 싣지 않는다.",
 		Internal: true,
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 없음(404) → 소비자가 읽는 문구
+// ─────────────────────────────────────────────────────────────────────────────
+
+// notFoundGuidance 는 종류별 처방이다.
+//
+// ★ 좌표만 싣고 처방을 하나로 두면 개선이 절반만 산다. 404 가 합류시키는 사유는
+// **오타 난 항목 id · 프로젝트 미등록 · 이미 반납된 선점** 셋이고, 셋의 고칠 거리가 전부 다르다.
+// 문구가 갈라져야 사유가 갈라진다.
+//
+// ★ 시험이 store.NotFoundKinds() 로 **전수** 확인한다(conflictWordTable 과 같은 규율).
+// 종류를 하나 늘리고 여기를 안 채우면 그 하나만 처방 없이 새어 나간다.
+var notFoundGuidance = map[store.NotFoundKind]string{
+	store.NFProject: "프로젝트가 아직 등록되지 않았다 — 세션을 한 번 열면 등록된다(fd open). " +
+		"훅이 도는지, project 인자의 철자가 맞는지 확인해라.",
+	store.NFMachine: "머신이 등록돼 있지 않다 — 세션을 열면 함께 등록된다(fd open).",
+	store.NFItem: "항목 id 오타이거나 아직 큐에 없는 항목이다 — fd next 로 목록을 보고, " +
+		"없으면 fd add 로 넣어라. 이미 끝난 항목이면 409(claim_refused)로 온다.",
+	store.NFClaim: "그 항목에 선점 행이 아예 없다 — 아직 아무도 집지 않았다는 뜻이다(fd pick <id>).",
+	store.NFLiveClaim: "살아 있는 선점이 없다 — 이미 반납됐거나 남이 끝낸 것이다. " +
+		"지금 누가 무엇을 쥐고 있는지는 board 가 낸다.",
+	store.NFSession: "세션이 등록돼 있지 않다 — fd open 으로 열어라(3중키라 재호출은 새 세션이 아니라 재개다).",
+	store.NFJudgment: "그 id 의 판단이 없다 — 판단은 추가 전용이라 id 를 지어내면 가리킬 것이 없다. " +
+		"검색은 GET /api/v1/judgments?q= 다.",
+	store.NFSnapshot:     "그 키의 스냅숏이 아직 없다 — PUT 으로 먼저 넣어라. 키 철자도 확인해라.",
+	store.NFResourceHold: "그 자원에 살아 있는 점유가 없다 — 이미 반납됐다는 뜻이다.",
+	store.NFIdempotency:  "그 멱등 키의 기록이 없다 — 보존 구간이 지났거나 처음 보는 키다.",
+	store.NFRefState: "그 ref 의 관측 기록이 아직 없다 — 보드를 한 번 부르면 서버가 git 에서 읽어 남긴다. " +
+		"프로젝트 경로가 비어 있으면 파생 자체가 안 돈다(fd doctor).",
+	store.NFChangeSet: "그 두 커밋 사이의 변경집합이 보관돼 있지 않다 — 보드 파생이 아직 그 구간을 안 읽었다.",
+}
+
+// NotFoundAdvice 는 없음 하나를 소비자가 읽을 응답으로 옮긴다. 순수 함수다.
+//
+// ★ 좌표를 응답에 싣는다. 실을 수 있는 이유는 그 값이 **호출자가 방금 보낸 것**이라서다 —
+// 프로젝트·항목·세션 id 는 내부 이름(구조체명·SQL·파일 경로)이 아니다.
+// 좌표를 빼면 오타 난 항목 id 와 프로젝트 미등록과 이미 반납된 선점이 같은 화면이 되고,
+// 그러면 조사가 사용자 신고 충실도에 의존한다.
+//
+// ★ 그래도 **외부에서 온 값이라 자르고 제어문자를 걷어낸 뒤에** 싣는다. 저장 계층이 이미
+// 한 번 자르지만 여기서 또 한다 — 가드는 소비 계층에 있어야 하고, 그 결선이 끊기는
+// 회귀는 실재한다.
+func NotFoundAdvice(e *store.NotFoundError) Classified {
+	if e == nil {
+		return Classified{Status: http.StatusOK, Code: "ok", Message: "오류가 없다"}
+	}
+	g, ok := notFoundGuidance[e.Kind]
+	if !ok {
+		// 종류가 늘었는데 처방이 안 붙은 것이다. 좌표는 그대로 내고 그 사실을 말한다 —
+		// 조용히 빈 처방으로 두면 "처방이 없는 종류"와 "처방이 필요 없는 종류"가 구분되지 않는다.
+		g = "이 종류의 처방이 아직 표에 없다 — 좌표는 위에 있다. request_id 로 서버 로그를 봐라."
+	}
+	return Classified{
+		Status:   http.StatusNotFound,
+		Code:     "not_found",
+		Message:  clip(e.What(), 200) + " 가 없다",
+		Guidance: g,
 	}
 }
 

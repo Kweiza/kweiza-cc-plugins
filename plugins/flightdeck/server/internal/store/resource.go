@@ -153,8 +153,7 @@ func heldBy(ctx context.Context, q dbtx, project, resource string) (model.Resour
 		WHERE project = ? AND resource = ? AND released_at IS NULL`, project, resource).
 		Scan(&r.ID, &r.Project, &r.Resource, &session, &job, &at, &force)
 	if errors.Is(err, sql.ErrNoRows) {
-		return r, fmt.Errorf("자원 %s/%s 의 살아 있는 점유가 %w",
-			clip(project, 64), clip(resource, 64), ErrNotFound)
+		return r, notFound(NFResourceHold, project, resource)
 	}
 	if err != nil {
 		return r, fmt.Errorf("자원 점유 조회 실패(project=%q resource=%q): %w",
@@ -225,8 +224,7 @@ func (t *Tx) ForceReleaseResource(project, resource, reason string) error {
 			clip(project, 64), clip(resource, 64), err)
 	}
 	if n == 0 {
-		return fmt.Errorf("자원 %s/%s 의 살아 있는 점유가 %w",
-			clip(project, 64), clip(resource, 64), ErrNotFound)
+		return notFound(NFResourceHold, project, resource)
 	}
 	return nil
 }
