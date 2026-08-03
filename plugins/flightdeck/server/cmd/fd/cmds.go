@@ -149,10 +149,19 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// ★ 본문이 없다고 stdin 을 읽지 않는다. `--body -` 일 때만 읽는다.
+	//
+	// 앞선 판은 본문이 비면 stdin 을 EOF 까지 읽었고, 그래서 **stdin 이 열려 있는 곳에서는
+	// 영원히 멈췄다** — 훅과 에이전트의 Bash 도구가 정확히 그 환경이다(스모크에서 3분 넘게 멈췄다).
+	// 더 나쁜 것은 훅 경로다: 거기 stdin 은 훅 JSON 페이로드라, 읽으면 그것을 판단 본문으로 삼는다.
+	// 단위 시험은 이 축을 원리적으로 못 본다 — 시험은 본문을 주거나 이미 닫힌 리더를 쓴다.
 	text := *body
-	if strings.TrimSpace(text) == "" {
-		if b, err := io.ReadAll(a.stdin); err == nil {
+	if text == "-" {
+		// stdin 읽기는 **명시적으로 요청했을 때만** 한다.
+		if b, err := io.ReadAll(io.LimitReader(a.stdin, 4<<20)); err == nil {
 			text = string(b)
+		} else {
+			text = ""
 		}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -260,7 +269,7 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("add")
 	id := fs.String("id", "", "항목 id(브랜치 이름·워크트리 디렉토리로 그대로 쓰인다)")
 	title := fs.String("title", "", "제목")
-	body := fs.String("body", "", "본문")
+	body := fs.String("body", "", "본문(`-` 이면 stdin 에서 읽는다)")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	var paths, labels, afterItems, afterSHAs stringList
 	fs.Var(&paths, "path", "이 항목이 만질 경로")
@@ -311,7 +320,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("finish")
 	outcome := fs.String("outcome", "done", "done|dropped")
 	title := fs.String("title", "", "판단 제목")
-	body := fs.String("body", "", "핸드오프 본문(비면 stdin)")
+	body := fs.String("body", "", "핸드오프 본문(`-` 이면 stdin 에서 읽는다)")
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
@@ -326,9 +335,12 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		return 2
 	}
 	text := *body
-	if strings.TrimSpace(text) == "" {
-		if b, err := io.ReadAll(a.stdin); err == nil {
+	if text == "-" {
+		// stdin 읽기는 **명시적으로 요청했을 때만** 한다.
+		if b, err := io.ReadAll(io.LimitReader(a.stdin, 4<<20)); err == nil {
 			text = string(b)
+		} else {
+			text = ""
 		}
 	}
 	if strings.TrimSpace(text) == "" {

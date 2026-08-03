@@ -225,3 +225,15 @@ func (h *harness) requireTokenEverywhere() {
 	h.srv = httptest.NewServer(handler)
 	h.t.Cleanup(h.srv.Close)
 }
+
+// runWithStdin 은 임의의 io.Reader 를 stdin 으로 준다.
+//
+// run/runEnv 는 문자열을 받아 strings.NewReader 로 감싸므로 **항상 즉시 EOF** 다.
+// 그래서 "본문이 없으면 stdin 을 EOF 까지 읽는다"는 폴백을 원리적으로 못 본다 —
+// 실제 훅·에이전트 환경의 stdin 은 열려 있고 EOF 가 안 온다.
+func (h *harness) runWithStdin(stdin io.Reader, args ...string) (int, string) {
+	h.t.Helper()
+	var out, errb bytes.Buffer
+	code := run(args, envOf(h.env), stdin, &out, &errb)
+	return code, out.String()
+}
