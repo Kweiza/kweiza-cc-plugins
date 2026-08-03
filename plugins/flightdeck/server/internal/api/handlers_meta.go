@@ -6,7 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"context"
+	"errors"
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 화면·알림·진단 표면.
@@ -201,7 +204,12 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer s.hub.Unsubscribe(subscriber)
 
 	// 첫 줄을 즉시 보낸다 — 구독이 성립했다는 사실 자체가 소비자에게 필요한 신호다.
-	if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
+	//
+	// ★ **무엇을 구독했는지 함께 말한다.** 범위를 안 말하면 뒤이은 침묵이
+	// "아무 일도 없다"인지 "필터가 아무것도 안 맞춘다"인지 구분되지 않는다 —
+	// 프로젝트 이름 오타 하나로 영원히 조용한 스트림을 정상으로 읽게 된다.
+	// 알려진 프로젝트인지도 함께 본다: 모르는 이름이면 그 사실이 첫 줄에 뜬다.
+	if _, err := io.WriteString(w, ": connected "+s.subscriptionScope(r.Context(), project)+"\n\n"); err != nil {
 		return
 	}
 	if err := rc.Flush(); err != nil {
@@ -247,4 +255,25 @@ func (s *server) handleUnmatched(w http.ResponseWriter, r *http.Request) {
 		Message:  "그런 표면이 없다",
 		Guidance: "정본 표면은 /api/v1/ 아래에 있다. 목록은 설계 §6 의 REST 표다.",
 	})
+}
+
+// subscriptionScope 는 이 구독이 무엇을 받는지 한 줄로 말한다.
+//
+// 침묵과 부재를 가르기 위한 것이다 — 스트림이 조용할 때 그것이 "일이 없다"인지
+// "이 필터에 맞는 것이 애초에 없다"인지는 이 줄이 없으면 답할 수 없다.
+func (s *server) subscriptionScope(ctx context.Context, project string) string {
+	if project == "" {
+		return "— 전 프로젝트(필터 없음)"
+	}
+	if s.st == nil {
+		return "— 프로젝트 " + clip(project, 64)
+	}
+	if _, err := s.st.GetProject(ctx, project); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "— 프로젝트 " + clip(project, 64) +
+				" (★ 등록되지 않은 이름이다 — 이 구독은 아무것도 받지 못한다. 오타이거나 아직 안 만든 프로젝트다)"
+		}
+		return "— 프로젝트 " + clip(project, 64) + " (등록 여부를 확인하지 못했다)"
+	}
+	return "— 프로젝트 " + clip(project, 64)
 }

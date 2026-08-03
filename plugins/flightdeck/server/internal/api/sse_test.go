@@ -84,7 +84,9 @@ func TestSSEDeliversEventAndCleansUpOnDisconnect(t *testing.T) {
 			t.Fatalf("Content-Type 이 %q 다", ct)
 		}
 		br := bufio.NewReader(resp.Body)
-		if first := readFrame(t, br); first != ": connected\n" {
+		// 첫 줄은 **무엇을 구독했는지**까지 말한다 — 범위를 안 말하면 뒤이은 침묵이
+		// "아무 일도 없다"인지 "필터가 아무것도 안 맞춘다"인지 구분되지 않는다.
+		if first := readFrame(t, br); !strings.HasPrefix(first, ": connected") {
 			t.Fatalf("구독 성립 줄이 %q 다", first)
 		}
 		readers = append(readers, br)
@@ -207,5 +209,50 @@ func TestSlowSubscriberDoesNotBlockPublishingAndIsCounted(t *testing.T) {
 		"flightdeck_sse_dropped_total 2") {
 		t.Fatalf("버린 이벤트가 안 세어졌다 — 조용한 이벤트가 된다:\n%s",
 			e.do(http.MethodGet, "/metrics", nil).Body.String())
+	}
+}
+
+// 구독 범위가 세 경우에 **서로 다르게** 보여야 한다.
+//
+// ★ 이 축이 없으면 오타 난 프로젝트로 구독한 사람이 영원히 조용한 스트림을 정상으로 읽는다.
+// 그리고 이 시험을 쓰게 된 계기 자체가 그 혼동이었다 — 필터 없는 구독을 재다가
+// **구독이 성립하기 전에 측정해** 0건을 보고 "필터 없으면 아무것도 안 온다"고 오진했다.
+// 허브는 처음부터 빈 프로젝트를 전 프로젝트로 다뤘다.
+func TestSubscriptionScopeDistinguishesSilenceFromBadFilter(t *testing.T) {
+	e := newEnv(t, nil)
+	e.openSession("cc-1")
+
+	// ★ SSE 핸들러는 클라이언트가 끊을 때까지 돈다. 레코더는 스스로 안 끊기므로
+	//   요청 컨텍스트로 끊는다 — 안 그러면 이 시험이 영원히 멈춘다(실제로 그랬다).
+	first := func(q string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		defer cancel()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/events"+q, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		e.h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("구독이 %d 다(%s)", w.Code, q)
+		}
+		line, _, _ := strings.Cut(w.Body.String(), "\n")
+		return line
+	}
+
+	none := first("")
+	known := first("?project=" + testProject)
+	unknown := first("?project=없는프로젝트")
+
+	if !strings.Contains(none, "전 프로젝트") {
+		t.Errorf("필터 없는 구독이 범위를 안 말한다: %q", none)
+	}
+	if !strings.Contains(known, testProject) || strings.Contains(known, "등록되지 않은") {
+		t.Errorf("등록된 프로젝트를 미등록으로 말한다: %q", known)
+	}
+	if !strings.Contains(unknown, "등록되지 않은") {
+		t.Errorf("모르는 프로젝트인데 그 사실을 안 말한다 — 조용한 스트림이 정상으로 읽힌다: %q", unknown)
+	}
+	// 셋이 서로 달라야 한다. 같으면 이 줄은 아무것도 구분하지 못한다.
+	if none == known || known == unknown {
+		t.Errorf("구독 범위 문구가 겹친다: %q · %q · %q", none, known, unknown)
 	}
 }
