@@ -147,7 +147,7 @@ func TestSetupCommandsRefusesUnsafeID(t *testing.T) {
 		t.Fatalf("명령 3줄이어야 한다: %v", cmds)
 	}
 	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"cd /repo", "git worktree add .flightdeck/worktrees/batch7 -b batch7 main"} {
+	for _, want := range []string{"cd '/repo'", "git worktree add '.flightdeck/worktrees/batch7' -b batch7 'main'"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("명령에 %q 가 없다:\n%s", want, joined)
 		}
@@ -159,7 +159,7 @@ func TestSetupCommandsRefusesUnsafeID(t *testing.T) {
 		t.Fatalf("프로젝트 경로를 모르면 명령을 만들면 안 된다: %v", got)
 	}
 	// 표 밖 케이스: 기본 브랜치가 비면 main 으로 메운다(빈 인자를 git 에 넘기지 않는다).
-	if got := SetupCommands("/repo", "", "batch7"); !strings.HasSuffix(got[1], " main") {
+	if got := SetupCommands("/repo", "", "batch7"); !strings.HasSuffix(got[1], " 'main'") {
 		t.Fatalf("기본 브랜치가 비면 main 이어야 한다: %v", got)
 	}
 }

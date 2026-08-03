@@ -370,7 +370,8 @@ func TestPickResponseHasBranchAndWorktreeCommands(t *testing.T) {
 	if !strings.Contains(rec, "브랜치: t5-iam") {
 		t.Fatalf("추천 응답에 브랜치 이름이 없다:\n%s", rec)
 	}
-	wantCmd := fmt.Sprintf("git worktree add %s -b t5-iam main", service.WorktreeDir("t5-iam"))
+	// 경로는 인용된다 — 이 문자열의 소비자가 에이전트의 Bash 도구라 공백 하나에 cd 가 갈라진다.
+	wantCmd := fmt.Sprintf("git worktree add '%s' -b t5-iam 'main'", service.WorktreeDir("t5-iam"))
 	if !strings.Contains(rec, wantCmd) {
 		t.Fatalf("추천 응답에 워크트리 준비 명령(%q)이 없다:\n%s", wantCmd, rec)
 	}

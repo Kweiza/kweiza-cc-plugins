@@ -282,7 +282,7 @@ func TestEncodeSSE(t *testing.T) {
 		t.Fatalf("직렬화 실패: %v", err)
 	}
 	s := string(frame)
-	if !strings.HasPrefix(s, "id: 01ABC\nevent: judgment.note\ndata: {") {
+	if !strings.HasPrefix(s, "id: 01ABC\ndata: {") {
 		t.Fatalf("프레임 머리가 다르다:\n%s", s)
 	}
 	if !strings.HasSuffix(s, "\n\n") {
@@ -297,8 +297,9 @@ func TestEncodeSSE(t *testing.T) {
 	if n := strings.Count(strings.TrimSuffix(string(frame), "\n\n"), "\n\n"); n != 0 {
 		t.Fatalf("프레임 안에 빈 줄이 생겼다(주입 통로다):\n%q", string(frame))
 	}
-	if lines := strings.Split(strings.TrimSuffix(string(frame), "\n\n"), "\n"); len(lines) != 3 {
-		t.Fatalf("프레임 줄 수가 3이 아니다: %q", string(frame))
+	if lines := strings.Split(strings.TrimSuffix(string(frame), "\n\n"), "\n"); len(lines) != 2 {
+		// id·data 둘뿐이다 — event 줄을 안 찍는다(브라우저 onmessage 가 발화해야 하므로)
+		t.Fatalf("프레임 줄 수가 2가 아니다: %q", string(frame))
 	}
 }
 

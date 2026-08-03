@@ -43,9 +43,18 @@ func EncodeSSE(id string, ev Event) ([]byte, error) {
 	if id != "" {
 		fmt.Fprintf(&b, "id: %s\n", oneLine(id))
 	}
-	if ev.Kind != "" {
-		fmt.Fprintf(&b, "event: %s\n", oneLine(ev.Kind))
-	}
+	// ★ `event:` 줄을 찍지 않는다. kind 는 data 안에 이미 있다.
+	//
+	// SSE 규약상 `event:` 가 있으면 브라우저의 `onmessage` 는 **한 번도 발화하지 않는다**
+	// (그 프레임의 type 이 `message` 가 아니게 되므로). 앞선 판은 여기서 이름을 찍고
+	// 화면은 `onmessage` 만 걸어, 스트림은 정상으로 열리는데 **화면이 영원히 정지**했다.
+	// 그리고 스트림이 열려 있으니 메타 리프레시 폴백도 안 켜졌고,
+	// "(파생: … N초 전)" 배지가 렌더 시각으로 굳어 **낡은 값을 신선하다고 우겼다.**
+	//
+	// 두 시험이 각자 자기 절반(발행 쪽은 프레임 문자열, 구독 쪽은 HTML 문자열)을 고정해
+	// 둘 다 초록인 채로 제품이 죽어 있었다. 이름을 안 찍으면 그 이음매 자체가 사라진다 —
+	// 새 kind 를 서버가 더해도 화면이 자동으로 받으므로 조용한 표류도 안 생긴다.
+	// 구독자가 종류로 거를 일이 생기면 data 의 kind 를 보면 된다.
 	fmt.Fprintf(&b, "data: %s\n\n", payload)
 	return []byte(b.String()), nil
 }

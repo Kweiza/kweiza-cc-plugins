@@ -119,7 +119,7 @@ func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {
 	if !strings.Contains(got, "브랜치: t5-iam") {
 		t.Fatalf("브랜치 이름이 없다:\n%s", got)
 	}
-	if !strings.Contains(got, "git worktree add .flightdeck/worktrees/t5-iam -b t5-iam main") {
+	if !strings.Contains(got, "git worktree add '.flightdeck/worktrees/t5-iam' -b t5-iam 'main'") {
 		t.Fatalf("워크트리 준비 명령이 없다:\n%s", got)
 	}
 	// 기계가 세는 값(사유 코드)은 사람 말로 풀지 않고 그대로 보인다.
