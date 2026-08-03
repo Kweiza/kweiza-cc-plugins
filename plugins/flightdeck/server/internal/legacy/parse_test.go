@@ -176,7 +176,7 @@ func TestParseQueueItemReadsTailFields(t *testing.T) {
 			t.Fatalf("거절됐다 — [%s] %s", r.Code, r.Detail)
 		}
 	}
-	if it.LandedSHA != "ca83243a039fab5d16f595e9e57df4a9bba9062c" {
+	if it.LandedSHA != "71f52b4c8d1e097a3b6f24e5d8c0a917be34f6d2" {
 		t.Errorf("landed_sha=%q", it.LandedSHA)
 	}
 	if it.Closed.IsZero() {
@@ -299,13 +299,13 @@ func TestParseDashboardReadsFourAxes(t *testing.T) {
 		t.Fatalf("축 개수가 다르다: landings=%d parts=%d issues=%d blockers=%d",
 			len(d.Landings), len(d.Parts), len(d.Issues), len(d.Blockers))
 	}
-	if d.Judged.SHA != "76cffa6" || d.Judged.At != "2026-08-03" {
+	if d.Judged.SHA != "5e83926" || d.Judged.At != "2026-08-03" {
 		t.Errorf("judged=%+v", d.Judged)
 	}
 	if d.Parts[0].Pct != 75 || d.Parts[0].Name != "계약 — 스키마 · API 스펙" {
 		t.Errorf("parts[0]=%+v", d.Parts[0])
 	}
-	if d.Landings[0].Commit != "7f703a0" {
+	if d.Landings[0].Commit != "8206c5a" {
 		t.Errorf("landings[0].commit=%q", d.Landings[0].Commit)
 	}
 	// ★ `body` 와 `note` 는 같은 자리의 두 이름이다. 실물 70건 중 41건이 `note` 만 갖고 있어서
@@ -329,7 +329,7 @@ func TestParseDashboardReadsFourAxes(t *testing.T) {
 	}
 	// evidence 는 지어내지 않고 judged 에서 만든다.
 	ev := PartEvidence(d.Judged, d.Parts[0])
-	if !strings.Contains(ev, "76cffa6") || !strings.Contains(ev, "2026-08-03") {
+	if !strings.Contains(ev, "5e83926") || !strings.Contains(ev, "2026-08-03") {
 		t.Errorf("근거 문자열에 전수 판정 좌표가 없다: %q", ev)
 	}
 }

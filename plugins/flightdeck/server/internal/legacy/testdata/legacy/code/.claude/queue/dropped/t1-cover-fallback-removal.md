@@ -1,7 +1,7 @@
 id: t1-cover-fallback-removal
 title: 옛 Raw 재처리 뒤 커버 폴백(2단) 제거 — 재처리 전에 지우면 전량 기본값이 된다
 repo: code
-paths: pipeline/src/pipeline/stages/
+paths: svc-beta/src/svc_beta/stages/
 track: 2
 needs: none
 after: t2-quarantine-stale-rows

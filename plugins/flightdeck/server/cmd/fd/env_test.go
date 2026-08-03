@@ -82,7 +82,7 @@ func TestMainRepoRootPicksTheMainRepositoryNotTheWorktree(t *testing.T) {
 
 func TestProjectIDFromPathStripsShellHostileCharacters(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"/home/a/context-platform", "context-platform"},
+		{"/home/a/sample-platform", "sample-platform"},
 		{"/home/a/my repo", "my-repo"},
 		{"/home/a/repo;rm -rf", "repo-rm--rf"},
 		{"/", ""},

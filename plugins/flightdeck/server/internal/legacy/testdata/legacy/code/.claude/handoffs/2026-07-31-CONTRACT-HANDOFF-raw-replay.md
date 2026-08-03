@@ -14,7 +14,7 @@
 `reprocess=true` 를 세우는 주체가 **생겼다**. 그 유일한 원천은 신규 PG 표
 `raw_replay_requests` 의 좌표별 marker 이고, 소비자가 원장 게이트에서 그것을 읽어
 `build_upsert_event(..., reprocess=True)` 로 넘긴다. **표식은 메시지에 실리지 않는다** —
-엔벨로프를 위조해도 이 값을 세울 수 없다. 재생 잡은 `pipeline.raw_replay` 다.
+엔벨로프를 위조해도 이 값을 세울 수 없다. 재생 잡은 `svc-beta.raw_replay` 다.
 
 메시지 스키마는 **무변경**이다(`topics.md` 가 배제한 헤더·전용 토픽 두 안을 준수했고,
 보류안이던 raw-envelope 선택 필드도 채택하지 않았다).
@@ -42,7 +42,7 @@ grep -rnE '재처리|재투입|재생' contracts/                      # ③ 어
 
 ### ① `events/context-updated.v1.schema.json` — `reprocess` description
 
-**현재**: "알파 현재 이 값은 발행자(outbox-relay)가 상수 false 로 싣는다 — true 를 세우는
+**현재**: "알파 현재 이 값은 발행자(relay-svc)가 상수 false 로 싣는다 — true 를 세우는
 주체는 Raw 범위 재투입(§6.6 백필) 경로뿐이고 **그것이 아직 없기 때문이며**, 그 경로가
 랜딩하는 시점에 발효한다"
 **왜 거짓**: 경로가 랜딩했다.
@@ -50,13 +50,13 @@ grep -rnE '재처리|재투입|재생' contracts/                      # ③ 어
 
 ### ② 같은 파일 같은 필드 — DLQ 재발행 배제 문장
 
-**현재**: "DLQ·격리 재발행 런북(pipeline.reprocess)의 재발행분은 여기서 말하는 재처리가
+**현재**: "DLQ·격리 재발행 런북(svc-beta.reprocess)의 재발행분은 여기서 말하는 재처리가
 아니다 — 그 자산은 아직 소비자에게 도달한 적이 없어 소비자에겐 신규 변경이 맞다"
 **왜 거짓**: 전칭이 깨진다. marker 가 남은 좌표(재생 발행 → 하류 일시 오류 → DLQ →
 RB-3 재발행)의 재발행은 게이트 우회를 타 `reprocess=true` 로 나간다.
 **제안 방향**: 단서 추가 — "단, §6.6 요청 표 marker 가 남아 있는 좌표의 재발행이 성공
 처리되면 그 이벤트는 재처리 유래로 표시된다(그 재발행이 §6.6 요청의 완료다)".
-**같은 단서를 정본 RB-3 행·부록 A 어휘 행에도 이미 넣었다**(문서 레포 커밋 `a8e13d0`) —
+**같은 단서를 정본 RB-3 행·부록 A 어휘 행에도 이미 넣었다**(문서 레포 커밋 `0a8eb4d`) —
 계약만 단서 없이 두면 그 자리에 새 거짓이 생긴다.
 
 ### ③ `topics.md:7` — `context.updated` 행 말미
@@ -82,7 +82,7 @@ RB-3 재발행)의 재발행은 게이트 우회를 타 `reprocess=true` 로 나
 
 ### ⑥ `envelope/context-item.v1.schema.json:144` — `updated_at` description  ← **3축에서만 걸린다**
 
-**현재**: "이 Context Item 이 마지막으로 갱신된 시각. … 원본 동기화 없이 항목이 바뀌는
+**현재**: "이 Sample Item 이 마지막으로 갱신된 시각. … 원본 동기화 없이 항목이 바뀌는
 그 밖의 경로(스튜어드 편집·**재처리**)가 생기면 갈림이 더 늘어난다"
 **왜 문제**: 그 경로가 생겼는데 **갈림이 안 늘어난다**. 재생은 `fetched_at`=원본
 `synced_at` 을 보존하므로 `updated_at` 이 갱신되지 않는다(`map.py` 가 `updated_at=fetched_at`
@@ -98,12 +98,12 @@ RB-3 재발행)의 재발행은 게이트 우회를 타 `reprocess=true` 로 나
 ### ⑦ `raw-envelope.v1.schema.json:40`·`:50` — 생산자 집합  ← **2축에서만 걸린다**
 
 **현재**: `:40` "…파이프라인은 값을 만들지 않고 그대로 전달한다 … 생산자가 있는 값은
-**figma 커넥터의** fixture·poll·snapshot-diff·backfill" / `:50` "**커넥터가** 이 엔벨로프를
+**vendor-a 커넥터의** fixture·poll·snapshot-diff·backfill" / `:50` "**커넥터가** 이 엔벨로프를
 발행한 시각"
 **왜 문제**: 파이프라인(`raw_replay`)이 `ingest.raw` 의 **두 번째 생산자**가 됐다. 재생
 엔벨로프는 원본 `sync_mode` 를 보존 복사하므로 값 집합은 안 바뀌지만, "생산자 = 커넥터"
 라는 진술과 "파이프라인은 값을 만들지 않는다"는 진술이 **불완전**해진다.
-**같은 취지의 정본 문장에는 이미 각주를 넣었다**(§6.1 :390, 문서 레포 `a8e13d0`) —
+**같은 취지의 정본 문장에는 이미 각주를 넣었다**(§6.1 :390, 문서 레포 `0a8eb4d`) —
 계약본만 두면 비대칭이다. **거짓이냐 불완전이냐는 독법에 따라 갈리므로 계약 세션이 판정할
 자리다**(그래서 트랙 2 가 단정하지 않고 넘긴다).
 
@@ -115,16 +115,16 @@ RB-3 재발행)의 재발행은 게이트 우회를 타 `reprocess=true` 로 나
 `pattern` 추가.
 
 현재 `{tenant_id}:{file_key}` 는 계약이지만 **`file_key` 를 `source_id` 에서 어떻게 뽑는지의
-정본이 트랙 1 사적 코드뿐이다**(`services/connector-figma/connector/emit.go` 의 `sourceID`).
+정본이 트랙 1 사적 코드뿐이다**(`services/svc-gamma/connector/emit.go` 의 `sourceID`).
 이번 랜딩으로 파이프라인이 그 형식을 **재현**해야 하는 두 번째 생산자가 됐고, 재현이
 어긋나면 다른 파티션으로 새어 파일 단위 순서 보장이 조용히 깨진다.
 
-트랙 2 는 임시로 정규식 `^figma:file/([^/]+)/node/.+$` 를 전량 일치로 두고 실패 시
+트랙 2 는 임시로 정규식 `^vendor-a:file/([^/]+)/node/.+$` 를 전량 일치로 두고 실패 시
 **발행하지 않는다**(fail-closed). 다만 **트랙 1 이 형식을 바꾸면 우리 시험은 초록인 채
 파티션 키가 갈라진다** — 시험이 사본을 단정하고 있기 때문이다. 계약 명문화가 근본 처방이다.
 
 **함께 볼 것**: 순서 보장 계약은 키 문자열만이 아니라 **파티셔너 알고리즘**도 포함한다.
-커넥터(franz-go)는 키 있는 레코드를 murmur2 로 배치하고 librdkafka 기본은 CRC32 라,
+커넥터(client-a)는 키 있는 레코드를 murmur2 로 배치하고 client-b 기본은 CRC32 라,
 파이프라인 쪽에 `partitioner: murmur2_random` 을 명시해야 같은 키가 같은 파티션으로 간다
 (이번 랜딩에 넣었다). 이 사실이 계약에 없으면 세 번째 생산자가 같은 함정에 빠진다.
 
@@ -137,9 +137,9 @@ RB-3 재발행)의 재발행은 게이트 우회를 타 `reprocess=true` 로 나
 
 | 자리 | 왜 계속 참인가 |
 |---|---|
-| `topics.md:16` — "커넥터 `sync_mode=backfill` 은 §6.6 재처리가 **아니다**" | **영구 규칙**이다. `pipeline/tests/test_outbox_event.py` 가 집행하고, 이번 랜딩 후에도 참이다 |
+| `topics.md:16` — "커넥터 `sync_mode=backfill` 은 §6.6 재처리가 **아니다**" | **영구 규칙**이다. `svc-beta/tests/test_outbox_event.py` 가 집행하고, 이번 랜딩 후에도 참이다 |
 | `raw-envelope.v1:40` 말미 — "재처리 유래 표시는 `context-updated` 의 `reprocess` 가 담당하는 별도 축" | 이번 설계가 **정확히 이대로** 했다 |
 | `events/tombstone.v1.schema.json:6` — "발행자는 아직 없다" | 삭제 통지 발행(delete 계층 ②)은 **별개 사건**이고 아직 안 왔다 |
 | `topics.md:8` — `lifecycle.deletions` 행의 알파 한정 구절 | 위와 같다 |
 | `README.md:35`·`:44`·`:46` | 계약 작성 **규율문**이지 이 랜딩의 대상이 아니다 |
-| `openapi/data-api.v1.yaml:322`·`:500` | 서빙 표면 축 — 이 랜딩과 무관 |
+| `openapi/svc-alpha.v1.yaml:322`·`:500` | 서빙 표면 축 — 이 랜딩과 무관 |
