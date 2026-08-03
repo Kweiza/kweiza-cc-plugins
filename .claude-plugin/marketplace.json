@@ -18,6 +18,12 @@
       "description": "Session handoff — save progress to a durable file, plan next session, write a starter prompt; resume it later with /session-resume",
       "source": "./plugins/session-handoff",
       "category": "productivity"
+    },
+    {
+      "name": "flightdeck",
+      "description": "Parallel session coordination — one self-hosted service that many sessions across machines register with: session board, work queue, merge queue, live dashboard",
+      "source": "./plugins/flightdeck",
+      "category": "productivity"
     }
   ]
 }
