@@ -1,0 +1,324 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/kweiza/flightdeck/internal/model"
+)
+
+// J 계층 — 판단·링크·전문 검색·스냅숏. 사람이 쓰는 유일한 것이고 **추가 전용**이다.
+//
+// ★ 이 파일에 UpdateJudgment·DeleteJudgment 가 없다. 스키마의 BEFORE UPDATE/DELETE 트리거가
+// 물리적으로 막지만, 애초에 **호출부가 없어야** 한다 — 트리거를 우회할 코드가 존재하지 않으면
+// 우회할 것도 없다. 정정은 새 행 + Supersedes 다.
+// 기존 게시판은 같은 파일을 두 세션이 쓸 수 있어 앞 세션의 절이 통째로 덮였고,
+// 저장소가 버전관리 밖이라 원문이 영구 소실됐다. 두 번 났다.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// judgment
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AddJudgment 는 판단 하나와 그 링크를 저장한다. ID 가 비어 있으면 발급한다.
+//
+// 반환은 저장된 판단이다(발급된 ID 를 호출부가 알아야 링크를 걸 수 있다).
+func (t *Tx) AddJudgment(j model.Judgment) (model.Judgment, error) {
+	if strings.TrimSpace(j.Body) == "" {
+		// 스키마 CHECK(body <> '') 가 최후 방어이지 1차 방어가 아니다.
+		// 공백만 든 본문은 CHECK 를 통과하는데, 그건 판단이 아니다.
+		return j, errors.New("판단 본문이 비었다 — 무엇을 왜 그렇게 했는지가 이 표의 존재 이유다")
+	}
+	if j.ID == "" {
+		j.ID = NewID()
+	}
+	if j.At.IsZero() {
+		j.At = nowStamp()
+	}
+	if _, err := t.tx.ExecContext(t.ctx, `
+		INSERT INTO judgment(id, project, session_id, at, kind, title, body, supersedes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, nullStr(j.Project), nullStr(j.SessionID), fmtTime(j.At),
+		string(j.Kind), nullStr(j.Title), j.Body, nullStr(j.Supersedes)); err != nil {
+		return j, fmt.Errorf("판단 저장 실패(id=%q kind=%q session=%q): %w",
+			clip(j.ID, 64), clip(string(j.Kind), 32), clip(j.SessionID, 64), err)
+	}
+	for _, l := range j.Links {
+		if l.TargetKind == "" || l.TargetID == "" {
+			return j, fmt.Errorf("판단 링크가 비었다(kind=%q id=%q)",
+				clip(l.TargetKind, 32), clip(l.TargetID, 64))
+		}
+		if _, err := t.tx.ExecContext(t.ctx,
+			`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
+			j.ID, l.TargetKind, l.TargetID); err != nil {
+			return j, fmt.Errorf("판단 링크 저장 실패(judgment=%q target=%s/%s): %w",
+				clip(j.ID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
+		}
+	}
+	return j, nil
+}
+
+// AddJudgment 는 단발 트랜잭션으로 감싼 것이다.
+func (s *Store) AddJudgment(ctx context.Context, j model.Judgment) (model.Judgment, error) {
+	var out model.Judgment
+	err := s.Tx(ctx, func(t *Tx) error {
+		var e error
+		out, e = t.AddJudgment(j)
+		return e
+	})
+	return out, err
+}
+
+const judgmentCols = `id, project, session_id, at, kind, title, body, supersedes`
+
+func scanJudgment(sc interface{ Scan(...any) error }) (model.Judgment, error) {
+	var j model.Judgment
+	var project, session, title, supersedes sql.NullString
+	var at, kind string
+	if err := sc.Scan(&j.ID, &project, &session, &at, &kind, &title, &j.Body, &supersedes); err != nil {
+		return j, err
+	}
+	j.Project, j.SessionID, j.Title, j.Supersedes = str(project), str(session), str(title), str(supersedes)
+	j.Kind = model.JudgmentKind(kind)
+	var err error
+	if j.At, err = parseTime(at); err != nil {
+		return j, err
+	}
+	return j, nil
+}
+
+func linksOf(ctx context.Context, q dbtx, judgmentID string) ([]model.JudgmentLink, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT target_kind, target_id FROM judgment_link WHERE judgment_id = ? ORDER BY target_kind, target_id`,
+		judgmentID)
+	if err != nil {
+		return nil, fmt.Errorf("판단 링크 조회 실패(judgment=%q): %w", clip(judgmentID, 64), err)
+	}
+	defer rows.Close()
+
+	var out []model.JudgmentLink
+	for rows.Next() {
+		var l model.JudgmentLink
+		if err := rows.Scan(&l.TargetKind, &l.TargetID); err != nil {
+			return nil, fmt.Errorf("판단 링크 행 해석 실패: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("판단 링크 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// GetJudgment 는 판단 하나를 링크째로 읽는다.
+func (s *Store) GetJudgment(ctx context.Context, id string) (model.Judgment, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+judgmentCols+` FROM judgment WHERE id = ?`, id)
+	j, err := scanJudgment(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return j, fmt.Errorf("판단 %q 가 %w", clip(id, 64), ErrNotFound)
+	}
+	if err != nil {
+		return j, fmt.Errorf("판단 조회 실패(id=%q): %w", clip(id, 64), err)
+	}
+	if j.Links, err = linksOf(ctx, s.db, id); err != nil {
+		return j, err
+	}
+	return j, nil
+}
+
+// ListJudgmentsBySession 은 한 세션이 남긴 판단을 시간순으로 낸다.
+func (s *Store) ListJudgmentsBySession(ctx context.Context, sessionID string) ([]model.Judgment, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+judgmentCols+` FROM judgment WHERE session_id = ? ORDER BY at, id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("세션 판단 조회 실패(session_id=%q): %w", clip(sessionID, 64), err)
+	}
+	out, err := collectJudgments(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.fillLinks(ctx, out)
+}
+
+// ListJudgmentsByKind 는 프로젝트의 특정 종류 판단을 최신순으로 낸다.
+func (s *Store) ListJudgmentsByKind(ctx context.Context, project string, kind model.JudgmentKind, limit int) ([]model.Judgment, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+judgmentCols+` FROM judgment WHERE project = ? AND kind = ? ORDER BY at DESC, id DESC LIMIT ?`,
+		project, string(kind), limit)
+	if err != nil {
+		return nil, fmt.Errorf("판단 종류별 조회 실패(project=%q kind=%q): %w",
+			clip(project, 64), clip(string(kind), 32), err)
+	}
+	out, err := collectJudgments(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.fillLinks(ctx, out)
+}
+
+func collectJudgments(rows *sql.Rows) ([]model.Judgment, error) {
+	defer rows.Close()
+	var out []model.Judgment
+	for rows.Next() {
+		j, err := scanJudgment(rows)
+		if err != nil {
+			return nil, fmt.Errorf("판단 행 해석 실패: %w", err)
+		}
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("판단 목록 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) fillLinks(ctx context.Context, js []model.Judgment) ([]model.Judgment, error) {
+	for i := range js {
+		l, err := linksOf(ctx, s.db, js[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		js[i].Links = l
+	}
+	return js, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 전문 검색
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FTSQuery 는 사람이 친 검색어를 FTS5 가 받는 안전한 질의로 바꾼다. 순수 함수다.
+//
+// ★ 왜 필요한가: FTS5 의 MATCH 는 자체 문법이 있어서 `-`·`"`·`*`·`(`·`:` 같은 문자가
+// 들어오면 **구문 오류로 죽는다**. 사용자가 친 문자열을 그대로 넘기면
+// "결과 없음"과 "질의가 깨져서 못 돌았음"이 같은 빈 목록으로 접힌다.
+// 그래서 토큰마다 큰따옴표로 감싸 전부 리터럴로 만든다(내부 `"` 는 겹쳐 이스케이프).
+// 토큰 사이는 FTS5 의 기본 결합(AND)에 맡긴다.
+//
+// 잃는 것: 사용자가 OR·NEAR·접두 검색 문법을 직접 쓸 수 없다.
+// 그것이 필요해지면 **인자를 하나 늘려** 원문 통과 경로를 여는 것이 맞다 —
+// 지금 문법을 반쯤 허용하면 어느 문자가 살아 있는지 아무도 모르는 상태가 된다.
+func FTSQuery(raw string) string {
+	var toks []string
+	for _, f := range strings.Fields(raw) {
+		toks = append(toks, `"`+strings.ReplaceAll(f, `"`, `""`)+`"`)
+	}
+	return strings.Join(toks, " ")
+}
+
+// SearchJudgments 는 판단을 전문 검색한다.
+//
+// project 가 비어 있으면 전 프로젝트를 본다. 결과는 FTS5 의 rank 순(관련도 높은 순)이다.
+// 판단이 쌓이면 grep 이 유일한 도달 경로가 되는 것을 막는 자리다.
+func (s *Store) SearchJudgments(ctx context.Context, project, query string, limit int) ([]model.Judgment, error) {
+	q := FTSQuery(query)
+	if q == "" {
+		// 빈 질의를 MATCH 에 넘기면 구문 오류가 난다. 빈 결과와 구분되는 오류로 거절한다.
+		return nil, fmt.Errorf("검색어가 비었다(원문 %q)", clip(query, 64))
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT j.id, j.project, j.session_id, j.at, j.kind, j.title, j.body, j.supersedes
+		FROM judgment_fts f
+		JOIN judgment j ON j.rowid = f.rowid
+		WHERE judgment_fts MATCH ? AND (? = '' OR j.project = ?)
+		ORDER BY rank
+		LIMIT ?`, q, project, project, limit)
+	if err != nil {
+		// 원인 전문을 담는다 — 변환된 질의까지 실어야 "무엇이 틀렸나"에 답이 된다.
+		return nil, fmt.Errorf("판단 검색 실패(원문=%q 변환=%q project=%q): %w",
+			clip(query, 64), clip(q, 128), clip(project, 64), err)
+	}
+	out, err := collectJudgments(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.fillLinks(ctx, out)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// snapshot
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ValidateSnapshot 은 스냅숏이 저장 가능한지 판정한다. 순수 함수다.
+//
+// ★ method='manual' 인데 근거가 없으면 **호출 전에** 거절한다.
+// 스키마 CHECK 가 최후 방어이지 1차 방어가 아니다 — DB 제약 위반 문구는
+// "무엇이 왜 빠졌나"를 말하지 않고, 그러면 호출부가 사용자에게 옮길 말이 없다.
+// 규율이 제약이 되는 자리다: "손으로 올리면 근거 없는 숫자가 되고, 그 순간 이 표를 아무도 못 믿는다."
+func ValidateSnapshot(s model.Snapshot) error {
+	switch {
+	case s.Project == "":
+		return errors.New("스냅숏의 project 가 비었다")
+	case s.Key == "":
+		return errors.New("스냅숏의 key 가 비었다")
+	case s.Method != model.SnapshotCommand && s.Method != model.SnapshotManual:
+		return fmt.Errorf("스냅숏 method 는 command 또는 manual 이어야 한다(받은 값 %q)",
+			clip(string(s.Method), 32))
+	case s.Method == model.SnapshotManual && strings.TrimSpace(s.Evidence) == "":
+		return fmt.Errorf("스냅숏 %q 는 method=manual 인데 근거(evidence)가 없다 "+
+			"— 손으로 올린 숫자에 근거가 없으면 그 순간 이 표를 아무도 못 믿는다", clip(s.Key, 64))
+	default:
+		return nil
+	}
+}
+
+// PutSnapshot 은 스냅숏을 저장한다(같은 키면 덮는다 — 파생이 아니라 재계산 결과이므로).
+func (t *Tx) PutSnapshot(s model.Snapshot) error {
+	if err := ValidateSnapshot(s); err != nil {
+		return err
+	}
+	if s.ComputedAt.IsZero() {
+		s.ComputedAt = nowStamp()
+	}
+	if _, err := t.tx.ExecContext(t.ctx, `
+		INSERT INTO snapshot(project, key, value, method, evidence, input_digest, computed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project, key) DO UPDATE SET
+		  value = excluded.value, method = excluded.method, evidence = excluded.evidence,
+		  input_digest = excluded.input_digest, computed_at = excluded.computed_at`,
+		s.Project, s.Key, s.Value, string(s.Method),
+		nullStr(s.Evidence), nullStr(s.InputDigest), fmtTime(s.ComputedAt)); err != nil {
+		return fmt.Errorf("스냅숏 저장 실패(project=%q key=%q method=%q): %w",
+			clip(s.Project, 64), clip(s.Key, 64), clip(string(s.Method), 32), err)
+	}
+	return nil
+}
+
+// PutSnapshot 은 단발 트랜잭션으로 감싼 것이다.
+func (s *Store) PutSnapshot(ctx context.Context, sn model.Snapshot) error {
+	return s.Tx(ctx, func(t *Tx) error { return t.PutSnapshot(sn) })
+}
+
+// GetSnapshot 은 스냅숏 하나를 읽는다.
+// "낡음" 판정은 여기서 하지 않는다 — input_digest 를 현재 트리와 대조하는 것은
+// git 을 읽는 계층의 몫이고, 저장 계층이 그 판정을 흉내 내면 두 벌이 된다.
+func (s *Store) GetSnapshot(ctx context.Context, project, key string) (model.Snapshot, error) {
+	var sn model.Snapshot
+	var evidence, digest sql.NullString
+	var method, at string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT project, key, value, method, evidence, input_digest, computed_at
+		FROM snapshot WHERE project = ? AND key = ?`, project, key).
+		Scan(&sn.Project, &sn.Key, &sn.Value, &method, &evidence, &digest, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sn, fmt.Errorf("스냅숏 %s/%s 가 %w", clip(project, 64), clip(key, 64), ErrNotFound)
+	}
+	if err != nil {
+		return sn, fmt.Errorf("스냅숏 조회 실패(project=%q key=%q): %w",
+			clip(project, 64), clip(key, 64), err)
+	}
+	sn.Method = model.SnapshotMethod(method)
+	sn.Evidence, sn.InputDigest = str(evidence), str(digest)
+	if sn.ComputedAt, err = parseTime(at); err != nil {
+		return sn, err
+	}
+	return sn, nil
+}
