@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -112,6 +113,59 @@ type SnapshotRow struct {
 	Evidence string
 	Computed string
 	Verdict  SnapshotVerdict
+
+	// 아래는 Value 가 진척 모양의 JSON 일 때만 채워진다(ParseProgress).
+	// 원문 Value 는 그대로 남는다 — **표시를 위해 원본을 바꾸지 않는다.**
+	Progress *Progress
+}
+
+// Progress 는 진척 수치 하나다. 화면에만 쓰는 표시 타입이다.
+type Progress struct {
+	Pct     int
+	Owner   string
+	State   string
+	Delta   string
+	Done    int // 완료 항목 수
+	Partial int // 부분
+	Nothing int // 없음
+	Total   int
+}
+
+// ParseProgress 는 스냅숏 값이 진척 모양이면 그것을 읽는다. 순수 함수다.
+//
+// ★ 값이 JSON 이라고 무조건 풀지 않는다 — `pct` 가 있을 때만 진척으로 본다.
+// 그 조건이 없으면 다른 종류의 스냅숏(그냥 수치나 문자열)이 우연히 JSON 이라는 이유로
+// 진척 막대로 그려지고, 그러면 화면이 없는 뜻을 지어내게 된다.
+//
+// 못 읽으면 nil 을 돌려주고 호출자는 원문을 그대로 보인다 —
+// **표시를 못 한다고 값을 감추지 않는다.**
+func ParseProgress(value string) *Progress {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(value), &m); err != nil {
+		return nil
+	}
+	pct, ok := m["pct"].(float64)
+	if !ok {
+		return nil
+	}
+	num := func(k string) int {
+		if v, ok := m[k].(float64); ok {
+			return int(v)
+		}
+		return 0
+	}
+	str := func(k string) string {
+		if v, ok := m[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	g := &Progress{
+		Pct: int(pct), Owner: str("owner"), State: str("state"), Delta: str("delta"),
+		Done: num("d"), Partial: num("q"), Nothing: num("n"),
+	}
+	g.Total = g.Done + g.Partial + g.Nothing
+	return g
 }
 
 // LandingPanel 은 섹션 ④ 다.
@@ -559,6 +613,7 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 			Evidence: Clip(sn.Evidence, 300),
 			Computed: sn.ComputedAt.Format("01-02 15:04"),
 			Verdict:  JudgeSnapshot(sn.InputDigest, current),
+			Progress: ParseProgress(sn.Value),
 		})
 	}
 	if len(pan.Snapshots) == 0 && pan.SnapErr == "" {

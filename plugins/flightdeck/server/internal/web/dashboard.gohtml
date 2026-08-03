@@ -60,6 +60,16 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 .stale { color:var(--warn); font-weight:600; }
 .note { border-left:2px solid var(--line); padding-left:8px; margin:8px 0; }
 .note .body { white-space:pre-wrap; font-size:12px; }
+  .bar { display:inline-block; width:120px; height:8px; border-radius:4px;
+         background:rgba(127,127,127,.25); vertical-align:middle; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:var(--pct,0%); border-radius:4px; background:currentColor; }
+  /* 접기 — 긴 목록은 5건만 보이고 나머지는 더보기로 조금씩 연다.
+     개수는 항상 보인다: 몇 건인지를 감추면 "없다"와 "접혀 있다"가 구분되지 않는다. */
+  .fold > .fold-row[hidden] { display:none; }
+  .more { margin-top:6px; font-size:12px; padding:3px 10px; border-radius:6px;
+          border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer; opacity:.8; }
+  .more:hover { opacity:1; }
+  .count { opacity:.65; font-weight:400; font-size:.85em; }
 </style>
 </head>
 <body>
@@ -166,7 +176,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 {{/* ──────────────────────────── ③ 큐 ──────────────────────────── */}}
 <section id="queue">
   <div class="shead">
-    <h2>③ 큐</h2>
+    <h2>③ 큐 <span class="count">{{len .Queue.Items}}건</span></h2>
     <span class="derived">{{.Queue.Derived}}</span>
   </div>
   {{template "pfail" .Queue.Panel}}
@@ -174,11 +184,11 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{if .Queue.Items}}
   <table>
     <tr><th>항목</th><th>제목</th><th>상태</th><th>선점</th><th>경로</th><th>선행(의존)</th><th>기대는 항목</th></tr>
-    {{range .Queue.Items}}
-    <tr>
+    <tbody class="fold">{{range .Queue.Items}}
+    <tr class="fold-row">
       <td class="mono">{{.ID}}</td>
       <td>{{.Title}}<div class="k">{{.Body}}</div>
-        {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</td>
+        {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</tbody></td>
       <td>{{.State}}</td>
       <td class="mono">{{if .Holder}}{{.Holder}}{{if .Since}}<div class="k">{{.Since}}부터</div>{{end}}{{else}}—{{end}}</td>
       <td class="mono">{{if .Paths}}{{join " · " .Paths}}{{else}}<span class="none">경로 선언 없음</span>{{end}}</td>
@@ -225,7 +235,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 {{/* ─────────────────────── ④ 랜딩 이력 ─────────────────────── */}}
 <section id="landing">
   <div class="shead">
-    <h2>④ 랜딩 이력</h2>
+    <h2>④ 랜딩 이력 <span class="count">{{len .Landing.Closed}}건</span></h2>
     <span class="derived">{{.Landing.Derived}}</span>
   </div>
   <p class="tier">{{.Landing.Tier}}</p>
@@ -234,9 +244,9 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{if .Landing.Closed}}
   <table>
     <tr><th>항목</th><th>제목</th><th>결과</th><th>랜딩 sha</th><th>종료</th><th>사유</th></tr>
-    {{range .Landing.Closed}}
-    <tr><td class="mono">{{.ID}}</td><td>{{.Title}}</td><td>{{.State}}</td>
-        <td class="mono">{{if .Holder}}{{.Holder}}{{else}}<span class="dim">—</span>{{end}}</td>
+    <tbody class="fold">{{range .Landing.Closed}}
+    <tr class="fold-row"><td class="mono">{{.ID}}</td><td>{{.Title}}</td><td>{{.State}}</td>
+        <td class="mono">{{if .Holder}}{{.Holder}}{{else}}<span class="dim">—</span>{{end}}</tbody></td>
         <td>{{.Since}}</td><td class="k">{{.Body}}</td></tr>
     {{end}}
   </table>
@@ -247,11 +257,23 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{with .Landing.SnapErr}}<p class="empty">{{.}}</p>{{end}}
   {{if .Landing.Snapshots}}
   <table>
-    <tr><th>키</th><th>값</th><th>방법</th><th>판정 시각</th><th>낡음</th><th>근거</th></tr>
+    <tr><th>파트</th><th>진척</th><th>항목(완료·부분·없음)</th><th>담당</th><th>판정 시각</th><th>낡음</th><th>근거</th></tr>
     {{range .Landing.Snapshots}}
-    <tr><td class="mono">{{.Key}}</td><td><b>{{.Value}}</b></td><td>{{.Method}}</td><td>{{.Computed}}</td>
-        <td>{{if .Verdict.Warn}}<span class="stale">{{.Verdict.Reason}}</span>{{else}}<span class="lv-ok">{{.Verdict.Reason}}</span>{{end}}</td>
-        <td class="k">{{.Evidence}}</td></tr>
+    <tr>
+      <td class="mono">{{.Key}}</td>
+      {{with .Progress}}
+        {{/* 값이 진척 모양일 때만 막대로 그린다. 아니면 원문을 그대로 보인다 —
+             표시를 못 한다고 값을 감추지 않는다. */}}
+        <td><span class="bar" style="--pct:{{.Pct}}%"><i></i></span> <b>{{.Pct}}%</b>{{with .Delta}} <span class="k">{{.}}</span>{{end}}</td>
+        <td class="k">{{.Total}} — 완료 {{.Done}} · 부분 {{.Partial}} · 없음 {{.Nothing}}</td>
+        <td class="k">{{.Owner}}</td>
+      {{else}}
+        <td><b>{{.Value}}</b></td><td class="k">—</td><td class="k">{{.Method}}</td>
+      {{end}}
+      <td>{{.Computed}}</td>
+      <td>{{if .Verdict.Warn}}<span class="stale">{{.Verdict.Reason}}</span>{{else}}<span class="lv-ok">{{.Verdict.Reason}}</span>{{end}}</td>
+      <td class="k">{{.Evidence}}</td>
+    </tr>
     {{end}}
   </table>
   {{end}}
@@ -262,7 +284,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 {{/* ─────────────────────────── ⑤ 막힘 ─────────────────────────── */}}
 <section id="blocked">
   <div class="shead">
-    <h2>⑤ 막힘</h2>
+    <h2>⑤ 막힘 <span class="count">{{len .Blocked.Notes}}건</span></h2>
     <span class="derived">{{.Blocked.Derived}}</span>
   </div>
   {{template "pfail" .Blocked.Panel}}
@@ -286,18 +308,18 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{end}}
   {{if .Blocked.Notes}}
   <h3>막힘 판단(blocked)</h3>
-  {{range .Blocked.Notes}}{{template "note" .}}{{end}}
+  <div class="fold">{{range .Blocked.Notes}}<div class="fold-row">{{template "note" .}}</div>{{end}}</div>
   {{end}}
   {{if .Blocked.Asks}}
   <h3>요청(ask) — 남이 건드리면 곤란한 것</h3>
-  {{range .Blocked.Asks}}{{template "note" .}}{{end}}
+  <div class="fold">{{range .Blocked.Asks}}<div class="fold-row">{{template "note" .}}</div>{{end}}</div>
   {{end}}
 </section>
 
 {{/* ─────────────────────── ⑥ 판단 검색 ─────────────────────── */}}
 <section id="search">
   <div class="shead">
-    <h2>⑥ 판단 검색</h2>
+    <h2>⑥ 판단 검색 <span class="count">{{len .Search.Results}}건</span></h2>
     <span class="derived">{{.Search.Derived}}</span>
   </div>
   <form method="get" action="./">
@@ -308,7 +330,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   <p class="k">{{.Search.Mode}}</p>
   {{template "pfail" .Search.Panel}}
   {{with .Search.Empty}}<p class="empty">{{.}}</p>{{end}}
-  {{range .Search.Results}}{{template "note" .}}{{end}}
+  <div class="fold">{{range .Search.Results}}<div class="fold-row">{{template "note" .}}</div>{{end}}</div>
 </section>
 
 </main>
@@ -329,6 +351,33 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     // 열린 적이 없으면 서버에 SSE 가 없는 것이다 — 끊고 폴백으로 넘어간다.
     if (!opened) { es.close(); later(); }
   };
+})();
+</script>
+<script>
+// 접기 — 5건씩 연다. 스크립트가 안 돌면 <noscript> 가 전부 펴므로 정보가 사라지지 않는다.
+(function () {
+  var STEP = 5;
+  document.querySelectorAll('.fold').forEach(function (box) {
+    var rows = Array.prototype.slice.call(box.querySelectorAll('.fold-row'));
+    if (rows.length <= STEP) { return; }
+    rows.forEach(function (r, i) { if (i >= STEP) { r.hidden = true; } });
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'more';
+    var shown = STEP;
+    function label() {
+      var left = rows.length - shown;
+      btn.textContent = left > 0 ? '더보기 ' + Math.min(STEP, left) + '건 (남은 ' + left + '건)' : '';
+      btn.hidden = left <= 0;
+    }
+    btn.addEventListener('click', function () {
+      rows.slice(shown, shown + STEP).forEach(function (r) { r.hidden = false; });
+      shown = Math.min(shown + STEP, rows.length);
+      label();
+    });
+    label();
+    var anchor = box.tagName === 'TBODY' ? box.closest('table') : box;
+    anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+  });
 })();
 </script>
 </body>
