@@ -176,19 +176,22 @@ func TestOneClaudeSessionIsOneRowAcrossChannels(t *testing.T) {
 		t.Fatalf("CLI 채널 실패(%d): %s", code, out)
 	}
 
-	// ── 채널 ③ MCP. hostname 을 일부러 다른 값으로 준다.
+	// ── 채널 ③ MCP. **운영 진입점(runMCP)을 그대로 탄다.**
+	// 여기서 mcpsrv.New 를 시험이 직접 조립하면 "mcp.go 가 정말 주입하는가"라는
+	// 축을 원리적으로 못 본다 — 시험이 만든 배선에 시험이 단정하게 된다.
+	//
+	// runMCP 는 옵션을 안 받으므로 mcpsrv 가 **프로세스의** env·cwd 를 읽는다(운영 조건이
+	// 그것이다 — MCP stdio 서버의 cwd 가 프로젝트 디렉토리다). 시험 프로세스의 그 둘을
+	// 운영과 같게 맞춘다. 안 맞추면 MCP 만 다른 cc_session_id·워크트리로 열려,
+	// **고쳐야 할 축이 아닌 것 때문에** 카드가 갈린다.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", cc)
+	t.Setenv("CLAUDE_PROJECT_DIR", dir)
+	t.Chdir(dir)
 	mcpApp := newApp(envOf(mcpEnv), quietLogger(), dir, strings.NewReader(""))
-	srv := mcpsrv.New(newMCPBackend(mcpApp), quietLogger(),
-		mcpsrv.WithEnv(envOf(mcpEnv)),
-		mcpsrv.WithCwd(dir, nil),
-		mcpsrv.WithHostname("some-other-host", nil),
-		mcpsrv.WithProject(mcpApp.proj.ID, mcpApp.proj.Path),
-		mcpsrv.WithMachine(mcpApp.machine),
-	)
 	var out strings.Builder
-	if err := srv.Serve(context.Background(),
-		strings.NewReader(mcpCall("board", map[string]any{})+"\n"), &out); err != nil {
-		t.Fatalf("MCP 채널 실패: %v", err)
+	if code := runMCP(context.Background(), mcpApp, quietLogger(),
+		strings.NewReader(mcpCall("board", map[string]any{})+"\n"), &out); code != 0 {
+		t.Fatalf("MCP 채널 실패(종료코드 %d):\n%s", code, out.String())
 	}
 
 	// ── 도달 전제: 세 채널이 정말 서버까지 갔는가.
