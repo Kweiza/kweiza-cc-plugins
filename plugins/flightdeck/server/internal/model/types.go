@@ -72,7 +72,7 @@ const (
 	JudgmentHandoff  JudgmentKind = "handoff"  // 랜딩된 것·검증 방법·일부러 안 한 것·후속
 	JudgmentDecision JudgmentKind = "decision" // 되돌리기 비싼 결정과 근거
 	JudgmentBlocked  JudgmentKind = "blocked"
-	JudgmentAsk      JudgmentKind = "ask"      // 남이 건드리면 곤란한 것 — 커밋 전 의도의 유일한 축
+	JudgmentAsk      JudgmentKind = "ask" // 남이 건드리면 곤란한 것 — 커밋 전 의도의 유일한 축
 	JudgmentNow      JudgmentKind = "now"
 	JudgmentRejected JudgmentKind = "rejected" // 검토했으나 기각한 후보
 	JudgmentNotDone  JudgmentKind = "not-done" // 일부러 안 한 것
@@ -276,15 +276,15 @@ type Event struct {
 // 불리언을 만드는 순간 그것이 회수·회피·탈락 셋의 상류가 되고,
 // 그 판정은 실측에서 두 번 틀렸다.
 type SessionView struct {
-	Session   Session
-	Signals   map[SignalKind]time.Time // 없는 종류는 키가 없다. 0값과 부재를 가른다
-	Paths     []string                 // footprint ∪ change_set
-	HasFootprint bool                  // false 면 "발자국 없음"을 명시한다. 침묵하지 않는다
-	Claims    []string                 // 선점한 항목 id
-	LastNote  *Judgment
-	Branch    string
-	BranchSHA string
-	AheadMain int
+	Session      Session
+	Signals      map[SignalKind]time.Time // 없는 종류는 키가 없다. 0값과 부재를 가른다
+	Paths        []string                 // footprint ∪ change_set
+	HasFootprint bool                     // false 면 "발자국 없음"을 명시한다. 침묵하지 않는다
+	Claims       []string                 // 선점한 항목 id
+	LastNote     *Judgment
+	Branch       string
+	BranchSHA    string
+	AheadMain    int
 }
 
 // Freshness 는 파생값이 언제 관측된 것인지다.
