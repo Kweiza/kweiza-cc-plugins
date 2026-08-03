@@ -80,7 +80,7 @@ func (s *server) logInternal(r *http.Request, msg string, err error) {
 		id = info.requestID
 	}
 	s.log.ErrorContext(r.Context(), msg,
-		"route", RoutePattern(r.Pattern, r.Method),
+		"route", s.resolveRoute(r),
 		"request_id", id,
 		"session_id", infoFrom(r.Context()).session(),
 		"error", err.Error(),
@@ -103,7 +103,7 @@ func (s *server) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	default:
 		// 파서의 오류 문구에는 오프셋과 Go 타입명이 섞인다. 응답에는 싣지 않는다.
 		s.log.WarnContext(r.Context(), "요청 본문 해석 실패",
-			"route", RoutePattern(r.Pattern, r.Method), "error", err.Error())
+			"route", s.resolveRoute(r), "error", err.Error())
 		s.writeError(w, r, badRequest("bad_json", "요청 본문을 JSON 으로 읽을 수 없다",
 			"필드 이름과 타입을 확인해라 — 자세한 위치는 서버 로그에 있다."))
 		return false

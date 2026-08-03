@@ -166,7 +166,7 @@ func (s *server) withAccessLog(next http.Handler) http.Handler {
 		start := s.now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			route := RoutePattern(r.Pattern, r.Method)
+			route := s.resolveRoute(r)
 			dur := s.now().Sub(start).Seconds()
 			s.met.observe(route, rec.status, dur)
 			info := infoFrom(r.Context())
@@ -307,7 +307,7 @@ func (s *server) withRecover(next http.Handler) http.Handler {
 				id = info.requestID
 			}
 			s.log.ErrorContext(r.Context(), "request panicked",
-				"route", RoutePattern(r.Pattern, r.Method),
+				"route", s.resolveRoute(r),
 				"request_id", id,
 				"session_id", info.session(),
 				"error", clip(toString(rv), 600),

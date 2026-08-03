@@ -34,6 +34,16 @@ type MetricsSnapshot struct {
 	IdemConflicts uint64
 	SSEDropped    uint64
 	SSESubs       int
+
+	// 세션 카드 파생 — **요청 지표와 다른 축이다.** 그쪽은 라우트별 총 시간이고
+	// 이쪽은 그중 git 저장소 전수 훑기가 먹은 몫이라, 둘을 겹쳐 봐야
+	// "느린 것이 파생인가 다른 것인가"가 갈린다.
+	//
+	// 이 축이 없던 동안 MCP 꼬리가 도구 호출마다 이 파생을 한 번씩 더 돌렸는데
+	// 그 사실이 **어느 화면에도 안 떴다.** 계측이 없으면 비용이 존재하지 않는 것처럼 보인다.
+	DeriveRuns    uint64
+	DeriveCards   uint64
+	DeriveSeconds float64
 }
 
 // RenderMetrics 는 스냅숏을 프로메테우스 텍스트 포맷으로 옮긴다. 순수 함수다.
@@ -90,6 +100,16 @@ func RenderMetrics(s MetricsSnapshot) string {
 	} {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", m.name, m.help, m.name, m.name, m.val)
 	}
+
+	b.WriteString("# HELP flightdeck_session_card_derives_total 세션 카드 파생을 돌린 횟수(git 저장소 전수 훑기)\n")
+	b.WriteString("# TYPE flightdeck_session_card_derives_total counter\n")
+	fmt.Fprintf(&b, "flightdeck_session_card_derives_total %d\n", s.DeriveRuns)
+	b.WriteString("# HELP flightdeck_session_cards_total 그 파생이 훑은 세션 수 누계\n")
+	b.WriteString("# TYPE flightdeck_session_cards_total counter\n")
+	fmt.Fprintf(&b, "flightdeck_session_cards_total %d\n", s.DeriveCards)
+	b.WriteString("# HELP flightdeck_session_card_derive_seconds_total 그 파생에 든 시간 합\n")
+	b.WriteString("# TYPE flightdeck_session_card_derive_seconds_total counter\n")
+	fmt.Fprintf(&b, "flightdeck_session_card_derive_seconds_total %.6f\n", s.DeriveSeconds)
 
 	b.WriteString("# HELP flightdeck_sse_subscribers 지금 붙어 있는 SSE 구독자 수\n")
 	b.WriteString("# TYPE flightdeck_sse_subscribers gauge\n")

@@ -110,6 +110,20 @@ func (b *mcpBackend) banner() string {
 	return StaleBanner(b.app.now(), b.app.cli.Cache.LastContact(), b.app.cli.URL)
 }
 
+// notFoundRelay 는 서버가 낸 404 를 **문구를 건드리지 않고** 올린다.
+//
+// ★ `fmt.Errorf("%s: %w", msg, store.ErrNotFound)` 를 쓰면 안 된다. 표식의 문구가 "없다"라서
+// 소비자 문장 끝에 한 번 더 붙고, 그러면 도구 응답이
+// "찾는 것이 없다: 항목 cp/t9-x 가 없다: 없다" 가 된다 — 실제로 그 모양이었다.
+//
+// guidance 를 함께 나르는 이유는 mcpsrv.NotFoundCarrier 주석에 있다: 종류별 처방표는
+// 정본 표면 한 곳에만 있어야 하고, 이 계층은 그것을 옮기기만 한다.
+type notFoundRelay struct{ msg, guidance string }
+
+func (e *notFoundRelay) Error() string            { return e.msg }
+func (e *notFoundRelay) Unwrap() error            { return store.ErrNotFound }
+func (e *notFoundRelay) NotFoundGuidance() string { return e.guidance }
+
 func reasonOr(res WriteResult, err error) string {
 	if strings.TrimSpace(res.Reason) != "" {
 		return res.Reason
@@ -124,8 +138,8 @@ func reasonOr(res WriteResult, err error) string {
 // 대신 이 호출이 무엇이었는지(what)는 **호출부가 알고 있으므로** 그것을 쓰고,
 // 서버 문구가 그 접두로 시작할 때만 접두를 떼어 이중 표기를 막는다.
 //
-// 404 는 store.ErrNotFound 로 감싼다 — mcpsrv 의 not-found 처방(프로젝트 미등록 안내)이
-// 그 축을 보고 있고, 그 처방은 이 계층이 아니라 거기에 있어야 한다.
+// 404 는 store.ErrNotFound 표식을 단 채로 **서버가 조립한 문구와 처방을 그대로** 올린다.
+// 그 판정은 이 계층이 아니라 정본 표면(internal/api 의 NotFoundAdvice)에 있어야 한다.
 func (b *mcpBackend) apiError(what string, err error) error {
 	var ae *APIError
 	if !errors.As(err, &ae) {
@@ -133,7 +147,7 @@ func (b *mcpBackend) apiError(what string, err error) error {
 	}
 	switch {
 	case ae.Status == http.StatusNotFound:
-		return fmt.Errorf("%s: %w", ae.Message, store.ErrNotFound)
+		return &notFoundRelay{msg: ae.Message, guidance: ae.Guidance}
 	case ae.Status >= 400 && ae.Status < 500:
 		reason := strings.TrimPrefix(ae.Message, what+" 거절: ")
 		guidance := ae.Guidance
@@ -321,10 +335,13 @@ func (b *mcpBackend) Alloc(ctx context.Context, project, counter string) (int64,
 
 // RecentNotes 는 꼬리에 실을 ask·blocked 다.
 //
-// REST 표면에 "종류별 최근 판단" 엔드포인트가 **없다**(설계 §6 의 표에 없다). 있는 것은
-// 전문 검색(q 필수)과 화면 한 장분(dashboard.json)뿐이라 후자를 쓴다 —
-// 없는 표면을 새로 열지 않는 것이 이 전환의 범위이기도 하다(배관 교체지 표면 변경이 아니다).
-// 세션 카드·큐는 안 쓰므로 queue=false 로 그만큼은 덜어 낸다.
+// ★ 앞선 판은 dashboard.json 을 `queue=false` 로 쳤다. 그래도 서버는 **세션 카드 파생을
+// 통째로 돌린다** — git worktree list + 세션마다 ChangedPaths·UncommittedPaths.
+// 꼬리는 모든 도구 응답에 붙으므로(설계 §6) 그 비용이 **도구 호출 1회마다** 얹혔고,
+// 그 사실이 어디에도 안 떴다. 지금은 꼬리 전용 표면 하나를 쓴다.
+//
+// 이 호출의 계측은 /metrics 의 `route="GET /api/v1/notices"` 로 갈라져 뜨고,
+// 파생 자체의 비용은 `flightdeck_session_card_derives_total` 이 센다.
 func (b *mcpBackend) RecentNotes(ctx context.Context, project string, limit int) ([]model.Judgment, error) {
 	if strings.TrimSpace(project) == "" {
 		return nil, nil
@@ -332,21 +349,21 @@ func (b *mcpBackend) RecentNotes(ctx context.Context, project string, limit int)
 	if limit <= 0 {
 		limit = 20
 	}
-	path := fmt.Sprintf("/api/v1/dashboard.json?project=%s&queue=false&notes=true&note_limit=%d",
-		urlValue(project), limit)
+	path := fmt.Sprintf("/api/v1/notices?project=%s&limit=%d", urlValue(project), limit)
 	raw, deg, err := b.read(ctx, "board", "board", path)
 	if err != nil {
 		return nil, err
 	}
-	var v service.BoardView
+	var v struct {
+		Notes []model.Judgment `json:"notes"`
+	}
 	if uerr := json.Unmarshal(raw, &v); uerr != nil {
 		return nil, fmt.Errorf("알림 응답 해석 실패: %w", uerr)
 	}
-	out := append(append([]model.Judgment(nil), v.Asks...), v.Blocked...)
 	if deg != nil {
-		return out, deg
+		return v.Notes, deg
 	}
-	return out, nil
+	return v.Notes, nil
 }
 
 func toAfterWire(in []model.After) []afterWire {

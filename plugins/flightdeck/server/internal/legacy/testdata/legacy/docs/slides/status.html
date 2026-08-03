@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Design Context Platform — 진척 대시보드</title>
+<link rel="stylesheet" href="deck.css" />
+<style>
+  body { background:#0B0B0C; color:var(--dm-fg-1); font-family:var(--font-sharp-body), system-ui;
+         word-break:keep-all; margin:0; }
+  .wrap { width:min(1180px, 94vw); margin:0 auto; padding:0 0 96px; }
+
+  /* ── 상단 고정 머리 ── */
+  header { position:sticky; top:0; z-index:20; background:rgba(11,11,12,.86); backdrop-filter:blur(14px);
+           border-bottom:1px solid var(--dm-stroke); padding:18px 0 15px; margin-bottom:26px; }
+  .hrow { width:min(1180px, 94vw); margin:0 auto; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .hrow h1 { font-family:var(--font-sharp); font-size:22px; font-weight:700; letter-spacing:-0.02em; margin:0; }
+  .hrow .meta { font-size:12px; color:var(--dm-fg-3); margin-left:auto; text-align:right; line-height:1.55; }
+  .live { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:var(--samsung-cobalt);
+          background:rgba(56,122,255,.12); border-radius:14px; padding:4px 11px; }
+  .live i { width:6px; height:6px; border-radius:50%; background:var(--samsung-cobalt); display:inline-block; }
+
+  h2 { font-family:var(--font-sharp); font-size:15px; font-weight:700; letter-spacing:.02em;
+       margin:38px 0 13px; display:flex; align-items:baseline; gap:10px; }
+  h2 small { font-size:11.5px; font-weight:400; color:var(--dm-fg-3); letter-spacing:0; }
+
+  .card { background:var(--dm-container); border-radius:20px; padding:18px 22px;
+          outline:1px solid var(--dm-stroke); }
+  .grid { display:grid; gap:12px; }
+
+  /* ── 요약 타일 ── */
+  .tiles { grid-template-columns:repeat(4, 1fr); }
+  .tile .k { font-size:11px; color:var(--dm-fg-3); font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+  .tile .v { font-family:var(--font-sharp); font-size:34px; font-weight:700; line-height:1.1; margin-top:7px;
+             font-variant-numeric:tabular-nums; }
+  .tile .s { font-size:11.5px; color:var(--dm-fg-3); margin-top:4px; line-height:1.5; }
+
+  /* ── 세션 카드 ── */
+  .sess { grid-template-columns:repeat(2, 1fr); }
+  .sess .card { display:flex; flex-direction:column; gap:9px; }
+  .sess .top { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .sess .tno { font-family:var(--font-sharp); font-size:15px; font-weight:700; }
+  .sess .ttl { font-size:12.5px; color:var(--dm-fg-2); }
+  .sess .br { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:10.5px; color:var(--dm-fg-3);
+              margin-left:auto; white-space:nowrap; }
+  .ago { cursor:help; }                      /* title 에 절대 시각(KST) */
+  .ago.bad { color:#FFB59A; font-weight:700; }
+  .sess dl { margin:0; display:grid; grid-template-columns:60px 1fr; gap:4px 10px; }
+  .sess dt { font-size:10.5px; font-weight:700; color:var(--dm-fg-3); padding-top:1px; }
+  .sess dd { margin:0; font-size:12px; color:var(--dm-fg-2); line-height:1.55; }
+  .sess dd.warn { color:#FFB59A; }
+  .sess .lin { font-size:11px; color:var(--dm-fg-3); line-height:1.65;
+               border-left:2px solid rgba(255,255,255,.12); padding-left:8px; }
+  .sess .lin b { color:var(--dm-fg-2); font-weight:600; }
+
+  /* 연속 세션 묶음 — 한 카드 안에서 이전/다음으로 갈아 끼운다 */
+  .sess .ver { display:flex; flex-direction:column; gap:9px; }
+  .sess .ver[hidden] { display:none; }
+  .sess .nav { display:flex; align-items:center; gap:8px; }
+  .sess .nb { font-family:inherit; font-size:10.5px; font-weight:700; color:var(--dm-fg-2);
+              background:rgba(255,255,255,.07); border:0; border-radius:11px; padding:3px 10px; cursor:pointer; }
+  .sess .nb:hover:not(:disabled) { background:rgba(255,255,255,.14); }
+  .sess .nb:disabled { color:var(--dm-fg-3); opacity:.35; cursor:default; }
+  .sess .pos { font-size:10.5px; color:var(--dm-fg-3); }
+
+  /* 끝났고 후속도 없는 세션 — 접어 둔다 */
+  .fold { margin-top:12px; }
+  .fold > summary { cursor:pointer; list-style:none; font-size:11.5px; color:var(--dm-fg-3);
+                    background:var(--dm-container); border-radius:14px; padding:11px 16px;
+                    outline:1px solid var(--dm-stroke); user-select:none; }
+  .fold > summary::-webkit-details-marker { display:none; }
+  .fold > summary::before { content:'▸  '; }
+  .fold[open] > summary::before { content:'▾  '; }
+  .fold > summary:hover { color:var(--dm-fg-2); }
+  .fold > .sess { margin-top:12px; }
+
+  .banner { border-color:rgba(231,105,49,.45); background:rgba(231,105,49,.08);
+            font-size:12px; color:#FFB59A; line-height:1.7; margin-bottom:12px; }
+  .banner b { color:#FFD1BC; }
+  .banner .s { display:block; margin-top:4px; font-size:11px; color:var(--dm-fg-3); }
+
+  .pill { border-radius:12px; padding:2px 9px; font-size:10.5px; font-weight:700; white-space:nowrap; }
+  .pill.run  { background:rgba(56,122,255,.16); color:#8FB4FF; }
+  .pill.blk  { background:rgba(231,105,49,.16); color:#FFA97F; }
+  .pill.non  { background:rgba(255,255,255,.07); color:var(--dm-fg-3); }
+  .pill.hold { background:rgba(239,180,32,.14); color:#F2CE6A; }
+  .pill.done { background:rgba(59,209,139,.14); color:#7FE3B6; }
+
+  /* ── 파트 진행 ── */
+  .parts { grid-template-columns:repeat(2, 1fr); gap:9px; }
+  .prow { display:grid; grid-template-columns:1fr 120px 50px; align-items:center; gap:13px;
+          background:var(--dm-container); border-radius:14px; padding:10px 15px; outline:1px solid var(--dm-stroke); }
+  .prow .pn { font-size:12.5px; font-weight:700; }
+  .prow .po { font-size:10.5px; color:var(--dm-fg-3); margin-top:2px; }
+  .prow .pv { font-family:var(--font-sharp); font-size:16px; font-weight:700; text-align:right;
+              font-variant-numeric:tabular-nums; }
+  .prow .pv small { font-size:10px; font-weight:400; color:var(--dm-fg-3); }
+  .bar { height:6px; border-radius:4px; background:#2A2A2F; overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:4px; background:var(--samsung-cobalt); }
+  .bar.blk > i { background:var(--status-orange); }
+  .bar.idle > i { background:#4A4A52; }
+  .delta { grid-column:1 / -1; font-size:10.5px; color:#8FB4FF; margin-top:6px;
+           padding-top:6px; border-top:1px solid var(--dm-divider); }
+
+  /* ── 타임라인 ── */
+  .tl { position:relative; padding-left:20px; }
+  .tl::before { content:''; position:absolute; left:4px; top:6px; bottom:6px; width:1px; background:var(--dm-stroke); }
+  .tl .it { position:relative; padding:0 0 15px; }
+  .tl .it::before { content:''; position:absolute; left:-19px; top:5px; width:7px; height:7px; border-radius:50%;
+                    background:var(--samsung-cobalt); outline:3px solid #0B0B0C; }
+  .tl .it.q::before { background:#4A4A52; }
+  .tl .d { font-size:10.5px; color:var(--dm-fg-3); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tl .t { font-size:12.5px; font-weight:700; margin-top:2px; }
+  .tl .n { font-size:11.5px; color:var(--dm-fg-3); line-height:1.55; margin-top:3px; }
+
+  /* ── 막힘 ── */
+  .blk3 { grid-template-columns:repeat(3, 1fr); }
+  .blk3 .card { display:flex; flex-direction:column; gap:11px; }
+  .bhd { font-family:var(--font-sharp); font-size:13px; font-weight:700; display:flex; align-items:center; gap:8px; }
+  .bhd span.c { font-size:10.5px; font-weight:400; color:var(--dm-fg-3); }
+  .bit { border-top:1px solid var(--dm-divider); padding-top:9px; }
+  .bit b { font-size:12px; display:block; }
+  .bit p { margin:3px 0 0; font-size:11.2px; color:var(--dm-fg-3); line-height:1.55; }
+
+  .note { font-size:11.5px; color:var(--dm-fg-3); line-height:1.7; }
+  .note b { color:var(--dm-fg-2); }
+  .mn { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color:var(--dm-fg-2); }
+  a { color:var(--samsung-cobalt); }
+
+  @media (max-width:900px) {
+    .tiles, .sess, .parts, .blk3 { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hrow">
+    <h1>개발 진척 대시보드</h1>
+    <span class="live"><i></i>등록·핸드오프마다 갱신</span>
+    <nav style="display:flex; gap:14px; font-size:12px;">
+      <a href="progress.html">진척 덱 →</a><a href="index.html" style="color:var(--dm-fg-3);">덱 목록</a>
+    </nav>
+    <div class="meta" id="hmeta"></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="grid tiles" id="tiles"></div>
+
+  <h2>세션 현황 <small>게시판(<span class="mn">tools/session-board.sh show</span>)의 스냅숏 — 실시간 정본은 게시판입니다</small></h2>
+  <div id="sessWarn"></div>
+  <div class="grid sess" id="sessions"></div>
+  <div id="sessDone"></div>
+  <div id="locks" style="margin-top:12px;"></div>
+
+  <h2>작업 큐 <small id="queueNote"></small></h2>
+  <div id="queueWarn"></div>
+  <div class="grid blk3" id="queue"></div>
+
+  <h2>파트별 진행 <small id="judgedNote"></small></h2>
+  <div class="grid parts" id="parts"></div>
+  <div class="card" style="margin-top:12px;">
+    <div class="note" id="partsNote"></div>
+  </div>
+
+  <h2>랜딩 이력 <small>핸드오프 단위 · 최근순</small></h2>
+  <div class="card"><div class="tl" id="timeline"></div></div>
+
+  <h2>열린 막힘 <small id="blkNote"></small></h2>
+  <div class="grid blk3" id="blockers"></div>
+
+  <h2>이 문서를 갱신하는 법</h2>
+  <div class="card"><div class="note" id="howto"></div></div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   여기부터 DATA 블록만 고치면 됩니다. 세션이 등록할 때와 해제할 때 갱신합니다.
+   갱신 절차는 페이지 맨 아래 "이 문서를 갱신하는 법"에 있습니다.
+
+   원칙 하나만 지키면 됩니다 —
+   **parts[].pct 는 전수 판정일의 값이고 손으로 올리지 않습니다.**
+   그 뒤 main에 랜딩된 변화는 parts[].delta 에 문장으로 적습니다.
+   진행률을 손으로 올리면 근거 없는 숫자가 되고, 그러면 이 표를 아무도 못 믿습니다.
+   ═══════════════════════════════════════════════════════════════════════ */
+const DATA = {
+  // 시각은 전부 KST(+09:00) 기준의 'YYYY-MM-DD HH:MM'. "N분 전"은 페이지가 계산하므로 적지 않습니다.
+  asOf: '2026-08-03 18:40',
+
+  code: {
+    main: '7f703a0',
+    subject: 'Let e2e run with a resident platform-admin present',
+    commits: 422,
+    since: '2026-07-26',
+  },
+
+  // 마지막 전수 판정 — progress.html 덱을 만들 때 코드로 판정한 값
+  judged: { at: '2026-08-03', sha: '76cffa6', deck: 'progress.html', items: 137, done: 56, partial: 60, none: 21 },
+
+  // 게시판 스냅숏. state: run(진행 중) | blk(막힘) | hold(대기) | done(핸드오프 완료) | non
+  //
+  // at — **그 카드를 마지막으로 쓴 시각**(KST). "방금"·"10분 전" 같은 상대시간은 적지 않습니다 —
+  //      화면의 "N분 전"은 이 값에서 계산하므로, 하드코딩하면 카드가 늙어도 영원히 "방금"입니다.
+  //      진행 중(state: 'run')인데 120분 넘게 갱신이 없으면 그 자리에 ⚠ 무갱신이 뜹니다.
+  //
+  // next — 이 세션에서 나온 후속 작업. **없으면 빈 문자열('')을 적습니다** — 그러면 그 카드는
+  //        state: 'done' 일 때 "후속 없이 끝난 세션"으로 접힙니다. "없음"이라고 문장으로 적으면
+  //        후속이 있는 것으로 취급돼 계속 펼쳐져 있습니다(문구를 읽어 판정하지 않기 때문입니다).
+  //        그렇게 적으면 **세션 현황 위에 ⚠ 경고가 뜨고 그 카드의 '다음' 칸에도 표시가 붙습니다** —
+  //        규율을 주석에만 두었더니 아무도 못 지켰고, 카드가 표시 없이 틀린 자리에 놓였습니다.
+  //
+  // prev — 앞 세션의 일을 이어받았으면 그 세션의 branch 를 적습니다(트랙이 달라도 됩니다).
+  //        이어받은 게 아니면 prev: null 을 적습니다. **안 적으면** 같은 트랙 카드가
+  //        2장 이상일 때 세션 현황 위에 경고가 뜹니다 — 연속 세션이 조용히 갈라지는 것을 막습니다.
+  //        이어진 세션들은 **카드 한 장으로 묶여 최신만 보이고**, 카드 안의 이전/다음으로 넘겨 봅니다.
+  sessions: [
+    { track: 'dash-syntax', title: '이 페이지가 백지였던 것 — status.html 구문 오류로 스크립트가 통째로 죽어 있었다',
+      state: 'done', label: '랜딩 후 종료 · 문서 레포만',
+      branch: 'docs-dash-syntax', prev: null, head: '235682d', at: '2026-07-31 11:11',
+      now: '**사용자가 "대시보드에 왜 아무것도 안 보이지"라고 물어 착수했습니다**(큐 항목 없이 돈 세션입니다). 이 페이지의 **인라인 스크립트**가 구문 오류로 파싱 자체에 실패해 본문이 한 줄도 그려지지 않고 있었습니다. 헤드리스 크롬 실측: **수정 전 본문 147자 · 컨테이너 6종 전부 빈칸 → 수정 후 74,569자 · 전부 채움**(배포 URL 재확인 74,567자, 페이지 오류는 favicon 404 하나뿐). 깨진 자리는 셋이고 전부 DATA 블록의 **문자열 리터럴**입니다 — `b:` 값 안에서 문단을 줄바꿈해 이어 붙인 곳 둘(작은따옴표 문자열은 줄을 넘지 못합니다)과, 본문에 ASCII 작은따옴표를 그대로 넣어 문자열이 거기서 끊긴 곳 하나. **텍스트는 한 글자도 안 바꿨습니다** — 공백·이스케이프를 정규화한 뒤 옛/새 전문을 기계로 대조해 동일함을 확인했고, 이 랜딩의 diff 는 공백과 이스케이프뿐입니다. **언제부터인지는 추정이 아니라 전수 판정입니다**: 이 파일의 이력 65건을 거꾸로 파싱해 `1683e64`(2026-07-30 21:37)가 첫 깨짐이고 그 앞 `fffdb29`는 통과함을 확인했습니다. 그 뒤 이 파일을 고친 커밋 **12건이 전부 백지인 채 랜딩**됐습니다. **이 건의 무게는 구문 오류가 아니라 게이트가 있는데 통과했다는 데 있습니다** — pre-commit 규칙 3-a 가 스테이징된 파일로 렌더 시험을 돌리는데, 그 시험이 "DATA 블록 끝" 주석에서 파일을 갈라 **그리기 절반만** 실행하고 데이터는 픽스처로 갈아 끼웁니다. 그래서 **파일의 나머지 절반(DATA 약 500줄)이 어떤 검사도 안 받고 있었습니다.** **인라인 스크립트 전체**의 구문만 보는 단정을 신설했고(내용은 안 봅니다 — 그것을 단정하면 픽스처를 쓰는 이유였던 문제를 그대로 되들여옵니다), 수정 전 실물 파일에 걸어 **빨간불과 파일 행 번호 691** 까지 확인했습니다. **같은 자리에서 시험의 경계 판정도 닫았습니다** — 이 카드를 쓰자 시험 23건이 한꺼번에 깨졌는데, 원인은 시험이 데이터/그리기 경계를 **부분 문자열**로 찾아 **카드가 그 문구를 인용한 것만으로** 경계가 DATA 한복판(스크립트 45행)으로 올라간 것이었습니다. 줄 전체로 찾고 **정확히 하나**일 것을 요구하도록 고쳤고(정상 경계는 563행), 이 카드가 그대로 살아 있는 회귀 사례가 됩니다. 문서 레포 랜딩 `d89962b` + 이 커밋. 코드 레포는 한 줄도 안 바뀌어 `landings`·`delta`·`pct` 는 건드리지 않았습니다(`dash-live` 선례).',
+      next: '① 큐 `dash-real-data-render` — **구문은 이제 막히지만 런타임은 여전히 안 보입니다.** 실 DATA 로 한 번 그려 보고 컨테이너가 비지 않았는지만 확인하는 축이 남았습니다. ② 항목으로 만들지 않은 관찰 하나: **12커밋 동안 아무도 이 페이지를 열어 보지 않았습니다.** 갱신 절차(맨 아래 "이 문서를 갱신하는 법")에 "열어서 확인한다"가 없고 지금도 없습니다 — 사람 규율로 넣을지 기계로 대신할지(①이 그쪽입니다)는 판단이 필요해 항목으로 만들지 않았습니다. ③ 큐 `dash-blocker-qid-stale` — 이 페이지가 스스로 띄우는 **끊긴 큐 포인터** 경고 둘(`contracts-console-api`·`contracts-feedback-surface` 가 이미 done). 이 랜딩 전부터 있던 것이고 계약 트랙 좌표라 여기서 고치지 않았습니다. ④ 깨진 12커밋의 **내용**은 검토하지 않았습니다 — 파싱이 되니 데이터는 살아 있고, "안 보였다"와 "틀렸다"는 다른 축입니다.',
+      blocked: '' },
+  ],
+
+  // pct·d·q·n 은 judged.at 시점의 전수 판정값. 손으로 올리지 않습니다.
+  // delta 는 그 뒤 main에 랜딩된 변화만 (미랜딩 브랜치 작업은 적지 않습니다).
+  parts: [
+    { name: '계약 — 스키마 · API 스펙', owner: '계약 전용 세션', pct: 75, d: 7, q: 4, n: 1, state: 'non',
+      delta: '' },
+    { name: '수집 — Figma 커넥터', owner: '트랙 1', pct: 71, d: 6, q: 5, n: 1, state: 'non',
+      delta: '' },
+    { name: '파이프라인 — 처리 7단계', owner: '트랙 2', pct: 65, d: 5, q: 7, n: 1, state: 'non',
+      delta: '' },
+  ],
+
+  // 핸드오프 단위 랜딩 이력. 최근이 위.
+  landings: [
+    { at: '2026-08-03 18:15', title: '콘솔이 **브라우저 주소로 열립니다** — edge nginx `/dcp-dev/` + base path 런타임화', commit: '7f703a0',
+      body: '**커밋 4개 · CI OK dev-7f703a0 · 반입 수렴 50초 · e2e 13/13 PASS.** 사용자가 "언제쯤 UI 로 들어가볼 수 있어?" 라고 물어 시작했습니다. 콘솔은 이미 3일째 스테이징에 떠 있었지만 ClusterIP 라 `kubectl port-forward` 로만 닿았고 계정도 e2e 잔재뿐이라, 실질적으로 **아무도 못 들어가는 상태**였습니다.<br/><br/>**막고 있던 것은 nginx 가 아니라 vite 산출물이었습니다.** 자산 참조가 절대 경로(`/assets/…`)라 프리픽스 뒤에서는 브라우저가 그것을 **프리픽스 없이** 요청하고, portal 의 `try_files … /index.html` 이 그 요청에 **200 text/html** 을 돌려줍니다 — 404 조차 안 나서 증상이 "백지"이고 원인이 어디에도 안 드러납니다. 그래서 서버가 **기동 시점에** 셸을 다시 씁니다(산출물 모양이 어긋나면 첫 요청이 아니라 기동에서 끊습니다). `&lt;base href&gt;` 는 **상대 URL 만** 고쳐 이 문제에 무용해서 기각했습니다 — 쓰려면 vite 를 상대 base 로 돌리고 CSP 의 `base-uri \'none\'` 까지 풀어야 하는데, **자산 참조가 index.html 2건이 전부**임을 실측(CSS `url()` 0건 · 동적 import 0건 · 배포본 grep)해 vite 도 CSP 도 안 건드리는 쪽을 골랐습니다.<br/><br/>**프리픽스는 빌드가 아니라 런타임 env 입니다**(`CONSOLE_WEB_BASE_PATH`, 사용자 판정). 이미지 하나가 두 좌표를 덮고, 서버의 `stripBasePath` 와 화면의 `toAppPath` 가 **접두가 있든 없든 같게** 받습니다 — nginx `proxy_pass` 의 끝 슬래시 한 글자에 배포가 걸리지 않게 하려는 것이고, 그 대칭을 실물로 확인했습니다(port-forward 에서 미프리픽스·프리픽스 요청이 전부 200).<br/><br/>**NodePort 를 한 번 추천했다가 접었습니다.** NodePort 트래픽은 노드 주소로 SNAT 되어 `namespaceSelector` 로 표현할 수 없어 **전체 허용**이 필요합니다 — grafana 가 그렇게 열려 있고 그 사유가 "값 있는 데이터 없음, 조회 전용"이라 **인증 표면인 콘솔에는 전이되지 않습니다.** 실제로 판 구멍은 `app: console-web` 하나만 겨눈 NetworkPolicy 라 그보다 좁습니다.<br/><br/>**급소는 `POST /v1/auth/logout` 204 입니다.** 403 이면 nginx 가 `Host` 를 재작성한 것이고, console-api 의 `sameOrigin` 이 `Origin` 을 받은 `Host` 와 문자열 비교하므로 상태변경 POST 5개가 전부 죽습니다 — 증상이 "로그인은 되는데 그 다섯만 403"이라 인가 결함으로 오진합니다. 로그인 200 · 계정 목록 200 · logout 204 까지 브라우저 좌표 그대로 curl 로 관통시켰고, 포털 회귀(`/`·`/dcp`·`/design-context-platform/`)도 함께 봤습니다.<br/><br/>**변이 7종 전부 사망**(각 변이는 적용 개수 1을 먼저 단정). 그중 시험이 **제 결함 하나**를 잡았습니다 — 셸 재작성에서 자산 치환이 먼저 도는 바람에 뒤쪽 `src="` 의 따옴표가 메타의 content 를 닫아 주는 것처럼 보였고, `/&lt;script src=` 같은 값이 잡히는데도 셸은 정상으로 떴습니다. 추출한 값 자체를 검증하게 고쳤습니다.<br/><br/>**세션 중 제 오판 둘이 드러났습니다.** ① "`.5` 에 edge nginx 가 없다"고 사용자에게 단정했는데 틀렸습니다 — `docker ps` 와 Ingress 오브젝트만 보고 결론을 냈고, 실제로는 **portal 네임스페이스의 워크로드 자체가 `nginx:alpine`** 이며 설정이 호스트에 hostPath 로 물려 있었습니다. ② e2e 락아웃 절의 전제를 **안 읽고** 관리자 계정을 시드해 **전 트랙의 e2e 를 막았습니다.** 그 절 주석은 이 상황을 이미 예견해 뒀고(`t5-seed-admin` 이 서면 상시 그렇다) 저는 그것을 시드 **뒤에** 읽었습니다. 상주 관리자는 알파의 정상 상태이지 고장이 아니므로, 판정을 셋으로 갈랐습니다 — 조건이 성립하면 단정 · 아니면 **무엇이 안 덮였는지 이름을 찍고** 통과 · 수를 못 읽으면 중단(못 읽은 것과 "1이 아니다"는 다른 사건이라 합치면 psql 이 깨져도 절이 조용히 사라집니다).<br/><br/>**안 옮긴 것 하나를 명시로 남깁니다** — `CONSOLE_BASE_URL` 은 여전히 port-forward 좌표입니다. 옮기려면 스테이징 호스트 주소가 커밋 파일에 들어가는데 그것이 금지고(배포 시점 주입이 필요합니다), `staging-e2e.sh` 12절이 그 접두를 단정해 이 값만 바꾸면 e2e 가 그 자리에서 깨집니다. **대가는 nginx 로 발급한 초대 링크를 터널 없는 수신자가 못 연다는 것**이고, 사유를 매니페스트 주석과 큐 `t6-console-invite-url-coordinate` 양쪽에 박았습니다.<br/><br/>곁다리로 **`console-web/server/server` 16MB 바이너리가 `7f03ffa` 이래 git 에 추적되던 것**을 걷어냈습니다 — 앞 트랙 6 세션이 같은 사고를 레포 루트에서 고치며 넣은 `/server` 규칙이 **루트 앵커**라 이 자리를 못 덮었습니다. **이 랜딩은 `security-reviewer` 미경유이고 사용자 판정 대기입니다.**' },
+    { at: '2026-08-03 16:42', title: 'e2e **서비스 계정 JWT 관통 블록** — 12블록이 전부 고정 토큰이던 자리', commit: '76cffa6',
+      body: '**커밋 5개 · CI OK dev-76cffa6 · e2e 13/13 PASS · 반입 불필요**(`git diff -- services/` 가 비어 이미지 무변경). `POST /oauth2/token` 을 e2e 가 **한 번도 부른 적이 없었습니다** — 12블록이 전부 고정 토큰 경로라 JWT 검증이 깨져도 `make e2e` 는 초록으로 남았고, 그 대가는 `t5-dataapi-jwt-verify` 최종 게이트가 자동 블록을 떼면서 **명시로 적어 둔 것**이었습니다. 이 랜딩이 그것을 갚습니다.<br/><br/>**무게중심은 코드가 아니라 판정 둘입니다.** ① `client_secret` 조달 경로 — e2e 가 seed 로 회전시켜 그 자리에서 Vault KV v2 에 적재하고 **전용 read 정책 토큰**으로 되읽어 발급받습니다. **&quot;하나의 선례&quot;라는 전제가 거짓이었습니다**: 읽기 축만 `run-local.sh` 에 이식되고, **`mcp-server` 에는 적용되지 않으며**(조달 주체가 아니라 수령 주체이고 정본상 클러스터 안이라 베타에 사이드카 대상 — 지금 Vault 클라이언트를 심으면 폐기 예정 자산), 쓰기 축은 e2e 한정 한시입니다. ② **정본 §9.3.2 규범 지위 충돌**(사용자 지시로 코드 착수 앞에 정리) — 그 소절에 규범 후보가 셋인데 **우선순위를 정한 문장이 없습니다**. 시점 축은 이탈이 아니고(M2 도래) 내용 축만 이탈입니다.<br/><br/>**이탈 문안이 좁혀진 것이 판정의 실질입니다.** &quot;사이드카 대신 직접 조회&quot;로 쓰면 거짓 등재가 됩니다 — `staging-e2e.sh` 는 본문이 연 예외 ②(배치성 운영 스크립트)에 문면상 들어가고, **예외 ①의 닫힌 열거는 정본 자신이 깼습니다**(알파 인증 개정 커밋이 첫 표에 「API 직접 호출 **sign** 연산」을 신설하고 본문의 「Transit **encrypt/decrypt**」를 안 고쳤습니다). 남는 어긋남은 **인증 경로 한 축** = 신원 게이팅 대신 시크릿 값 게이팅이고, 그것이 원장 **알파 한시 표 #14** 입니다. 정본은 D-0016 형태로 **개정 이월**했습니다(지금 알파 주석을 박으면 레포 상태 의존 서술이 되어 `mcp-server` 반입일에 새 거짓이 됩니다).<br/><br/>**리뷰가 랜딩 차단급을 하나 잡았고 스테이징 프로브가 그것을 실측으로 확정했습니다.** `kubectl run --rm` 의 stdout 이 넷으로 오염됩니다(본문·마커·삭제 통지·attach 경고 두 줄) — 마지막 줄이 `pod … terminated (Error)` 라 정확 행 파싱이면 **매 실행** 깨졌고, 더 나쁜 것은 그 실패 문구가 **JWT 를 콘솔로 흘린다**는 것이었습니다. 마커 파싱 + 마스킹으로 고쳤습니다. 재시도도 장식이 아니었습니다 — 갓 뜬 파드가 `curl: (7) … after 1 ms` 로 거부됐고 `--retry-connrefused` 를 붙이자 200 이 됐습니다.<br/><br/>**남의 계정을 집어삼키고 있었습니다** — `seed_service_account.go` 가 &quot;status 도 건드리지 않는다&quot;를 명시 불변식으로 뒀는데 원시 SQL 로 우회하면서 scope 까지 좁혔습니다. scope 보존·되살림 로그·불변식 주석으로 막고 전용 계정 전환은 큐로 넘겼습니다. **새로 심은 거짓 여섯 자리**(인용 좌표·`unknown_client` 관측 주장·도달 불가한 오류 문구·원장의 &quot;직독&quot;·README 시크릿 건수)도 전부 원문 대조로 고쳤습니다.<br/><br/>**실측 발견이 값을 했습니다** — `caddie-probe` 가 실행 시점에 **`disabled`** 였습니다. 1215 핸드오프는 active 로 만들었다 하고 1830 세션은 &quot;활성 슬롯을 점유한다&quot;를 전제로 계정 설계를 뒤집었는데 실물이 달랐습니다. 좌표를 가정했으면 첫 실행에서 깨졌을 자리라, 블록이 매 실행 psql 로 실측 발견합니다.' },
+    { at: '2026-07-31 02:47', title: '신뢰도 서빙(§5.2) 단정을 질의 파싱으로 — 부분 문자열이 13종 변이를 살리고 있었다', commit: '6210d6b',
+      note: '**전 시험을 통과하면서 §5.2 를 무너뜨리는 변이가 13종이었다.** 앞 세션이 격리(§3.2) 축을 파싱으로 푼 뒤 신뢰도 축을 "아직 부분 문자열"이라 자백하며 남겨 뒀는데, 그 구멍의 크기가 이번에 실측됐다. 최악형은 status 절을 `must_not` 아래로 옮기는 것 — 기본 검색이 **오직 exploratory·deprecated·archived 만** 반환하는데도 초록이었다. `must_not` 아래로 못 가게 하는 것만이 아니다: 기본 셋에 `exploratory` 를 더해도(Contains 는 존재만 본다), T2 필터를 **통째로 지워도**(부정 단정뿐이라), 필드명만 `status`→`trust_level` 로 바꿔도(아무 문서도 안 맞아 상시 0건인데 200 이라 장애로 안 읽힌다) 전부 초록이었다. **`status` 절은 `tenant` 와 구조가 달라 축이 하나 성립하지 않는다** — 단일 term/terms 라 `minimum_should_match` 가 아예 없어 **위치만이 구속력을 정한다.** 그 자리를 절의 **형태**(term/terms)를 기대값에 담는 것으로 메웠다(엔진이 둘을 다르게 파싱하므로 소비자에게 보이는 차이다). 검증은 격리 워크트리 5그룹 병렬 + 6종 직접 재현이고, **대조군이 값을 했다**: 그 워크트리들이 랜딩 커밋이 아니라 main 에서 나서 세 그룹이 처음에 대상 파일이 **없는** 트리를 초록으로 보고했다 — "대조군이 자기 전제를 증명하게 하라"를 안 넣었으면 13종 전부가 거짓 초록이 됐다. **리뷰가 내가 새로 쓴 주석 셋이 거짓임을 잡았다**(이 레포의 "정정이 새 거짓을 심는다" 재실증): 그중 하나는 `isolation_test.go` 의 무조건 서술("should 아래면 가점 힌트")을 **새 파일로 복제한 것**인데, 그 bool 이 msm 을 1로 명시하면 구속이고 **반례가 운영 코드 자신**이다(테넌트 필터가 그 형태다). 셋 다 고쳤고 원본 자리는 큐로 이연했다. 리뷰가 실증한 쉼표 구분자 구멍(`["confirmed,in_progress"]` 단일 원소가 두 원소 집합과 같은 표기가 되어 조용히 통과)도 닫았다. 판정 함수를 직접 부르는 픽스처를 신설해 위치 축 분기가 CI 에서 실행되게 했다 — 그전까지 그 분기의 유일한 근거가 1회성 변이 주입이었다. 시험 211→229. **런타임 무변경이라 e2e 생략**(변경 파일이 `_test.go` 둘뿐).' },
+    { at: '2026-07-28 16:28', title: '트랙 2 백스톱', commit: 'ca19f3d', note: '' },
+    { at: '2026-07-28 10:20', title: '계약 batch4 — URN 3세그먼트', commit: 'aa4304b', note: '' },
+  ],
+
+  // 열린 막힘만. 풀리면 지웁니다.
+  blockers: [
+    { kind: '설계 판정', hint: '정해야 움직인다', items: [
+      { qid: ['image-axis-ruling'], t: '이미지 축 부칙', b: '이미지 임베딩 모델 · 캡션 처리 · 이미지 검색 편입 여부. 확정 전까지 착수가 규율로 금지돼 파이프라인 ⑥ · Data API가 묶여 있습니다. MCP 쪽은 이미지 도구(search_by_image) 하나만 묶이고 나머지 3도구는 이 부칙과 무관합니다 — 앞 문안이 "MCP"로 뭉뚱그려 과대 표기였습니다.' },
+      { qid: ['m1-gate-reinterpret'], t: 'M1 게이트 ① 재해석', b: '"우리 예산 + CADDIE 잔존 호출 합산"이라는 조건이, 계정이 서로 다른 것으로 밝혀져 그대로는 성립하지 않는다.' },
+      { qid: ['t5-m2-service-accounts', 'contracts-inbox-surface', 'contracts-fixed-token-abolition-wording'],
+        t: '정본 §6.6 신고 루프 — **경성 선행이 풀렸고 소비자 전환 3갈래가 열려 있습니다** (2026-08-03 14:05)',
+        b: '**2026-08-03 14:05 갱신 — 좌표에서 `t7-vault-kv-deployment` 를 걷었습니다.** 그 항목은 09:42 에 done 인데(랜딩 `5356977`) 이 절이 계속 가리켜 페이지가 끊긴 큐 포인터로 경고했습니다 — **본문은 이미 "경성 선행이 풀렸습니다"라고 옳게 적고 있었고 좌표만 안 따라간 형태**입니다. 제목도 그 사실에 맞췄습니다(앞 제목은 아직 "트랙 7에 막혔습니다"였습니다). 남은 좌표 셋은 그대로 열려 있습니다.<br/><br/>**2026-08-03 16:42 갱신 — e2e 갈래가 랜딩됐습니다**(코드 main `76cffa6` · **e2e 13/13 PASS**). 소비자 전환 3갈래 중 첫 갈래가 실물이 됐고 `client_secret` 조달 경로가 사용자 판정으로 확정됐습니다(**D-0029** · 이탈 원장 알파 한시 표 **#14**) — 전용 read 정책 정적 토큰으로 Vault KV v2 를 조회합니다. **선례 사거리가 셋으로 갈립니다**: 읽기 축만 `run-local.sh` 에 이식되고, **`mcp-server` 에는 적용되지 않으며**(조달 주체가 아니라 수령 주체이고 §6.7 상 클러스터 안이라 베타에 사이드카 대상), 회전·적재는 e2e 한정 한시입니다(정본 §9.3.1 4단계 적재 주체는 콘솔 백엔드인데 그 관리 표면이 계약에 0건 — 큐 `t5-service-account-admin-surface`).<br/><br/>**같은 자리에서 정본 §9.3.2 의 규범 지위 공백을 판정으로 메웠습니다**(사용자 지시로 코드 착수 앞에). 그 소절에 규범 후보가 셋인데 **우선순위를 정한 문장이 문서에 없습니다** — 시점 축은 이탈이 아니고(M2 도래) **내용 축만 이탈**입니다. 이탈은 「직접 호출」이 아니라 **인증 경로 한 축**(신원 게이팅 대신 시크릿 값 게이팅)으로 좁혔습니다: `staging-e2e.sh` 는 본문이 연 예외 ②(배치성 운영 스크립트)에 문면상 들어가고, **예외 ①의 닫힌 열거는 정본 자신이 깼습니다**(알파 인증 개정 커밋이 첫 표에 「API 직접 호출 **sign** 연산」을 신설하고도 본문의 「Transit **encrypt/decrypt**」를 안 고쳤습니다). 정본 개정은 D-0016 형태로 **이월**했습니다(큐 `docs-canon-932-sidecar-alpha-note`).<br/><br/>**남은 둘은 트랙 8 영역입니다** — 그쪽 랜딩 뒤 별도 세션 몫이고 **`mcp-server` 는 이 선례를 상속하지 않습니다.** 새로 열린 축 하나: `t5-mcp-jwt-refresh-gap` — **mcp-server 에 JWT 갱신 기구가 0줄**이라 `run-local` 이 전환되는 순간 1시간 넘는 MCP 세션이 전건 401 이 됩니다.<br/><br/>아래는 이전 갱신입니다.<br/><br/>**2026-08-03 10:45 갱신 — 3갈래 중 첫 갈래를 트랙 5 가 집었습니다.** 열린 소비자 전환 3갈래 중 **e2e 갈래**(`deploy/bootstrap/staging-e2e.sh`)를 `t5-issuer-e2e-block` 으로 착수했습니다(위 세션 카드). 나머지 둘(`services/mcp-server` · `tools/mcp/run-local.sh`)은 **트랙 8 이 그 디렉토리를 점유 중이라 지금 집을 수 없고**, 그쪽 랜딩 뒤 별도 세션 몫입니다. **우산 `t5-m2-service-accounts` 는 일부러 열어 둡니다** — 남은 세 갈래가 트랙 8·4·계약 영역에 흩어져 한 세션이 질 수 없고, 셋이 각자 랜딩한 뒤 폐지 세션이 집는 것이 맞습니다. **이 세션이 정하는 `client_secret` 조달 경로가 나머지 두 갈래의 선례가 됩니다**(트랙 7 이 auth method 를 일부러 안 고르고 넘긴 자리입니다).<br/><br/>**2026-08-03 09:50 갱신 — 경성 선행이 풀렸습니다.** Vault(OpenBao) KV v2 가 스테이징에 **실물로 섰습니다**(코드 main `5356977` · e2e 12/12 · 경로는 정본대로 `secret/svc-accounts/{tenant}/{agent}`). ⇒ **소비자 전환 3갈래가 열립니다** — 이 자리가 막고 있던 것이 그것이었습니다.<br/><br/>**다만 Vault auth method 는 아직 설정하지 않았습니다.** 소비자 셋이 전부 클러스터 밖이라(`services/mcp-server` 는 Dockerfile·매니페스트 자체가 없고 나머지 둘은 개발 머신) **정본이 지정한 사이드카 주입·k8s auth 가 적용 대상 0개**입니다 — 지금 고르면 셋 다 못 덮는 것을 고르게 됩니다. 가산적 조작이라 전환 세션이 그 자리에서 정하면 되고 서버 재배포·데이터 이관이 0입니다. 적재 주체는 정본 §9.3.2 상 **콘솔 백엔드**입니다.<br/><br/>**기밀성 상한은 아직 안 올라갔습니다** — unseal key 가 k8s Secret 에 있어 그것을 읽는 자가 Vault 를 엽니다(사용자 판정, 알고 고른 것). 이번에 사 온 것은 경로 규약·감사·회전 메타데이터·정책입니다. 아래는 이전 갱신입니다.<br/><br/>**2026-08-02 22:35 갱신 — 아래 18:30 절이 적은 "트랙 5가 그동안 할 자리 넷"이 이제 하나 남았습니다.** 합산 상한 **폐기**(베타 이연, `a402590`) · freshness 축 이식 **랜딩**(`b30b460`) · 인증 관측 + 로그 tenant 축 이식 **랜딩**(`69a9bbe`). 남은 것은 **스테이징 실측**(`caddie-probe` 실 DB 상태 · e2e 벽시계 소요) 하나뿐입니다.<br/><br/>**⇒ 이제 트랙 5 가 놀지 않을 자리가 거의 없습니다. `t7-vault-kv-deployment` 가 유일한 경성 선행인데 아직 아무도 안 집었고, 그것이 서기 전까지 소비자 전환 3갈래가 전부 막혀 있습니다** — 이 사슬을 움직이려면 다음 세션이 트랙 7 을 집는 것이 맞습니다(`deploy/` 경로라 트랙 5 세션과 경로가 안 겹칩니다).<br/><br/>아래는 이전 갱신입니다.<br/><br/>**2026-08-02 19:57 갱신 — 선행이 하나 줄었습니다.** 18:30 판정 ⓐ(다계정 전환)가 붙였던 선행 `t5-tenant-aggregate-limit`(테넌트 합산 상한)은 **베타로 이연 판정**돼 폐기됐고(코드 main `a402590`), 인덱스는 유지됩니다. 근거는 정본이 그 집행을 게이트웨이 몫으로 지정하고(§7.10.2) 검증을 베타 게이트에 걸어 뒀으며(§10.10.5) `30%`의 분모가 정본에 없다는 것입니다. ⇒ **남은 사슬은 `t7-vault-kv-deployment` → 소비자 전환 3갈래 → 폐지**로 단순해졌습니다. 아래는 이전 갱신입니다.<br/><br/>**2026-08-02 18:30 갱신 — 전수 조사가 끝났고 사용자 판정 셋이 임계 경로를 바꿨습니다.** 남은 넷째 단계(소비자 전환·고정 토큰 폐지)의 소비자는 **셋으로 확정**됐습니다(`services/mcp-server` · `tools/mcp/run-local.sh` · `deploy/bootstrap/staging-e2e.sh` — 8축 검색으로 닫혔고 레포 밖 음성). 셋 다 **무인 실행**이라 `client_secret` 을 어딘가에서 읽어야 하는데, 그 자리가 **Vault KV v2 로 확정**됐고(사용자 판정) **Vault 는 레포에 0건**입니다(`token-issuer.v1.yaml:33` 이 "트랙 7 몫"으로 명시). ⇒ **소비자 전환 3갈래 전부가 트랙 7의 Vault 배포를 기다립니다**(큐 `t7-vault-kv-deployment`). 나머지 판정 둘: 테넌트당 활성 1계정 인덱스를 **푼다**(→ `t5-tenant-aggregate-limit` 이 선행으로 붙습니다) · 계약 문안은 **계약 전용 세션이 먼저**(큐 `contracts-fixed-token-abolition-wording`). **트랙 5는 그동안 놀지 않습니다** — 판정 무관·역행 안전한 자리 넷이 열려 있습니다(합산 상한 · freshness 축 이식 · 인증 관측 · 스테이징 실측). 아래는 이전 갱신입니다.<br/><br/>**2026-08-02 13:06 갱신 — M2 의 셋째 단계까지 섰습니다.** data-api JWT 검증 미들웨어가 랜딩됐습니다(코드 main `a703741` — `dab5910` 위에 `9564925`·`a703741`, 이중 수용) — **토큰이 발급만 되던 상태에서 처음으로 쓰이는 곳이 생겼습니다.** 착수 설계("검증 불능이면 503")를 정본 §9.3.7 이 뒤집어 stale-if-error 로 갔고, 게이트가 보안 검토가 놓친 블로커 2건(시험의 `exp` 벽시계 고정 · 취소된 요청의 30초 복구 창 소진)을 잡아 닫았습니다. **남은 것은 소비자 전환(`t5-console-to-dataapi-client`)과 고정 토큰 폐지뿐입니다** — 인박스 사슬 자체의 선행은 이것으로 사실상 다 섰고, 남은 둘은 사슬 자체보다 알파 인증 체계 정리 축입니다.<br/><br/>**2026-08-02 08:20 갱신 — 막힘이 또 한 칸 좁혀졌습니다.** 사슬의 선행이던 M2 중 **레지스트리와 발급기까지 랜딩됐습니다**(코드 main `dab5910` — 계약 12차 `8e94c0f` 위에 `c583c7a`·`3a4c6f2`·`dab5910`). 그 앞 착수 조사에서 사용자 판정 7건이 회수됐습니다(서명키를 k8s Secret 에 두고 이탈 등재 · 계약을 별도 파일로 · 발급기 오류는 RFC 6749 준수 + 좁은 예외 · `aud`=`cdo-data-api` · `svc-cdo-console` 계정은 이번 범위 밖). **`svc-cdo-console` 을 뺀 것이 이 사슬에 직접 걸립니다** — 인박스 전결(steward)은 테넌트 스코프라 영향이 없지만, platform-admin 집행·auditor 열람의 전 테넌트 축은 여전히 `t5-admin-cross-tenant-axis` 를 기다립니다.<br/><br/>**이 자리는 사람 판정 대기에서 빠집니다.** 2026-08-01 사용자 판정이 났고 정본에 반영됐습니다(D-0026, 문서 레포 main `3c92e54`). ① **신고 인박스는 §9.2.1 의 `/v1/admin/*` 운영 플레인 표면**이고 콘솔이 `svc-cdo-console` 정체성으로 대행 호출합니다 — 접수(`POST /v1/feedback/flags`)만 소비자 축 Data API 표면이고 인박스는 아닙니다. 저장 계정도 그 축을 따라 **콘솔 전용 DB 계정에 업무 테이블 권한을 넓히지 않습니다**(D-0011 계정 분리 유지). ② **소속 판정은 격리 집행보다 앞입니다** — 접수는 오라클 차단 때문에 실재·소속을 못 보고, 계약이 그 판정을 「후속 루프」에 넘기면서 루프 안 어느 자리인지는 안 정했습니다. 그 순서가 교차 테넌트 격리 유발의 유일한 방벽입니다. ③ **§10.9 P1 전화 체인의 탐지 지점은 접수가 아니라 격리 성립**입니다 — 지어낸 `chunk_id` 반복으로 dedupe 억제 창을 우회해 24×7 전화 체인을 무한 발화시키는 경로가 닫힙니다.\n\n**막힘이 사라진 것이 아니라 좌표가 확정된 것입니다** — `contracts-inbox-surface` 이하 사슬(→ `t4-feedback-flags-serving` → `t8-flag-bad-context`)의 선행이 **M2(서비스 계정 축)** 로 바뀌었습니다. **큐에 M2 항목이 아예 없어서 신설했습니다**(`t5-m2-service-accounts`). 함께 신설: `t5-console-to-dataapi-client`(console→data-api **첫 아웃바운드 호출** — 레포에 `http.Client` 가 0건입니다) · `t5-admin-cross-tenant-axis`(platform-admin 집행·auditor 열람의 전 테넌트 축 — **인박스 전결 경로의 선행은 아닙니다**) · `t7-alert-detection-point`.\n\n**기각한 대안과 이유는 D-0026 대안 표에 있습니다** — 콘솔 계정에 업무 테이블 GRANT(울타리 첫 예외) · 전용 스키마 GRANT(저장 위치로 표면 소속을 대신 정하는 형태) · 스튜어드 전결 경로만 먼저(알파에 서비스 계정 JWT 가 없어 **콘솔이 테넌트별 고정 토큰을 전부 쥐어야 하는 시크릿 팬아웃**) · dedupe 키에 신고자 축(알파는 테넌트당 계정 1개라 판별력이 낮습니다).' },
+    ]},
+  ],
+
+  // 지금 통과하고 있어서 더 위험한 것들 — progress.html 17장과 같은 목록
+  issues: [
+    '문서 레포 쓰기 가드의 탈출구를 막힌 사람이 알 방법이 없다 — 차단 메시지(guard-docs-write.sh:69-75)가 DOCS_WRITE_GUARD_SKIP 을 안내하지 않고 그 레포 CLAUDE.md 에도 언급이 0건이라, 아는 경로가 설계 문서와 코드 주석뿐이다. 설계 §5.1 은 "탈출구가 없으면 막힌 사람이 Bash 우회를 습관으로 익힌다"를 근거로 그것을 뒀는데, 안내가 없으면 그 근거가 성립하지 않고 실제 행동도 Bash 우회로 간다 (큐 docs-hatch-not-user-facing)',
+    '커서에 무결성 보호가 없다 — 서버는 커서에 서명하지 않으므로 질의 묶임(query · 정규화된 min_trust · 테넌트)이 유지된 채 offset 만 바꾼 커서는 거부되지 않고 그대로 쓰인다(search.go:548-556 — 검증은 파싱·질의 묶임·음수 offset·모드 일치(:613-614)뿐이다). 계약 개정 7차가 400 설명의 "변조됐다"를 걷어내 **계약은 이제 이 사실을 정확히 말하지만, 서버 동작은 그대로다** — 소비자가 커서를 신뢰 경계로 쓰고 있었다면 그 전제가 지금도 틀린 것이고, 페이지 경계를 넘는 접근 통제를 커서에 기대면 안 된다. 막으려면 서명이 필요하고 그것은 계약이 아니라 트랙 4 의 코드 몫이다',
+    '릴레이가 멈춘 것을 아무도 못 본다 — outbox-relay 에는 probe 가 없어 파드는 계속 Ready 이고, 정지를 드러내는 축인 outbox_unpublished · outbox_oldest_unpublished_seconds · outbox_relay_holds_lock 에 알림 규칙이 0건이다(prometheus-config 에 "outbox" 문자열 0건). **8c80eb1 이 지표 쪽 거짓만 닫았다** — holds_lock 이 최초 획득 뒤 1에 고정되던 것이 매 틱 재평가로 바뀌어, 이제 그 값을 믿고 규칙을 얹을 수 있다. 규칙을 쓸 때의 실측 3건(트랙 7): ① **pipeline 파드도 이 지표들을 상시 0 으로 노출한다**(metrics.py 가 공유 모듈. 프로메테우스에서 직접 확인 — pipeline=0, outbox-relay=1) → 셀렉터를 pod=~"outbox-relay.*" 로 걸어라. 안 걸면 min() 은 상시 발화하고 max() 는 락 상실을 못 잡는다 ② **짧은 락 상실은 원리적으로 안 보인다** — 재접속은 한 틱(1초)에 자가 복구되는데 스크랩 간격이 30초다(실제로 놓쳤다). 쓸 수 있는 규칙은 지속적 상실(for: 1m 이상)뿐이고 그게 맞는 설계이기도 하다 ③ **PG 순단 구간에는 적체·연령 게이지가 얼어붙는다**(그 값을 읽는 질의도 PG 다) — 평평한 oldest 를 "적체 없음"으로 읽으면 안 되고 holds_lock 과 msg="outbox relay pg unavailable" 을 함께 봐야 한다. **probe 부재는 그대로 열려 있다** (트랙 7)',
+    '같은 사실이 여러 문서에 복제되면 하나를 고쳐도 되살아난다 — 405 거짓이 11곳에 있었고 batch6이 둘만 고쳤는데, 남은 사본 중 "앞을 보는 목록"(세션 배정·다음 계약 세션 후보)이 다음 세션에게 405를 다시 후보로 올렸다. 07899b8이 전부 닫았으나 이 구조 자체는 남아 있다: 지금도 같은 진술이 계약·CHANGELOG·원장·설계 문서·이 페이지에 병렬로 산다. 사본을 만들 때 서로를 가리키게 하거나, 앞을 보는 목록만이라도 단일 출처로 모을 것',
+    '위조 신뢰 토큰의 공백 변형(`[T1 · figma]`)이 상류 새니타이저와 렌더를 모두 통과한다 — 두 패턴이 같은 리터럴이라 구분자 앞 공백에서 나란히 깨진다 (트랙 2 심층 방어 항목)',
+    '색인 매핑 갱신이 기존 인덱스에는 하드코딩된 3필드만 닿는다 — 새 필드가 조용히 누락된다',
+  ],
+};
+/* ═══════════════ DATA 블록 끝 — 아래는 그리기 코드입니다 ═══════════════ */
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const attr = s => esc(s).replace(/"/g, '&quot;');
+
+// 사람이 쓰는 본문 필드(세션 카드 · 막힘 · 이슈 · 랜딩)의 표기를 화면 표기로 옮긴다.
+// **반드시 esc() 뒤에** 돈다 — 앞에서 돌리면 DATA 의 문자열이 태그로 살아나 주입 통로가 된다.

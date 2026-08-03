@@ -103,6 +103,33 @@ type server struct {
 	idem *idemStore
 	lim  *limiter
 	now  func() time.Time
+
+	// mux 는 라우팅 표다. 게이트가 **mux 에 닿기 전에** 되돌아 나갈 때
+	// 라우트 라벨을 스스로 풀기 위해 보관한다 — 아래 resolveRoute 참조.
+	mux *http.ServeMux
+}
+
+// resolveRoute 는 이 요청의 라우트 라벨을 낸다.
+//
+// ★ r.Pattern 은 **mux 가 매칭한 뒤에야** 채워진다. 그래서 멱등·인증처럼 mux 앞에서
+// 되돌아 나가는 게이트의 응답은 라벨이 전부 `<METHOD> unmatched` 가 됐다 —
+// 재생(201)·충돌(409)·키 없음(400) 셋 다.
+//
+// 이 레포의 로그 규율은 "route 는 메트릭 라벨과 **같은 문자열**"이다. 그 결선이 여기서 끊기면
+// 아웃박스 재생 구간처럼 **정의상 재시도가 몰리는 트래픽**이 통째로 unmatched 로 뭉쳐,
+// 어느 라우트가 재생되는지를 지표로 볼 수 없다.
+//
+// mux.Handler 는 매칭만 하고 핸들러를 부르지 않으므로 부작용이 없다.
+func (s *server) resolveRoute(r *http.Request) string {
+	if p := strings.TrimSpace(r.Pattern); p != "" && p != "/" {
+		return RoutePattern(p, r.Method)
+	}
+	if s.mux != nil {
+		if _, pattern := s.mux.Handler(r); pattern != "" {
+			return RoutePattern(pattern, r.Method)
+		}
+	}
+	return RoutePattern("", r.Method)
 }
 
 // NewServer 는 라우팅과 게이트를 얹은 핸들러를 만든다.
@@ -112,7 +139,8 @@ type server struct {
 // 라우터가 그 문자열을 돌려주는 것 자체가 이 계층이 필요로 하는 기능의 전부다.
 func NewServer(svc *service.Service, opt Options) http.Handler {
 	s := newServer(svc, opt)
-	return s.chain(s.routes())
+	s.mux = s.routes()
+	return s.chain(s.mux)
 }
 
 // newServer 는 상태만 만든다. 라우팅과 분리한 이유는 시험이 **같은 게이트 사슬**에
@@ -146,7 +174,7 @@ func newServer(svc *service.Service, opt Options) *server {
 }
 
 // routes 는 표면 목록이다. 설계 §6 의 REST 표와 1:1 이다.
-func (s *server) routes() http.Handler {
+func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 세션 — D 계층. 사람이 branch·head·sha 를 적을 자리가 **없다**(설계 §5).
@@ -173,6 +201,7 @@ func (s *server) routes() http.Handler {
 
 	// 화면·알림·진단.
 	mux.HandleFunc("GET /api/v1/dashboard.json", s.handleDashboard)
+	mux.HandleFunc("GET /api/v1/notices", s.handleNotices) // 꼬리 전용. 세션 카드 파생을 안 돈다
 	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
 	mux.HandleFunc("GET /events", s.handleEvents) // 짧은 별칭. 화면이 이걸 문다
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

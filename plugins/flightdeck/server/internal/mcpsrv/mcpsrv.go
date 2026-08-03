@@ -658,9 +658,11 @@ func (s *Server) errText(tool string, err error) string {
 		return RenderRefusal(ref.What, ref.Reason, ref.Guidance)
 	}
 	if errors.Is(err, store.ErrNotFound) {
+		// err.Error() 에 **무엇이 없었는지**가 들어 있다(store.NotFoundError 가 좌표를 나른다).
+		// 앞선 판은 REST 를 건너오면 그 좌표가 사라져 "요청한 대상이 없다"만 남았고,
+		// 그래서 오타 난 항목 id 와 프로젝트 미등록이 글자 그대로 같은 화면이었다.
 		return RenderRefusal(tool, "찾는 것이 없다: "+clip(err.Error(), 300),
-			fmt.Sprintf("프로젝트 %q 가 아직 등록되지 않았다면 세션이 한 번도 안 열린 것이다 — "+
-				"board 를 먼저 부르거나 훅이 도는지 확인해라.", s.id.ProjectID))
+			NotFoundGuidance(err, s.id.ProjectID))
 	}
 	s.log.ErrorContext(context.Background(), "도구 실패",
 		"mode", tool, "project", s.id.ProjectID, "error", err.Error())
