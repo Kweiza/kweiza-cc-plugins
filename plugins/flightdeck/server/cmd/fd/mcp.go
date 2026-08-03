@@ -56,7 +56,11 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 		log.Info("MCP 기동 시 아웃박스 재생", "count", res.Sent, "skipped", res.Remaining)
 	}
 
-	if err := mcpsrv.Run(ctx, newMCPBackend(app), stdin, stdout, log); err != nil {
+	// ★ 프로젝트 좌표를 **여기서 넘긴다.** mcpsrv 가 스스로 풀면 경로의 마지막 성분이 되고,
+	// 워크트리에서 그것은 워크트리 이름이라 유령 프로젝트가 생긴다(실물로 재현했다).
+	// 옳은 규칙(git 주 저장소)은 App 이 이미 풀어 뒀으므로 그 값을 그대로 쓴다.
+	srv := mcpsrv.New(newMCPBackend(app), log, mcpsrv.WithProject(app.proj.ID, app.proj.Path))
+	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())
 		return 1
 	}
