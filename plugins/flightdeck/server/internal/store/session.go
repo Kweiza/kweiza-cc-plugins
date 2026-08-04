@@ -129,6 +129,38 @@ func (t *Tx) sessionByTriple(machineID, worktree, ccSessionID string) (model.Ses
 	return s, nil
 }
 
+// DivergentSessions 는 **같은 대화(cc_session_id)인데 project 나 machine 이 다른** 세션을 낸다.
+//
+// ★ 키를 바꾸지 않는다. 세션 정체는 (machine, worktree, cc) 3중키 그대로이고, 이 조회는
+// 판정이 아니라 **관측**이다 — 갈렸다는 사실을 말할 자리를 만드는 것이 전부다.
+// 갈렸을 때 조용히 합치면 워크트리 축의 보증(조상 트리 등록을 안 물려받는다)이 무너진다.
+//
+// ★ 이 조회를 받는 인덱스가 없다(session_by_project 는 (project,state), UNIQUE 는 machine 선두).
+// 지금 이 표는 수십 행 규모라 전수 주사가 무해하고, 부르는 자리도 **세션이 새로 만들어질 때
+// 한 번**뿐이다(재개 경로는 안 탄다). 표가 커지면 cc_session_id 인덱스를 먼저 봐라.
+func (t *Tx) DivergentSessions(ccSessionID, project, machineID string) ([]model.Session, error) {
+	rows, err := t.tx.QueryContext(t.ctx,
+		`SELECT `+sessionCols+` FROM session
+		 WHERE cc_session_id = ? AND (project <> ? OR machine_id <> ?)
+		 ORDER BY opened_at`, ccSessionID, project, machineID)
+	if err != nil {
+		return nil, fmt.Errorf("정체 갈림 조회 실패(cc_session=%q): %w", clip(ccSessionID, 64), err)
+	}
+	defer rows.Close()
+	var out []model.Session
+	for rows.Next() {
+		s, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("정체 갈림 행 해석 실패: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("정체 갈림 조회 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
 func getSession(ctx context.Context, q dbtx, id string) (model.Session, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+sessionCols+` FROM session WHERE id = ?`, id)
 	s, err := scanSession(row)
