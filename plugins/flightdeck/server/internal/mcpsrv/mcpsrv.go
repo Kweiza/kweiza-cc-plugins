@@ -37,6 +37,7 @@ import (
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 	"github.com/kweiza/flightdeck/internal/store"
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // ★ 이 서버는 DB 를 열지 않는다. 조정 서버에 붙는 통로는 Backend 하나뿐이고,
@@ -57,6 +58,8 @@ type Server struct {
 
 	id Identity
 
+	beaconDir string // 창 비콘을 둘 디렉토리. 빈 값이면 심지 않는다(WithBeaconDir 참고)
+
 	mu        sync.Mutex
 	sessionID string // 게으르게 연다. 도구를 한 번도 안 부르면 세션 행도 안 생긴다
 }
@@ -75,6 +78,7 @@ type builder struct {
 	hostname    string
 	hostErr     error
 	now         func() time.Time
+	beaconDir   string
 }
 
 // WithEnv 는 환경 조회를 바꾼다. nil 은 무시한다.
@@ -186,6 +190,10 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 			"project", id.ProjectID, "worktree", clip(id.Worktree, 200),
 			"cc_session", clip(id.CCSessionID, 64))
 	}
+
+	s.beaconDir = b.beaconDir
+	s.plantBeacon()
+
 	return s
 }
 
@@ -429,6 +437,37 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 // canAttribute 는 이 프로세스가 세션 행을 만들 수 있는지다.
 func (s *Server) canAttribute() bool {
 	return s.id.CCSessionID != "" && s.id.ProjectID != "" && filepath.IsAbs(s.id.Worktree)
+}
+
+// BeaconKey 는 이 프로세스가 심을 창 좌표다. 심을 수 없으면 ok=false 다.
+//
+// ★ 부모가 claude 라는 보장이 없다. 실측: Cursor 가 띄운 fd mcp 의 부모는 node 이고
+// 조상 사슬 어디에도 claude 가 없으며 CLAUDE_* 환경이 하나도 없다. 그 자리에 심으면
+// 어떤 훅도 못 맞추는 pid 로 키가 잡히므로, 정체가 온전할 때만(canAttribute) 심는다 —
+// beaconDir 이 비었을 때도 마찬가지다(시험 격리, WithBeaconDir 주석 참고).
+func (s *Server) BeaconKey() (window.Key, bool) {
+	if s.beaconDir == "" || !s.canAttribute() {
+		return window.Key{}, false
+	}
+	ppid := os.Getppid()
+	started, err := window.StartedOf(ppid)
+	if err != nil {
+		return window.Key{}, false
+	}
+	k := window.Key{MachineID: s.id.MachineID, ClaudePID: ppid, Started: started}
+	return k, k.Valid()
+}
+
+// plantBeacon 은 이 창의 자리를 표시한다. 실패해도 서버를 막지 않는다 —
+// 비콘이 없으면 훅이 폴백하고, 그 폴백이 오늘 거동이다.
+func (s *Server) plantBeacon() {
+	k, ok := s.BeaconKey()
+	if !ok {
+		return
+	}
+	if _, err := window.Plant(s.beaconDir, k, s.id.Worktree, s.id.CCSessionID, s.now()); err != nil {
+		s.log.WarnContext(context.Background(), "창 비콘 심기 실패", "error", err.Error())
+	}
 }
 
 // ensureSession 은 세션을 한 번만 연다. 같은 3중키면 같은 세션이므로 재호출도 안전하지만,
@@ -845,4 +884,14 @@ func WithProject(id, path string) Option {
 // 프로젝트 축이 먼저 같은 사고를 겪고 주입으로 고쳤는데 머신 축만 그 교정에서 빠져 있었다.
 func WithMachine(id string) Option {
 	return func(b *builder) { b.machineID = strings.TrimSpace(id) }
+}
+
+// WithBeaconDir 는 창 비콘을 둘 디렉토리를 준다.
+//
+// ★ **이 옵션이 없으면 심지 않는다.** 여기서 기본 경로로 떨어지면 go test 가 개발자의
+// 진짜 ~/.flightdeck/windows/ 에 파일을 쓴다 — cmd/fd 는 그 사고를
+// TestUnpinnedEnvNeverReachesTheRealHome 으로 막지만 이 패키지에는 그런 방어가 없다.
+// 경로를 고르는 판단은 window.Dir 하나가 갖고, 그것을 부르는 것은 배선(cmd/fd)의 일이다.
+func WithBeaconDir(dir string) Option {
+	return func(b *builder) { b.beaconDir = dir }
 }
