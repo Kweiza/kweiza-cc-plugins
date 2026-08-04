@@ -593,6 +593,19 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 		}
 	}
 
+	// ★ item.paths 는 가장 큰 경로 컬럼인데 여기 오기 전까지 검증이 하나도 없었다.
+	// 세션 worktree 와 달리 클라이언트 OS 라는 관문조차 없어서 사람이 무엇을 붙여넣든
+	// 들어온다. 통과시키면 그 항목의 겹침 축이 **조용히** 죽는다 — 오류가 아니라
+	// '겹침 없음'이라 정상 응답과 구분되지 않는다.
+	for i, p := range in.Paths {
+		if v := judge.JudgePathCoordinate(p); !v.OK {
+			return model.Item{}, &RefusedError{What: "add",
+				Reason: fmt.Sprintf("%d번째 경로: %s", i, v.Reason),
+				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
+					"좌표계가 다르면 이 항목의 겹침 축이 조용히 죽는다."}
+		}
+	}
+
 	it := model.Item{
 		Project: in.Project, ID: in.ID, Title: in.Title, Body: in.Body,
 		Paths: in.Paths, Labels: in.Labels, State: model.ItemOpen, After: in.After,
