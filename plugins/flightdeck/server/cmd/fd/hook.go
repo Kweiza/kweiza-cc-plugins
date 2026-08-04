@@ -128,7 +128,7 @@ func (a *App) runHook(ctx context.Context, event string, stdin io.Reader, out io
 	case "pre-compact":
 		a.hookPreCompact(ctx, p)
 	case "stop":
-		a.hookStop(ctx, p, out)
+		a.hookStop(ctx, p, perr, out)
 	default:
 		a.log.Error("모르는 훅 이름", "mode", clip(event, 40),
 			"error", "session-start|user-prompt|post-tool|pre-compact|stop 중 하나여야 한다")
@@ -277,7 +277,22 @@ func (a *App) hookPreCompact(ctx context.Context, p HookPayload) {
 // 무가드 판을 실제로 돌려 루프를 냈고 사람이 인터럽트로 끊었다.
 // 그리고 이 가드는 임시방편이 아니라 옳은 의미론이다 — 처방은 **사람이 몰던 턴의 끝**에
 // 한 번 뜨는 것이지, 자기가 만든 턴의 끝에 다시 뜨는 것이 아니다.
-func (a *App) hookStop(ctx context.Context, p HookPayload, out io.Writer) {
+//
+// ★★★ **가드는 파싱 성패에 달려 있어야지, 억제에 기대면 안 된다.** runHook 은 페이로드
+// 해석이 실패해도(session-start 가 페이로드 없이 배너를 내야 하므로) 경고만 남기고
+// 제로값 HookPayload 로 계속 진행한다 — 그 제로값의 StopHookActive 는 항상 false 다.
+// 플랫폼이 Stop 페이로드 모양을 바꾸는 날 이 훅의 모든 호출이 파싱에 실패하면
+// 재진입 가드가 **매번** 꺼진다. 그때 남는 방벽은 처방의 (세션×키) 당 1회 억제뿐인데,
+// 그것은 우연한 edge-triggering이라 재진입 턴이 새 경로를 편집하면(새 outside:<path> 키)
+// 뚫린다. 그래서 파싱 자체가 실패했으면 이 가드가 참인지 거짓인지 알 수 없다는 뜻이고,
+// 모르면 안전한 쪽(아무것도 안 낸다)으로 fail-close 한다 — 다른 훅과 달리 이 훅만
+// **재진입이 세션을 못 쓰게 만들 수 있어** fail-open 원칙보다 이 가드가 앞선다.
+func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Writer) {
+	if perr != nil {
+		// 페이로드를 못 읽었으니 이 호출이 재진입인지 알 길이 없다 — 모르면 안 낸다.
+		a.log.Warn("stop: 페이로드 해석 실패 — 재진입 여부를 몰라 처방을 안 낸다", "error", perr.Error())
+		return
+	}
 	if p.StopHookActive {
 		// 내가 만든 턴이다. 여기서 또 내면 그 턴이 또 턴을 만든다.
 		return

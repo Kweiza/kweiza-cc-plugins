@@ -197,6 +197,11 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		return FinishResult{}, err
 	}
 
+	// ★ 트랜잭션이 커밋된 **바로 다음**에 부른다. 이 자리 뒤의 GetItem 이 실패해도
+	// handoff 판단은 이미 남았으므로 열린 처방은 닫혀야 한다 — Note(finish.go 아래)와
+	// 같은 규율이다: 커밋됐으면 그 뒤 무엇이 실패하든 ack 은 반드시 시도한다.
+	s.ackPrescriptions(ctx, in.Project, in.SessionID)
+
 	item, err := s.st.GetItem(ctx, in.Project, in.ItemID)
 	if err != nil {
 		return FinishResult{}, err
@@ -311,6 +316,14 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 		return NoteResult{}, err
 	}
 
+	// 처방을 받고 판단을 남겼다 — 열린 처방을 닫는다. 실패해도 판단은 이미 저장됐다.
+	//
+	// ★ **수신자 파생보다 먼저 부른다.** 아래 sessionCards 가 실패하면 이 함수는
+	// 그 자리에서 바로 반환한다 — 그 반환 뒤에 ack 을 두면, 판단은 트랜잭션에서
+	// 이미 커밋됐는데 파생 실패 하나 때문에 처방이 영영 안 닫히는 반쪽 상태가 생긴다.
+	// 커밋 여부만이 ack 을 가르는 조건이어야 하고, 그 뒤의 다른 축 실패는 아니다.
+	s.ackPrescriptions(ctx, in.Project, in.SessionID)
+
 	// 받을 세션은 조정 정보다. 파생 실패로 접지 않고 그대로 올린다.
 	d := &derive{}
 	proj, perr := s.st.GetProject(ctx, in.Project)
@@ -325,9 +338,6 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 	s.log.InfoContext(ctx, "판단 저장",
 		"project", in.Project, "session_id", in.SessionID, "mode", string(in.Kind),
 		"count", len(recipients), "bytes", len(in.Body))
-
-	// 처방을 받고 판단을 남겼다 — 열린 처방을 닫는다. 실패해도 판단은 이미 저장됐다.
-	s.ackPrescriptions(ctx, in.Project, in.SessionID)
 
 	return NoteResult{Judgment: j, Recipients: recipients}, nil
 }

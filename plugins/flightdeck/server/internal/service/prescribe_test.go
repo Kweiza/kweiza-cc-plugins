@@ -116,6 +116,43 @@ func TestNoteWithoutOpenPrescriptionsLeavesNoAck(t *testing.T) {
 	}
 }
 
+// finish 도 note 처럼 handoff 판단을 남긴다 — 그 판단이 열린 처방을 닫아야 한다.
+// **재현**: 선점한 항목의 선언 경로 밖을 편집해 outside:b.go 처방을 발화시킨 뒤
+// finish 로 마무리한다. finish 가 ack 를 안 부르면 이 처방은 영영 열린 채로 남는다 —
+// 억제는 judgment 표가 아니라 이 ack 이벤트를 보므로 발화율 계측만 어긋나지만,
+// 설계 §10 은 그 값이 떨어지면 "조건을 줄인다"는 교정을 걸므로 거짓 값은 교정을 그르친다.
+func TestFinishAcksOpenPrescriptions(t *testing.T) {
+	svc, st := newSvc(t)
+
+	sess := openSessionForPrescribeTest(t, svc)
+	claimItemForPrescribeTest(t, svc, st, sess, "batch7", []string{"a.go"})
+	touchPathForPrescribeTest(t, st, sess, "b.go") // 선언 경로(a.go) 밖 — outside:b.go
+
+	first, err := svc.Prescriptions(ctx(), sess)
+	if err != nil || len(first.All) == 0 {
+		t.Fatalf("처방이 안 나왔다: %v / %+v", err, first)
+	}
+
+	if _, err := svc.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: sess, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "batch7 랜딩",
+		Body: "① 왜 그렇게 했나 … ② 무엇을 기각했나 … ③ 일부러 안 한 것 … ④ 확인했으나 못 한 것 …",
+	}); err != nil {
+		t.Fatalf("마무리 실패: %v", err)
+	}
+
+	acks, err := st.ListSessionEvents(ctx(), sess, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 1 {
+		t.Fatalf("finish 뒤에도 ack 이 %d건이다 — handoff 판단이 열린 처방을 안 닫았다", len(acks))
+	}
+	if !strings.Contains(acks[0].Payload, first.All[0].Key) {
+		t.Fatalf("ack payload 에 열린 키(%s)가 없다: %s", first.All[0].Key, acks[0].Payload)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 헬퍼 — 이 패키지의 기존 헬퍼(newSvc·openSession·addItem)를 조립한 것뿐이다.
 // ─────────────────────────────────────────────────────────────────────────────

@@ -84,8 +84,8 @@ func TestPrescribe(t *testing.T) {
 			name: "선점이 있으면 unclaimed 는 안 뜬다",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me",
-				Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
-				TurnPaths:    []string{"cmd/fd/hook.go"}, LastJudgment: pt0, NewPaths: 1,
+				Claims:    []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths: []string{"cmd/fd/hook.go"}, LastJudgment: pt0, NewPaths: 1,
 			},
 			wantKeys: nil,
 		},
@@ -93,8 +93,8 @@ func TestPrescribe(t *testing.T) {
 			name: "silent — 경로 임계",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me",
-				Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
-				TurnPaths:    []string{"cmd/fd/hook.go"}, LastJudgment: pt0, NewPaths: SilentNewPaths,
+				Claims:    []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths: []string{"cmd/fd/hook.go"}, LastJudgment: pt0, NewPaths: SilentNewPaths,
 			},
 			wantKeys: []string{"silent"},
 		},
@@ -121,8 +121,8 @@ func TestPrescribe(t *testing.T) {
 			name: "silent 은 판단 뒤에 다시 뜬다",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me",
-				Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
-				TurnPaths:    []string{"cmd/fd/hook.go"}, NewPaths: SilentNewPaths,
+				Claims:    []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths: []string{"cmd/fd/hook.go"}, NewPaths: SilentNewPaths,
 				LastJudgment: pt0.Add(-time.Minute),
 				Emitted:      map[string]time.Time{"silent": pt0.Add(-2 * time.Minute)},
 			},
@@ -132,8 +132,8 @@ func TestPrescribe(t *testing.T) {
 			name: "silent 은 무시하면 안 다시 뜬다",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me",
-				Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
-				TurnPaths:    []string{"cmd/fd/hook.go"}, NewPaths: SilentNewPaths,
+				Claims:    []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths: []string{"cmd/fd/hook.go"}, NewPaths: SilentNewPaths,
 				LastJudgment: pt0.Add(-3 * time.Minute),
 				Emitted:      map[string]time.Time{"silent": pt0.Add(-2 * time.Minute)},
 			},

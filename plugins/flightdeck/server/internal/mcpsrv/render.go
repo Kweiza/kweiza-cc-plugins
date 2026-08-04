@@ -208,9 +208,15 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		if !v.OldestOutside.IsZero() {
 			age = fmt.Sprintf("(가장 오래된 신호 %s 전) ", FormatAge(now.Sub(v.OldestOutside)))
 		}
+		// ★ 창 값은 v.Window 에서 그대로 가져온다 — 숫자를 박아 두면 기본값이
+		// 바뀔 때마다(0113b35 처럼) 조용히 낡는다. 그리고 "이렇게 본다"에서 멈춘다 —
+		// "window=Nh 로 본다"처럼 손잡이를 돌리라는 투로 쓰지 않는다. MCP board 도구는
+		// window 인자를 받지 않고(tools.go), 그 인자를 새로 만들지도 않는다(설계가
+		// 도구 수를 6개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
+		// 웹 패널(internal/web/page.go)이 이미 이렇게 한다: 사실만 말하고 지시하지 않는다.
 		foot = append(foot, fmt.Sprintf(
-			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다. window=8h 로 본다",
-			v.OutOfWindow, age))
+			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
+			v.OutOfWindow, age, FormatAge(v.Window)))
 	}
 	if opt.Detail {
 		foot = append(foot, boardDetailFoot(v)...)

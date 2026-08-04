@@ -363,11 +363,16 @@ func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 
 // TestBoardSaysWhatTheWindowCutOff 는 창 밖으로 잘린 것을 **침묵시키지 않는다.**
 // 창은 표시 구간이지 생존 판정이 아니다(설계 §4).
+//
+// ★ 창 값은 3시간으로 고른다 — 지금 기본값(2h, service.DefaultLiveWindow)도
+// 옛 하드코딩 값(8h, 0113b35 이전 기본값)도 아닌 제3의 값이라, 문구가 하드코딩된
+// 숫자를 그대로 찍으면 **반드시** 어긋난다. v.Window 를 실제로 안 읽으면 이 시험이 잡는다.
 func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	window := 3 * time.Hour
 	got := RenderBoard(service.BoardView{
 		Sessions:      []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Window:        2 * time.Hour,
+		Window:        window,
 		OutOfWindow:   9,
 		OldestOutside: now.Add(-7 * time.Hour),
 	}, BoardRenderOptions{Now: now})
@@ -375,8 +380,18 @@ func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 	if !strings.Contains(got, "창 밖 9건") {
 		t.Fatalf("창 밖 건수를 안 말한다:\n%s", got)
 	}
-	if !strings.Contains(got, "window=") {
-		t.Fatalf("어떻게 보는지를 안 말한다:\n%s", got)
+	// ★ 어떻게 보는지는 v.Window 에서 파생돼야 한다 — 하드코딩된 숫자가 아니라.
+	if !strings.Contains(got, FormatAge(window)) {
+		t.Fatalf("창 밖 문구가 실제 창(%s)을 안 말한다 — 하드코딩된 값을 찍고 있을 수 있다:\n%s",
+			FormatAge(window), got)
+	}
+	if strings.Contains(got, "8h") || strings.Contains(got, "8시간") {
+		t.Fatalf("창 밖 문구에 옛 하드코딩 값(8h, 0113b35 이전 기본값)이 남아 있다:\n%s", got)
+	}
+	// ★ MCP board 도구는 window 인자를 받지 않는다(tools.go) — 없는 손잡이를
+	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 6개로 눌러 잡는다).
+	if strings.Contains(got, "window=") {
+		t.Fatalf("존재하지 않는 window 인자를 돌리라고 한다:\n%s", got)
 	}
 	if strings.Contains(got, "죽") {
 		t.Fatalf("생존 판정 낱말이 들어갔다 — 설계 §4 위반:\n%s", got)
