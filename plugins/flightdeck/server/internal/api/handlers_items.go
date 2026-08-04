@@ -182,3 +182,36 @@ func (s *server) handleFinishItem(w http.ResponseWriter, r *http.Request) {
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
 }
+
+// moveRequest 는 항목을 다른 프로젝트로 옮기는 요청이다.
+//
+// PATCH 를 열지 않고 전용 동사를 쓴다 — 항목 표면에 PATCH 가 생기면 "무엇까지
+// 고칠 수 있나"가 열린 질문이 되고, 그 질문은 이 자리에서 답할 것이 아니다.
+type moveRequest struct {
+	Project   string `json:"project"`
+	SessionID string `json:"session_id"`
+	To        string `json:"to"`
+}
+
+func (s *server) handleMoveItem(w http.ResponseWriter, r *http.Request) {
+	var req moveRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	infoFrom(r.Context()).setSession(req.SessionID)
+	res, err := s.svc.MoveItem(r.Context(), service.MoveInput{
+		Project: req.Project, SessionID: req.SessionID,
+		ItemID: r.PathValue("id"), To: req.To,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// ★ 원장에 남긴다. 조용히 옮기면 "왜 이 항목이 여기 있나"에 답할 자리가 없어진다 —
+	// 그리고 이 명령이 존재하는 이유 자체가 그 질문에 답하지 못해서다.
+	s.publish(r, "item.move", req.Project, req.SessionID, map[string]any{
+		"item": clip(res.Item.ID, 100), "from": clip(res.From, 64), "to": clip(res.To, 64),
+		"count": res.CrossRefs,
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}

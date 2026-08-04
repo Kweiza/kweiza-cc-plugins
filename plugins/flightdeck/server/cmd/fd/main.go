@@ -37,6 +37,7 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd add --id … --title … --body …        큐 항목 등록
   fd finish <item-id> --body …            판단+후속+종료+반납을 한 번에
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
+  fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
   fd alloc <counter>                      원자 발번
   fd doctor                               이 머신과 서버의 축을 실제로 잰다
 
@@ -109,6 +110,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runAdd(ctx, args[1:], stdout)
 	case "finish":
 		return app.runFinish(ctx, args[1:], stdout)
+	case "move":
+		return app.runMove(ctx, args[1:], stdout)
 	case "alloc":
 		return app.runAlloc(ctx, args[1:], stdout)
 	case "doctor":

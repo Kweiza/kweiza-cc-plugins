@@ -189,6 +189,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/items", s.handleAddItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/claim", s.handleClaimItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/finish", s.handleFinishItem)
+	mux.HandleFunc("POST /api/v1/items/{id}/move", s.handleMoveItem)
 
 	// 판단 — J 계층. **추가 전용**이라 PUT·DELETE 가 없다.
 	mux.HandleFunc("POST /api/v1/judgments", s.handleAddJudgment)

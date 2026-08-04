@@ -480,3 +480,64 @@ func orDash(s string) string {
 func urlPath(s string) string {
 	return strings.ReplaceAll(urlValue(s), "+", "%20")
 }
+
+// runMove 는 `fd move <item-id> --project <대상>` 이다.
+//
+// 왜 이 명령이 있나: 항목을 잘못된 프로젝트에 등록하면 되돌릴 길이 **0** 이었다.
+// move 가 없고, drop 후 같은 id 재등록은 "id 는 전역 유일" 규칙이 409 로 막으며,
+// 본문·경로를 고치는 명령도 없다. 그래서 fd 항목 10건이 context-platform 에 갇혀
+// **fd 레포에서 `fd next` 가 그것을 하나도 못 보는** 상태가 실제로 났다.
+//
+// 고칠 수 있는 것은 **프로젝트 한 축뿐이다.** 일반 amend 로 번지지 않게 여기서 막는다.
+func (a *App) runMove(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("move")
+	to := fs.String("project", "", "대상 프로젝트 id")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "옮길 항목 id 를 줘라: fd move <item-id> --project <대상>")
+		return 2
+	}
+	if strings.TrimSpace(*to) == "" {
+		fmt.Fprintln(out, "대상 프로젝트를 줘라: fd move <item-id> --project <대상>")
+		return 2
+	}
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "move", "/api/v1/items/"+urlPath(itemID)+"/move", moveReq{
+		Project: a.proj.ID, SessionID: sess, To: *to,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "항목을 못 옮겼다: %v\n", err)
+		return 1
+	}
+	var got struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		CrossRefs int    `json:"cross_refs"`
+		Item      struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"item"`
+	}
+	if uerr := json.Unmarshal(res.Body, &got); uerr != nil {
+		fmt.Fprintf(out, "옮겼으나 응답을 못 읽었다: %v\n", uerr)
+		return 1
+	}
+	fmt.Fprintf(out, "move · %s 를 %s → %s 로 옮겼다\n", got.Item.ID, got.From, got.To)
+	if got.Item.Title != "" {
+		fmt.Fprintf(out, "제목: %s\n", got.Item.Title)
+	}
+	if got.CrossRefs > 0 {
+		// 막지 않고 알린다 — 막으면 오등록을 되돌릴 길이 다시 0이 된다.
+		fmt.Fprintf(out, "주의: 옛 프로젝트에 남은 항목 %d건이 이 항목을 선행으로 가리킨다. "+
+			"그 관계는 프로젝트를 넘어 표현되지 않으므로 확인해라.\n", got.CrossRefs)
+	}
+	return 0
+}
