@@ -63,15 +63,44 @@ func parseAPIError(status int, path string, raw []byte) *APIError {
 }
 
 // Client 는 서버 하나에 붙는 클라이언트다.
+//
+// ★ **이 Client 는 "한 번에 한 호출" 전제 위에 서 있다. 동시 호출에 안전하지 않다.**
+//
+// 이 파일도, Cache 도, Outbox 도 잠금이 하나도 없다(cmd/fd 비시험 코드에 sync·atomic 0건).
+// 지금 그것이 문제가 안 되는 이유는 **호출자가 전부 순차**라서다:
+//
+//   - CLI 서브명령은 한 프로세스가 명령 하나를 처리하고 끝난다.
+//   - `fd mcp` 는 mcpsrv.Serve 의 프레임 루프가 프레임을 하나씩 돈다.
+//
+// 즉 여기 초록은 "지금 안전하다"이지 **"병렬화해도 안전하다"가 아니다.** 겹치면 셋이 깨진다:
+//
+//  1. Session — 아래 필드 주석. mcpBackend 가 호출마다 갈아 쓴다.
+//  2. Outbox.Append — 중복 키 검사가 List→검사→쓰기라 겹치면 둘 다 통과한다(outbox.go).
+//  3. Cache.Put — 키마다 tmp 경로가 하나뿐이라 같은 경로에 동시에 쓰면 섞인다(cache.go).
+//
+// -race 는 이것을 **원리적으로 못 본다** — 동시 진입이 없으니 볼 경합이 없다.
+// 그래서 전제를 시험으로 묶어 뒀다: internal/mcpsrv 의 TestServeNeverOverlapsBackend.
+// 프레임 루프를 병렬로 바꾸는 커밋은 거기서 빨강을 보고, 위 셋을 함께 고쳐야 초록이 된다.
 type Client struct {
-	URL     string
-	Token   string
-	HTTP    *http.Client
-	Cache   *Cache
-	Outbox  *Outbox
-	Log     *slog.Logger
-	Now     func() time.Time
-	Session string // 멱등 키의 앞 절반. 없을 수 있다(세션 열기 전)
+	URL    string
+	Token  string
+	HTTP   *http.Client
+	Cache  *Cache
+	Outbox *Outbox
+	Log    *slog.Logger
+	Now    func() time.Time
+
+	// Session 은 멱등 키의 앞 절반이다. 없을 수 있다(세션 열기 전).
+	//
+	// ★ **공유 가변 상태다.** 읽는 자리는 KeyFor 하나뿐이지만, 쓰는 자리는 여럿이고
+	// 그중 mcpbackend.go 의 넷(Pick·Note·AddItem·Finish)은 **호출마다** 갈아 쓴다.
+	// 쓰기와 읽기 사이에 잠금이 없으므로 겹치면 그 자리에서 깨진다 —
+	// 문자열은 (ptr,len) 둘이라 찢긴 값이 나올 수 있고, 그 값이 곧 멱등 키다.
+	//
+	// `fd mcp` 안에서는 한 프로세스가 한 세션이라(mcpsrv 의 ensureSession 이 한 번만 연다)
+	// 갈아 쓰는 값이 매번 **같다** — 세션이 서로 섞이는 사고는 원리적으로 안 난다.
+	// 그것이 이 자리를 지금 고치지 않기로 한 이유다. 다만 찢김은 그와 별개로 남는다.
+	Session string
 }
 
 func newClient(sd StateDir, get func(string) (string, bool), log *slog.Logger) *Client {

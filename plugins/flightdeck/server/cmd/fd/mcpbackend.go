@@ -24,6 +24,22 @@ import (
 // **클라이언트를 두 벌로 만들지 않는다.** 여기 있는 것은 전부 `fd status|note|pick|…` 이
 // 쓰는 것과 같은 *Client 다 — 그래서 열화(L1)·멱등 키·캐시·아웃박스가 한 자리에 있고,
 // 그 정책은 JudgeOffline·IdempotencyStable(순수 함수)이 정한 그대로 이 경로에도 적용된다.
+//
+// ─── 순차 전제 ───────────────────────────────────────────────────────────────
+//
+// ★ **이 백엔드는 한 번에 한 호출만 도는 전제 위에 있다.** 그 전제의 보증인은
+// mcpsrv.Serve 의 프레임 루프다 — 읽기만 고루틴이고 handle 은 루프 본문에서 인라인으로 돈다.
+//
+// 아래 넷(Pick·Note·AddItem·Finish)이 호출마다 `b.app.cli.Session` 을 갈아 쓴다.
+// 클라이언트를 한 벌로 둔 대가이고, 지금은 공유가 아니라 **직렬 재사용**이라 안전하다.
+//
+// 병렬로 도구를 돌리기 시작하는 순간 이 자리가 깨진다. 그런데 깨지는 것이 여기만이 아니라서
+// 이 넷만 고치면 **더 조용한 결함이 남는다** — 무엇이 함께 깨지는지는 client.go 의
+// Client 타입 주석에 셋으로 적어 뒀다(Session · Outbox.Append · Cache.Put).
+//
+// -race 로는 못 잡는다(동시 진입이 없으니 볼 경합이 없다). 그래서 전제를 시험으로 묶었다:
+// internal/mcpsrv 의 **TestServeNeverOverlapsBackend**. 프레임 루프를 병렬로 바꾸는 커밋은
+// 거기서 빨강을 보고, 셋을 함께 고쳐야 초록으로 돌아온다.
 type mcpBackend struct {
 	app *App
 }
@@ -242,6 +258,7 @@ func (b *mcpBackend) Pick(ctx context.Context, in service.PickInput) (service.Pi
 		}
 		return r, nil
 	}
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
 	b.app.cli.Session = in.SessionID
 	raw, err := b.write(ctx, "pick", "/api/v1/items/"+urlPath(in.ItemID)+"/claim",
 		claimReq{Project: in.Project, SessionID: in.SessionID})
@@ -256,6 +273,7 @@ func (b *mcpBackend) Pick(ctx context.Context, in service.PickInput) (service.Pi
 
 func (b *mcpBackend) Note(ctx context.Context, in service.NoteInput) (service.NoteResult, error) {
 	var r service.NoteResult
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
 	b.app.cli.Session = in.SessionID
 	raw, err := b.write(ctx, "note", "/api/v1/judgments", noteReq{
 		Project: in.Project, SessionID: in.SessionID, Kind: string(in.Kind),
@@ -272,6 +290,7 @@ func (b *mcpBackend) Note(ctx context.Context, in service.NoteInput) (service.No
 }
 
 func (b *mcpBackend) AddItem(ctx context.Context, in service.AddItemInput) (model.Item, error) {
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
 	b.app.cli.Session = in.SessionID
 	raw, err := b.write(ctx, "add", "/api/v1/items", addReq{
 		Project: in.Project, SessionID: in.SessionID, ID: in.ID,
@@ -305,6 +324,7 @@ func (b *mcpBackend) Finish(ctx context.Context, in service.FinishInput) (servic
 			Paths: f.Paths, Labels: f.Labels, After: toAfterWire(f.After),
 		})
 	}
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
 	b.app.cli.Session = in.SessionID
 	raw, err := b.write(ctx, "finish", "/api/v1/items/"+urlPath(in.ItemID)+"/finish", finishReq{
 		Project: in.Project, SessionID: in.SessionID, Outcome: string(in.Outcome),

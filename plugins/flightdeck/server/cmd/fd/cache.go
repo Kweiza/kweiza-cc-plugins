@@ -55,6 +55,13 @@ func newCache(sd StateDir) *Cache { return &Cache{dir: sd.sub("cache")} }
 
 // Put 은 성공 응답을 보관한다. 실패해도 상위 동작을 죽이지 않고 사유를 돌려준다 —
 // 캐시 쓰기 실패는 지금 이 요청의 실패가 아니다. 다만 **삼키지도 않는다.**
+//
+// ★ 아래 원자 교체는 **프로세스 안에서 호출이 겹치지 않는다는 전제 위에 있다**
+// (Client 타입 주석의 셋 중 셋째). tmp 경로가 키마다 하나뿐이라, 같은 path 로 둘이
+// 동시에 들어오면 같은 tmp 파일에 겹쳐 쓴 뒤 각자 rename 한다 — 교체는 원자인데
+// **교체되는 내용이 두 응답의 뒤섞임**일 수 있다. rename 이 막아 주는 것은
+// 부분 기록이지 동시 기록이 아니다.
+// 전제를 깨는 커밋은 internal/mcpsrv 의 TestServeNeverOverlapsBackend 에서 빨강을 본다.
 func (c *Cache) Put(path string, body []byte, at time.Time) error {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return fmt.Errorf("캐시 디렉토리 생성 실패: %w", err)
