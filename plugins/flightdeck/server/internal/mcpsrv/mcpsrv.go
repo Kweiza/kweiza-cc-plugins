@@ -478,13 +478,28 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	if s.sessionID != "" {
 		return s.sessionID, nil
 	}
+
+	// ★ 비콘이 있으면 cc 만 그 값을 쓴다. 기동 시 주입된 s.id.CCSessionID 는 exec 이후
+	// 못 바뀌지만, 훅은 매번 새 프로세스라 /clear·compact 로 갈린 새 cc 를 비콘에 적어 둔다.
+	// 여기서 그 값을 집어야 두 프로세스(훅·MCP)가 같은 3중키로 같은 카드를 연다.
+	//
+	// s.id 자체는 안 고친다 — s.id 는 뮤텍스 없이 여러 곳에서 읽힌다(callTool·toolBoard·
+	// errText·tail 응답 등). 그 필드를 가변으로 만들면 지금 코드에 없는 경쟁이 생긴다.
+	// 여기 지역 변수로만 쓴다.
+	cc := s.id.CCSessionID
+	if k, ok := s.BeaconKey(); ok {
+		if b, err := window.Load(s.beaconDir, k); err == nil && strings.TrimSpace(b.CCSessionID) != "" {
+			cc = b.CCSessionID
+		}
+	}
+
 	res, err := s.be.OpenSession(ctx, service.OpenSessionInput{
 		Project:     s.id.ProjectID,
 		ProjectPath: s.id.ProjectPath,
 		MachineID:   s.id.MachineID,
 		Hostname:    s.id.Hostname,
 		Worktree:    s.id.Worktree,
-		CCSessionID: s.id.CCSessionID,
+		CCSessionID: cc,
 	})
 	// 서버가 죽었어도 이 머신에 캐시된 마지막 세션이 있으면 그 좌표로 진행한다 —
 	// 여기서 끊으면 아웃박스에 쌓아야 할 판단까지 함께 죽는다(설계 §7 L1 의 open 처방).
