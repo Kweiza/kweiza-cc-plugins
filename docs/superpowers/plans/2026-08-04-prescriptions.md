@@ -2086,7 +2086,34 @@ git commit -m "fix(flightdeck): stop offering a note kind the board never reads"
 - Consumes: Task 1 의 실측 결과 · Task 5 의 REST 경로 · Task 7 의 채널
 - Produces: 없음 (문서)
 
-- [ ] **Step 1: §6 훅 표에 `Stop` 행을 더한다**
+- [ ] **Step 1: `hooks.json` 에 `Stop` 훅을 등록한다 — 이게 없으면 기능 전체가 죽은 코드다**
+
+**★ 이 단계가 원래 Task 1 에 있었는데, Task 1 을 settings.json 탐침으로 고쳐 쓰면서 같이
+사라졌다.** Task 7 리뷰가 그 구멍을 잡았다. `fd hook stop` 이 구현돼 있어도 훅이 등록 안 되면
+아무 데서도 안 불린다.
+
+`plugins/flightdeck/hooks/hooks.json` 의 `hooks` 객체에 더한다:
+
+```json
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+```
+
+**`async` 를 쓰지 않는다.** 이 훅의 출력이 곧 배달이고, async 는 그 출력의 운명을 안 정해 준다.
+**타임아웃 3초**: 사람이 기다리는 유일한 훅이라 짧게 잡는다.
+
+그리고 `hooks.json` 을 단정하는 시험이 있으면(`plugin_test.go` 계열) 훅 수 기대값을 맞춘다.
+
+- [ ] **Step 2: §6 훅 표에 `Stop` 행을 더한다**
 
 ```
 | `Stop` | — | `fd hook stop` → 처방(발화 4조건, 전이 1회) 주입. **fail-open, 3초** |
