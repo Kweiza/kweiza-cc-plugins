@@ -138,6 +138,27 @@ func (a *App) openSession(ctx context.Context, in openReq) (res service.SessionR
 	return res, true, nil
 }
 
+// moveSessionCache 는 세션 캐시를 새 cc 키로 옮긴다. rekey 가 성공한 직후에만 부른다.
+//
+// ★ openSession 은 응답을 sessionCachePath+"/"+cc 에 캐시한다(위 참조). cc 가 갈리면
+// 그 키가 낡아 오프라인 읽기가 빗나가고 "이 세션의 캐시도 없다"가 된다 —
+// **서버가 안 닿는 순간에만** 드러나는 결함이라, 안 옮기면 정작 필요한 그날 아무도 못 찾는다.
+//
+// 옛 키는 지우지 않는다. 지우는 쪽이 얻는 것은 파일 하나이고, 잃는 것은 rekey 직후
+// 옛 cc 로 들어오는 실행(예: 아직 안 끝난 다른 채널)의 마지막 스냅숏이다.
+func (a *App) moveSessionCache(oldCC, newCC string) {
+	if oldCC == "" || newCC == "" || oldCC == newCC {
+		return
+	}
+	ent, err := a.cli.Cache.Get(sessionCachePath + "/" + oldCC)
+	if err != nil {
+		return // 옮길 것이 없다. 캐시가 없는 것은 결함이 아니다
+	}
+	if err := a.cli.Cache.Put(sessionCachePath+"/"+newCC, ent.Body, a.now()); err != nil {
+		a.log.Warn("세션 캐시 키 이전 실패", "error", err.Error())
+	}
+}
+
 // Rekey 는 /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영한다.
 //
 // ★ a.cli.do 를 쓴다 — a.cli.Write 가 아니다. Write 는 JudgeOffline·IdempotencyStable 을 거치는데

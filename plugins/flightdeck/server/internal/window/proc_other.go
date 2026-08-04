@@ -8,3 +8,11 @@ package window
 func PPidOf(pid int) (int, error) { return 0, ErrUnsupported }
 
 func StartedOf(pid int) (string, error) { return "", ErrUnsupported }
+
+// Alive 는 여기서 **살아 있다고 본다.** 위 둘과 달리 오류를 낼 자리가 없다 —
+// Prune 의 계약이 bool 이고, 그것이 곧 "지울까"의 판정이기 때문이다.
+//
+// ★ 그래서 모를 때는 **안 지우는 쪽**으로 붙인다. false 를 내면 이 플랫폼의 Prune 이
+// 멀쩡한 창의 비콘을 전부 지워 표류 수리가 조용히 죽는다. true 의 손해는 파일이 쌓이는
+// 것뿐이고, 애초에 이 플랫폼은 StartedOf 가 없어 비콘이 심기지도 않는다.
+func Alive(pid int) bool { return true }

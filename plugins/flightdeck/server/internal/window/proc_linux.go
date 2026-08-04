@@ -3,11 +3,26 @@
 package window
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
+
+// Alive 는 pid 가 지금 살아 있는지다. Prune 이 이 판정을 인자로 받는 자리의 실물이다.
+//
+// ★ **ESRCH 만 "없다"다.** signal 0 은 아무것도 안 보내고 존재와 권한만 검사하는데,
+// EPERM 은 "그 pid 는 있는데 남의 것"이라는 뜻이라 살아 있는 쪽이다. 둘을 뭉개
+// "오류면 죽었다"로 접으면 다른 사용자로 뜬 창의 비콘을 지우고, 그 창은 다음 /clear 에서
+// 표류를 못 고친다 — 지우는 쪽의 실수만 되돌릴 수 없다.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+}
 
 // PPidOf 는 /proc/<pid>/stat 에서 부모 pid 를 읽는다.
 //
