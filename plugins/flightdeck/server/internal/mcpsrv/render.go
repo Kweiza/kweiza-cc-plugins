@@ -539,6 +539,17 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	if r.Scope != "" {
 		fmt.Fprintf(&b, "범위: %s\n", r.Scope)
 	}
+	// 큐 규모. board 가 쓰는 이름을 **그대로** 쓴다(같은 술어에 두 번째 이름을 붙이면
+	// 두 수가 갈려도 읽는 쪽이 "다른 지표겠지"로 넘어가 불일치가 조용히 정상으로 등록된다).
+	//
+	// nil 을 침묵으로 접지 않는다. 원인은 셋인데(구버전 서버 · 옛 캐시 · 조회 실패)
+	// nil 하나로는 못 가르므로 **원인 중립 문장**을 쓴다 — 지어낸 원인보다 정확하고,
+	// 이 문장은 SkewBanner 가 못 잡는 스큐 구간의 유일한 신호이기도 하다.
+	if r.QueueOpen != nil {
+		fmt.Fprintf(&b, "큐 열림 %d건\n", *r.QueueOpen)
+	} else {
+		b.WriteString("큐 열림 수가 이 응답에 없다 — 서버 판이 이 축을 안 내거나 세지 못했다\n")
+	}
 
 	if r.Item != nil {
 		it := *r.Item
@@ -546,6 +557,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		if len(it.Paths) > 0 {
 			fmt.Fprintf(&b, "경로: %s\n", strings.Join(it.Paths, ", "))
 		}
+		b.WriteString(renderPathCheck(r.PathCheck, it.ID))
 		if len(it.After) > 0 {
 			fmt.Fprintf(&b, "선행: %s\n", formatAfter(it.After))
 		}
@@ -623,6 +635,29 @@ func indent(s, pad string) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderPathCheck 는 경로 실재 축 한 줄이다. 순수 함수다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다.** 이상이 없어도 한 줄을 찍는 이유는
+// RenderTail 이 겹침 0건일 때도 "겹침: 없음"을 찍는 것과 같다 — 침묵하면
+// "이상 없다"와 "이 축을 안 봤다"가 같은 화면이 되고, 그러면 stat 이 전부 실패한 날에도
+// pick 은 평소와 똑같아 보인다.
+//
+// ★ 접두가 "경로 실재:" 인 이유는 바로 위 줄이 이미 "경로: <목록>" 이기 때문이다.
+// 같은 접두를 쓰면 선언과 관측이 안 갈린다.
+//
+// ★ 되돌리는 명령은 **유일 지목일 때만** 낸다. 여럿이 지목된 상태에서 그 명령을 내면
+// 그것이 곧 오등록 단정이고, 그 단정이 실물 큐에서 5건 헛발화하던 규칙이다.
+func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
+	if v == nil {
+		return "경로 실재: 이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
+	}
+	s := "경로 실재: " + v.Summary + "\n"
+	if v.Kind == judge.KindMisregistered && v.Suggest != "" {
+		s += fmt.Sprintf("           맞다면 지금 되돌려라: `fd move %s --project %s`\n", itemID, v.Suggest)
+	}
+	return s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

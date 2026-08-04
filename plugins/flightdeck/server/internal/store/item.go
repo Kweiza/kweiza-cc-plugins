@@ -378,6 +378,11 @@ func (t *Tx) GetItem(project, itemID string) (model.Item, error) {
 }
 
 // ListOpen 은 열린 항목을 오래된 순으로 낸다.
+//
+// ★ 큐의 정의(`state = 'open'`)는 여기와 CountOpen 두 곳에 있다. 한쪽만 고치지 마라 —
+// board 는 이 함수의 길이를, pick 은 CountOpen 의 수를 `큐 열림 N건` 이라는 **같은 이름**으로
+// 낸다. 술어가 갈리면 두 화면이 같은 이름으로 다른 수를 내고, 그 어긋남은
+// 두 화면을 나란히 놓기 전에는 안 보인다.
 func (s *Store) ListOpen(ctx context.Context, project string) ([]model.Item, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+itemCols+` FROM item WHERE project = ? AND state = 'open' ORDER BY created_at, id`, project)
@@ -405,6 +410,25 @@ func (s *Store) ListOpen(ctx context.Context, project string) ([]model.Item, err
 		}
 	}
 	return out, nil
+}
+
+// CountOpen 은 열린 항목 수다.
+//
+// ListOpen 으로 대신하지 않는 이유는 소비자가 다르기 때문이다 — pick 의 선점 경로는
+// 수 하나만 필요한데 ListOpen 은 항목 본문·경로·선행 조건까지 읽는다.
+// ★ 술어는 ListOpen 과 **같아야 한다**(그쪽 주석을 보라).
+//
+// Tx 짝을 만들지 않는다 — 호출자가 없다. 선점 트랜잭션 밖에서 세는 것이 설계이고
+// (표시용 숫자 하나 때문에 선점의 실패면을 넓히지 않는다), 호출자 없는 Tx 표면은
+// 이 패키지가 만들지 않는다.
+func (s *Store) CountOpen(ctx context.Context, project string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM item WHERE project = ? AND state = 'open'`, project).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("열린 항목 수 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	return n, nil
 }
 
 // ListItems 는 프로젝트의 **모든** 항목을 상태와 무관하게 낸다.
