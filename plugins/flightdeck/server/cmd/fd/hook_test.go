@@ -29,7 +29,7 @@ func TestHooksAreFailOpenForEveryInput(t *testing.T) {
 		{"정상", valid},
 		{"거대한 tool_input", `{"session_id":"cc-1","tool_input":{"file_path":"` + strings.Repeat("a", 5000) + `"}}`},
 	}
-	events := []string{"session-start", "user-prompt", "post-tool", "pre-compact",
+	events := []string{"session-start", "user-prompt", "post-tool", "pre-compact", "stop",
 		"없는-훅-이름"} // ★ 표 밖: 우리가 모르는 훅 이름도 세션을 막으면 안 된다
 
 	for _, ev := range events {

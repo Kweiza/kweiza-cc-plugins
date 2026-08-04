@@ -33,6 +33,9 @@ type HookPayload struct {
 	ToolInput      map[string]any `json:"tool_input"`
 	Trigger        string         `json:"trigger"`
 	CustomInstr    string         `json:"custom_instructions"`
+	// StopHookActive 는 지금 이 호출 자체가 **Stop 훅의 주입이 만든 턴**의 끝에서
+	// 왔다는 뜻이다. hookStop 이 이것을 확인 없이 넘기면 무한 루프다(hookStop 주석 참고).
+	StopHookActive bool `json:"stop_hook_active"`
 }
 
 // ParseHookPayload 는 훅 stdin 을 읽는다. 순수 함수다.
@@ -124,9 +127,11 @@ func (a *App) runHook(ctx context.Context, event string, stdin io.Reader, out io
 		a.hookPostTool(ctx, p)
 	case "pre-compact":
 		a.hookPreCompact(ctx, p)
+	case "stop":
+		a.hookStop(ctx, p, out)
 	default:
 		a.log.Error("모르는 훅 이름", "mode", clip(event, 40),
-			"error", "session-start|user-prompt|post-tool|pre-compact 중 하나여야 한다")
+			"error", "session-start|user-prompt|post-tool|pre-compact|stop 중 하나여야 한다")
 	}
 	return 0 // ★ 이 함수의 반환값은 항상 0 이다. 훅이 세션을 막으면 안 된다
 }
@@ -256,6 +261,58 @@ func (a *App) hookPreCompact(ctx context.Context, p HookPayload) {
 		Title: "압축 직전 초안", Body: b.String(),
 	}); werr != nil {
 		a.log.Error("pre-compact 초안 저장 실패", "error", werr.Error())
+	}
+}
+
+// hookStop 은 턴이 끝날 때 처방을 받아 낸다.
+//
+// ★ 턴 끝에 모으는 이유: 한 턴에 파일 20개를 고쳐도 처방은 1회로 묶인다.
+// 그리고 에이전트가 다음 턴을 시작하기 전이라 사람을 안 기다린다.
+//
+// ★ fail-open 이다. 서버가 죽어도 조용히 반환한다 — 훅이 세션을 막으면 안 된다.
+//
+// ★★ **stop_hook_active 면 아무것도 안 낸다. 이 가드가 없으면 무한 루프다.**
+// 2026-08-04 실측(Claude Code 2.1.221): Stop 훅의 additionalContext 는 붙기만 하는 것이
+// 아니라 **모델을 다시 부른다**. 그 턴이 끝나면 Stop 이 또 불리고, 또 주입한다.
+// 무가드 판을 실제로 돌려 루프를 냈고 사람이 인터럽트로 끊었다.
+// 그리고 이 가드는 임시방편이 아니라 옳은 의미론이다 — 처방은 **사람이 몰던 턴의 끝**에
+// 한 번 뜨는 것이지, 자기가 만든 턴의 끝에 다시 뜨는 것이 아니다.
+func (a *App) hookStop(ctx context.Context, p HookPayload, out io.Writer) {
+	if p.StopHookActive {
+		// 내가 만든 턴이다. 여기서 또 내면 그 턴이 또 턴을 만든다.
+		return
+	}
+	if strings.TrimSpace(p.CWD) != "" {
+		a.proj = resolveProject(a.env, p.CWD)
+	}
+	cc := a.ccSessionID(p.SessionID)
+	if cc == "" {
+		a.log.Warn("stop: 세션 id 를 못 읽어 처방을 못 냈다")
+		return
+	}
+	res, _, err := a.OpenSession(ctx, cc, "")
+	if err != nil {
+		a.log.Warn("stop: 세션 좌표를 못 얻었다", "error", err.Error())
+		return
+	}
+	a.cli.Session = res.Session.ID
+
+	wr, err := a.cli.Write(ctx, "prescriptions",
+		"/api/v1/sessions/"+urlPath(res.Session.ID)+"/prescriptions", struct{}{})
+	if err != nil {
+		a.log.Warn("stop: 처방 조회 실패", "error", err.Error())
+		return
+	}
+	var got struct {
+		Shown  []PrescriptionLine `json:"shown"`
+		Folded int                `json:"folded"`
+	}
+	if err := json.Unmarshal(wr.Body, &got); err != nil {
+		a.log.Warn("stop: 처방 응답 해석 실패", "error", err.Error())
+		return
+	}
+	if text := RenderPrescriptions(got.Shown, got.Folded); text != "" {
+		emitContext(out, "Stop", text)
 	}
 }
 

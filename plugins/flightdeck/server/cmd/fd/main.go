@@ -5,7 +5,7 @@
 //	fd serve                     조정 서버(REST 정본 · HTML · SSE · /healthz · /metrics)
 //	fd mcp                       stdio MCP — REST 위의 얇은 껍데기
 //	fd status|open|beat|…        클라이언트. **전부 REST 를 친다**
-//	fd hook <event>              훅 4종. 전부 fail-open(어떤 실패에도 종료코드 0)
+//	fd hook <event>              훅 5종. 전부 fail-open(어떤 실패에도 종료코드 0)
 //
 // 하나로 둔 이유: 배포 단위가 하나면 클라이언트·서버 버전 스큐를 /healthz 한 축으로 볼 수 있고,
 // 플러그인이 캐시할 산출물도 하나다.
@@ -27,7 +27,7 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd serve [--addr :7420] [--db <경로>]   조정 서버를 띄운다
   fd mcp                                  stdio MCP 서버(플러그인이 부른다)
   fd hook <event>                         훅. stdin 으로 페이로드를 받는다
-                                          (session-start|user-prompt|post-tool|pre-compact)
+                                          (session-start|user-prompt|post-tool|pre-compact|stop)
 
   fd status                               서버 상태 배너 + 보드
   fd open [--label …]                     세션 등록(재호출은 재개다)
@@ -89,7 +89,7 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 
 	case "hook":
 		if len(args) < 2 {
-			log.Error("훅 이름이 없다", "error", "fd hook <session-start|user-prompt|post-tool|pre-compact>")
+			log.Error("훅 이름이 없다", "error", "fd hook <session-start|user-prompt|post-tool|pre-compact|stop>")
 			return 0 // ★ fail-open. 인자가 틀려도 세션을 막지 않는다
 		}
 		return app.runHook(ctx, args[1], stdin, stdout)
