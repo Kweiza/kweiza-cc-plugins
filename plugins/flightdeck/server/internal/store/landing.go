@@ -141,6 +141,40 @@ func (s *Store) LiveLandingRow(ctx context.Context, project, sessionID string) (
 	return liveLandingRow(ctx, s.db, project, sessionID)
 }
 
+// lastLandingRow 는 세션의 **가장 최근** 줄 행을 읽는다(살아 있든 닫혔든). 없으면 ErrNotFound.
+//
+// 살아 있는 행은 세션당 하나뿐이고(부분 유니크 인덱스), 다시 서려면 먼저 닫혀야 하므로
+// id 가 가장 큰 행은 "살아 있으면 그 행, 아니면 마지막으로 닫힌 행"이다.
+//
+// ★ LiveLandingRow 로 대신할 수 없는 자리가 있다: 회수된 세션에게 **왜** 레인을 잃었는지
+// 답하려면 이미 닫힌 행의 left_detail 을 읽어야 한다. 그 사유는 landing_queue 에만 있다
+// (resource_hold.force_reason 은 released_at 이 찍힌 행이라 heldBy 로 안 읽히고,
+// 판단은 사람이 읽는 넓은 기록이지 응답이 파싱할 자리가 아니다).
+func lastLandingRow(ctx context.Context, q dbtx, project, sessionID string) (model.LandingRow, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT `+landingCols+` FROM landing_queue
+		WHERE project = ? AND session_id = ?
+		ORDER BY id DESC LIMIT 1`, project, sessionID)
+	r, err := scanLandingRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, notFoundNote(NFLiveLandingRow, fmt.Sprintf("프로젝트 %s · 세션 %s 의 줄 행(닫힌 것 포함)에 해당하는",
+			clip(project, 64), clip(sessionID, 64)))
+	}
+	if err != nil {
+		return r, fmt.Errorf("마지막 랜딩 줄 행 조회 실패(project=%q session=%q): %w",
+			clip(project, 64), clip(sessionID, 64), err)
+	}
+	return r, nil
+}
+
+// LastLandingRow 는 트랜잭션 안에서 세션의 마지막 줄 행을 낸다.
+//
+// 트랜잭션 안에 두는 이유는 HeldBy 와 같다 — "내가 점유자인가"와 "내 행이 어떻게 닫혔나"를
+// 밖에서 따로 읽으면 그 사이에 회수가 끼어들어 두 답이 서로 다른 순간을 가리킨다.
+func (t *Tx) LastLandingRow(project, sessionID string) (model.LandingRow, error) {
+	return lastLandingRow(t.ctx, t.tx, project, sessionID)
+}
+
 // frontLandingRow 는 줄의 맨 앞(살아 있는 행 중 가장 작은 id)을 읽는다. 없으면 ErrNotFound.
 func frontLandingRow(ctx context.Context, q dbtx, project string) (model.LandingRow, error) {
 	row := q.QueryRowContext(ctx, `
@@ -215,12 +249,14 @@ func (s *Store) CloseLandingRowBySession(ctx context.Context, project, sessionID
 	return s.Tx(ctx, func(t *Tx) error { return t.CloseLandingRowBySession(project, sessionID, kind, detail) })
 }
 
-// ListLandingQueue 는 지금 줄에 서 있는 행 전부를 순번(오래된 순)으로 낸다.
+// listLandingQueue 는 지금 줄에 서 있는 행 전부를 순번(오래된 순)으로 읽는다.
 //
 // ★ 생존 창으로 거르지 않는다 — 맨 앞 세션이 창 밖(무갱신)일 때가 정확히 사람이 그
 // 사실을 봐야 하는 순간이다. 거르면 "줄이 비었는데 아무도 못 잡는다"가 된다.
-func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.LandingRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+//
+// Tx 안팎에서 같은 질의가 필요해서 자유 함수로 뒀다(listHeld·heldBy 와 같은 자리).
+func listLandingQueue(ctx context.Context, q dbtx, project string) ([]model.LandingRow, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT `+landingCols+` FROM landing_queue
 		WHERE project = ? AND left_at IS NULL
 		ORDER BY id`, project)
@@ -241,4 +277,17 @@ func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.L
 		return nil, fmt.Errorf("랜딩 줄 목록 순회 실패: %w", err)
 	}
 	return out, nil
+}
+
+// ListLandingQueue 는 트랜잭션 밖에서 줄을 읽는다(보드·화면).
+func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.LandingRow, error) {
+	return listLandingQueue(ctx, s.db, project)
+}
+
+// ListLandingQueue 는 트랜잭션 안에서 줄을 읽는다.
+//
+// ★ 순번을 이 트랜잭션에서 세려면 반드시 이쪽이어야 한다. 밖에서 읽으면 **방금 넣은
+// 내 행이 아직 커밋 전이라 안 보이고**, 그러면 자기 자신이 빠진 줄에서 순번을 세게 된다.
+func (t *Tx) ListLandingQueue(project string) ([]model.LandingRow, error) {
+	return listLandingQueue(t.ctx, t.tx, project)
 }

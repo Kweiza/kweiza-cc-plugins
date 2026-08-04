@@ -338,3 +338,93 @@ func TestLastSignalAnswersForSessionsOutsideTheWindow(t *testing.T) {
 		t.Errorf("가장 최근 신호가 아니다: %v (기대 %v)", got, newer.UTC())
 	}
 }
+
+// TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction — 순번을 트랜잭션 안에서
+// 세려면 Tx 판이 있어야 한다. 밖에서 읽으면 방금 넣은 행이 커밋 전이라 안 보이고,
+// 그러면 서비스가 **자기 자신이 빠진 줄**에서 자기 순번을 센다.
+func TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		row, err := tx.EnqueueLanding("p", a.ID)
+		if err != nil {
+			return err
+		}
+		inside, err := tx.ListLandingQueue("p")
+		if err != nil {
+			return err
+		}
+		if len(inside) != 1 || inside[0].ID != row.ID {
+			t.Errorf("같은 트랜잭션에서 넣은 행이 목록에 없다: %+v", inside)
+		}
+		// 대조: 같은 순간 트랜잭션 **밖** 판은 아직 아무것도 못 본다.
+		// 이 차이가 Tx 판을 더한 이유 전부다.
+		outside, err := s.ListLandingQueue(ctx, "p")
+		if err != nil {
+			return err
+		}
+		if len(outside) != 0 {
+			t.Errorf("커밋 전인데 트랜잭션 밖에서 %d행이 보인다 — 대조가 성립하지 않는다", len(outside))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("트랜잭션이 실패했다: %v", err)
+	}
+}
+
+// TestLastLandingRowReadsClosedRowsThatLiveLandingRowCannot — 회수된 세션에게 **왜**
+// 레인을 잃었는지 답하려면 이미 닫힌 행의 left_detail 을 읽어야 한다.
+// LiveLandingRow 는 그 자리에서 ErrNotFound 라 사유를 못 낸다.
+func TestLastLandingRowReadsClosedRowsThatLiveLandingRowCannot(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	closed := mustEnqueue(t, s, "p", a.ID)
+	if err := s.CloseLandingRow(ctx, "p", closed.ID, model.LandingLeftForce, "사람이 회수했다"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LiveLandingRow(ctx, "p", a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("사전 조건이 깨졌다 — 닫은 행이 아직 살아 있다: %v", err)
+	}
+
+	last := mustLastLandingRow(t, s, "p", a.ID)
+	if last.ID != closed.ID || last.LeftKind != model.LandingLeftForce || last.LeftDetail != "사람이 회수했다" {
+		t.Fatalf("닫힌 행의 사유가 안 실렸다 — 회수된 세션에게 답할 것이 사라진다: %+v", last)
+	}
+
+	// 다시 서면 **살아 있는 행**이 최신이다(그 행에는 사유가 없다).
+	again := mustEnqueue(t, s, "p", a.ID)
+	last = mustLastLandingRow(t, s, "p", a.ID)
+	if last.ID != again.ID || last.LeftAt != nil {
+		t.Fatalf("다시 선 뒤에도 닫힌 행이 최신으로 나온다: %+v", last)
+	}
+
+	// 선 적이 없는 세션은 ErrNotFound 다 — 0값과 부재를 가른다.
+	b := mustSession(t, s, "p", "cc-B")
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		_, err := tx.LastLandingRow("p", b.ID)
+		return err
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("선 적 없는 세션에 ErrNotFound 가 아니다: %v", err)
+	}
+}
+
+// mustLastLandingRow 는 Tx.LastLandingRow 를 단발 트랜잭션으로 감싼 시험 전용 헬퍼다
+// (Store 짝을 안 둔 이유는 mustEnqueue 와 같다 — 호출부가 서비스의 트랜잭션 안뿐이다).
+func mustLastLandingRow(t *testing.T, s *Store, project, sessionID string) model.LandingRow {
+	t.Helper()
+	var row model.LandingRow
+	if err := s.Tx(context.Background(), func(tx *Tx) error {
+		var err error
+		row, err = tx.LastLandingRow(project, sessionID)
+		return err
+	}); err != nil {
+		t.Fatalf("마지막 줄 행 조회 실패(project=%s session=%s): %v", project, sessionID, err)
+	}
+	return row
+}
