@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -55,6 +56,7 @@ type SessionVerdict struct {
 // 불리언이 아니라 **사유**를 돌려준다 — "안 됐다"만 알면 무엇을 안 준 것인지 알 수 없고,
 // 이 네 값은 전부 클라이언트 환경에서 오므로 빠진 축이 곧 탐지가 깨진 축이다(설계 §13).
 func JudgeOpenSession(in OpenSessionInput) SessionVerdict {
+	wt := judge.JudgePathCoordinate(in.Worktree)
 	switch {
 	case strings.TrimSpace(in.Project) == "":
 		return SessionVerdict{Reason: "project 가 비었다 — 어느 프로젝트의 세션인지 없이는 큐도 보드도 좌표가 없다"}
@@ -62,6 +64,11 @@ func JudgeOpenSession(in OpenSessionInput) SessionVerdict {
 		return SessionVerdict{Reason: "machine_id 가 비었다 — 세션 정체는 (machine, worktree, cc_session) 3중키다"}
 	case strings.TrimSpace(in.Worktree) == "":
 		return SessionVerdict{Reason: "worktree 가 비었다 — MCP 서버의 cwd 가 그 값이다(설계 §13)"}
+	// ★ 이 절이 IsAbs 보다 **앞**이어야 한다. Linux 서버의 filepath.IsAbs 는 "C:\repo" 를
+	// 절대경로로 안 보므로, 순서가 뒤바뀌면 Windows 사용자가 "절대경로가 아니다"라는
+	// 사실이되 원인이 아닌 사유를 받는다 — 그 사유로는 고칠 수 없다.
+	case !wt.OK:
+		return SessionVerdict{Reason: wt.Reason}
 	case !filepath.IsAbs(in.Worktree):
 		return SessionVerdict{Reason: fmt.Sprintf(
 			"worktree %q 가 절대경로가 아니다 — 상대경로는 서버와 세션이 서로 다른 곳을 가리킨다",
