@@ -240,6 +240,45 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	}
 }
 
+// TestBoardCardCarriesItsOwnAsk 는 사건이 그것을 남긴 세션의 카드에 붙는다는 것을 단정한다.
+// 전역 꼬리만으로는 누가 남겼는지가 안 이어진다.
+func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	v := service.BoardView{
+		Sessions: []service.SessionCard{
+			{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
+			{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
+		},
+		Asks: []model.Judgment{
+			{ID: "j1", SessionID: "01AAA", At: now.Add(-12 * time.Minute),
+				Title: "mcpbackend.go 를 잡는다"},
+		},
+	}
+	got := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
+
+	lines := strings.Split(got, "\n")
+	var aaaIdx, askIdx, bbbIdx int = -1, -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.Contains(l, "01AAA"):
+			aaaIdx = i
+		case strings.Contains(l, "mcpbackend.go 를 잡는다"):
+			askIdx = i
+		case strings.Contains(l, "01BBB"):
+			bbbIdx = i
+		}
+	}
+	if askIdx < 0 {
+		t.Fatalf("사건이 어디에도 없다:\n%s", got)
+	}
+	if !(aaaIdx < askIdx && askIdx < bbbIdx) {
+		t.Fatalf("사건이 01AAA 카드 안에 없다 (aaa=%d ask=%d bbb=%d):\n%s", aaaIdx, askIdx, bbbIdx, got)
+	}
+	if !strings.Contains(lines[askIdx], "12분") {
+		t.Fatalf("사건의 나이가 없다: %q", lines[askIdx])
+	}
+}
+
 func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 	fin := RenderFinish(service.FinishResult{
 		Item:      model.Item{ID: "t5-iam", State: model.ItemDone},
