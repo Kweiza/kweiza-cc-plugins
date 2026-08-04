@@ -263,7 +263,9 @@ func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
 		case strings.Contains(l, "01AAA"):
 			aaaIdx = i
 		case strings.Contains(l, "mcpbackend.go 를 잡는다"):
-			askIdx = i
+			if askIdx < 0 {
+				askIdx = i
+			}
 		case strings.Contains(l, "01BBB"):
 			bbbIdx = i
 		}
