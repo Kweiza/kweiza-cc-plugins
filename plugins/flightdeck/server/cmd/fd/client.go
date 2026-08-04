@@ -87,6 +87,10 @@ type Client struct {
 	HTTP   *http.Client
 	Cache  *Cache
 	Outbox *Outbox
+	// Legacy 는 아웃박스가 채널마다 갈려 있던 시절의 큐다. **옮기지 않는다** —
+	// 재생이 제자리에서 돌려 전송으로 비우고, 마지막 줄까지 나가면 keep() 이 파일을 지운다.
+	// (os.Rename 청구로 고정 자리에 흡수하려던 앞선 설계는 반증됐다 — 스펙 §4.)
+	Legacy []*Outbox
 	Log    *slog.Logger
 	Now    func() time.Time
 
@@ -121,13 +125,19 @@ func newClient(sd StateDir, get func(string) (string, bool), home string, log *s
 			timeout = d
 		}
 	}
+	ob := newOutbox(get, home)
+	var legacy []*Outbox
+	for _, d := range LegacyOutboxDirs(get, home, ob.Dir()) {
+		legacy = append(legacy, newOutboxAt(d))
+	}
 	return &Client{
 		Endpoint: ep, // 출처를 들고 있는다 — fd doctor·fd setup 이 '왜 저 주소인가'를 찍는다
 		URL:      url,
 		Token:    token,
 		HTTP:     &http.Client{Timeout: timeout},
 		Cache:    newCache(sd),
-		Outbox:   newOutbox(get, home),
+		Outbox:   ob,
+		Legacy:   legacy,
 		Log:      log,
 		Now:      func() time.Time { return time.Now().UTC() },
 	}
@@ -291,8 +301,11 @@ func (c *Client) KeyFor(cmd, path string, body []byte) string {
 
 // Flush 는 쌓인 판단을 재생한다. **모든 명령의 앞에서 불린다** —
 // 재연결을 감지하는 별도 기구를 만들지 않는다(감지 기구는 자기가 안 돌 때 조용하다).
+//
+// ★ 고정 큐를 돌고 **옛 채널 자리 큐도 함께 돈다.** 큐마다 독립이라 한쪽이 막혀도
+// 다른 쪽은 나간다 — 한 큐의 정체가 다른 큐를 인질로 잡지 않는다.
 func (c *Client) Flush(ctx context.Context) ReplayResult {
-	res, err := c.Outbox.Replay(ctx, func(ctx context.Context, e OutboxEntry) error {
+	return c.flushAll(ctx, func(_ *Outbox, e OutboxEntry) error {
 		var body any
 		if uerr := json.Unmarshal(e.Body, &body); uerr != nil {
 			// 해석 불가한 줄은 보낼 수 없다. 버리지 않고 남긴 채 사유를 올린다.
@@ -301,12 +314,44 @@ func (c *Client) Flush(ctx context.Context) ReplayResult {
 		_, _, err := c.do(ctx, http.MethodPost, e.Path, body, e.Key)
 		return err
 	})
-	if err != nil {
-		c.Log.Error("아웃박스 재생 실패", "error", err.Error(), "count", res.Sent)
-	} else if res.Sent > 0 {
-		c.Log.Info("아웃박스 재생", "count", res.Sent, "skipped", res.Remaining)
+}
+
+// flushAll 은 큐 전부를 돌고 결과를 합산한다. 전송 함수를 인자로 받는 이유는
+// 시험이 서버 없이 갈래를 볼 수 있어야 해서다(하네스를 띄우면 그 갈래가 안 보인다).
+func (c *Client) flushAll(ctx context.Context, send func(*Outbox, OutboxEntry) error) ReplayResult {
+	var total ReplayResult
+	var details []string
+	for _, ob := range append([]*Outbox{c.Outbox}, c.Legacy...) {
+		res, err := ob.Replay(ctx, func(ctx context.Context, e OutboxEntry) error {
+			return send(ob, e)
+		})
+		total.Sent += res.Sent
+		total.Rejected += res.Rejected
+		total.Remaining += res.Remaining
+		switch {
+		case err != nil:
+			c.Log.Error("아웃박스 재생 실패", "dir", ob.Dir(), "error", err.Error(), "count", res.Sent)
+			details = append(details, ob.Dir()+": "+err.Error())
+		case res.Remaining > 0 || res.Rejected > 0:
+			// ★ 이 가지가 없어서 **완전 침묵**이었다. 옛 코드는 err!=nil 이거나 Sent>0
+			// 일 때만 로그를 냈는데, 남거나 격리만 된 경우가 정확히 err==nil·Sent==0 이다.
+			// 큐가 여럿이 된 지금 그 침묵은 "어느 큐가 왜 안 나갔나"에 답할 자리를 없앤다(§9).
+			c.Log.Warn("아웃박스가 안 비었다", "dir", ob.Dir(),
+				"sent", res.Sent, "remaining", res.Remaining, "rejected", res.Rejected)
+			details = append(details, ob.Dir()+": "+res.Detail)
+		case res.Sent > 0:
+			c.Log.Info("아웃박스 재생", "dir", ob.Dir(), "count", res.Sent)
+		}
 	}
-	return res
+	switch {
+	case len(details) > 0:
+		total.Detail = strings.Join(details, " · ")
+	case total.Sent > 0:
+		total.Detail = fmt.Sprintf("판단 %d건을 재생했다", total.Sent)
+	default:
+		total.Detail = "대기 중인 판단이 없다"
+	}
+	return total
 }
 
 // healthzResponse 는 /healthz 본문이다(internal/api.HealthzBody 와 같은 모양).
