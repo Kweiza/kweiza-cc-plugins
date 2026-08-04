@@ -31,6 +31,38 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
+// bodyFlagHelp 는 `--body` 의 도움말 문구다. **셋이 같은 문구를 쓴다.**
+//
+// ★ 문구를 상수로 두는 이유는 이 항목이 준 교훈 그대로다. 앞서 add 는 이 문구를 걸어 놓고
+// 읽는 코드가 없었고, note 는 코드를 고친 뒤에도 문구가 옛 동작("비면 읽는다")을 말하고 있었다.
+// 문구와 동작이 각자 세 벌이면 어긋난 벌을 아무도 못 센다.
+const bodyFlagHelp = "본문(`-` 이면 stdin 에서 읽는다)"
+
+// resolveBody 는 `--body` 값을 푼다. **`-` 일 때만 stdin 을 읽는다.**
+//
+// ★ 본문이 없다고 stdin 을 읽지 않는다. 앞선 판은 본문이 비면 stdin 을 EOF 까지 읽었고,
+// 그래서 **stdin 이 열려 있는 곳에서는 영원히 멈췄다** — 훅과 에이전트의 Bash 도구가
+// 정확히 그 환경이다(스모크에서 3분 넘게 멈췄다). 더 나쁜 것은 훅 경로다: 거기 stdin 은
+// 훅 JSON 페이로드라, 읽으면 그것을 판단 본문으로 삼는다.
+// 단위 시험은 이 축을 원리적으로 못 본다 — 시험은 본문을 주거나 이미 닫힌 리더를 쓴다.
+//
+// ★ **이 판정을 사본으로 두지 않는다.** note·finish 가 같은 열 줄을 각자 들고 있었고
+// add 는 아예 안 들고 있어서, `fd add --body -` 가 오류도 없이 `-` 한 글자를 본문으로
+// 저장했다. 그렇게 등록된 항목 하나(fd-item-move)는 고칠 방법이 없어 폐기됐는데
+// **id 는 전역 유일이라 회수되지 않아 그 이름이 영구히 죽었다.**
+// 이 레포는 "같은 판정을 두 자리에 두면 한쪽만 고칠 때 조용히 어긋난다"를 세 번 겪었다.
+func (a *App) resolveBody(flagValue string) string {
+	if flagValue != "-" {
+		return flagValue
+	}
+	// stdin 읽기는 **명시적으로 요청했을 때만** 한다.
+	b, err := io.ReadAll(io.LimitReader(a.stdin, 4<<20))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // TakeFirstPositional 은 맨 앞의 위치 인자를 떼어낸다. 순수 함수다.
 //
 // ★ 표준 flag 패키지는 **첫 비플래그 인자에서 파싱을 멈춘다.** 그래서
@@ -144,27 +176,13 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("note")
 	kind := fs.String("kind", "", "handoff|decision|blocked|ask|now|rejected|not-done|verified|draft")
 	title := fs.String("title", "", "제목")
-	body := fs.String("body", "", "본문(비면 stdin 에서 읽는다)")
+	body := fs.String("body", "", bodyFlagHelp)
 	item := fs.String("item", "", "연결할 항목 id")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	// ★ 본문이 없다고 stdin 을 읽지 않는다. `--body -` 일 때만 읽는다.
-	//
-	// 앞선 판은 본문이 비면 stdin 을 EOF 까지 읽었고, 그래서 **stdin 이 열려 있는 곳에서는
-	// 영원히 멈췄다** — 훅과 에이전트의 Bash 도구가 정확히 그 환경이다(스모크에서 3분 넘게 멈췄다).
-	// 더 나쁜 것은 훅 경로다: 거기 stdin 은 훅 JSON 페이로드라, 읽으면 그것을 판단 본문으로 삼는다.
-	// 단위 시험은 이 축을 원리적으로 못 본다 — 시험은 본문을 주거나 이미 닫힌 리더를 쓴다.
-	text := *body
-	if text == "-" {
-		// stdin 읽기는 **명시적으로 요청했을 때만** 한다.
-		if b, err := io.ReadAll(io.LimitReader(a.stdin, 4<<20)); err == nil {
-			text = string(b)
-		} else {
-			text = ""
-		}
-	}
+	text := a.resolveBody(*body)
 	if strings.TrimSpace(text) == "" {
 		fmt.Fprintln(out, "판단 본문이 비었다 — 무엇을 왜 그렇게 했는지가 이 표의 존재 이유다. 한 줄이라도 남겨라.")
 		return 2
@@ -270,7 +288,7 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("add")
 	id := fs.String("id", "", "항목 id(브랜치 이름·워크트리 디렉토리로 그대로 쓰인다)")
 	title := fs.String("title", "", "제목")
-	body := fs.String("body", "", "본문(`-` 이면 stdin 에서 읽는다)")
+	body := fs.String("body", "", bodyFlagHelp)
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	var paths, labels, afterItems, afterSHAs stringList
 	fs.Var(&paths, "path", "이 항목이 만질 경로")
@@ -287,10 +305,13 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	for _, v := range afterSHAs {
 		after = append(after, afterWire{SHA: v})
 	}
+	// ★ add 도 셋 중 하나다. 앞서 여기만 안 읽어서 `-` 한 글자가 본문으로 저장됐다.
+	text := a.resolveBody(*body)
+
 	sess, _ := a.sessionID(ctx, *session)
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, "add", "/api/v1/items", addReq{
-		Project: a.proj.ID, SessionID: sess, ID: *id, Title: *title, Body: *body,
+		Project: a.proj.ID, SessionID: sess, ID: *id, Title: *title, Body: text,
 		Paths: paths, Labels: labels, After: after,
 	})
 	if err != nil {
@@ -321,7 +342,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("finish")
 	outcome := fs.String("outcome", "done", "done|dropped")
 	title := fs.String("title", "", "판단 제목")
-	body := fs.String("body", "", "핸드오프 본문(`-` 이면 stdin 에서 읽는다)")
+	body := fs.String("body", "", "핸드오프 "+bodyFlagHelp)
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
@@ -335,15 +356,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, "끝낼 항목 id 를 줘라: fd finish <item-id>")
 		return 2
 	}
-	text := *body
-	if text == "-" {
-		// stdin 읽기는 **명시적으로 요청했을 때만** 한다.
-		if b, err := io.ReadAll(io.LimitReader(a.stdin, 4<<20)); err == nil {
-			text = string(b)
-		} else {
-			text = ""
-		}
-	}
+	text := a.resolveBody(*body)
 	if strings.TrimSpace(text) == "" {
 		fmt.Fprintln(out, "판단 본문(body)이 비어 있어 끝낼 수 없다.")
 		fmt.Fprintln(out, service.HandoffGuidance)
