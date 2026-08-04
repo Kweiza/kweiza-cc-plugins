@@ -423,6 +423,33 @@ func (o *Outbox) quarantine(r RejectedEntry) error {
 // Rejected 는 격리된 줄 전부다. 파일이 없으면 빈 목록이다(오류가 아니다).
 func (o *Outbox) Rejected() ([]RejectedEntry, error) { return readRejected(o.rejectedPath()) }
 
+// Leftover 는 옛 자리 하나에 아직 남아 있는 것이다.
+type Leftover struct {
+	Dir      string
+	Pending  int    // 대기열 줄 수
+	Rejected int    // 격리 줄 수 — 이것은 안 비워진다(보관소는 제 큐 옆에 남는다)
+	Err      string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
+}
+
+// leftover 는 이 큐에 남은 것을 **읽기만 해서** 센다.
+//
+// ★ 보내지 않는다. 진단이 부작용을 가지면 "찍어 봤더니 상태가 달라졌다"가 되고,
+// 그러면 진단을 믿을 수 없다. 재생은 Flush 경로에서만 돈다.
+func (o *Outbox) leftover() Leftover {
+	lo := Leftover{Dir: o.dir}
+	if es, err := o.List(); err != nil {
+		lo.Err = err.Error()
+	} else {
+		lo.Pending = len(es)
+	}
+	if rs, err := o.Rejected(); err != nil {
+		lo.Err = strings.TrimSpace(lo.Err + " " + err.Error())
+	} else {
+		lo.Rejected = len(rs)
+	}
+	return lo
+}
+
 // readRejected 는 격리 파일 하나를 읽는다. doctor 의 잔량 합산도 이것을 쓴다.
 func readRejected(path string) ([]RejectedEntry, error) {
 	b, err := os.ReadFile(path)
