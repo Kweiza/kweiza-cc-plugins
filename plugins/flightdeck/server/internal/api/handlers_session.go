@@ -87,6 +87,30 @@ func (s *server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, map[string]any{"session": sess})
 }
 
+type rekeyRequest struct {
+	CCSessionID string `json:"cc_session_id"`
+}
+
+// handleRekey 는 /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영한다.
+//
+// ★ 훅만 이걸 부른다. MCP 는 자기 environ 이 exec 뒤 안 바뀌므로 새 cc 를 알 길이 없다
+// (store.Tx.Rekey 주석 참조).
+func (s *server) handleRekey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	infoFrom(r.Context()).setSession(id)
+	var req rekeyRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	out, err := s.svc.Rekey(r.Context(), id, req.CCSessionID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.publish(r, "session.rekey", out.Project, out.ID, map[string]any{"cc_session_id": out.CCSessionID})
+	s.writeJSON(w, r, http.StatusOK, out)
+}
+
 type signalRequest struct {
 	Kind  string   `json:"kind"`
 	Paths []string `json:"paths"`

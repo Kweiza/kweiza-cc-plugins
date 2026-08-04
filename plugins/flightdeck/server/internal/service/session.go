@@ -373,6 +373,29 @@ func (s *Service) SetState(ctx context.Context, sessionID string, st model.Sessi
 	return err
 }
 
+// Rekey 는 카드 하나의 cc_session_id 를 갈아끼운다.
+//
+// ★ 왜 서비스에 판단이 없나. 이 갈래는 "무엇이 옳은가"를 정하지 않는다 — 어느 카드를 어떤 cc 로
+// 옮길지는 훅이 계보 대조로 이미 정했고, 여기서 다시 물으면 같은 판단이 두 자리에 산다.
+// 서버가 지키는 것은 3중키 무결성뿐이고 그건 UNIQUE 가 한다.
+//
+// ★ 빈 cc 는 여기서 미리 거절한다. store.Rekey 도 같은 것을 막지만 그 오류는 평범한
+// fmt.Errorf 라 ClassifyError 화이트리스트에 안 걸리고 500 으로 접힌다 — 화이트리스트를
+// 넓히는 대신(그러면 그 갈래가 다른 오류까지 삼킬 수 있다) SetState 의 session_id 빈값 검사와
+// 같은 자리에서 RefusedError 로 미리 접는다.
+func (s *Service) Rekey(ctx context.Context, sessionID, ccSessionID string) (model.Session, error) {
+	if strings.TrimSpace(ccSessionID) == "" {
+		return model.Session{}, &RefusedError{What: "session rekey",
+			Reason: "cc_session_id 가 비었다 — 정체 없는 카드를 만들 수 없다"}
+	}
+	out, err := s.st.Rekey(ctx, sessionID, ccSessionID)
+	if err != nil {
+		s.logFail(ctx, "session.rekey", "", sessionID, err)
+		return model.Session{}, err
+	}
+	return out, nil
+}
+
 // 시간 비교의 기준점. Board 가 자르는 지점을 만든다.
 func (s *Service) cut(now time.Time, window time.Duration) time.Time {
 	if window <= 0 {
