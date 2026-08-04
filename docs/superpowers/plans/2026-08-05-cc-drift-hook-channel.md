@@ -173,21 +173,33 @@ func (k Key) Valid() bool {
 	return strings.TrimSpace(k.MachineID) != "" && k.ClaudePID > 0 && strings.TrimSpace(k.Started) != ""
 }
 
+// ★ 접지 않고 **이스케이프한다.** 불허 문자를 전부 같은 '-' 로 뭉개면 단사가 아니게 되고,
+// hostname 에 점이 흔하므로 web-1.corp 와 web.1.corp 가 같은 파일명이 된다 — 그러면
+// 한 홈을 공유하는 두 머신이 서로의 비콘을 덮는다. 그것을 막으려고 있는 축이 MachineID 다.
+//
+// ★ **바이트 단위**다. 룬 단위로 %02x 를 쓰면 자릿수가 가변이라 _4e2d 가 룬 0x4e2d 인지
+// 룬 0x4e2 뒤의 'd' 인지 갈리지 않는다. 바이트는 언제나 두 자리라 모호함이 없다.
+// 그래서 '_' 는 허용 문자가 아니다 — _5f 로 이스케이프되어야 표식 노릇을 한다.
 func scrub(s string) string {
 	var b strings.Builder
-	for _, r := range s {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			b.WriteRune(r)
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b.WriteByte(c)
 		default:
-			b.WriteRune('-')
+			fmt.Fprintf(&b, "_%02x", c)
 		}
 	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "x"
+	// ★ 빈 입력의 표식이 '_' 인 것에 이유가 있다. scrub 은 홑 '_' 를 절대 안 낸다 —
+	// '_' 는 허용 문자가 아니라 언제나 _5f 로 이스케이프되므로, 출력의 모든 '_' 는
+	// 세 바이트 _XX 토큰의 첫 글자다. 그래서 한 바이트짜리 "_" 는 어떤 입력으로도 도달 불가이고,
+	// 무엇과도 겹치지 않는다. "x" 나 "none" 처럼 평범한 글자로 바꾸면 그 글자를 그대로 담은
+	// 입력과 충돌한다 — 실제로 그렇게 뒀다가 걸렸다.
+	if b.Len() == 0 {
+		return "_"
 	}
-	return out
+	return b.String()
 }
 
 // Beacon 은 창 하나가 남긴 내용이다.
