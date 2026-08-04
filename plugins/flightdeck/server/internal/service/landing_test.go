@@ -137,6 +137,57 @@ func TestTwoSessionsBothKeepTheirRowWhenOnlyOneGetsTheLane(t *testing.T) {
 	}
 }
 
+// TestReentrantLandByTheHolderStaysTurn — 이미 레인을 쥔 세션이 land 를 다시 불러도 turn 이다.
+//
+// ★ 저장층 둘의 재진입 성질이 **반대**라 서비스가 그것을 이어야 한다:
+// EnqueueLanding 은 재진입 안전이라 기존 행을 그대로 내주는데, AcquireResource 는 같은
+// 점유자여도 유니크 위반을 ResourceHeldError 로 바꾼다. 안 이으면 점유자가
+// {waiting, position:1, holder:자기 자신} 을 듣고 **자기 자신을 기다린다** —
+// 그 세션은 "레인을 못 받았다"고 믿으므로 report·leave 를 안 부르고, 레인은 교착한다.
+func TestReentrantLandByTheHolderStaysTurn(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	first, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 첫 land 가 차례를 못 받았다: %+v", first)
+	}
+
+	again, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a})
+	if err != nil {
+		t.Fatalf("점유자의 재진입 land 가 오류가 됐다: %v", err)
+	}
+	if again.State != "turn" {
+		t.Fatalf("점유자가 다시 부르자 %q 로 답했다 — 이 세션은 자기 자신을 기다리게 되고 "+
+			"report·leave 를 안 불러 레인이 교착한다: %+v", again.State, again)
+	}
+	if again.Holder != nil {
+		t.Errorf("점유자에게 앞사람을 실어 보냈다 — 그 앞사람은 자기 자신이다: %+v", again.Holder)
+	}
+	if again.RowID != first.RowID || again.Position != 1 {
+		t.Errorf("재진입이 자리를 바꿨다: %+v (기대 행 %d · 순번 1)", again, first.RowID)
+	}
+
+	// 재진입이 줄이나 점유를 늘리지 않는다.
+	if n := liveQueue(t, st); n != 1 {
+		t.Errorf("재진입 뒤 살아 있는 줄 행이 %d개다(기대 1)", n)
+	}
+	if n := laneHolders(t, st, a); n != 1 {
+		t.Errorf("재진입 뒤 점유가 %d건이다(기대 1)", n)
+	}
+	// 뒤에 선 세션의 순서도 안 흔들린다.
+	second, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.State != "waiting" || second.Position != 2 {
+		t.Errorf("재진입이 뒷사람의 순서를 흔들었다: %+v", second)
+	}
+}
+
 // TestSecondInLineGetsTheLaneOnNextLandAfterFrontLeaves — 맨 앞이 ok 로 빠진 뒤
 // 2번째가 부르면 부여된다. 차례를 미는 주체는 다음 호출이다(지연 부여).
 func TestSecondInLineGetsTheLaneOnNextLandAfterFrontLeaves(t *testing.T) {
@@ -502,5 +553,44 @@ func TestLiveLandingHoldAlwaysHasALiveQueueRow(t *testing.T) {
 	check("사람이 회수한")
 	if n := laneHolders(t, st, ""); n != 0 {
 		t.Fatalf("회수 뒤에도 랜딩 점유가 %d건 남았다", n)
+	}
+}
+
+// TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead — 신호를 못 읽은 것을
+// "신호가 없다"로 적지 않는다.
+//
+// ★ 판단은 불변으로 남는 기록이라, 관측 실패를 사실로 적으면 그 거짓이 영구히 박히고
+// 되짚을 방법이 없다. 표시용 응답(LastSignalAt)은 둘 다 빈칸으로 접어도 되지만
+// 원장은 아니다 — 못 읽은 축은 값으로 채우지 않고 그 사실을 적는다(pick.go 의 규율).
+func TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead(t *testing.T) {
+	s, st := newSvc(t)
+	a, _ := twoSessions(t, s)
+
+	mine, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(세션 열기가 Beat 한다)
+	// "없음"이 나오면 그것은 거짓이다.
+	if n := countRows(t, st, `SELECT count(*) FROM signal WHERE session_id = ?`, a); n == 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 이 세션에 신호가 하나도 없다")
+	}
+	if _, err := st.DB().ExecContext(ctx(), `ALTER TABLE signal RENAME TO signal_hidden`); err != nil {
+		t.Fatalf("신호 조회를 실패시키지 못했다: %v", err)
+	}
+
+	rel, err := s.ReleaseLaneRow(ctx(), "p", mine.RowID, "aaron", "신호를 못 읽는 상태에서의 회수")
+	if err != nil {
+		t.Fatalf("신호 조회 실패가 회수를 죽였다 — 그러면 물린 레인을 푸는 유일한 길이 막힌다: %v", err)
+	}
+	j, err := st.GetJudgment(ctx(), rel.JudgmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(j.Body, "신호를 한 번도 안 남겼다") {
+		t.Fatalf("못 읽은 것을 \"신호가 없다\"는 사실로 원장에 적었다:\n%s", j.Body)
+	}
+	if !strings.Contains(j.Body, "읽지 못했다") {
+		t.Fatalf("관측 실패를 판단에 안 적었다 — 나중에 이 회수가 무엇을 보고 한 것인지 알 수 없다:\n%s", j.Body)
 	}
 }

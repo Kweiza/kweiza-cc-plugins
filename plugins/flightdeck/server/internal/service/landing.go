@@ -140,7 +140,23 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 			if !errors.As(aerr, &held) {
 				return aerr
 			}
-			// 맨 앞인데 남이 쥐고 있다 = 두 표가 어긋난 상태다. 오류로 올리지 않고
+			if held.Holder.SessionID == in.SessionID {
+				// 이미 내가 쥐고 있다 = 재진입이다. **저장층 둘의 재진입 성질이 반대라
+				// 그것을 잇는 자리가 여기밖에 없다**: EnqueueLanding 은 재진입 안전이라
+				// 기존 행을 그대로 내주는데(store/landing.go), AcquireResource 는 같은
+				// 점유자여도 무조건 INSERT 하고 부분 유니크 위반을 ResourceHeldError 로
+				// 바꾼다(store/resource.go). 안 이으면 "이미 서 있으면 내 자리를 다시 낸다"는
+				// 이 함수의 계약이 점유자에게 {waiting, position:1, holder:자기 자신} 을
+				// 답하고, 그 세션은 **자기 자신을 기다리며** report·leave 를 안 불러
+				// 레인이 교착한다. 표시 오류가 아니라 교착이다.
+				//
+				// grant 이벤트는 다시 안 남긴다 — 부여가 아니라 재확인이고, 여기서 세면
+				// 대기 폴링 횟수가 부여 횟수로 둔갑한다.
+				out.State = "turn"
+				out.Position = 1
+				return nil
+			}
+			// 맨 앞인데 **남이** 쥐고 있다 = 두 표가 어긋난 상태다. 오류로 올리지 않고
 			// 점유자를 그대로 실어 보낸다 — 그 상태를 푸는 것은 사람의 회수다.
 		}
 		pos, holder, err := s.lanePosition(t, in.Project, mine.ID)
@@ -154,7 +170,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	//   쓰기 잠금을 쥔 채 커넥션 풀(상한 8)을 기다리는 자리가 생기고, 그 대기 동안 다른 land
 	//   전부가 busy_timeout 만큼 선다. 이 값은 사람이 나이를 재는 표시용이라 커밋 직후 시점으로 충분하다.
 	if err == nil && out.Holder != nil {
-		out.Holder.LastSignalAt = s.lastSignal(ctx, out.Holder.SessionID)
+		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
 	}
 	if err != nil {
 		s.logFail(ctx, "lane.land", in.Project, in.SessionID, err)
@@ -323,18 +339,22 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 	}
 	out := LaneView{Entries: make([]LaneEntry, 0, len(rows))}
 	for _, r := range rows {
+		// 관측 실패와 "신호 없음"은 화면에서 둘 다 빈칸이다 — 사람이 다시 물으면 되고,
+		// 실패 사유는 WARN 에 남는다. 이 축을 반드시 봐야 하는 곳은 불변으로 남는
+		// 판단 본문이고, 그쪽(ReleaseLaneRow)은 두 경우를 다른 문장으로 적는다.
+		at, _ := s.lastSignal(ctx, r.SessionID)
 		out.Entries = append(out.Entries, LaneEntry{
 			RowID: r.ID, SessionID: r.SessionID, EnqueuedAt: r.EnqueuedAt,
-			LastSignalAt: s.lastSignal(ctx, r.SessionID),
+			LastSignalAt: at,
 		})
 	}
 
 	hold, herr := s.st.HeldBy(ctx, project, LaneResource)
 	switch {
 	case herr == nil:
+		at, _ := s.lastSignal(ctx, hold.SessionID)
 		out.Holder = &LaneHolder{
-			SessionID: hold.SessionID, AcquiredAt: hold.AcquiredAt,
-			LastSignalAt: s.lastSignal(ctx, hold.SessionID),
+			SessionID: hold.SessionID, AcquiredAt: hold.AcquiredAt, LastSignalAt: at,
 		}
 	case errors.Is(herr, store.ErrNotFound):
 		// 아무도 안 쥐었다. Holder 는 nil 이고 그것이 곧 "레인이 비었다"다.
@@ -377,16 +397,23 @@ func (s *Service) ReleaseLaneRow(ctx context.Context, project string, rowID int6
 	if err != nil {
 		return LaneReleaseResult{}, err
 	}
+	// ★ 셋을 **다른 문장으로** 적는다. 판단은 불변으로 남는 기록이라, 못 읽은 것을
+	//   "없다"로 적으면 그 자리에 거짓 사실이 영구히 박힌다(이 기능이 금지하는 부류다).
 	signalLine := "마지막 신호: 관측하지 못했다(회수 직전 줄 목록에 이 행이 없었다)"
 	for _, r := range pre {
 		if r.ID != rowID {
 			continue
 		}
-		if at := s.lastSignal(ctx, r.SessionID); at != nil {
+		at, observed := s.lastSignal(ctx, r.SessionID)
+		switch {
+		case !observed:
+			signalLine = "마지막 신호: 읽지 못했다(신호 조회가 실패했다 — 원인은 서버 로그의 WARN 에 있다). " +
+				"**이 회수는 신호 나이를 보지 않고 한 것이다.**"
+		case at == nil:
+			signalLine = "마지막 신호: 없음(이 세션은 신호를 한 번도 안 남겼다)"
+		default:
 			signalLine = fmt.Sprintf("마지막 신호: %s (나이 %s)",
 				at.Format(time.RFC3339), now.Sub(*at).Round(time.Second))
-		} else {
-			signalLine = "마지막 신호: 없음(이 세션은 신호를 한 번도 안 남겼다)"
 		}
 		break
 	}
@@ -570,20 +597,26 @@ func laneReleaseBody(now time.Time, target model.LandingRow, queue []model.Landi
 	return b.String()
 }
 
-// lastSignal 은 세션의 마지막 신호 시각이다. 없으면 nil.
+// lastSignal 은 세션의 마지막 신호 시각이다. 두 번째 값은 **관측에 성공했나**다.
 //
-// ★ 읽기 실패를 오류로 올리지 않는다. 이 값은 사람이 나이를 재는 **표시용**인데,
+// ★ 읽기 실패를 오류로 올리지 않는다. 이 값은 사람이 나이를 재는 표시용인데,
 // 그것 하나 못 읽었다고 Land 의 트랜잭션을 되돌리면 줄 행과 순번이 함께 사라진다 —
-// 이 기능이 가장 조심하는 바로 그 사고다. 대신 삼키지 않고 WARN 으로 남긴다.
-func (s *Service) lastSignal(ctx context.Context, sessionID string) *time.Time {
+// 이 기능이 가장 조심하는 바로 그 사고다. 대신 삼키지도 않는다: WARN 으로 원인을 남기고,
+// **"못 읽었다"와 "신호가 하나도 없다"를 두 번째 값으로 가른다**(pick.go 의 규율 —
+// 못 읽은 축은 값으로 채우지 않고 그 사실을 따로 남긴다).
+//
+// 표시용 응답(LaneHolder.LastSignalAt)은 둘 다 nil 로 접어도 사람이 화면에서 다시 물으면
+// 되지만, **판단 본문처럼 불변으로 남는 기록은 반드시 이 축을 봐야 한다** —
+// 거기에 "신호가 없었다"고 적히면 그 거짓은 영구히 남고 되짚을 방법이 없다.
+func (s *Service) lastSignal(ctx context.Context, sessionID string) (*time.Time, bool) {
 	at, ok, err := s.st.LastSignal(ctx, sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "마지막 신호 조회 실패(레인 응답은 계속한다)",
 			"session_id", clip(sessionID, 64), "error", err.Error())
-		return nil
+		return nil, false
 	}
 	if !ok {
-		return nil
+		return nil, true // 관측은 됐다. 신호가 없는 것이다
 	}
-	return &at
+	return &at, true
 }
