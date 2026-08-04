@@ -60,6 +60,9 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 		"UserPromptSubmit": {"", false},
 		"PostToolUse":      {"Edit|Write", true},
 		"PreCompact":       {"", true},
+		// ★ Stop 은 async 면 안 된다 — 이 훅의 출력이 곧 처방 배달이고, async 는
+		//   그 출력의 운명을 안 정해 준다(설계 §6).
+		"Stop": {"", false},
 	}
 	if len(hf.Hooks) != len(want) {
 		t.Fatalf("훅 이벤트가 %d개다 — %d개여야 한다: %v", len(hf.Hooks), len(want), keysOf(hf.Hooks))
@@ -102,6 +105,7 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 	// 조용히 아무것도 안 하고 0 을 낸다 — 그것이 이 단정을 두는 이유다.
 	known := map[string]bool{
 		"session-start": true, "user-prompt": true, "post-tool": true, "pre-compact": true,
+		"stop": true,
 	}
 	for ev, groups := range hf.Hooks {
 		cmd := groups[0].Hooks[0].Command
