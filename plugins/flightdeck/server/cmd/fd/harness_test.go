@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +37,7 @@ type harness struct {
 	project string
 	token   string // 빈 문자열이면 인증 꺼짐. newHarnessAuth 가 채운다
 	env     map[string]string
+	home    string // unpinnedEnv 가 쓰는 **가짜 홈**. 진짜 홈을 건드리지 않기 위한 자리다
 }
 
 // newHarness 는 실물 store + internal/api + internal/web 을 한 주소에 붙인다.
@@ -55,6 +57,7 @@ func newHarnessAuth(t *testing.T, token string) *harness {
 		state:   filepath.Join(dir, "state"),
 		db:      filepath.Join(dir, "fd.db"),
 		project: "testproj",
+		home:    filepath.Join(dir, "home"),
 	}
 	hs.openStore()
 	t.Cleanup(hs.closeStore) // srv.Close 보다 **먼저** 등록한다 — 정리는 LIFO 라 나중에 돈다
@@ -168,11 +171,55 @@ func (h *harness) run(stdin string, args ...string) (int, string) {
 	return h.runEnv(h.env, stdin, args...)
 }
 
+// unpinnedEnv 는 **상태 디렉토리 축을 고정하지 않는** 환경이다.
+//
+// ★ 왜 정식 갈래가 필요한가. 기본 env 는 FD_STATE_DIR 를 한 값에 못박는데, 그것이
+// ResolveStateDir 의 **첫 가지**라서 나머지 넷(CLAUDE_PLUGIN_DATA · XDG_STATE_HOME ·
+// ~/.local/state · 임시 디렉토리)이 하네스를 통해서는 **평가조차 되지 않는다.**
+// 머신 id 가 채널마다 갈려 한 세션이 카드 세 장으로 뜬 결함이 전 시험 초록 상태로 산
+// 구조적 이유가 이것이다 — 축을 고정한 시험은 그 축의 결함을 원리적으로 못 본다.
+//
+// ★ **HOME 을 반드시 가짜로 준다. 이것이 이 갈래의 핵심이다.**
+// FD_STATE_DIR 를 빼는 순간 MachineIDPath 의 둘째 가지(~/.flightdeck/machine-id)가 열리고,
+// homeDir 은 주입된 HOME 이 없으면 os.UserHomeDir() 로 떨어진다 — 그 함수는 **프로세스
+// 환경**을 읽으므로 시험이 못 바꾼다. 즉 HOME 없이 FD_STATE_DIR 만 빼면 시험이
+// **사용자의 진짜 ~/.flightdeck/machine-id 를 읽고 쓴다.** 지금 그 문을 막고 있는 유일한 것이
+// 다름 아닌 그 FD_STATE_DIR 고정이라, 고정을 푸는 갈래는 반드시 홈을 함께 옮겨야 한다.
+// TestUnpinnedEnvNeverReachesTheRealHome 이 그 짝을 강제한다.
+//
+// ★ **FD_URL 은 일부러 고정된 채로 둔다.** 그것까지 풀면 DefaultURL(127.0.0.1:7420)로
+// 떨어져 시험이 개발자 머신의 **진짜 조정 서버**를 친다. 그것은 사각이 아니라 사고다.
+// "환경 축을 고정하지 않는다"가 "전부 푼다"는 뜻은 아니고, 무엇을 왜 남기는지가 이 주석이다.
+func (h *harness) unpinnedEnv(extra map[string]string) map[string]string {
+	h.t.Helper()
+	if err := os.MkdirAll(h.home, 0o755); err != nil {
+		h.t.Fatalf("가짜 홈을 못 만들었다(%s): %v", h.home, err)
+	}
+	e := map[string]string{}
+	for k, v := range h.env {
+		e[k] = v
+	}
+	delete(e, "FD_STATE_DIR") // 이 갈래의 존재 이유
+	e["HOME"] = h.home        // 위 ★ — 빼면 진짜 홈을 건드린다
+	for k, v := range extra {
+		e[k] = v
+	}
+	return e
+}
+
+// runUnpinned 는 상태 디렉토리 축을 푼 환경으로 fd 한 번을 돌린다.
+func (h *harness) runUnpinned(extra map[string]string, stdin string, args ...string) (int, string) {
+	h.t.Helper()
+	return h.runEnv(h.unpinnedEnv(extra), stdin, args...)
+}
+
 // runEnv 는 **다른 환경으로** fd 한 번을 돌린다.
 //
 // 상태 디렉토리를 고르는 축(FD_STATE_DIR·CLAUDE_PLUGIN_DATA·XDG_STATE_HOME)은
 // 하네스가 FD_STATE_DIR 로 고정해 두므로, 그 우선순위 자체를 시험하려면
 // 환경을 바꿔 끼울 자리가 필요하다. 전역 환경을 흔들지 않는 것이 이 갈래의 존재 이유다.
+// 축을 푼 환경이 필요하면 손으로 만들지 말고 unpinnedEnv 를 써라 — 손으로 만들면
+// HOME 을 잊고, 그러면 시험이 사용자의 진짜 홈에 쓴다.
 func (h *harness) runEnv(env map[string]string, stdin string, args ...string) (int, string) {
 	h.t.Helper()
 	var out, errb bytes.Buffer
