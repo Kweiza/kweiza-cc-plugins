@@ -91,6 +91,16 @@ DESIGN §0 병목 2번은 레거시 랜딩 락이 너무 넓다고 지적했다(
 
 ### 1. 데이터 모델
 
+★ **`schema.sql` 을 고치지 않는다.** 그 파일은 기반 한 판이고 그 위의 변경은
+`internal/store/migrations/NNN_*.sql` 에 증분으로 쌓는다(`schema.sql:1-6` 이 명시적으로 금지한다 —
+"신규용으로 여기에 새 표를 또 적으면 정의가 두 벌이 되고, 그때 신규 설치와 업그레이드가
+다른 모양의 DB 를 갖는다"). 표를 더한 유일한 선례 커밋 `523b21d` 의 diff 가 그것을 증명한다 —
+`002_idempotency.sql` 을 새로 만들었고 `schema.sql` 은 머리말 주석만 늘었다.
+
+그래서 새 표는 **`internal/store/migrations/003_landing_queue.sql`** 이고,
+`store.go` 세 자리를 함께 고친다(`//go:embed` 변수 · `SchemaVersion 2→3` · `migrations` 슬라이스).
+`TestFreshInstallAndUpgradeProduceTheSameSchema` 가 이 규율을 지킨다.
+
 ```sql
 CREATE TABLE landing_queue (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- 이것이 순번이다
@@ -183,6 +193,21 @@ func (s *Service) ReleaseLaneRow(ctx, project string, rowID int64, reason string
 유일한 탈출구가 만료 기구가 된다"를 막는 자리다.
 
 **자동 만료는 만들지 않는다.** 화면과 응답은 나이를 **숫자로만** 낸다. 판정은 사람이 한다.
+
+★ **`fd lane release` 는 1단계에 들어간다.** 원래 회수 표면 전체를 2단계로 미루려 했는데,
+그러면 1단계만 랜딩한 상태에서 **물린 레인을 푸는 길이 하나도 없다.** 오늘 자원 점유를 푸는
+프로덕션 표면이 0건이고(`AcquireResource`·`ForceReleaseResource` 둘 다 호출자 0건),
+자동 만료도 없고, 세션 정체가 `(machine, worktree, cc_session_id)` 라 **죽은 세션 명의로
+`land(leave)` 를 부를 방법이 없다.** 레인은 프로젝트당 하나뿐이라 한 번 물리면 그 프로젝트의
+랜딩이 전원 정지하고, 복구 수단이 `sqlite3` 직접 UPDATE 뿐이 된다 — 판단 한 줄 안 남는 경로다.
+
+CLI 한 줄기만 앞당기면 탈출구가 성립한다(REST 라우트 하나 + `cmd/fd` 서브명령 하나 + `wire.go`
+요청 타입 하나). 웹 폼·미들웨어·출처 대조·화면 레인 절은 2단계에 그대로 남는다.
+
+★ **두 표가 어긋난 상태를 잡는 시험을 둔다.** `resource_hold(resource='landing')` 의 살아 있는 점유와
+`landing_queue` 의 살아 있는 선두 행은 같은 사실을 표현한다. 어긋나면(행은 닫혔는데 hold 가 남는다)
+`ListLandingQueue` 는 아무도 안 보여 주는데 레인은 영영 잡혀 있다.
+"살아 있는 landing hold 가 있으면 반드시 대응하는 살아 있는 줄 행이 있다"를 시험으로 잠근다.
 
 회수는 `judgment`(kind=`decision`)도 함께 남긴다(`web/actions.go:149-154` 가 선점 회수에서 이미 그렇게 한다).
 **그 판단은 `left_detail` 의 사본이 아니다** — `left_detail` 은 사람이 친 한 줄이고, 판단은 거기에
