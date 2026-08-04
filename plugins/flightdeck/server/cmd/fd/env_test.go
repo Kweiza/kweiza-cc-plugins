@@ -129,3 +129,53 @@ func TestCacheKeySeparatesDifferentQueries(t *testing.T) {
 		t.Fatal("빈 경로에 빈 키를 냈다 — 파일 이름이 없어진다")
 	}
 }
+
+// 아웃박스 자리는 **채널 환경과 무관해야 한다.**
+//
+// ★ 이 시험이 이 항목의 회귀를 원리적으로 막는다. TestConfigPathIsChannelIndependent ·
+// TestAllChannelsAgreeOnMachineID 와 같은 모양이다 — 산문이 아니라 이것이 규칙을 지킨다.
+//
+// 왜 상태 디렉토리가 아닌가: ResolveStateDir 은 CLAUDE_PLUGIN_DATA(훅·MCP 에만 있다)와
+// XDG_STATE_HOME|~/.local/state(사용자 셸)로 **일부러 갈리게** 만든 축이다. 캐시는
+// 재생성 가능하니 갈려도 되지만 아웃박스는 설계 §7 이 "재생성 불가한 유일한 자산"이라
+// 부른 것을 담는다.
+func TestOutboxPathIsChannelIndependent(t *testing.T) {
+	home := "/h"
+	envs := []map[string]string{
+		{},
+		{"CLAUDE_PLUGIN_DATA": "/plugin/data"}, // 훅·MCP 채널
+		{"XDG_STATE_HOME": "/xdg/state"},       // 사용자 셸 채널
+		{"CLAUDE_PLUGIN_DATA": "/plugin/data", "XDG_STATE_HOME": "/xdg/state"},
+	}
+	want := filepath.Join(home, ".flightdeck", "outbox")
+	for i, e := range envs {
+		got, src := OutboxPath(envOf(e), home)
+		if got != want {
+			t.Errorf("%d번 환경에서 아웃박스 자리가 %q 다 — %q 여야 한다.\n"+
+				"채널마다 갈리면 셸에서 쌓인 판단을 훅·MCP 가 영영 못 보낸다", i, got, want)
+		}
+		if strings.TrimSpace(src) == "" {
+			t.Errorf("%d번 환경에서 출처가 비었다 — '왜 여기냐'에 답할 자리가 없다", i)
+		}
+	}
+}
+
+// FD_STATE_DIR 는 채널이 아니라 **사람이** 지정하는 축이라 이것만은 존중한다
+// (MachineIDPath·ConfigPath 가 같은 예외를 같은 이유로 둔다).
+func TestOutboxPathHonoursExplicitStateDir(t *testing.T) {
+	got, src := OutboxPath(envOf(map[string]string{"FD_STATE_DIR": "/explicit"}), "/h")
+	if want := filepath.Join("/explicit", "outbox"); got != want {
+		t.Errorf("FD_STATE_DIR 를 줬는데 %q 다 — %q 여야 한다", got, want)
+	}
+	if !strings.Contains(src, "FD_STATE_DIR") {
+		t.Errorf("출처가 FD_STATE_DIR 를 안 말한다: %q", src)
+	}
+}
+
+// HOME 도 FD_STATE_DIR 도 없으면 임시 디렉토리로 떨어지되 **그 사실을 사유에 적는다.**
+func TestOutboxPathSaysWhenItWillNotSurviveReboot(t *testing.T) {
+	_, src := OutboxPath(envOf(map[string]string{}), "")
+	if !strings.Contains(src, "임시") {
+		t.Errorf("임시 디렉토리 폴백인데 사유가 그것을 안 말한다: %q", src)
+	}
+}

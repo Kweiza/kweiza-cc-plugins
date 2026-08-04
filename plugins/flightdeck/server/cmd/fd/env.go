@@ -92,6 +92,40 @@ func MachineIDPath(get func(string) (string, bool), home string) (path, source s
 		"임시 디렉토리 — HOME 이 없다. 재부팅하면 머신 id 가 바뀌어 세션이 갈린다"
 }
 
+// OutboxPath 는 아웃박스와 격리 파일을 두는 디렉토리다. 순수 함수다.
+//
+// ★ **상태 디렉토리를 일부러 안 쓴다** — MachineIDPath·ConfigPath 와 **같은 규칙의
+// 셋째 적용**이다. 새 규칙이 아니다.
+//
+// 앞선 두 판정은 "같은 머신이면 같아야 하는 값"을 갈린 자리에 두면 안 된다고 했다.
+// 아웃박스가 그 부류인 줄 몰랐던 것이 이 사고다. config.go 의 옛 주석은
+// "열화 상태(캐시·아웃박스)는 채널마다 따로여도 된다"고 적었는데 **그 주장이 반증됐다.**
+//
+// 가르는 축은 "열화 상태인가"가 아니라 **"재생성 가능한가"**다:
+//
+//   - 캐시 — 재생성 가능하다. 채널마다 갈려도 되고, ${CLAUDE_PLUGIN_ROOT} 를 피하라는
+//     설계 §7 의 원래 논거가 그대로 유효하다. 그래서 StateDir 에 남는다.
+//   - 아웃박스·격리 — 설계 §7 이 "재생성 불가한 유일한 자산"이라 부른 것을 담는다.
+//     갈린 자리에 두면 셸에서 쌓인 판단을 훅·MCP 가 영영 못 보낸다(실측: 8/3 판단 하나가
+//     그렇게 셸 쪽에 갇혀 있었다).
+//
+// 설계 §7 이 이것을 막지 않았던 이유도 적어 둔다: §7 은 `${CLAUDE_PLUGIN_ROOT} 는
+// 업데이트마다 경로가 바뀐다` 를 근거로 **CLAUDE_PLUGIN_ROOT 를 피하라**고 했을 뿐,
+// 채널 분기 자체를 방어한 적이 없다.
+//
+// FD_STATE_DIR 만 예외로 남긴다 — 채널이 아니라 **사람이** 명시 지정하는 축이라
+// 프로세스마다 갈리지 않고, 시험이 진짜 홈의 판단을 건드리지 않게 막는 유일한 자리다.
+func OutboxPath(get func(string) (string, bool), home string) (dir, source string) {
+	if v, ok := get("FD_STATE_DIR"); ok && strings.TrimSpace(v) != "" {
+		return filepath.Join(filepath.Clean(strings.TrimSpace(v)), "outbox"), "FD_STATE_DIR (명시 지정)"
+	}
+	if strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".flightdeck", "outbox"), "~/.flightdeck — 채널 환경과 무관한 고정 자리"
+	}
+	return filepath.Join(os.TempDir(), "flightdeck", "outbox"),
+		"임시 디렉토리 — HOME 이 없다. 재부팅하면 **아직 못 보낸 판단**이 사라진다"
+}
+
 // MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도, 그리고
 // **어느 채널에서 불러도** 같아야 한다.
 //
