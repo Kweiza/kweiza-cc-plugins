@@ -182,6 +182,8 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", s.handlePatchSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/signals", s.handleSignal)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/workspaces", s.handleWorkspace)
+	// 처방은 턴마다 돈다. **세션 카드 파생을 안 도는 표면이다** — /notices 와 같은 이유(설계 §6).
+	mux.HandleFunc("POST /api/v1/sessions/{id}/prescriptions", s.handlePrescriptions)
 	mux.HandleFunc("POST /api/v1/footprints", s.handleFootprints)
 
 	// 큐 — Q 계층.
