@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -188,4 +189,127 @@ func contains(xs []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Windows 경로를 주면 "절대경로가 아니다"가 아니라 **원인**을 말해야 한다.
+// 사용자는 자기가 준 것이 절대경로라고 알고 있어서, 그 사유로는 고칠 수 없다.
+func TestJudgeOpenSessionNamesWindowsPathAsTheCause(t *testing.T) {
+	base := OpenSessionInput{
+		Project: "p", MachineID: "m", CCSessionID: "cc",
+	}
+	cases := []struct {
+		name     string
+		worktree string
+		want     string
+	}{
+		{"드라이브 절대경로", `C:\Users\a\repo`, "드라이브 절대경로"},
+		{"UNC", `\\host\share\repo`, "UNC"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			in.Worktree = c.worktree
+			v := JudgeOpenSession(in)
+			if v.OK {
+				t.Fatal("Windows 경로를 통과시켰다")
+			}
+			if !strings.Contains(v.Reason, c.want) {
+				t.Fatalf("사유 %q 가 원인(%q)을 안 짚는다", v.Reason, c.want)
+			}
+			if !strings.Contains(v.Reason, "WSL") {
+				t.Errorf("사유에 처방(WSL)이 없다: %s", v.Reason)
+			}
+		})
+	}
+}
+
+// 좌표계 판정이 기존 축을 가리면 안 된다 — 상대경로는 여전히 상대경로 사유를 받는다.
+func TestJudgeOpenSessionKeepsExistingAxes(t *testing.T) {
+	base := OpenSessionInput{Project: "p", MachineID: "m", CCSessionID: "cc"}
+
+	in := base
+	in.Worktree = "relative/path"
+	if v := JudgeOpenSession(in); v.OK || !strings.Contains(v.Reason, "절대경로") {
+		t.Errorf("상대경로 사유가 바뀌었다: ok=%v reason=%s", v.OK, v.Reason)
+	}
+
+	in = base
+	in.Worktree = ""
+	if v := JudgeOpenSession(in); v.OK || !strings.Contains(v.Reason, "worktree 가 비었다") {
+		t.Errorf("빈 worktree 사유가 바뀌었다: ok=%v reason=%s", v.OK, v.Reason)
+	}
+
+	in = base
+	in.Worktree = "/home/a/repo"
+	if v := JudgeOpenSession(in); !v.OK {
+		t.Errorf("정상 POSIX 경로를 거절했다: %s", v.Reason)
+	}
+}
+
+// Beat 는 훅이 부른다. 좌표계가 틀린 경로가 섞여 와도 신호 자체는 살아야 한다 —
+// 여기서 오류를 내면 세션이 보드에서 사라지고 그 인과를 아무도 못 짚는다.
+// 좋은 경로는 그대로 들어가고, 나쁜 것만 조용히가 아니라 **원장에 건수를 남기고** 빠진다.
+func TestBeatDropsBadCoordinatePathsButKeepsSignal(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-beat-coord", "좌표계")
+
+	good := filepath.Join(repo, "tools", "x.sh")
+	if err := s.Beat(ctx(), sess.Session.ID, model.SignalTool, []string{
+		good,
+		`C:\other\y.go`,
+		`z\w.go`,
+	}); err != nil {
+		t.Fatalf("좌표계가 틀린 경로 때문에 신호가 죽었다: %v", err)
+	}
+
+	// 신호는 살아 있다.
+	sig, err := st.Signals(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("신호 조회 실패: %v", err)
+	}
+	if _, ok := sig[model.SignalTool]; !ok {
+		t.Fatalf("tool 신호가 안 남았다 — 나쁜 경로 하나가 신호 전체를 죽였다: %v", sig)
+	}
+
+	// ★ 이름이 약속한 셋 중 나머지 둘 — "좋은 경로가 실제로 발자국으로 남았는가"와
+	// "원장에 버린 건수가 기록됐는가" — 도 함께 본다. 신호만 보면 필터가 전부 버려도
+	// 이 시험은 초록이었다.
+	fps, err := st.FootprintPaths(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("발자국 조회 실패: %v", err)
+	}
+	if len(fps) != 1 || fps[0] != "tools/x.sh" {
+		t.Fatalf("좋은 경로가 발자국으로 안 남았다: %v", fps)
+	}
+
+	// 원장 — session.beat payload 에 rejected 건수와 kept 건수가 남았는지.
+	// 선례: internal/service/prescribe_test.go:36 의 ListSessionEvents 사용을 그대로 따른다.
+	evs, err := st.ListSessionEvents(ctx(), sess.Session.ID, "session.beat", time.Time{})
+	if err != nil {
+		t.Fatalf("이벤트 조회 실패: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("session.beat 이벤트가 %d건이다, want 1건: %+v", len(evs), evs)
+	}
+	payload := evs[0].Payload
+	if !strings.Contains(payload, `"rejected":2`) {
+		t.Fatalf("원장에 버린 건수(2)가 안 남았다: %s", payload)
+	}
+	if !strings.Contains(payload, `"count":1`) {
+		t.Fatalf("원장에 통과 건수(1)가 안 남았다: %s", payload)
+	}
+	// ★ 버린 경로 자체도 남아야 한다(스펙 §4.2 정정 — 살아 있는 유일한 표면인 Beat 에서
+	// 버린 경로가 어디에도 안 남는 문제). 사유 전체는 안 실어도 되지만 경로는 실어야 한다.
+	// payload 는 JSON 이라 백슬래시가 이스케이프된다(`\` → `\\`) — 원본 경로가 아니라
+	// JSON 인코딩된 형태로 단정한다.
+	if !strings.Contains(payload, `dropped_paths`) {
+		t.Fatalf("원장에 dropped_paths 필드가 없다: %s", payload)
+	}
+	if !strings.Contains(payload, `C:\\other\\y.go`) {
+		t.Fatalf("원장에 버린 경로가 안 남았다: %s", payload)
+	}
+	if !strings.Contains(payload, `z\\w.go`) {
+		t.Fatalf("원장에 버린 경로 둘째 건이 안 남았다: %s", payload)
+	}
 }

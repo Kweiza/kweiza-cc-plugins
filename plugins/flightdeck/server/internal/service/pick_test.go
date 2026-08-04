@@ -486,3 +486,69 @@ func TestPickNoneHasNoPathCheck(t *testing.T) {
 		t.Fatalf("항목이 없는데 경로 실재 판정이 실렸다: %+v", res.PathCheck)
 	}
 }
+
+// item.paths 는 가장 큰 경로 컬럼인데 검증이 하나도 없었다.
+// 여기를 통과시키면 그 항목의 겹침 축이 영영 죽는다 — 조용히.
+func TestAddItemRejectsNonSlashCoordinatePaths(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "")
+	cases := []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"드라이브 절대경로", []string{`C:\repo\x.go`}, "드라이브 절대경로"},
+		{"UNC", []string{`\\host\share\x.go`}, "UNC"},
+		{"상대 백슬래시", []string{`internal\api\x.go`}, "백슬래시"},
+		{"정상 경로 뒤에 섞여 있어도", []string{"internal/api/x.go", `b\c.go`}, "백슬래시"},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := s.AddItem(ctx(), AddItemInput{
+				Project: "p", ID: fmt.Sprintf("fd-x%d", i), Title: "t", Body: "b",
+				Paths: c.paths,
+			})
+			if err == nil {
+				t.Fatal("잘못된 좌표계의 경로를 통과시켰다")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("오류 %q 가 원인(%q)을 안 짚는다", err.Error(), c.want)
+			}
+		})
+	}
+}
+
+// 몇 번째 경로가 문제인지 말해야 한다 — 목록이 길면 "어딘가 틀렸다"로는 못 고친다.
+func TestAddItemSaysWhichPathIsWrong(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "")
+	_, err := s.AddItem(ctx(), AddItemInput{
+		Project: "p", ID: "fd-which", Title: "t", Body: "b",
+		Paths: []string{"a/b.go", "c/d.go", `e\f.go`},
+	})
+	if err == nil {
+		t.Fatal("통과시켰다")
+	}
+	if !strings.Contains(err.Error(), "2번째") {
+		t.Errorf("몇 번째 경로인지 안 말한다: %s", err.Error())
+	}
+}
+
+// 정상 경로는 그대로 들어간다.
+func TestAddItemAcceptsSlashCoordinatePaths(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "")
+	it, err := s.AddItem(ctx(), AddItemInput{
+		Project: "p", ID: "fd-ok", Title: "t", Body: "b",
+		Paths: []string{"internal/api/x.go", "Makefile", "tools/"},
+	})
+	if err != nil {
+		t.Fatalf("정상 경로를 거절했다: %v", err)
+	}
+	if len(it.Paths) != 3 {
+		t.Fatalf("경로 %d개, want 3개", len(it.Paths))
+	}
+}

@@ -569,6 +569,23 @@ type AddItemInput struct {
 	After     []model.After
 }
 
+// judgeItemPathsCoordinate 는 경로 목록에 좌표계 관문(judge.JudgePathCoordinate)을
+// 순서대로 태운다. 처음 위반한 경로의 인덱스(0-based)와 사유를 "%d번째 경로: %s"
+// 형태로 담아 낸다 — 위반이 없으면 nil.
+//
+// add(item.paths)와 finish(followup.paths)가 이 헬퍼를 공유한다. 둘 다 사람/에이전트가
+// 대화형으로 등록하는 경로이고, 훅이 자동으로 보내는 발자국과 달리 스펙 §4.2 의
+// "사람이 넣으면 거절" 기준에 정확히 해당한다. 오류를 RefusedError 로 감싸는 것과
+// What·Guidance 는 호출부마다 다르므로 여기서는 안 한다 — 순수하게 판정만 나른다.
+func judgeItemPathsCoordinate(paths []string) error {
+	for i, p := range paths {
+		if v := judge.JudgePathCoordinate(p); !v.OK {
+			return fmt.Errorf("%d번째 경로: %s", i, v.Reason)
+		}
+	}
+	return nil
+}
+
 // AddItem 은 큐 항목을 만든다.
 func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, error) {
 	if err := ValidateItemID(in.ID); err != nil {
@@ -591,6 +608,22 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 				Guidance: "미랜딩 선행은 항목 id 로, 랜딩된 것은 sha 로 가리켜라 — " +
 					"브랜치 이름을 담을 자리가 없다(랜딩이 끝나면 브랜치가 지워져 그 순간 해석 불가가 된다)."}
 		}
+	}
+
+	// ★ item.paths 는 가장 큰 경로 컬럼인데 여기 오기 전까지 검증이 하나도 없었다.
+	// 세션 worktree 와 달리 클라이언트 OS 라는 관문조차 없어서 사람이 무엇을 붙여넣든
+	// 들어온다. 통과시키면 그 항목의 겹침 축이 **조용히** 죽는다 — 오류가 아니라
+	// '겹침 없음'이라 정상 응답과 구분되지 않는다.
+	//
+	// ★ finish 의 followup 경로(finish.go)도 judgeItemPathsCoordinate 를 그대로 쓴다.
+	// finish 는 t.AddItem 을 직접 불러 이 함수의 검증을 거치지 않으므로, 거기서 따로
+	// 부르지 않으면 같은 사람이 같은 세션에서 add 는 거절당하고 finish 는 조용히
+	// 통과하는 반쪽 관문이 된다 — 반쪽 발화는 균일한 부재보다 나쁘다.
+	if err := judgeItemPathsCoordinate(in.Paths); err != nil {
+		return model.Item{}, &RefusedError{What: "add",
+			Reason: err.Error(),
+			Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
+				"좌표계가 다르면 이 항목의 겹침 축이 조용히 죽는다."}
 	}
 
 	it := model.Item{

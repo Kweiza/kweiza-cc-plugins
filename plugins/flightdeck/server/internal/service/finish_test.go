@@ -346,3 +346,76 @@ func TestHealthAndDoctorNameWhatWasNotObserved(t *testing.T) {
 		t.Fatalf("프로젝트 git 도달성을 실제로 재지 않았다: %+v", rep.Projects)
 	}
 }
+
+// finish 의 followup 은 t.AddItem 을 직접 불러 add(AddItem)의 좌표계 검증 루프를
+// 거치지 않는 우회 문이었다 — followup 경로도 같은 관문(judgeItemPathsCoordinate)을
+// 거쳐야 한다. 안 그러면 같은 사람이 같은 세션에서 add 는 거절당하고 finish 는
+// 조용히 통과하는 반쪽 관문이 된다.
+func TestFinishRejectsFollowupWithBadCoordinatePaths(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-coord", "좌표계")
+	addItem(t, s, "p", "coord-main", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "coord-main")
+
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 판단이 이미 %d건 있다", n)
+	}
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "coord-main",
+		Outcome: model.ItemDone,
+		Title:   "coord-main 랜딩",
+		Body:    "① … ④ …",
+		Followups: []FollowupInput{
+			{ID: "coord-fu", Title: "다음 배치", Body: "본문",
+				Paths: []string{"a/b.go", `internal\api\x.go`}},
+		},
+	})
+	if err == nil {
+		t.Fatal("좌표계가 틀린 후속 경로를 통과시켰다")
+	}
+	msg := err.Error()
+	// 몇 번째 후속인지와, 그 후속 안에서 몇 번째 경로인지를 **둘 다** 말해야 한다.
+	if !strings.Contains(msg, "0번째 후속") {
+		t.Errorf("몇 번째 후속인지 안 말한다: %s", msg)
+	}
+	if !strings.Contains(msg, "1번째 경로") {
+		t.Errorf("후속 안에서 몇 번째 경로인지 안 말한다: %s", msg)
+	}
+	if !strings.Contains(msg, "백슬래시") {
+		t.Errorf("원인(백슬래시)을 안 짚는다: %s", msg)
+	}
+
+	// 거절이면 아무것도 안 쓴다 — 다른 followup 검증 실패와 같은 규율(§ 위 롤백 시험).
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절했는데 판단이 %d건 저장됐다", n)
+	}
+}
+
+// 정상 좌표계의 followup 경로는 그대로 통과해야 한다 — 관문이 정상 입력까지 막으면
+// 그것도 침묵만큼 나쁘다.
+func TestFinishAcceptsFollowupWithGoodCoordinatePaths(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-coord-ok", "좌표계")
+	addItem(t, s, "p", "coord-ok-main", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "coord-ok-main")
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "coord-ok-main",
+		Outcome: model.ItemDone,
+		Title:   "coord-ok-main 랜딩",
+		Body:    "① … ④ …",
+		Followups: []FollowupInput{
+			{ID: "coord-ok-fu", Title: "다음 배치", Body: "본문",
+				Paths: []string{"internal/api/x.go", "Makefile"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("좌표계가 맞는 후속 경로를 거절했다: %v", err)
+	}
+	if len(res.Followups) != 1 || len(res.Followups[0].Paths) != 2 {
+		t.Fatalf("후속 경로가 안 들어갔다: %+v", res.Followups)
+	}
+}
