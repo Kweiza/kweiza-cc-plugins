@@ -281,6 +281,52 @@ func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
 	}
 }
 
+// TestFoldKeepsEventCardsOverSilentOnes 는 예산이 자를 때 **사건이 붙은 카드가 조용한 카드보다
+// 먼저 남는다**는 것을 단정한다. 이것이 없으면 사건을 카드에 붙여도 예산이 그걸 먼저 버린다.
+func TestFoldKeepsEventCardsOverSilentOnes(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	var sessions []service.SessionCard
+	for i := 0; i < 20; i++ {
+		sessions = append(sessions, service.SessionCard{
+			View: model.SessionView{
+				Session: model.Session{ID: fmt.Sprintf("01S%02d", i)},
+				Paths:   []string{"some/long/path/that/costs/tokens.go"},
+			},
+		})
+	}
+	v := service.BoardView{
+		Sessions: sessions,
+		Asks: []model.Judgment{
+			{ID: "j1", SessionID: "01S19", At: now, Title: "마지막 세션이 남긴 요청"},
+		},
+	}
+	got := RenderBoard(v, BoardRenderOptions{Now: now, Budget: 300})
+
+	if !strings.Contains(got, "01S19") {
+		t.Fatalf("사건이 붙은 카드가 접혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "접었다") {
+		t.Fatalf("예산 300 인데 아무것도 안 접혔다:\n%s", got)
+	}
+}
+
+// TestFoldAlwaysKeepsSelfFirst: 나는 언제나 첫 카드다.
+func TestFoldAlwaysKeepsSelfFirst(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	var sessions []service.SessionCard
+	for i := 0; i < 20; i++ {
+		sessions = append(sessions, service.SessionCard{
+			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}},
+			IsSelf: i == 19,
+		})
+	}
+	got := RenderBoard(service.BoardView{Sessions: sessions},
+		BoardRenderOptions{Now: now, Self: "01S19", Budget: 300})
+	if !strings.Contains(got, "01S19") {
+		t.Fatalf("내 카드가 접혔다:\n%s", got)
+	}
+}
+
 func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 	fin := RenderFinish(service.FinishResult{
 		Item:      model.Item{ID: "t5-iam", State: model.ItemDone},
