@@ -199,3 +199,117 @@ func TestNoBeaconMeansTodaysBehaviour(t *testing.T) {
 		t.Fatalf("비콘이 없던 자리에 훅이 %d개를 만들었다 — 심기는 MCP 의 일이다", len(ents))
 	}
 }
+
+// 비콘의 워크트리가 내 것과 다르면 **남의 창이다 — 수리하지 않는다**(설계 §2 둘째 층).
+//
+// ★ 이 시험이 없으면 사각이 정확히 무엇인가. window.Find 가 맞추는 것은
+// (머신·조상 pid·시작 시각) 셋뿐이고 **워크트리는 그 대조에 없다.** 그런데 rekey 가 고치는
+// 카드의 키는 3중키(머신·워크트리·cc)다. 그래서 한 창 안에서 두 채널이 워크트리를 다르게
+// 풀면, 훅이 **남의 워크트리 카드의 cc 를 갈아엎고** 아래 upsert 는 내 워크트리로 새 카드를
+// 또 만든다 — 그 카드의 선점이 아무 잘못도 없는 워크트리 쪽에 고아로 남는다.
+// 이 기능이 없애려는 바로 그 결과를, 이 기능이 만들어 내는 것이다.
+//
+// 좌표축이 채널마다 갈리는 사고는 이 레포에서 이미 났다(internal/window/dir.go 머리말 ·
+// 한 세션이 카드 3장). 그래서 이것은 가정이 아니라 재발 방지다.
+func TestABeaconFromAnotherWorktreeIsNotOurs(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	mine := t.TempDir()  // 이번 훅이 도는 워크트리
+	other := t.TempDir() // 같은 창의 비콘이 가리키는 **다른** 워크트리
+
+	app := newApp(envOf(h.env), quietLogger(), mine, strings.NewReader(""))
+	myTree := app.proj.Worktree
+	otherApp := newApp(envOf(h.env), quietLogger(), other, strings.NewReader(""))
+	otherTree := otherApp.proj.Worktree
+	if myTree == otherTree {
+		t.Fatalf("대조 전제가 깨졌다 — 두 워크트리가 같은 경로다(%s)", myTree)
+	}
+
+	// ① 다른 워크트리 쪽에 카드가 하나 있고, 항목 하나를 쥐고 있다.
+	//    운영 경로 그대로 훅으로 만든다 — 손으로 넣으면 프로젝트·머신 행의 전제가 갈린다.
+	if code, out := h.run(sessionStartPayload("cc-old", other), "hook", "session-start"); code != 0 {
+		t.Fatalf("다른 워크트리의 SessionStart 훅 종료코드 %d: %s", code, out)
+	}
+	otherCards := cardsFor(t, h, app.machine, otherTree)
+	if len(otherCards) != 1 {
+		t.Fatalf("다른 워크트리의 카드가 %d장이다 — 전제가 안 섰다", len(otherCards))
+	}
+	otherCard := otherCards[0]
+
+	const itemID = "t12-other-tree-item"
+	if err := h.st.AddItem(ctx, model.Item{
+		Project: h.project, ID: itemID, Title: "남의 트리 항목", Body: "본문", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("항목 등록 실패: %v", err)
+	}
+	if _, err := h.st.ClaimItem(ctx, h.project, itemID, otherCard.ID); err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+
+	// ② 이 창의 비콘이 **그 다른 워크트리**를 가리키게 심는다.
+	//    Find 는 이 비콘을 맞춘다 — 좌표 셋(머신·pid·시작 시각)이 전부 내 것이기 때문이다.
+	pid := os.Getpid()
+	started, err := window.StartedOf(pid)
+	if err != nil {
+		t.Fatalf("이 프로세스의 시작 시각을 못 읽었다: %v", err)
+	}
+	key := window.Key{MachineID: app.machine, ClaudePID: pid, Started: started}
+	if _, err := window.Plant(app.beaconDir, key, otherTree, "cc-old", time.Now()); err != nil {
+		t.Fatalf("비콘 심기 실패: %v", err)
+	}
+	if _, err := window.SaveIdentity(app.beaconDir, key, "cc-old", otherCard.ID, time.Now()); err != nil {
+		t.Fatalf("비콘에 카드 id 를 못 적었다: %v", err)
+	}
+
+	// ③ **내** 워크트리에서 새 cc 로 SessionStart.
+	code, out := h.run(sessionStartPayload("cc-new", mine), "hook", "session-start")
+	if code != 0 {
+		t.Fatalf("SessionStart 훅 종료코드 %d: %s", code, out)
+	}
+
+	// ④ 남의 카드는 cc 가 그대로다 — rekey 가 안 갔다.
+	stored, err := h.st.GetSession(ctx, otherCard.ID)
+	if err != nil {
+		t.Fatalf("다른 워크트리의 카드를 못 읽었다: %v", err)
+	}
+	if stored.CCSessionID != "cc-old" {
+		t.Fatalf("다른 워크트리 카드의 cc 가 %q 로 바뀌었다 — 훅이 남의 트리 카드를 rekey 했다. "+
+			"그 트리의 세션은 이제 자기 카드를 못 찾는다", stored.CCSessionID)
+	}
+	if stored.Worktree != otherTree {
+		t.Fatalf("카드의 워크트리가 %q 다 — 전제가 깨졌다", stored.Worktree)
+	}
+
+	// ⑤ 그 카드의 선점도 그대로 붙어 있다.
+	claimed, err := h.st.ClaimedItems(ctx, otherCard.ID)
+	if err != nil {
+		t.Fatalf("선점 조회 실패: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0] != itemID {
+		t.Fatalf("다른 워크트리 카드의 선점이 %v 다 — [%s] 를 기대했다. 고아가 됐다", claimed, itemID)
+	}
+
+	// ⑥ 그리고 내 워크트리는 오늘 거동 그대로 자기 카드를 얻는다(거절은 오류가 아니다).
+	myCards := cardsFor(t, h, app.machine, myTree)
+	if len(myCards) != 1 || myCards[0].CCSessionID != "cc-new" {
+		t.Fatalf("내 워크트리의 카드가 %d장(%+v)이다 — cc-new 1장이어야 한다. "+
+			"워크트리 불일치는 거절이지 실패가 아니다", len(myCards), myCards)
+	}
+
+	// ⑦ 비콘도 안 건드렸다 — 남의 트리 비콘에 내 정체를 적으면 그것도 오염이다.
+	b, err := window.Load(app.beaconDir, key)
+	if err != nil {
+		t.Fatalf("비콘을 못 읽었다: %v", err)
+	}
+	if b.CCSessionID != "cc-old" || b.SessionID != otherCard.ID {
+		t.Fatalf("비콘이 cc=%q session=%q 로 덮였다 — 남의 트리 비콘에 내 정체를 적었다",
+			b.CCSessionID, b.SessionID)
+	}
+
+	// ⑧ **그리고 이 사실이 화면에 온다.** 두 채널이 좌표를 다르게 풀었다는 것은 다른 데의
+	//    진짜 결함이라, 아무도 안 켜는 로그 레벨에 묻히면 지난번처럼 오래 안 보인다.
+	//    (카드·선점 단정은 위에서 전부 store 로 했다 — 이 한 줄만이 화면 축이고, 그것이 요구다)
+	if !strings.Contains(out, "다른 워크트리") {
+		t.Fatalf("워크트리 불일치가 화면에 안 나온다:\n%s", out)
+	}
+}
