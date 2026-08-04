@@ -326,7 +326,9 @@ func (a *App) pruneWindows() {
 	if a.beaconDir == "" {
 		return
 	}
-	if _, err := window.Prune(a.beaconDir, window.Alive); err != nil {
+	// 머신 축을 함께 넘긴다 — 이 프로세스는 **남의 머신 pid** 가 살았는지 알 수 없다
+	// (공유 홈, window.Prune 주석).
+	if _, err := window.Prune(a.beaconDir, a.machine, window.Alive); err != nil {
 		a.log.Debug("비콘 가지치기 실패", "error", err.Error())
 	}
 }
