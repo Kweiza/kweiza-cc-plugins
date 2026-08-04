@@ -12,37 +12,44 @@ func TestKeyFileNameIsStableAndPathSafe(t *testing.T) {
 // ★ scrub 함수는 전사 함수여야 한다. 여러 다른 입력이 같은 파일명으로 붕괴하면
 // 다른 머신이 한 파일을 공유하게 되고 비콘이 침묵하게 덮어진다.
 func TestKeyFileNameIsInjective(t *testing.T) {
-	// 다양한 MachineID 입력 조합
-	machineIDs := []string{"host-1", "host/1", "host\\1", "host 1", "host.1"}
-	const pid = 42
-	const started = "100"
+	// 여러 충돌 벡터를 아우르는 Key 들의 표.
+	// 1. MachineID 특수 문자: "host-1", "host/1", "host\1", "host 1", "host.1"
+	// 2. 구분자 충돌: "a" vs "a-1"
+	// 3. 음수 PID: -5 vs 5
+	// 4. 빈 입력 가드: "" vs "x"
+	allKeys := []Key{
+		// 다양한 MachineID 입력 조합 (모두 pid=42, started="100")
+		{MachineID: "host-1", ClaudePID: 42, Started: "100"},
+		{MachineID: "host/1", ClaudePID: 42, Started: "100"},
+		{MachineID: "host\\1", ClaudePID: 42, Started: "100"},
+		{MachineID: "host 1", ClaudePID: 42, Started: "100"},
+		{MachineID: "host.1", ClaudePID: 42, Started: "100"},
 
-	fileNames := make(map[string]string)
-	for _, id := range machineIDs {
-		k := Key{MachineID: id, ClaudePID: pid, Started: started}
+		// 구분자 충돌 벡터
+		{MachineID: "a", ClaudePID: 1, Started: "23-5"},
+		{MachineID: "a-1", ClaudePID: 23, Started: "5"},
+
+		// 음수 PID 벡터
+		{MachineID: "m", ClaudePID: -5, Started: "s"},
+		{MachineID: "m", ClaudePID: 5, Started: "s"},
+
+		// 빈 입력 가드 벡터 (MachineID)
+		{MachineID: "", ClaudePID: 5, Started: "1"},
+		{MachineID: "x", ClaudePID: 5, Started: "1"},
+
+		// 빈 입력 가드 벡터 (Started)
+		{MachineID: "m", ClaudePID: 7, Started: ""},
+		{MachineID: "m", ClaudePID: 7, Started: "x"},
+	}
+
+	// 모든 Key 가 고유 파일명을 가져야 한다.
+	fileNames := make(map[string]Key)
+	for _, k := range allKeys {
 		fn := k.FileName()
 		if prev, exists := fileNames[fn]; exists {
-			t.Fatalf("collision: %q and %q both map to %q", prev, id, fn)
+			t.Fatalf("collision: %+v and %+v both map to %q", prev, k, fn)
 		}
-		fileNames[fn] = id
-	}
-
-	// 구분자 충돌 테스트: 다른 Key 인데 같은 파일명이 나올 수 있나.
-	// 첫 번째는 MachineID="a", PID=1, Started="23-5"
-	k1 := Key{MachineID: "a", ClaudePID: 1, Started: "23-5"}
-	// 두 번째는 MachineID="a-1", PID=23, Started="5"
-	// "-" 를 이스케이프하지 않으면 두 가지 다 "a-1-23-5.json" 이 된다.
-	k2 := Key{MachineID: "a-1", ClaudePID: 23, Started: "5"}
-	if fn1, fn2 := k1.FileName(), k2.FileName(); fn1 == fn2 {
-		t.Fatalf("delimiter collision: %+v and %+v both map to %q", k1, k2, fn1)
-	}
-
-	// 음수 PID 테스트: strconv.Itoa(-5) = "-5" 인데 scrub 없이 쓰면
-	// 구분자와 혼동된다. scrub 해서 "_2d5" 가 되어야 한다.
-	k3 := Key{MachineID: "m", ClaudePID: -5, Started: "s"}
-	k4 := Key{MachineID: "m", ClaudePID: 5, Started: "s"}
-	if fn3, fn4 := k3.FileName(), k4.FileName(); fn3 == fn4 {
-		t.Fatalf("negative PID collision: %+v and %+v both map to %q", k3, k4, fn3)
+		fileNames[fn] = k
 	}
 }
 

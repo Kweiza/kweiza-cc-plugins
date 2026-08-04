@@ -47,6 +47,9 @@ func (k Key) Valid() bool {
 // 따라서 안전하지 않은 바이트는 "_HH" (16진)로 이스케이프하는 방식으로 바꿨다. 그러면
 // 같은 입력만 같은 출력을 낸다. 비용은 읽기 어려워진다는 것 — 예를 들어 "web.corp" 는
 // "web_2ecorp" 이 되는데, 이것은 정하는 바다.
+// 빈 입력 가드는 "_" 를 쓴다 — "x" 같은 일반 문자를 쓰면 scrub("x") 와 충돌한다.
+// "_" 는 안전한데, scrub 이 내보내는 "_" 는 항상 "_5f" 같은 3바이트 이스케이프의 시작이고
+// 1바이트 "_" 는 빈 입력에서만 나오기 때문이다.
 func scrub(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
@@ -60,7 +63,7 @@ func scrub(s string) string {
 	}
 	out := b.String()
 	if out == "" {
-		return "x"
+		return "_"
 	}
 	return out
 }
