@@ -63,9 +63,16 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 	// 머신 id 도 같은 이유로 넘긴다. mcpsrv 가 스스로 풀면 hostname 이 되는데, 진입점은
 	// 상태에 보관하는 안정 id 를 쓴다 — 그 둘이 달라 **한 세션이 보드에 카드 3장**으로 떴다.
 	// 이 프로세스는 이미 App 을 들고 있으므로 값을 새로 만들 필요가 애초에 없었다.
+	//
+	// ★ 비콘 디렉토리도 **반드시 여기서 넘긴다.** WithBeaconDir 이 없으면 mcpsrv 는
+	// "심지 않는다"로 조용히 넘어간다(그 옵션의 존재 이유 자체가 시험을 개발자의 진짜
+	// 홈에서 격리하는 것이다) — 그래서 이 인자를 빠뜨리면 프로덕션에서 비콘이 영영 안 심기는데
+	// 시험은 전부 초록으로 남는다. App 이 이미 사다리의 유일한 주인(BeaconDir)으로 값을 풀어
+	// 뒀으므로 여기서 다시 풀지 않는다 — 두 자리에서 풀면 반드시 어긋난다(env.go 참고).
 	srv := mcpsrv.New(newMCPBackend(app), log,
 		mcpsrv.WithProject(app.proj.ID, app.proj.Path),
-		mcpsrv.WithMachine(app.machine))
+		mcpsrv.WithMachine(app.machine),
+		mcpsrv.WithBeaconDir(app.beaconDir))
 	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())
 		return 1
