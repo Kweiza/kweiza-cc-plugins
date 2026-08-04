@@ -171,6 +171,22 @@ func TestRenderPickNeverCallsAnAbsentQueueSizeZero(t *testing.T) {
 	}
 }
 
+// TestRenderPickPrintsAGenuineZero 는 부재의 반대편을 못박는다.
+//
+// nil 이 "0건" 이 되면 안 된다는 것은 다른 시험이 지킨다. 이 시험은 그 반대 —
+// **진짜 0건이 부재로 접히면 안 된다**. 둘 중 하나만 지키면 `*QueueOpen > 0` 같은
+// '정리'가 시험을 전부 통과하면서 빈 큐를 "서버가 안 냈다" 로 바꿔 놓는다.
+func TestRenderPickPrintsAGenuineZero(t *testing.T) {
+	zero := 0
+	got := RenderPick(service.PickResult{Mode: service.PickNone, Reason: "적격 0건이다", QueueOpen: &zero}, t0)
+	if !strings.Contains(got, "큐 열림 0건") {
+		t.Fatalf("진짜 0건이 숫자로 안 나왔다:\n%s", got)
+	}
+	if strings.Contains(got, "이 응답에 없다") {
+		t.Fatalf("진짜 0건을 부재로 접었다:\n%s", got)
+	}
+}
+
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{

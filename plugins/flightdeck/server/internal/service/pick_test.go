@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -385,6 +386,45 @@ func TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.
 		t.Fatalf("큐 열림 %d건 (기대 3) — 추천은 선점하지 않으므로 셋 다 열림이다", *got.QueueOpen)
 	}
 	if !strings.Contains(got.Scope, "열린 항목 3건") {
+		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
+	}
+}
+
+// TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine 은 none 모드도
+// QueueOpen 을 낸다는 것과, 그 수가 자기 사유 안의 수와 갈리지 않는다는 것을 단정한다.
+//
+// none 모드는 다른 모드보다 갈림이 더 위험하다 — Reason 자체가 Scope 문장을 그대로
+// 이어붙이므로(pick.go:329-330) QueueOpen 이 어긋나면 **한 응답 안에서 서로 다른 두 숫자가
+// 나란히 찍힌다.** recommended 모드는 그 옆에 실제 항목이라도 있어 사람이 위화감을 느낄
+// 여지가 있지만, none 모드에는 보여줄 항목 자체가 없어 그 모순을 알아챌 다른 단서가 없다.
+func TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	// 서로가 서로의 선행이 되는 순환 — 영영 안 풀린다(TestPickRecordsEvalAndEveryRejectionWhenNothingIsEligible
+	// 이 쓴 것과 같은 수법: 선행이 안 끝나 대기 상태로 남기되, 둘 다 열린 채로 둔다).
+	addItem(t, s, "p", "a", nil, []model.After{{Item: "b"}})
+	addItem(t, s, "p", "b", nil, []model.After{{Item: "a"}})
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if got.Mode != PickNone {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickNone)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다 — none 모드도 예외가 아니다")
+	}
+	if *got.QueueOpen != 2 {
+		t.Fatalf("큐 열림 %d건 (기대 2) — 순환 대기 중인 둘 다 열림이다", *got.QueueOpen)
+	}
+	want := fmt.Sprintf("열린 항목 %d건", *got.QueueOpen)
+	if !strings.Contains(got.Reason, want) {
+		t.Fatalf("사유 문자열과 큐 수가 갈렸다: %q vs %d건", got.Reason, *got.QueueOpen)
+	}
+	if !strings.Contains(got.Scope, want) {
 		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
 	}
 }
