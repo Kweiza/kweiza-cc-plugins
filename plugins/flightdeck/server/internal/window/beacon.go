@@ -29,10 +29,11 @@ type Key struct {
 //
 // ★ machine id 는 hostname 에서 온다(mcpsrv/identity.go). 즉 **외부 입력**이고
 // 경로 구분자가 들어올 수 있다. 그대로 쓰면 디렉토리를 벗어나므로 안전하게 바꾼다.
-// scrub 함수는 여러 입력이 같은 파일명으로 붕괴하지 않도록 전사 함수(injective)여야 한다 —
-// 다르면 여러 머신이 한 파일을 공유하게 된다.
+// 세 좌표를 "-" 로 이으므로, scrub 결과는 "-" 를 절대 포함하면 안 된다 —
+// 포함하면 파일명이 몇 개 조각으로 갈려서 다른 Key 끼리도 같은 이름이 된다.
+// 따라서 세 좌표 모두 scrub 을 거친다.
 func (k Key) FileName() string {
-	return scrub(k.MachineID) + "-" + strconv.Itoa(k.ClaudePID) + "-" + scrub(k.Started) + ".json"
+	return scrub(k.MachineID) + "-" + scrub(strconv.Itoa(k.ClaudePID)) + "-" + scrub(k.Started) + ".json"
 }
 
 // Valid 는 이 좌표로 파일을 만들어도 되는지다. 빈 축이 있으면 안 된다 —
@@ -41,12 +42,17 @@ func (k Key) Valid() bool {
 	return strings.TrimSpace(k.MachineID) != "" && k.ClaudePID > 0 && strings.TrimSpace(k.Started) != ""
 }
 
+// ★ scrub 는 입력을 파일명으로 안전한 문자열로 바꾼다. 처음엔 안전하지 않은 바이트를 모두
+// 같은 "-" 로 붕괴했는데, 그렇게 하면 다른 입력이 같은 출력이 되고 Key 끼리 충돌한다.
+// 따라서 안전하지 않은 바이트는 "_HH" (16진)로 이스케이프하는 방식으로 바꿨다. 그러면
+// 같은 입력만 같은 출력을 낸다. 비용은 읽기 어려워진다는 것 — 예를 들어 "web.corp" 는
+// "web_2ecorp" 이 되는데, 이것은 정하는 바다.
 func scrub(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-':
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'):
 			b.WriteByte(c)
 		default:
 			fmt.Fprintf(&b, "_%02x", c)
