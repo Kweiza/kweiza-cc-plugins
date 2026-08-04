@@ -557,6 +557,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		if len(it.Paths) > 0 {
 			fmt.Fprintf(&b, "경로: %s\n", strings.Join(it.Paths, ", "))
 		}
+		b.WriteString(renderPathCheck(r.PathCheck, it.ID))
 		if len(it.After) > 0 {
 			fmt.Fprintf(&b, "선행: %s\n", formatAfter(it.After))
 		}
@@ -634,6 +635,29 @@ func indent(s, pad string) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderPathCheck 는 경로 실재 축 한 줄이다. 순수 함수다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다.** 이상이 없어도 한 줄을 찍는 이유는
+// RenderTail 이 겹침 0건일 때도 "겹침: 없음"을 찍는 것과 같다 — 침묵하면
+// "이상 없다"와 "이 축을 안 봤다"가 같은 화면이 되고, 그러면 stat 이 전부 실패한 날에도
+// pick 은 평소와 똑같아 보인다.
+//
+// ★ 접두가 "경로 실재:" 인 이유는 바로 위 줄이 이미 "경로: <목록>" 이기 때문이다.
+// 같은 접두를 쓰면 선언과 관측이 안 갈린다.
+//
+// ★ 되돌리는 명령은 **유일 지목일 때만** 낸다. 여럿이 지목된 상태에서 그 명령을 내면
+// 그것이 곧 오등록 단정이고, 그 단정이 실물 큐에서 5건 헛발화하던 규칙이다.
+func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
+	if v == nil {
+		return "경로 실재: 이 응답은 그 축을 읽지 않았다(낡은 캐시일 수 있다).\n"
+	}
+	s := "경로 실재: " + v.Summary + "\n"
+	if v.Kind == judge.KindMisregistered && v.Suggest != "" {
+		s += fmt.Sprintf("           맞다면 지금 되돌려라: `fd move %s --project %s`\n", itemID, v.Suggest)
+	}
+	return s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
