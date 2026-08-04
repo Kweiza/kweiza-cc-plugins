@@ -126,6 +126,64 @@ func OutboxPath(get func(string) (string, bool), home string) (dir, source strin
 		"임시 디렉토리 — HOME 이 없다. 재부팅하면 **아직 못 보낸 판단**이 사라진다"
 }
 
+// LegacyOutboxDirs 는 재생이 **함께 돌아 줘야 하는** 다른 아웃박스 자리다. 순수 함수다.
+//
+// 아웃박스가 채널마다 갈려 있던 시절의 자리와, 이 실행이 목표를 바꿨을 때 뒤에 남는 자리다.
+//
+// ★ **파일을 옮기지 않는다.** 재생이 각 큐를 제자리에서 돌려 **전송으로** 비우고,
+// 마지막 줄까지 나가면 keep() 이 그 파일을 지운다 — 이미 있는 동작이다.
+// (앞선 판에서는 os.Rename 청구로 고정 자리에 흡수하려 했는데, 그 설계가 반증됐다.
+// 스펙 §4 "왜 옮기지 않기로 했나"에 재현 결과가 있다. 되살리지 마라.)
+//
+// ★ **~/.claude/plugins/data/*/flightdeck 를 glob 하지 않는다.** 그 경로에는 플러그인
+// 버전과 마켓 이름이 들어가고, 설계 §13 이 "버전이 경로에 들어가므로 그 경로를 어디에도
+// 저장하지 않는다"고 판정했다. 추측해 박으면 마켓 이름이 바뀌는 날 조용히 빗나간다.
+//
+// 그래서 수렴은 이렇게 일어난다: 훅·MCP 채널은 CLAUDE_PLUGIN_DATA 가 있으니
+// SessionStart 마다 제 자리를 비우고, 셸 채널은 제 자리를 비운다.
+// **정직한 구멍**: 어떤 채널이 이 변경 뒤 fd 를 한 번도 안 돌리면 그 자리는 영영
+// 안 비워진다. 그 사실은 runDoctor 가 말로 찍는다 — 안 잰 축을 잰 척하지 않는다(§13).
+//
+// 임시 디렉토리도 넣는다. **앞선 판에서 이것을 뺐던 근거가 틀렸다** — "그 갈래가 걸리는
+// 조건에서는 목표도 같은 자리라 어차피 걸러진다"고 적었는데, 이 목록이 판정하는 것은
+// **과거 실행의** 환경이고 목표를 정하는 것은 **지금** 환경이다. HOME 없이(데몬·컨테이너
+// 진입점) 돌아 tmp 에 쌓은 머신이 나중에 HOME 을 갖게 되면 그 판단이 영영 안 나간다.
+// 공용 머신에서 남의 것을 건드리는 위험은 파일 권한이 막는다(아웃박스 파일은 0600 이라
+// 읽기가 실패하고, 그 실패는 사유로 올라온다).
+func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []string {
+	var out []string
+	tgt := filepath.Clean(target)
+	add := func(p string) {
+		if strings.TrimSpace(p) == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		if p == tgt {
+			return // 목표와 같은 자리는 재생이 이미 돈다
+		}
+		for _, x := range out {
+			if x == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	if v, ok := get("CLAUDE_PLUGIN_DATA"); ok && strings.TrimSpace(v) != "" {
+		add(filepath.Join(filepath.Clean(strings.TrimSpace(v)), "flightdeck", "outbox"))
+	}
+	if v, ok := get("XDG_STATE_HOME"); ok && strings.TrimSpace(v) != "" {
+		add(filepath.Join(filepath.Clean(strings.TrimSpace(v)), "flightdeck", "outbox"))
+	}
+	if strings.TrimSpace(home) != "" {
+		add(filepath.Join(home, ".local", "state", "flightdeck", "outbox"))
+		// ★ 고정 자리 자신. FD_STATE_DIR 를 새로 켜면 목표가 그쪽으로 옮겨 가는데,
+		// 이 줄이 없으면 그때까지 여기 쌓인 판단이 조용히 안 보이게 된다.
+		add(filepath.Join(home, ".flightdeck", "outbox"))
+	}
+	add(filepath.Join(os.TempDir(), "flightdeck", "outbox"))
+	return out
+}
+
 // MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도, 그리고
 // **어느 채널에서 불러도** 같아야 한다.
 //
