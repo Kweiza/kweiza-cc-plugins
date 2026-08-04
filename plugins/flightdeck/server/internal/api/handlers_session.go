@@ -207,17 +207,23 @@ func ValidateOrigin(o string) (model.FootprintOrigin, error) {
 	}
 }
 
-// NormalizeFootprints 는 훅이 준 절대경로를 저장소 좌표계로 옮긴다. 순수 함수다.
+// NormalizeFootprints 는 훅이 준 절대경로를 저장소 좌표계로 옮기고, 좌표계가 다른 것을 가른다.
+// 순수 함수다.
 //
 // ★ 좌표계를 안 맞추면 겹침 축이 **조용히** 죽는다. 훅은 절대경로를 주고
 // git 은 저장소 상대를 주므로, 둘을 그대로 두면 같은 파일이 서로 다른 문자열이 되어
 // 아무와도 안 겹친다 — 그리고 그 결과는 "겹침 없음"이라는 정상 응답과 구분되지 않는다.
-func NormalizeFootprints(worktree string, paths []string) []string {
-	rels := make([]string, 0, len(paths))
-	for _, p := range paths {
+//
+// ★ 버린 것을 **함께 돌려준다.** 이 표면은 거절하지 않는다(훅을 400 으로 죽이면 세션
+// 생존 신호가 끊긴다). 그러면 버린 사실을 호출부가 말할 수 있어야 하고, 못 말하면
+// 경로가 조용히 사라진 것과 같아진다 — 이 함수가 없애려는 바로 그 침묵이다.
+func NormalizeFootprints(worktree string, paths []string) ([]string, []service.RejectedPath) {
+	kept, rejected := service.FilterFootprintPaths(paths)
+	rels := make([]string, 0, len(kept))
+	for _, p := range kept {
 		rels = append(rels, service.RelPath(worktree, p))
 	}
-	return service.UnionPaths(rels)
+	return service.UnionPaths(rels), rejected
 }
 
 // handleFootprints 는 발자국을 기록한다.
@@ -247,7 +253,7 @@ func (s *server) handleFootprints(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	rels := NormalizeFootprints(sess.Worktree, req.Paths)
+	rels, rejected := NormalizeFootprints(sess.Worktree, req.Paths)
 	now := s.now()
 	for _, p := range rels {
 		if err := s.st.Touch(r.Context(), req.SessionID, p, origin, now); err != nil {
@@ -258,10 +264,15 @@ func (s *server) handleFootprints(w http.ResponseWriter, r *http.Request) {
 	s.publish(r, "session.footprint", sess.Project, req.SessionID, map[string]any{
 		"origin": string(origin), "count": len(rels),
 	})
-	s.writeJSON(w, r, http.StatusOK, map[string]any{
+	res := map[string]any{
 		"session_id": req.SessionID, "origin": string(origin),
 		"count": len(rels), "paths": rels,
-	})
+	}
+	// 버린 것이 있을 때만 싣는다 — 빈 배열을 늘 실으면 정상 응답에 잡음이 낀다.
+	if len(rejected) > 0 {
+		res["rejected"] = rejected
+	}
+	s.writeJSON(w, r, http.StatusOK, res)
 }
 
 // handlePrescriptions 는 이 세션이 지금 받아야 할 처방을 내고 발화를 기록한다.

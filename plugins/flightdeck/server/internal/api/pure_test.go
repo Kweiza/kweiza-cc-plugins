@@ -329,7 +329,7 @@ func TestValidateOrigin(t *testing.T) {
 }
 
 func TestNormalizeFootprints(t *testing.T) {
-	got := NormalizeFootprints("/repo", []string{
+	got, _ := NormalizeFootprints("/repo", []string{
 		"/repo/internal/api/api.go",
 		"/repo/internal/api/api.go", // 중복은 접힌다
 		"internal/api/sse.go",       // 이미 상대인 것은 그대로
@@ -341,8 +341,44 @@ func TestNormalizeFootprints(t *testing.T) {
 		t.Fatalf("정규화 결과가 다르다: %v, 기대 %v", got, want)
 	}
 	// ★ 표 밖: 접두 문자열로 자르면 /repo-old/x.go 가 "-old/x.go" 로 둔갑한다.
-	if got := NormalizeFootprints("/repo", []string{"/repo-old/x.go"}); got[0] != "/repo-old/x.go" {
+	if got, _ := NormalizeFootprints("/repo", []string{"/repo-old/x.go"}); got[0] != "/repo-old/x.go" {
 		t.Fatalf("저장소 밖 경로가 잘렸다: %q", got[0])
+	}
+}
+
+// 발자국은 거절하지 않고 버린다 — 훅을 400 으로 죽이면 세션 생존 신호가 끊긴다.
+// 대신 버린 것을 돌려줘야 한다. 안 그러면 경로가 조용히 사라진 것과 같다.
+func TestNormalizeFootprintsKeepsGoodDropsBad(t *testing.T) {
+	kept, rejected := NormalizeFootprints("/repo", []string{
+		"/repo/internal/api/x.go",
+		`C:\other\y.go`,
+		"/repo/Makefile",
+		`z\w.go`,
+	})
+
+	want := []string{"Makefile", "internal/api/x.go"} // UnionPaths 가 정렬한다
+	if fmt.Sprint(kept) != fmt.Sprint(want) {
+		t.Fatalf("kept = %v, want %v", kept, want)
+	}
+
+	if len(rejected) != 2 {
+		t.Fatalf("rejected %d건, want 2건: %+v", len(rejected), rejected)
+	}
+	if rejected[0].Path != `C:\other\y.go` {
+		t.Errorf("거절이 원본 경로를 안 나른다: %+v", rejected[0])
+	}
+	if rejected[0].Reason == "" {
+		t.Error("거절에 사유가 없다")
+	}
+}
+
+func TestNormalizeFootprintsAllGoodHasNoRejected(t *testing.T) {
+	kept, rejected := NormalizeFootprints("/repo", []string{"/repo/a.go", "/repo/b.go"})
+	if len(kept) != 2 {
+		t.Fatalf("kept = %v, want 2건", kept)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("정상 입력에 거절이 생겼다: %+v", rejected)
 	}
 }
 
