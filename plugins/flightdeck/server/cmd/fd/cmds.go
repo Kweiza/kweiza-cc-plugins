@@ -434,6 +434,11 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 이 축이 채널마다 갈려 한 세션이 카드 세 장으로 떴을 때, 값이 다르다는 것보다
 	// "어느 파일에서 왔나"가 원인에 이르는 열쇠였다(그 줄이 없어 /proc 을 뒤져야 했다).
 	fmt.Fprintf(out, "  머신 %s (%s)\n", a.machine, a.machineSrc)
+	// ★ 주소·토큰도 **어디서 읽었는지**를 찍는다. machineSrc 가 그 선례다 —
+	// 값이 예상과 다를 때 "왜 저 값인가"에 답할 자리가 없으면 /proc 을 뒤지게 된다.
+	fmt.Fprintf(out, "  서버 주소 %s (%s)\n", a.cli.URL, a.cli.Endpoint.URLSource)
+	fmt.Fprintf(out, "  서버 토큰 %s (%s)\n",
+		map[bool]string{true: "설정됨", false: "없음"}[a.cli.Token != ""], a.cli.Endpoint.TokenSource)
 	fmt.Fprintf(out, "  프로젝트 %s · 주 저장소 %s · 워크트리 %s\n", a.proj.ID, a.proj.Path, a.proj.Worktree)
 	fmt.Fprintf(out, "  좌표 판정: %s\n", a.proj.Detail)
 	// ★ 아웃박스는 **상태 디렉토리마다 따로 쌓인다**(채널마다 다르다 — 훅·MCP 는

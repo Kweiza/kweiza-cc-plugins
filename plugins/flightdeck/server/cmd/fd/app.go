@@ -38,9 +38,15 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 		host = "unknown"
 		warn = strings.TrimSpace(warn + " · hostname 을 못 읽었다: " + herr.Error())
 	}
+	cli := newClient(sd, env, home, log)
+	// 설정 파일의 경고(깨졌다·권한이 넓다)를 같은 자리로 합류시킨다 —
+	// notice 는 "도구가 스스로 못 한 것"의 자리이고, 조용히 사라지면 안 된다.
+	if w := strings.TrimSpace(cli.Endpoint.Warn); w != "" {
+		warn = strings.TrimSpace(warn + " · " + w)
+	}
 	a := &App{
 		env: env, log: log, sd: sd,
-		cli:        newClient(sd, env, log),
+		cli:        cli,
 		proj:       resolveProject(env, cwd),
 		machine:    mid,
 		machineSrc: midSrc,

@@ -214,7 +214,7 @@ func TestLauncherBuildsAndRuns(t *testing.T) {
 // 스킬 목록은 항목당 잘리므로 규율 산문을 넣으면 그것이 도구 설명을 밀어낸다.
 func TestSkillsStayWithinTheContextBudget(t *testing.T) {
 	root := pluginRoot(t)
-	for _, name := range []string{"fd-pickup", "fd-handoff"} {
+	for _, name := range []string{"fd-pickup", "fd-handoff", "fd-setup"} {
 		path := filepath.Join(root, "skills", name, "SKILL.md")
 		raw, err := os.ReadFile(path)
 		if err != nil {
