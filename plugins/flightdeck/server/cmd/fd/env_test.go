@@ -56,10 +56,14 @@ func TestResolveStateDirPrefersPluginDataAndAlwaysGivesReason(t *testing.T) {
 	if got.Path != filepath.Join("/home/a", ".local", "state", "flightdeck") {
 		t.Fatalf("빈 CLAUDE_PLUGIN_DATA 를 값으로 받았다: %q", got.Path)
 	}
-	// 임시 폴백은 **잃을 수 있다는 사실**을 말해야 한다.
+	// 임시 폴백은 **잃을 수 있다는 사실**을 말해야 한다 — 다만 상태 디렉토리가 담는 것은
+	// 이제 캐시뿐이다. "판단"을 언급하면 아웃박스가 여기 있다는, 반증된 전제가 되살아난다.
 	tmp := ResolveStateDir(envOf(map[string]string{}), "")
-	if !strings.Contains(tmp.Source, "아직 못 보낸 판단") {
+	if !strings.Contains(tmp.Source, "캐시") {
 		t.Fatalf("임시 폴백이 무엇을 잃는지 말하지 않는다: %q", tmp.Source)
+	}
+	if strings.Contains(tmp.Source, "판단") {
+		t.Fatalf("상태 디렉토리 폴백이 판단(아웃박스 몫)을 언급한다 — 갈린 축이 다시 섞였다: %q", tmp.Source)
 	}
 }
 

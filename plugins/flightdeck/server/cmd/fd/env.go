@@ -60,7 +60,7 @@ func ResolveStateDir(get func(string) (string, bool), home string) StateDir {
 	return StateDir{
 		Path: filepath.Join(os.TempDir(), "flightdeck"),
 		Source: "임시 디렉토리 — 홈도 CLAUDE_PLUGIN_DATA 도 없다. " +
-			"재부팅하면 캐시와 **아직 못 보낸 판단**이 사라진다",
+			"재부팅하면 캐시가 사라진다(잃어도 다시 만들면 된다)",
 	}
 }
 
