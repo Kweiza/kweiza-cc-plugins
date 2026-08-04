@@ -158,6 +158,13 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	} else {
 		a.log.Warn("아웃박스 조회 실패", "error", err.Error())
 	}
+	// ★ 옛 채널 자리의 대기도 더한다. 업그레이드 직후에는 고정 큐가 비어 있고
+	// 판단은 전부 옛 자리에 남아 있는 것이 흔한 상태라, 고정 큐만 보면 배너가
+	// 조용해진다 — 정작 사람이 물어보지 않고도 보는 유일한 표면이 바로 이 배너다.
+	// "이 머신에 쌓여 있다"는 문장은 그대로 참이다: 옛 자리도 이 머신 안이다.
+	for _, lo := range a.cli.LegacyLeftovers() {
+		in.Pending += lo.Pending
+	}
 
 	cc := a.ccSessionID(p.SessionID)
 	if cc == "" {

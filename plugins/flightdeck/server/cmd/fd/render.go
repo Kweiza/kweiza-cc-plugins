@@ -31,7 +31,7 @@ type SessionStartInput struct {
 	BoardStale bool
 	Asks       []model.Judgment
 	Blocked    []model.Judgment
-	Pending    int    // 아웃박스에 남아 있는 판단 수
+	Pending    int    // 아웃박스에 남아 있는 판단 수 — 고정 자리 + 옛 채널 자리 합계(hookSessionStart 참고)
 	Notice     string // 도구가 스스로 못 한 것(예: machine-id 를 못 적었다)
 }
 

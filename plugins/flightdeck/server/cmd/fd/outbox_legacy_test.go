@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,5 +297,65 @@ func TestDoctorReportsOutboxPlaceAndItsOwnBlindness(t *testing.T) {
 	//   빼먹어도 초록이 된다 — 이 레포가 반복해서 경계한 '전 시험 초록 상태로 사는 결함'이다.
 	if !strings.Contains(out, "옛 자리 탐색") {
 		t.Errorf("doctor 가 못 보는 범위를 안 말한다 — 0건이 '깨끗하다'로 읽힌다:\n%s", out)
+	}
+}
+
+// doctor 는 옛 자리에 실제로 남은 대기를 **줄로** 낸다.
+//
+// ★ 위 시험(TestDoctorReportsOutboxPlaceAndItsOwnBlindness)은 옛 자리가 빈 채로 돈다 —
+// cmds.go 의 `for _, lo := range a.cli.LegacyLeftovers()` 루프 전체를 지워도
+// LegacyLeftovers()가 빈 목록을 내고 그 시험은 계속 초록이다(리뷰어의 변이 실험이 이걸
+// 잡았다). 여기서는 TestNewClientWiresLegacyOutboxFromHome 이 보인 방식대로
+// h.home/.local/state/flightdeck/outbox 에 큐를 심어 newClient 가 그것을 Legacy 로
+// 집어 들게 한 뒤, doctor 출력에 "! 옛 자리 …" 줄과 건수가 실제로 찍히는지를 잰다.
+func TestDoctorReportsLegacyLeftoverLine(t *testing.T) {
+	h := newHarness(t)
+	legacyHome := filepath.Join(h.home, ".local", "state", "flightdeck", "outbox")
+	seedQueue(t, legacyHome, "old1", "old2")
+
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
+	}
+	if !strings.Contains(out, "! 옛 자리 "+legacyHome) {
+		t.Errorf("doctor 가 옛 자리(%s) 줄을 안 찍었다 — 루프를 지워도 이 시험 전에는 아무도 못 잡았다:\n%s",
+			legacyHome, out)
+	}
+	if !strings.Contains(out, "대기 2건") {
+		t.Errorf("doctor 가 옛 자리 대기 건수를 안 찍었다:\n%s", out)
+	}
+	// 진단은 읽기만 한다 — 옛 큐가 그대로 남아 있어야 한다.
+	if _, err := os.Stat(filepath.Join(legacyHome, pendingName)); err != nil {
+		t.Errorf("doctor 가 옛 큐를 건드렸다: %v", err)
+	}
+}
+
+// ── flushAll 이 "안 비었다" 경고를 실제 로거에 낸다 ─────────────────────────────
+
+// quietLogger() 는 LevelError 로 io.Discard 에 버리므로, client.go:339 의
+// c.Log.Warn("아웃박스가 안 비었다", …) 호출을 지워도 quietLogger 를 쓰는 시험은
+// 아무것도 못 본다(리뷰어의 변이 실험이 이걸 잡았다). 그 줄을 실제로 지키려면
+// **경고를 실제로 받아 적는 로거**가 있어야 한다 — bytes.Buffer 에 LevelWarn 이하로
+// 쓰는 핸들러를 newClient 에 직접 물린다.
+func TestFlushAllWarnsWhenLegacyQueueIsNotEmptied(t *testing.T) {
+	h := newHarness(t)
+	legacy := filepath.Join(t.TempDir(), "chanStuck", "outbox")
+	seedQueue(t, legacy, "stuck1")
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, log)
+	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+
+	cli.flushAll(t.Context(), func(*Outbox, OutboxEntry) error {
+		return ErrUnreachable // 전송이 실패한다 — 큐가 안 빈다
+	})
+
+	got := buf.String()
+	if !strings.Contains(got, "아웃박스가 안 비었다") {
+		t.Errorf("flushAll 이 '안 비었다' 경고를 안 남겼다 — 사람이 볼 유일한 표면이 침묵했다:\n%s", got)
+	}
+	if !strings.Contains(got, legacy) {
+		t.Errorf("경고에 어느 큐인지(%s)가 안 보인다:\n%s", legacy, got)
 	}
 }
