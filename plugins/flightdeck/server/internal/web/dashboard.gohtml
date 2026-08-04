@@ -98,6 +98,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   </div>
   {{template "pfail" .Live.Panel}}
   {{with .Live.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{with .Live.OutOfWindow}}<p class="dim">{{.}}</p>{{end}}
   <div class="cards">
     {{range .Live.Sessions}}
     <div class="card{{if .IsSelf}} self{{end}}">

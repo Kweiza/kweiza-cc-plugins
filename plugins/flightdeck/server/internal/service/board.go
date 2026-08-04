@@ -89,16 +89,42 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
 
 	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).
-	if all, aerr := s.st.ListLive(ctx, proj.ID, time.Time{}); aerr != nil {
+	listAll := s.outOfWindowLister
+	if listAll == nil {
+		listAll = s.st.ListLive
+	}
+	if all, aerr := listAll(ctx, proj.ID, time.Time{}); aerr != nil {
 		d.fail("out-of-window", aerr) // 못 세면 침묵하지 않고 파생 실패로 남긴다
 	} else {
 		view.OutOfWindow = len(all) - len(cards)
-		cut := s.cut(now, window)
+
+		// ★ OldestOutside 는 **숨은 세션**만의 값이어야 한다. cards 에 이미 나온 세션의
+		// 신호 하나하나를 다시 훑으면, 그 세션이 최근 신호로 창 안에 있어도 다른 종류의
+		// 옛 신호(예: 6시간 전 commit) 때문에 "창 밖"으로 잘못 집힌다 — 보이는 세션의
+		// 신호로 숨은 세션 지표를 오염시키는 것이다. 숨은지 여부는 cards(= 실제로 사용한
+		// ListLive(cut) 결과)와 **같은 판정**을 다시 쓴다 — 여기서 opened_at·신호 조건을
+		// 새로 판단하면 그 판정이 SQL 쪽과 갈라질 수 있다(같은 판정을 두 자리에 두면
+		// 한쪽만 고치는 순간 조용히 어긋난다는 것을 이 파일이 이미 한 번 겪었다).
+		shown := make(map[string]bool, len(cards))
+		for _, c := range cards {
+			shown[c.View.Session.ID] = true
+		}
 		for _, v := range all {
+			if shown[v.Session.ID] {
+				continue
+			}
+			// 숨은 세션의 "마지막으로 언제 봤나" — 그 세션 신호들의 최댓값이다.
+			var lastSeen time.Time
 			for _, at := range v.Signals {
-				if at.Before(cut) && (view.OldestOutside.IsZero() || at.Before(view.OldestOutside)) {
-					view.OldestOutside = at
+				if at.After(lastSeen) {
+					lastSeen = at
 				}
+			}
+			if lastSeen.IsZero() {
+				continue // 신호가 하나도 없다 — 언제 봤는지 답할 재료가 없다
+			}
+			if view.OldestOutside.IsZero() || lastSeen.Before(view.OldestOutside) {
+				view.OldestOutside = lastSeen
 			}
 		}
 	}
