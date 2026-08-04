@@ -68,6 +68,54 @@ func TestFoldedPrescriptionsAreStillRecorded(t *testing.T) {
 	}
 }
 
+// note 하나가 그 시점 열린 처방 전부를 닫고, 무엇이 열려 있었는지가 ack 에 남는다.
+func TestNoteAcksOpenPrescriptions(t *testing.T) {
+	svc, st := newSvc(t)
+
+	sess := openSessionForPrescribeTest(t, svc)
+	touchPathForPrescribeTest(t, st, sess, "cmd/fd/hook.go")
+
+	first, err := svc.Prescriptions(ctx(), sess)
+	if err != nil || len(first.All) == 0 {
+		t.Fatalf("처방이 안 나왔다: %v / %+v", err, first)
+	}
+
+	if _, err := svc.Note(ctx(), NoteInput{
+		Project: "p", SessionID: sess, Kind: model.JudgmentDecision,
+		Title: "무엇을 하는지", Body: "훅에서 처방을 낸다",
+	}); err != nil {
+		t.Fatalf("note 실패: %v", err)
+	}
+
+	acks, err := st.ListSessionEvents(ctx(), sess, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 1 {
+		t.Fatalf("ack 이 1건이 아니다: %d", len(acks))
+	}
+	if !strings.Contains(acks[0].Payload, first.All[0].Key) {
+		t.Fatalf("ack payload 에 열려 있던 키가 없다: %s", acks[0].Payload)
+	}
+}
+
+// 열린 처방이 없으면 ack 도 안 남는다. 빈 ack 는 확인율 분모를 오염시킨다.
+func TestNoteWithoutOpenPrescriptionsLeavesNoAck(t *testing.T) {
+	svc, st := newSvc(t)
+	sess := openSessionForPrescribeTest(t, svc)
+
+	if _, err := svc.Note(ctx(), NoteInput{
+		Project: "p", SessionID: sess, Kind: model.JudgmentDecision,
+		Title: "t", Body: "b",
+	}); err != nil {
+		t.Fatalf("note 실패: %v", err)
+	}
+	acks, _ := st.ListSessionEvents(ctx(), sess, "prescribe_ack", time.Time{})
+	if len(acks) != 0 {
+		t.Fatalf("열린 처방이 없는데 ack 이 남았다: %d", len(acks))
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 헬퍼 — 이 패키지의 기존 헬퍼(newSvc·openSession·addItem)를 조립한 것뿐이다.
 // ─────────────────────────────────────────────────────────────────────────────

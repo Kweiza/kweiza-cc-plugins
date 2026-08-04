@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
@@ -141,6 +142,65 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 		}
 	}
 	return out, since, nil
+}
+
+// ackPrescriptions 는 지금 열려 있는 처방 전부를 닫는다.
+//
+// ★ note 한 번이 전부를 닫는 이유: 처방 문구가 무엇을 쓸지 지정하므로 보통 판단 하나가
+// 그것을 덮는다. 처방마다 대응 판단을 요구하면 세션이 형식적 note 를 양산하고,
+// 그러면 건수는 오르는데 판단 바이트는 안 오른다 — 설계 §10 이 그 둘을 함께 보라고 한 이유다.
+//
+// ★ **실패해도 판단 저장을 되돌리지 않는다.** 판단이 재생성 불가한 자산이고 ack 은 계측이다.
+// 다만 삼키지 않는다 — WARN 으로 남긴다.
+func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID string) {
+	sess, err := s.st.GetSession(ctx, sessionID)
+	if err != nil {
+		s.log.WarnContext(ctx, "ack: 세션을 못 읽었다", "session_id", sessionID, "error", err.Error())
+		return
+	}
+	open, _, err := s.emittedKeys(ctx, sessionID, sess.OpenedAt)
+	if err != nil {
+		s.log.WarnContext(ctx, "ack: 발화 이력을 못 읽었다", "session_id", sessionID, "error", err.Error())
+		return
+	}
+	acked, err := s.ackedKeys(ctx, sessionID, sess.OpenedAt)
+	if err != nil {
+		s.log.WarnContext(ctx, "ack: 확인 이력을 못 읽었다", "session_id", sessionID, "error", err.Error())
+		return
+	}
+	var keys []string
+	for k := range open {
+		if !acked[k] {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return // **빈 ack 은 안 남긴다** — 확인율의 분자를 부풀린다
+	}
+	sort.Strings(keys) // 같은 입력에 같은 payload
+	s.st.LogEvent(ctx, eventPrescribeAck, project, sessionID, map[string]any{"keys": keys})
+}
+
+// ackedKeys 는 이미 확인된 키다.
+func (s *Service) ackedKeys(ctx context.Context, sessionID string, openedAt time.Time) (map[string]bool, error) {
+	evs, err := s.st.ListSessionEvents(ctx, sessionID, eventPrescribeAck, openedAt)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, e := range evs {
+		var p struct {
+			Keys []string `json:"keys"`
+		}
+		if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
+			s.log.WarnContext(ctx, "ack payload 해석 실패", "payload", e.Payload)
+			continue
+		}
+		for _, k := range p.Keys {
+			out[k] = true
+		}
+	}
+	return out, nil
 }
 
 // lastJudgmentAt 은 이 세션의 마지막 판단 시각이다.
