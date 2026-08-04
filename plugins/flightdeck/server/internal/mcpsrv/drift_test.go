@@ -39,13 +39,23 @@ func li(session, machine, worktree, cc string) LiveIdentity {
 }
 
 func TestDriftedTwinsFindsTheCCAxisOnly(t *testing.T) {
-	mine := Identity{MachineID: "m1", Worktree: "/w/repo", CCSessionID: "cc-new"}
+	mine := LiveIdentity{SessionID: "s-me", MachineID: "m1", Worktree: "/w/repo", CCSessionID: "cc-new"}
 
 	cases := []struct {
 		name string
 		live []LiveIdentity
 		want []string // 기대하는 쌍둥이의 session id
 	}{
+		{
+			// ★★ **내 카드 id 면 cc 가 무엇이든 나 자신이다.**
+			// cc 축만으로 자기를 빼면 이 기능의 정상 상태에서 자기 카드가 잡힌다 —
+			// ensureSession 은 비콘의 cc 로 카드를 여는데, 그 값과 이 프로세스가
+			// 든 env cc 는 /clear 뒤 **정의상** 다르다. 그리고 열고 나서 board 를
+			// 부르기 전에 /clear 가 또 오면 cc 축은 다시 갈린다 — id 축만이 안정적이다.
+			name: "내 카드 id 면 cc 가 달라도 나 자신이다",
+			live: []LiveIdentity{li("s-me", "m1", "/w/repo", "cc-changed-again")},
+			want: nil,
+		},
 		{
 			name: "같은 좌표에 cc 만 다른 세션 — 이것이 표류다",
 			live: []LiveIdentity{li("s-old", "m1", "/w/repo", "cc-old")},
@@ -109,24 +119,57 @@ func TestDriftedTwinsFindsTheCCAxisOnly(t *testing.T) {
 }
 
 // 문구는 소비자 좌표계다 — 세션이 읽는 것은 이것뿐이다.
-func TestRenderDriftNamesTheAxisAndWhatToDo(t *testing.T) {
-	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "cc-new")
+//
+// ★ 훅이 비콘으로 표류를 고치게 된 뒤로 "재기동해라"는 틀린 조언이 됐다 — 지금은
+// 그 수리가 이번엔 왜 안 됐는지를 말해야 한다. 그래서 여기서 단정하는 것은 옛 문구가
+// 아니라 새 사실: why 인자가 화면에 그대로 실리는지, 그리고 재기동 권유가 사라졌는지다.
+func TestRenderDriftNamesTheAxisAndWhyRepairDidNotHappen(t *testing.T) {
+	twins := []CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}
+	got := RenderDrift(twins, "cc-new", "조상 사슬 어디에도 이 머신의 비콘이 없다")
 
 	for _, want := range []string{
 		"cc-old", // 상대가 든 값
 		"cc-new", // 내가 든 값
 		"s-old",  // 어느 카드인지
-		"기동",     // 왜 이렇게 됐는지(기동 시 주입)
-		"재기동",    // 무엇을 하면 되는지
+		"조상 사슬",  // 수리가 이번엔 왜 안 됐는지(why 가 화면에 실렸는지)
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("문구에 %q 가 없다 — 무엇이 갈렸는지/무엇을 하면 되는지 알 수 없다:\n%s", want, got)
+			t.Errorf("문구에 %q 가 없다 — 무엇이 갈렸는지/왜 못 고쳤는지 알 수 없다:\n%s", want, got)
 		}
 	}
 
+	// ★ 옛 조언("재기동해라")은 이제 틀렸다 — 훅이 다음 SessionStart 에 비콘으로 고친다.
+	if strings.Contains(got, "재기동") {
+		t.Errorf("고쳐진 뒤에도 재기동을 권한다:\n%s", got)
+	}
+
+	// ★★ **합쳐진다고 단정하지 않는다.** 자기 카드를 뺀 뒤에 남는 쌍둥이는 둘 중 하나다:
+	// (a) 같은 워크트리에 열린 **다른 창** — 이것은 영영 안 합쳐지고, 안 합쳐지는 것이 옳다
+	//     (이 머신에 그런 창이 다섯이다, 설계 개정 ③), 또는
+	// (b) 진짜로 수리가 멈춘 표류.
+	// 단정형 문구는 (a)에게 오지 않을 수리를 약속한다 — 그 약속을 믿고 기다리면
+	// "왜 아직도 두 장이냐"에 아무도 답을 못 한다.
+	if strings.Contains(got, "훅이 다음 SessionStart 에 이것을 합친다") {
+		t.Errorf("합쳐진다고 단정한다 — 다른 창이면 영영 안 합쳐진다:\n%s", got)
+	}
+	if !strings.Contains(got, "다른 창") {
+		t.Errorf("남은 쌍둥이가 '다른 창'일 수 있다는 갈래를 말하지 않는다:\n%s", got)
+	}
+
 	// 표류가 없으면 **아무 말도 안 한다.** 매 board 마다 빈 절이 붙으면 예산이 토큰인 화면이 상한다.
-	if s := RenderDrift(nil, "cc-new"); s != "" {
+	if s := RenderDrift(nil, "cc-new", ""); s != "" {
 		t.Errorf("표류가 없는데 문구를 냈다: %q", s)
+	}
+}
+
+// why 가 비어도 문구가 잘 맺어지는지("because:" 만 남고 뒤가 없는 꼴이 아닌지) 본다.
+func TestRenderDriftIsWellFormedWithoutAReason(t *testing.T) {
+	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "cc-new", "")
+	if got == "" {
+		t.Fatalf("표류가 있는데 문구가 비었다")
+	}
+	if strings.Contains(got, "사유:") {
+		t.Errorf("사유가 없는데 '사유:' 꼬리표만 남았다:\n%s", got)
 	}
 }
 
@@ -179,9 +222,15 @@ func TestBoardShowsCCDriftInTheResponse(t *testing.T) {
 		t.Fatalf("전제가 깨졌다 — 워크트리 %s 에 cc 가 %d종뿐이다(%v). 갈림이 없으면 볼 것도 없다",
 			repo, len(ccs), ccs)
 	}
-	for _, want := range []string{"cc_session_id 가 갈린", "재기동"} {
+	// ★ "재기동" 을 더 이상 요구하지 않는다 — 옛 조언이 틀렸으므로 문구에서 지웠다.
+	// 렌더 문구가 바뀌어도 안 깨지도록, **갈린 cc 두 값이 본문에 실제로 뜨는지**로
+	// 단정한다(정체 값). 프레이즈를 고정하면 문구가 바뀔 때마다 시험이 따라 깨진다.
+	for _, want := range []string{"cc-session-uuid-1", "cc-from-before-clear"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("응답에 %q 가 없다 — 카드가 왜 여러 장인지 세션이 알 수 없다:\n%s", want, body)
+			t.Errorf("응답에 갈린 cc 값 %q 가 없다 — 카드가 왜 여러 장인지 세션이 알 수 없다:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "재기동") {
+		t.Errorf("고쳐진 뒤에도 재기동을 권한다:\n%s", body)
 	}
 }

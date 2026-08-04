@@ -113,3 +113,9 @@ type moveReq struct {
 	SessionID string `json:"session_id"`
 	To        string `json:"to"`
 }
+
+// rekeyReq 는 POST /api/v1/sessions/{id}/rekey 의 본문이다.
+// 필드 이름이 internal/api 의 rekeyRequest 와 어긋나면 서버가 조용히 0값을 받는다.
+type rekeyReq struct {
+	CCSessionID string `json:"cc_session_id"`
+}
