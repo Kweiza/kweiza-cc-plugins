@@ -62,6 +62,7 @@ type Server struct {
 
 	mu        sync.Mutex
 	sessionID string // 게으르게 연다. 도구를 한 번도 안 부르면 세션 행도 안 생긴다
+	openedCC  string // 그 카드를 **실제로 연** cc. 비콘이 있으면 s.id.CCSessionID 와 다르다
 }
 
 // Option 은 Server 의 선택 설정이다. 시험이 환경을 인자로 주기 위한 자리다 —
@@ -507,7 +508,8 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	//
 	// s.id 자체는 안 고친다 — s.id 는 뮤텍스 없이 여러 곳에서 읽힌다(callTool·toolBoard·
 	// errText·tail 응답 등). 그 필드를 가변으로 만들면 지금 코드에 없는 경쟁이 생긴다.
-	// 여기 지역 변수로만 쓴다.
+	// 대신 **s.sessionID 옆에**(같은 뮤텍스 아래) 적어 둔다 — 이 둘은 한 쌍이다:
+	// "어느 카드를, 어느 cc 로 열었나". 표류 판정은 그 쌍을 기준점으로 써야 한다(openedIdentity).
 	cc := s.id.CCSessionID
 	if k, ok := s.BeaconKey(); ok {
 		if b, err := window.Load(s.beaconDir, k); err == nil && strings.TrimSpace(b.CCSessionID) != "" {
@@ -535,7 +537,7 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.sessionID = res.Session.ID
+	s.sessionID, s.openedCC = res.Session.ID, cc
 	s.log.InfoContext(ctx, "세션 귀속",
 		"session_id", res.Session.ID, "project", res.Project.ID,
 		"created", res.Created, "branch", res.Branch)
@@ -585,12 +587,17 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	//
 	// why 는 twins 가 있을 때만 구한다 — beaconMiss 가 비콘 파일을 읽으므로, 표류가 없는
 	// (대부분의) board 호출에서까지 그 I/O 를 낼 이유가 없다.
-	twins := DriftedTwins(s.id, liveIdentitiesOf(view.Sessions))
+	//
+	// ★★ 기준점은 s.id 가 **아니다.** s.id.CCSessionID 는 exec 때 주입된 뒤 안 바뀌는 값이고,
+	// 카드는 비콘의 cc 로 열린다(ensureSession) — /clear 뒤에는 그 둘이 **정상적으로** 다르다.
+	// s.id 로 재면 방금 수리에 성공한 자기 카드를 자기가 표류로 고발한다.
+	self := s.openedIdentity(sessionID)
+	twins := DriftedTwins(self, liveIdentitiesOf(view.Sessions))
 	why := ""
 	if len(twins) > 0 {
 		why = s.beaconMiss()
 	}
-	if d := RenderDrift(twins, s.id.CCSessionID, why); d != "" {
+	if d := RenderDrift(twins, self.CCSessionID, why); d != "" {
 		if notice != "" {
 			notice += "\n"
 		}
@@ -615,6 +622,27 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	return textResult(RenderBoard(view, BoardRenderOptions{
 		Self: sessionID, Detail: a.Detail, Now: s.now(), Tail: tail, Notice: notice,
 	}), false)
+}
+
+// openedIdentity 는 표류 판정의 기준점이다 — 이 프로세스가 **실제로 연 카드**의 좌표다.
+//
+// ★ sessionID 를 인자로 받는 이유: 호출부(toolBoard)가 이미 그 값을 들고 있고, 그것이
+// 이번 호출이 자기 카드로 삼은 값이다. 여기서 s.sessionID 를 다시 읽으면 그 사이에 바뀐
+// 값을 볼 수 있어 "응답이 self 로 표시한 카드"와 "표류 판정이 자기라고 본 카드"가 갈린다.
+//
+// ★ 아직 카드를 안 열었으면(canAttribute 가 거짓이거나 열기가 실패한 경우) env 의 cc 로
+// 떨어진다 — 오늘 거동이고, 그 경우 s.id 축이 대개 반쪽이라 DriftedTwins 가 어차피 nil 이다.
+func (s *Server) openedIdentity(sessionID string) LiveIdentity {
+	s.mu.Lock()
+	cc := s.openedCC
+	s.mu.Unlock()
+	if cc == "" {
+		cc = s.id.CCSessionID
+	}
+	return LiveIdentity{
+		SessionID: sessionID, MachineID: s.id.MachineID,
+		Worktree: s.id.Worktree, CCSessionID: cc,
+	}
 }
 
 // liveIdentitiesOf 는 표류 판정에 필요한 좌표만 뽑는다.
