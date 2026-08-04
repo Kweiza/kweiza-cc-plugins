@@ -317,6 +317,7 @@ Tier B 가 만드는 값을 선행별로 갈라 보면 한 덩어리가 아니�
 ```
 POST   /sessions                    PATCH  /sessions/{id}
 POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces
+POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
 POST   /footprints
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
