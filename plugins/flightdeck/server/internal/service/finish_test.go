@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -209,6 +210,165 @@ func TestFinishIsOneCallForJudgmentFollowupCloseAndRelease(t *testing.T) {
 	for _, want := range []string{"item:batch7", "item:batch8"} {
 		if !links[want] {
 			t.Fatalf("판단 링크 %q 가 없다: %v", want, j.Links)
+		}
+	}
+}
+
+// TestFinishWhileHoldingTheLaneLetsTheSessionQueueAgain — 레인을 쥔 채 마무리한 세션이
+// 뒤탈 없이 다시 줄을 설 수 있어야 한다.
+//
+// ★ 단정은 "자원이 반납됐나"가 아니라 **"그 세션이 다시 줄을 설 수 있나"**다. 자원만 보면
+// (아래 res.Released 확인만으로는) 줄 행이 유령으로 남는 결함을 못 잡는다 — 자원은 정상
+// 반납되고, EnqueueLanding 은 재진입 안전이라 살아 있는 유령 행을 오류 없이 그대로
+// 돌려주기 때문이다(store/landing.go). 그러면 새로 서는 줄이 옛 유령 행(오래된 id)에
+// 계속 들러붙어, 이미 기다리던 세션을 영영 추월 못 하게 막는다 —
+// TestFailedReportSendsTheSessionToTheBack(landing_test.go)이 report 경로에서 잠근
+// "새로 서면 맨 뒤" 규율이 finish 경로에서만 깨져 있었던 자리다.
+func TestFinishWhileHoldingTheLaneLetsTheSessionQueueAgain(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	mine, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("줄 서기 실패: %v", err)
+	}
+	if mine.State != "turn" {
+		t.Fatalf("빈 레인의 첫 세션이 차례를 못 받았다: %+v", mine)
+	}
+	theirs, err := s.Land(ctx(), LandInput{Project: "p", SessionID: other.Session.ID})
+	if err != nil {
+		t.Fatalf("두 번째 세션의 줄 서기 실패: %v", err)
+	}
+	if theirs.State != "waiting" {
+		t.Fatalf("레인을 쥔 세션이 있는데 두 번째가 %q 다(기대 waiting): %+v", theirs.State, theirs)
+	}
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "① 왜 그렇게 했나 …",
+	})
+	if err != nil {
+		t.Fatalf("레인을 쥔 채 마무리가 실패했다: %v", err)
+	}
+	if len(res.Released) != 1 || res.Released[0] != LaneResource {
+		t.Fatalf("레인 자원이 반납 목록에 없다: %v", res.Released)
+	}
+
+	// ★ 여기부터가 핵심 단정이다 — 자원 반납이 아니라 재입장.
+	again, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("마무리 뒤 다시 줄 서기가 실패했다: %v", err)
+	}
+	if again.RowID <= theirs.RowID {
+		t.Fatalf("옛 유령 줄 행(%d)이 재사용됐다 — finish 가 줄 행을 안 닫았다"+
+			"(다시 선 행 %d, 기다리던 행 %d)", mine.RowID, again.RowID, theirs.RowID)
+	}
+	if again.State != "waiting" || again.Position != 2 {
+		t.Fatalf("마무리하고 다시 선 세션이 유령 행 덕에 새치기했다: %+v", again)
+	}
+
+	// 옛 행은 finish 로 닫혀 있어야 한다 — 유령이 없다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_kind = 'finish'`, mine.RowID); n != 1 {
+		t.Fatalf("첫 줄 행이 finish 로 안 닫혔다(id=%d)", mine.RowID)
+	}
+}
+
+// TestFinishSurvivesAForcedReleaseRacingIt — finish 가 점유 목록을 읽은 뒤 반납을 실제로
+// 시도하기 전에 사람이 강제 회수해도, 판단은 살아남아야 한다.
+//
+// ★ 판단(handoff)은 이 레포가 "원리적으로 파생 불가한 유일한 자산"이라 부르는 값이다.
+// holds 를 트랜잭션 밖에서 읽으면(고치기 전) 그 사이에 사람이 레인을 강제 회수했을 때
+// ④ 의 반납 시도가 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로 롤백시켜 판단이
+// 함께 사라진다.
+//
+// ★ 실물 트랜잭션 둘로 그 창을 연다. "guard" 트랜잭션이 강제 회수를 커밋 직전 상태로
+// 붙잡아 두는 동안 finish 의 ListHeld(트랜잭션 밖 읽기 — WAL 이라 guard 의 쓰기 잠금과
+// 안 부딪힌다)가 아직 살아 있는 점유를 읽고, 그 다음에야 guard 가 커밋한다 — 그러면
+// finish 의 반납 시도는 이미 사라진 점유를 향해 쏘게 된다. guard 가 잠금을 쥐고 회수까지
+// 마친 뒤에야(아직 커밋 전) finish 를 연다 — 그래야 "누가 쓰기 잠금을 먼저 쥐나"의
+// 순서가 뒤집히지 않는다(뒤집히면 finish 가 경합 없이 정상 종료해 이 시험이 아무것도
+// 못 본다).
+func TestFinishSurvivesAForcedReleaseRacingIt(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	land, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("줄 서기 실패: %v", err)
+	}
+	if land.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 레인을 못 쥐었다: %+v", land)
+	}
+
+	guardReady := make(chan struct{})
+	pause := make(chan struct{})
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- st.Tx(ctx(), func(t *store.Tx) error {
+			if err := t.ForceReleaseResource("p", LaneResource,
+				"레이스 시험: finish 의 ListHeld 와 Tx 사이에 사람이 회수했다"); err != nil {
+				close(guardReady)
+				return err
+			}
+			close(guardReady) // 회수는 이미 실행됐다(아직 커밋 전) — finish 를 열어도 안전하다
+			<-pause
+			return nil
+		})
+	}()
+	<-guardReady
+
+	type finishOutcome struct {
+		res FinishResult
+		err error
+	}
+	finishDone := make(chan finishOutcome, 1)
+	go func() {
+		res, err := s.Finish(ctx(), FinishInput{
+			Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+			Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "① 왜 그렇게 했나 …",
+		})
+		finishDone <- finishOutcome{res, err}
+	}()
+
+	// finish 의 ListHeld 는 읽기라 guard 의 쓰기 잠금과 안 부딪힌다 — 로컬 SQLite 라
+	// 이 여유(밀리초 단위)는 넉넉하다. finish 의 Tx() 는 guard 가 잠금을 쥔 동안
+	// BEGIN IMMEDIATE 에서 막혀 기다린다.
+	time.Sleep(100 * time.Millisecond)
+	close(pause)
+
+	if err := <-guardDone; err != nil {
+		t.Fatalf("강제 회수(guard)가 실패했다: %v", err)
+	}
+	out := <-finishDone
+
+	// ★ 오늘(고치기 전)은 여기가 빨갛다: ErrNotFound 가 그대로 올라가 판단까지 롤백된다.
+	if out.err != nil {
+		t.Fatalf("경합 중에도 마무리는 성공해야 한다(판단은 원리적으로 파생 불가한 유일한 자산이다): %v",
+			out.err)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM judgment WHERE project='p' AND session_id=?`, me.Session.ID); n != 1 {
+		t.Fatalf("판단 행이 안 남았다(%d건) — 강제 회수 경합이 핸드오프를 함께 지웠다", n)
+	}
+	it, err := st.GetItem(ctx(), "p", "batch7")
+	if err != nil {
+		t.Fatalf("항목 조회 실패: %v", err)
+	}
+	if it.State != model.ItemDone {
+		t.Fatalf("경합 뒤 항목이 안 끝났다: %s", it.State)
+	}
+	// 레인은 guard 가 이미 강제 회수했다 — finish 가 그것을 다시 반납했다고 보고하면 거짓이다.
+	for _, r := range out.res.Released {
+		if r == LaneResource {
+			t.Fatalf("이미 강제 회수된 자원을 finish 가 다시 반납했다고 보고했다: %v", out.res.Released)
 		}
 	}
 }

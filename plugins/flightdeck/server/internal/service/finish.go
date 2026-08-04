@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -139,14 +140,8 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 
 	now := s.now()
 
-	// 자원 목록은 트랜잭션 밖에서 읽는다(읽기는 WAL 이라 쓰기 잠금과 안 부딪힌다).
-	holds, err := s.st.ListHeld(ctx, in.Project)
-	if err != nil {
-		return FinishResult{}, err
-	}
-
 	var out FinishResult
-	err = s.st.Tx(ctx, func(t *store.Tx) error {
+	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		// ★ 시도를 **먼저** 예약한다. Tx.LogEvent 는 롤백된 뒤에도 흘러가므로
 		//   "무엇을 시도했다 실패했나"가 원장에 남는다 — 끝에 두면 성공한 것만 세게 되고,
 		//   그러면 §10 의 "세션당 쓰기 호출 수"가 실패를 못 본다.
@@ -189,14 +184,39 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		}
 
 		// ④ 이 세션이 쥔 자원 반납. 규율 산문이 강제하던 마지막 단계다.
+		//
+		// ★ holds 를 **트랜잭션 안에서** 읽는다. 밖에서 읽으면 그 사이에 사람이 레인을
+		//   강제 회수했을 때 아래 반납이 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로
+		//   롤백시켜 **원리적으로 파생 불가한 유일한 자산인 판단이 사라진다.**
+		holds, err := t.ListHeld(in.Project)
+		if err != nil {
+			return err
+		}
 		for _, h := range holds {
 			if h.SessionID != in.SessionID {
 				continue
 			}
 			if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+				var held *store.ResourceHeldError
+				if errors.Is(err, store.ErrNotFound) || errors.As(err, &held) {
+					// ★ 남이 이미 반납했거나 강제로 회수했다. 그것은 finish 를 실패시킬
+					//   이유가 아니다 — 원장에만 남기고 Released 에서 뺀다
+					//   (item.go 의 ReleaseClaim 과 같은 규율).
+					t.LogEvent("lane.release_skipped", in.Project, in.SessionID,
+						map[string]any{"resource": h.Resource, "why": "이미 반납되었거나 남이 회수했다"})
+					continue
+				}
 				return fmt.Errorf("자원 %s 반납 실패: %w", clip(h.Resource, 64), err)
 			}
 			out.Released = append(out.Released, h.Resource)
+		}
+
+		// ★ 줄 행 닫기는 **반납 루프 밖에서 조건 없이** 한다. 루프 안에 두면 레인을 안 쥔 채
+		//   줄만 서 있던 세션(대기 중 마무리)의 유령 행이 안 닫힌다. 살아 있는 행이 없으면
+		//   무동작으로 통과하므로 줄을 한 번도 안 선 세션에도 안전하다.
+		if err := t.CloseLandingRowBySession(
+			in.Project, in.SessionID, model.LandingLeftFinish, ""); err != nil {
+			return err
 		}
 
 		return nil
