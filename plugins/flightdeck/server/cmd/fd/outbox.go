@@ -166,19 +166,50 @@ func IdempotencyKey(session string, body []byte) string {
 	return clip(s, 64) + ":" + hex.EncodeToString(sum[:12])
 }
 
-// Outbox 는 상태 디렉토리 아래의 대기열 하나다. 파일 하나에 JSONL 로 쌓는다.
+// 대기열·격리 파일의 이름. 한 자리에 모은다 — 옛 자리 재생이 이 이름으로 큐를 찾으므로
+// 두 자리에 흩어 두면 한쪽만 고칠 때 그 큐가 조용히 안 보이게 된다.
+const (
+	pendingName  = "pending.jsonl"
+	rejectedName = "rejected.jsonl"
+)
+
+// Outbox 는 디렉토리 하나의 대기열이다. 파일 하나에 JSONL 로 쌓는다.
+//
+// ★ 예전에는 상태 디렉토리 아래였고, 그 자리가 채널마다 갈려서 셸에서 쌓인 판단을
+// 훅·MCP 가 영영 못 보내는 결함이 있었다(OutboxPath 주석에 판정 전문이 있다).
+// 지금은 새 쓰기가 고정 자리로 가고, 옛 자리는 **같은 타입의 값을 하나씩 만들어**
+// 재생이 함께 돈다(Client.Legacy). 큐 하나가 이 값 하나다.
 type Outbox struct {
-	path string
+	dir    string // 대기열·격리 파일이 있는 디렉토리
+	source string // 왜 이 자리인가. fd doctor 가 찍는다 — machineSrc 가 선례다
 	// now 는 격리 시각을 찍는 시계다. 시험이 갈아 끼울 자리이기도 하다.
 	now func() time.Time
 }
 
-func newOutbox(sd StateDir) *Outbox {
+func newOutbox(get func(string) (string, bool), home string) *Outbox {
+	dir, src := OutboxPath(get, home)
+	o := newOutboxAt(dir)
+	o.source = src
+	return o
+}
+
+// newOutboxAt 은 자리를 직접 주는 생성자다. 옛 자리 큐(Client.Legacy)와 시험이 쓴다.
+func newOutboxAt(dir string) *Outbox {
 	return &Outbox{
-		path: filepath.Join(sd.sub("outbox"), "pending.jsonl"),
-		now:  func() time.Time { return time.Now().UTC() },
+		dir:    dir,
+		source: "직접 지정",
+		now:    func() time.Time { return time.Now().UTC() },
 	}
 }
+
+// Dir·Source 는 fd doctor 가 "어디를, 왜"를 찍기 위한 자리다.
+func (o *Outbox) Dir() string    { return o.dir }
+func (o *Outbox) Source() string { return o.source }
+
+// pendingPath·rejectedPath 는 두 파일의 자리다. 같은 디렉토리에 둔다 —
+// 같은 축의 같은 자산이고, 격리는 제 큐 옆에 남아야 '어디서 온 것인가'가 안 사라진다.
+func (o *Outbox) pendingPath() string  { return filepath.Join(o.dir, pendingName) }
+func (o *Outbox) rejectedPath() string { return filepath.Join(o.dir, rejectedName) }
 
 // stamp 는 지금이다. 시계가 안 꽂혔어도 값을 낸다.
 func (o *Outbox) stamp() time.Time {
@@ -205,14 +236,14 @@ func (o *Outbox) Append(e OutboxEntry) error {
 			return nil // 이미 쌓여 있다. 조용히 넘어가도 되는 유일한 경우다
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(o.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(o.pendingPath()), 0o755); err != nil {
 		return fmt.Errorf("아웃박스 디렉토리 생성 실패: %w", err)
 	}
 	buf, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("아웃박스 직렬화 실패: %w", err)
 	}
-	f, err := os.OpenFile(o.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(o.pendingPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("아웃박스 열기 실패: %w", err)
 	}
@@ -224,11 +255,14 @@ func (o *Outbox) Append(e OutboxEntry) error {
 }
 
 // List 는 대기 중인 전부를 순서대로 낸다. 파일이 없으면 빈 목록이다(오류가 아니다).
+func (o *Outbox) List() ([]OutboxEntry, error) { return readEntries(o.pendingPath()) }
+
+// readEntries 는 JSONL 대기열 파일 하나를 읽는다.
 //
 // ★ 깨진 줄을 **조용히 버리지 않는다.** 이 파일은 재생성 불가한 자산이므로
-// 해석 실패는 오류로 올려 사람이 보게 한다(설계 §9 "조용히 버리는 것이 하나도 없어야 한다").
-func (o *Outbox) List() ([]OutboxEntry, error) {
-	f, err := os.Open(o.path)
+// 해석 실패는 **읽은 데까지와 함께** 오류로 올려 사람이 보게 한다(설계 §9).
+func readEntries(path string) ([]OutboxEntry, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -262,7 +296,7 @@ func (o *Outbox) List() ([]OutboxEntry, error) {
 // keep 은 남길 항목만 다시 쓴다(원자 교체).
 func (o *Outbox) keep(entries []OutboxEntry) error {
 	if len(entries) == 0 {
-		if err := os.Remove(o.path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(o.pendingPath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("아웃박스 비우기 실패: %w", err)
 		}
 		return nil
@@ -276,11 +310,11 @@ func (o *Outbox) keep(entries []OutboxEntry) error {
 		b.Write(buf)
 		b.WriteByte('\n')
 	}
-	tmp := o.path + ".tmp"
+	tmp := o.pendingPath() + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("아웃박스 기록 실패: %w", err)
 	}
-	if err := os.Rename(tmp, o.path); err != nil {
+	if err := os.Rename(tmp, o.pendingPath()); err != nil {
 		return fmt.Errorf("아웃박스 교체 실패: %w", err)
 	}
 	return nil
@@ -366,11 +400,6 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 	return res, nil
 }
 
-// rejectedPath 는 격리 파일 자리다. 대기열 옆에 둔다 — 같은 축의 같은 자산이다.
-func (o *Outbox) rejectedPath() string {
-	return filepath.Join(filepath.Dir(o.path), "rejected.jsonl")
-}
-
 // quarantine 은 영구 거절된 줄을 격리 파일로 옮긴다. **추가 전용이다.**
 func (o *Outbox) quarantine(r RejectedEntry) error {
 	if err := os.MkdirAll(filepath.Dir(o.rejectedPath()), 0o755); err != nil {
@@ -392,8 +421,11 @@ func (o *Outbox) quarantine(r RejectedEntry) error {
 }
 
 // Rejected 는 격리된 줄 전부다. 파일이 없으면 빈 목록이다(오류가 아니다).
-func (o *Outbox) Rejected() ([]RejectedEntry, error) {
-	b, err := os.ReadFile(o.rejectedPath())
+func (o *Outbox) Rejected() ([]RejectedEntry, error) { return readRejected(o.rejectedPath()) }
+
+// readRejected 는 격리 파일 하나를 읽는다. doctor 의 잔량 합산도 이것을 쓴다.
+func readRejected(path string) ([]RejectedEntry, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

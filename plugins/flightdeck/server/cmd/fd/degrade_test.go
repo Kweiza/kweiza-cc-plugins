@@ -35,7 +35,7 @@ func TestOfflineNoteQueuesAndReplaysExactlyOnce(t *testing.T) {
 		t.Fatalf("재시도 note 가 실패했다")
 	}
 
-	ob := newOutbox(ResolveStateDir(envOf(h.env), ""))
+	ob := newOutbox(envOf(h.env), h.home)
 	pend, err := ob.List()
 	if err != nil {
 		t.Fatalf("아웃박스 조회 실패: %v", err)
@@ -129,7 +129,7 @@ func TestOfflinePickIsRefusedWithReason(t *testing.T) {
 		"배타는 서버만 보장할 수 있",
 	)
 	// 아웃박스에 새면 안 된다 — 나중에 재생되면 그때 배타가 깨진다.
-	ob := newOutbox(ResolveStateDir(envOf(h.env), ""))
+	ob := newOutbox(envOf(h.env), h.home)
 	pend, err := ob.List()
 	if err != nil {
 		t.Fatalf("아웃박스 조회 실패: %v", err)

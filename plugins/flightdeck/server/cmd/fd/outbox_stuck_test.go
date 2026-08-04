@@ -31,10 +31,9 @@ import (
 func mkOutbox(t *testing.T) *Outbox {
 	t.Helper()
 	at := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
-	return &Outbox{
-		path: filepath.Join(t.TempDir(), "outbox", "pending.jsonl"),
-		now:  func() time.Time { return at },
-	}
+	o := newOutboxAt(filepath.Join(t.TempDir(), "outbox"))
+	o.now = func() time.Time { return at }
+	return o
 }
 
 func entry(key string) OutboxEntry {
