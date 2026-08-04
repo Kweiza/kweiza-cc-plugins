@@ -109,6 +109,15 @@ func WithClock(f func() time.Time) Option {
 //
 // 매 호출마다 다시 읽지 않는 이유: 한 프로세스는 한 세션의 것이고(claude 가 세션마다 띄운다),
 // 중간에 바뀌었다면 그것은 정체가 흔들린 것이라 조용히 따라가면 안 되는 사건이다.
+//
+// ★ **그리고 다시 읽어 봐야 같은 값이다**(2026-08-04 실측 — drift.go·drift_test.go).
+// claude 는 세션 id 를 스스로 만들어 MCP 서버에 **기동 시 주입**하고, 프로세스의 environ 은
+// 그 뒤 바뀌지 않는다. /clear·compact·재개로 대화의 cc 가 갈려도 이 프로세스는 옛 값을
+// 영원히 든다 — 훅은 매번 새 프로세스라 새 값을 본다. 그래서 카드가 두 장 뜬다.
+//
+// **"도구 호출마다 cc 를 다시 읽어 따라간다"는 처방을 넣지 마라 — 아무것도 안 하는 코드다.**
+// 이 프로세스가 할 수 있는 정직한 일은 갈렸다는 사실을 보드에서 이름으로 말하는 것뿐이고,
+// 그것이 DriftedTwins·RenderDrift 다. 따라가려면 훅이 새 값을 실어 오는 별도 통로가 필요하다.
 func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = slog.Default()
@@ -492,6 +501,18 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 			mine = c.View.Paths
 		}
 	}
+	// cc_session_id 표류를 여기서 본다 — 보드가 그 증상(카드 여러 장)이 실제로 보이는 자리다.
+	// 새 파생도 새 왕복도 없다: 살아 있는 세션의 좌표는 이 응답에 이미 실려 있다.
+	// 꼬리가 아니라 notice 에 싣는 이유는 꼬리가 **모든 도구 응답**에 붙기 때문이다 —
+	// 그러려면 도구 호출마다 보드를 파생해야 하고, 그 비용은 이미 한 번 문제가 됐다
+	// (RecentNotes 주석). 증상이 보이는 자리에서만 말한다.
+	if d := RenderDrift(DriftedTwins(s.id, liveIdentitiesOf(view.Sessions)), s.id.CCSessionID); d != "" {
+		if notice != "" {
+			notice += "\n"
+		}
+		notice += d
+	}
+
 	notes := append(append([]model.Judgment(nil), view.Asks...), view.Blocked...)
 	tail := s.tail(ctx, tailOpts{
 		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID),
@@ -510,6 +531,20 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	return textResult(RenderBoard(view, BoardRenderOptions{
 		Self: sessionID, Detail: a.Detail, Now: s.now(), Tail: tail, Notice: notice,
 	}), false)
+}
+
+// liveIdentitiesOf 는 표류 판정에 필요한 좌표만 뽑는다.
+func liveIdentitiesOf(cards []service.SessionCard) []LiveIdentity {
+	out := make([]LiveIdentity, 0, len(cards))
+	for _, c := range cards {
+		out = append(out, LiveIdentity{
+			SessionID:   c.View.Session.ID,
+			MachineID:   c.View.Session.MachineID,
+			Worktree:    c.View.Session.Worktree,
+			CCSessionID: c.View.Session.CCSessionID,
+		})
+	}
+	return out
 }
 
 func liveOf(cards []service.SessionCard) []judge.LiveSession {
