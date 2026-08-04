@@ -147,6 +147,13 @@ func ValidateWorkspacePath(p string) error {
 //
 // 한 세션이 코드 레포와 문서 레포를 함께 만지는 실무가 있다 — 단수 project 필드로는
 // 담기지 않아서 별도 표면이 있는 것이다(설계 §3 의 session_workspace).
+// handleWorkspace 는 세션에 작업 트리 하나를 붙인다.
+//
+// ★ **이 표면을 치는 클라이언트가 하나도 없다**(2026-08-04 실측 — cmd/fd 에도 mcpsrv 에도
+// "workspaces" 를 치는 코드가 0건). 그래서 session_workspace 에 실제로 들어가는 것은
+// OpenSession 이 넣는 primary 하나뿐이고, 그 값은 session.worktree 와 같다.
+// 이 사실이 왜 중요한지(그리고 이 표를 무엇의 근거로 쓰면 안 되는지)는
+// store/session.go 의 AddWorkspace 주석에 있다.
 func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	infoFrom(r.Context()).setSession(id)

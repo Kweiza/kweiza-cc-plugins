@@ -312,6 +312,29 @@ func (s *Store) ListSessions(ctx context.Context, project string) ([]model.Sessi
 
 // AddWorkspace 는 세션이 만지는 작업 트리 하나를 붙인다.
 // 한 세션이 코드 레포와 문서 레포를 함께 만지는 실무를 담는다 — 단수 project 필드로는 못 담는다.
+//
+// ─── 이 표는 지금 **쓰기만 있다.** 왜 그런지, 그리고 무엇을 근거로 쓰면 안 되는지 ───
+//
+// 실측(2026-08-04, 전수 grep):
+//
+//   - ListWorkspaces 의 비시험 호출자가 **0건**이다. 아무도 안 읽는다.
+//   - 실제로 도는 유일한 writer 는 OpenSession 이 넣는 primary 하나이고,
+//     그 Path 는 in.Worktree — 즉 **session.worktree 와 같은 값**이다.
+//   - 부(副) 워크스페이스를 넣는 표면(POST /api/v1/sessions/{id}/workspaces)은 있지만
+//     **그것을 치는 클라이언트가 하나도 없다**(cmd/fd 에도 mcpsrv 에도 없다).
+//
+// 그래서 지금 이 표에는 **세션 행이 이미 갖고 있지 않은 값이 한 건도 들어 있지 않다.**
+//
+// ★ **여기서 나오는 오판 하나를 미리 막는다.** 조회 키(3중키)에서 worktree 축을 빼자는
+// 안을 기각할 때 "워크트리 축은 session_workspace 가 이미 갖고 있다"가 근거로 쓰였다.
+// 그 문장은 **저장에만 참이고 표시에는 거짓이다** — 읽는 코드가 없으므로 카드·보드·겹침
+// 어디에도 그 축이 나타나지 않는다. 게다가 위에서 보듯 담긴 값도 새롭지 않다.
+// 이 표를 근거로 세션 키에서 worktree 를 빼면 그 축은 **아무 데서도 복구되지 않는다.**
+//
+// 이 표를 안 지운 이유: 표면(POST …/workspaces)과 스키마가 이미 있고, 한 세션이 여러 트리를
+// 만지는 실무가 실재한다. 지우면 그 표면이 갈 곳을 잃는다. 다만 **읽는 쪽이 생기기 전까지는
+// 근거로 쓰지 마라.** 지금 참인 상태는 시험이 지킨다 —
+// internal/service 의 TestWorkspaceTableHoldsNothingNewYet.
 func (t *Tx) AddWorkspace(w model.Workspace) error {
 	primary := 0
 	if w.IsPrimary {
@@ -339,6 +362,9 @@ func (s *Store) AddWorkspace(ctx context.Context, w model.Workspace) error {
 }
 
 // ListWorkspaces 는 세션이 붙인 작업 트리를 낸다.
+//
+// ★ **비시험 호출자가 0건이다**(2026-08-04 실측). 지우지 않고 두는 이유와, 이 표를
+// "워크트리 축은 이미 있다"의 근거로 쓰면 안 되는 이유는 AddWorkspace 주석에 있다.
 func (s *Store) ListWorkspaces(ctx context.Context, sessionID string) ([]model.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT session_id, project, path, is_primary FROM session_workspace
