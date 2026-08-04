@@ -123,6 +123,18 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
 					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다."}
 		}
+		// ★ followup.paths 도 add(item.paths)와 같은 관문(judgeItemPathsCoordinate,
+		// pick.go)을 거친다. Finish 는 아래 ②에서 t.AddItem 을 직접 불러 AddItem 의
+		// 검증 루프를 거치지 않으므로, 여기서 따로 부르지 않으면 같은 사람이 같은
+		// 세션에서 add 는 거절당하고 finish followup 은 조용히 통과하는 우회 문이
+		// 된다 — 반쪽 발화는 균일한 부재보다 나쁘다(관문이 발화한다는 것만 가르치고
+		// 다른 문에서 배신한다).
+		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
+			return FinishResult{}, &RefusedError{What: "finish",
+				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i, clip(f.ID, 64), err),
+				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
+					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
+		}
 	}
 
 	now := s.now()

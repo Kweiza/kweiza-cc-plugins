@@ -249,3 +249,32 @@ func TestProbePlatformNamesWhatIsMissing(t *testing.T) {
 		t.Fatalf("cwd 축이 잘못됐다: %+v", byName["cwd"])
 	}
 }
+
+// RelPath 의 출력은 슬래시 좌표계다 — 그 계약을 코드 밖에 못박는다.
+//
+// ★ Linux 에서 이 시험은 약하다(filepath.ToSlash 가 무연산이라 변경 전에도 통과한다).
+// 그래도 두는 이유는 계약이 주석에만 있으면 다음 사람이 깨기 때문이다.
+// 겹침 축 전체가 "모든 경로는 슬래시"라는 이 계약 위에 서 있다.
+func TestRelPathOutputIsSlashCoordinate(t *testing.T) {
+	cases := []struct {
+		name     string
+		root, in string
+		want     string
+	}{
+		{"저장소 안", "/repo", "/repo/internal/api/x.go", "internal/api/x.go"},
+		{"저장소 밖은 원본", "/repo", "/other/x.go", "/other/x.go"},
+		{"상대경로는 정리만", "/repo", "internal/./api/x.go", "internal/api/x.go"},
+		{"빈 경로", "/repo", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := RelPath(c.root, c.in)
+			if got != c.want {
+				t.Fatalf("RelPath(%q, %q) = %q, want %q", c.root, c.in, got, c.want)
+			}
+			if strings.ContainsRune(got, '\\') {
+				t.Fatalf("출력 %q 에 백슬래시가 있다 — 슬래시 좌표계 계약을 깼다", got)
+			}
+		})
+	}
+}
