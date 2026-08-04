@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // 훅 — 전부 **fail-open**. 어떤 입력에도, 어떤 실패에도 종료코드 0 이다.
@@ -166,6 +168,27 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		return
 	}
 
+	// ★ 표류 수리. **순서가 전부다 — rekey 가 아래 OpenSession 보다 앞이어야 한다.**
+	// 뒤에 두면 그 upsert 가 새 cc 로 카드 B 를 먼저 만들고, 그러면 rekey 가 3중키
+	// UNIQUE 에 걸려 두 카드를 진짜로 병합하는 경로가 또 필요해진다 — 이 설계에 그 경로는
+	// 일부러 없다. 앞에 두면 같은 upsert 가 이미 고쳐진 카드 A 로 그냥 떨어진다.
+	// 뒤바꿔도 컴파일도 되고 대부분의 시험도 초록이라, 그 축은 시험이 따로 붙들고 있다
+	// (TestClearKeepsOneCardAndItsClaim).
+	beaconKey, beacon, haveBeacon := a.findWindow()
+	if haveBeacon && beacon.SessionID != "" && beacon.CCSessionID != cc {
+		if _, rerr := a.Rekey(ctx, beacon.SessionID, cc); rerr != nil {
+			// ★ 삼키고 알린다. 409(이미 남이 쓰는 cc)는 미도달이 아니라 *APIError 로 오므로
+			// 기존 열화 경로가 이걸 안 잡아 준다 — 아래 OpenSession 실패를 다루는 꼴과 같이 간다.
+			// 여기서 오류를 위로 올리면 훅이 세션을 막는다(이 파일 머리말).
+			a.log.Warn("세션 rekey 실패", "error", rerr.Error(),
+				"session", clip(beacon.SessionID, 40), "cc", clip(cc, 40))
+			in.Notice = strings.TrimSpace(in.Notice +
+				" cc 가 갈렸는데 카드를 못 합쳤다: " + clip(rerr.Error(), 200))
+		} else {
+			a.moveSessionCache(beacon.CCSessionID, cc)
+		}
+	}
+
 	res, stale, err := a.OpenSession(ctx, cc, "")
 	if err != nil {
 		a.log.Error("훅에서 세션 열기 실패", "mode", "session-start", "error", err.Error())
@@ -179,6 +202,14 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		}
 	}
 
+	// 비콘에 이번 cc 와 그 카드를 적어 둔다. 다음 전환에서 이 값이 rekey 의 대상이 된다.
+	if haveBeacon && in.SessionID != "" {
+		if _, werr := window.SaveIdentity(a.beaconDir, beaconKey, cc, in.SessionID, a.now()); werr != nil {
+			a.log.Warn("창 비콘 갱신 실패", "error", werr.Error())
+		}
+	}
+	a.pruneWindows()
+
 	v, boardBanner, berr := a.Board(ctx, in.SessionID)
 	if berr != nil {
 		a.log.Error("훅에서 보드 조회 실패", "mode", "session-start", "error", berr.Error())
@@ -191,6 +222,38 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		in.Asks, in.Blocked = v.Asks, v.Blocked
 	}
 	emitContext(out, "SessionStart", RenderSessionStart(in))
+}
+
+// findWindow 는 내 조상 사슬 위의 비콘을 찾는다.
+//
+// 못 찾아도 **오류가 아니다** — 설계 §5 의 폴백이고, 그 폴백이 오늘 거동이다.
+// 그래서 사유는 로그로만 남긴다: 이 자리에서 화면에 문구를 얹으면 비콘을 안 쓰는
+// 대다수 실행(Cursor·비리눅스·MCP 미기동)이 매번 배너를 하나씩 더 달게 된다.
+func (a *App) findWindow() (window.Key, window.Beacon, bool) {
+	if a.beaconDir == "" {
+		return window.Key{}, window.Beacon{}, false
+	}
+	anc := window.Ancestors(os.Getpid(), window.PPidOf, 24)
+	m, ok, why := window.Find(a.beaconDir, a.machine, anc, window.StartedOf)
+	if !ok {
+		a.log.Debug("창 비콘을 못 찾았다", "why", why)
+		return window.Key{}, window.Beacon{}, false
+	}
+	return m.Key, m.Beacon, true
+}
+
+// pruneWindows 는 죽은 창의 비콘을 치운다.
+//
+// ★ **훅에서만 한다.** SessionStart 타임아웃이 10초(plugins/flightdeck/hooks/hooks.json)라
+// 디렉토리 하나를 훑을 여유가 있는 쪽이고, MCP 는 도구 응답 지연에 민감하다 —
+// 그 지연은 매 도구 호출마다 사람이 기다리는 시간이다.
+func (a *App) pruneWindows() {
+	if a.beaconDir == "" {
+		return
+	}
+	if _, err := window.Prune(a.beaconDir, window.Alive); err != nil {
+		a.log.Debug("비콘 가지치기 실패", "error", err.Error())
+	}
 }
 
 // hookUserPrompt 는 prompt 신호를 남기고 미확인 알림만 주입한다.
