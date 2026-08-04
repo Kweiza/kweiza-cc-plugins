@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -224,6 +225,54 @@ func (t *Tx) SetSessionState(id string, state model.SessionState, why string) er
 // SetSessionState 는 단발 트랜잭션으로 감싼 것이다.
 func (s *Store) SetSessionState(ctx context.Context, id string, state model.SessionState, why string) error {
 	return s.Tx(ctx, func(t *Tx) error { return t.SetSessionState(id, state, why) })
+}
+
+// Rekey 는 카드의 cc_session_id 만 갈아끼운다.
+//
+// ★ 이것이 "카드 두 장을 하나로 합치기"의 전부다. 선점·판단·발자국·자원이 전부
+// session(id) 를 참조하고 cc_session_id 는 UNIQUE (machine_id, worktree, cc_session_id) 에만
+// 쓰이므로, 이 한 줄로 원장이 통째로 따라온다. 표를 옮기는 코드가 필요 없다.
+//
+// ★ 언제 이것이 필요한가. /clear·compact 로 대화의 cc 가 갈리면 이미 떠 있는 MCP 프로세스는
+// 옛 값을 계속 쓴다(environ 은 exec 뒤 안 바뀐다). 훅만 새 값을 보므로, 훅이 이 갈래로
+// 카드를 따라오게 한다.
+//
+// 빈 cc 를 거절한다 — 정체가 사라진 카드는 3중키에서 다른 빈 카드와 충돌하고,
+// 그 카드가 쥔 선점은 아무도 회수할 수 없다.
+func (t *Tx) Rekey(id, ccSessionID string) (model.Session, error) {
+	cc := strings.TrimSpace(ccSessionID)
+	if cc == "" {
+		return model.Session{}, fmt.Errorf("cc_session_id 가 비었다 — 정체 없는 카드를 만들 수 없다")
+	}
+	res, err := t.tx.ExecContext(t.ctx,
+		`UPDATE session SET cc_session_id = ? WHERE id = ?`, cc, id)
+	if err != nil {
+		return model.Session{}, writeErr(err, writeTarget{Target: TargetSession, ID: id},
+			"세션 cc 갈아끼우기 실패(session=%s cc=%s)", clip(id, 64), clip(cc, 64))
+	}
+	if err := affectedOne(res, NFSession, "", id); err != nil {
+		return model.Session{}, err
+	}
+	s, err := t.GetSession(id)
+	if err != nil {
+		return model.Session{}, err
+	}
+	// ★ 이벤트를 남긴다. 카드의 cc 가 조용히 바뀌면 나중에 아무도 원인에 도달 못 한다 —
+	// 이 기능을 만들기 위해 /proc 을 뒤져야 했던 것이 정확히 그 이유였다.
+	// Tx 안에서는 Tx.LogEvent 다. Store.LogEvent 는 별도 연결이라 여기서 부르면 교착한다.
+	t.LogEvent("session.rekey", s.Project, s.ID, map[string]any{"cc_session_id": cc})
+	return s, nil
+}
+
+// Rekey 는 Tx.Rekey 의 단독 실행 짝이다.
+func (s *Store) Rekey(ctx context.Context, id, ccSessionID string) (model.Session, error) {
+	var out model.Session
+	err := s.Tx(ctx, func(t *Tx) error {
+		var err error
+		out, err = t.Rekey(id, ccSessionID)
+		return err
+	})
+	return out, err
 }
 
 // ListLive 는 since 이후에 신호가 있거나 그 뒤에 열린 세션을 낸다.
