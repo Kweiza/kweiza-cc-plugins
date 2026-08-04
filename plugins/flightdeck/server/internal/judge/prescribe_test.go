@@ -90,6 +90,55 @@ func TestPrescribe(t *testing.T) {
 			wantKeys: nil,
 		},
 		{
+			// ★ finish 로 항목을 제대로 닫으면 선점이 반납된다. 그 순간 Claims 가 비고,
+			//   방금 끝낸 그 일의 경로를 근거로 "선점하지 않고 고치고 있다"가 뜬다 —
+			//   **가장 성실하게 마무리한 세션이 가장 확실하게 잔소리를 듣는다.**
+			//   "한 번도 안 집었다"와 "방금 제대로 끝냈다"는 다른 상태다.
+			name: "방금 끝낸 항목의 경로에는 unclaimed 가 안 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				Closed:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths:    []string{"cmd/fd/hook.go"},
+				LastJudgment: pt0, NewPaths: 1,
+			},
+			wantKeys: nil,
+		},
+		{
+			// 그러나 끝낸 뒤 **다른** 일을 시작하면 뜬다. 그게 이 처방의 존재 이유다.
+			name: "끝낸 항목의 경로 밖으로 새 일을 시작하면 unclaimed 가 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				Closed:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths:    []string{"internal/store/item.go"},
+				LastJudgment: pt0, NewPaths: 1,
+			},
+			wantKeys: []string{"unclaimed"},
+		},
+		{
+			// 경로를 선언 안 한 항목을 닫았으면 접을 근거가 없다 — 옛 동작 그대로 뜬다.
+			// 빈 선언을 "전부 덮음"으로 접으면 paths 없는 항목 하나가 이 축을 통째로 끈다.
+			name: "선언 경로가 없는 항목을 닫았으면 unclaimed 는 그대로 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				Closed:       []ClaimView{{ItemID: "fd-x", Paths: nil}},
+				TurnPaths:    []string{"cmd/fd/hook.go"},
+				LastJudgment: pt0, NewPaths: 1,
+			},
+			wantKeys: []string{"unclaimed"},
+		},
+		{
+			// 끝낸 항목의 경로 **일부만** 덮으면 뜬다. 부분 일치로 접으면
+			// 큰 항목 하나를 닫은 세션이 그 뒤 아무 일이나 해도 안 걸린다.
+			name: "일부만 덮이면 unclaimed 가 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				Closed:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+				TurnPaths:    []string{"cmd/fd/hook.go", "internal/store/item.go"},
+				LastJudgment: pt0, NewPaths: 2,
+			},
+			wantKeys: []string{"unclaimed"},
+		},
+		{
 			name: "silent — 경로 임계",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me",
