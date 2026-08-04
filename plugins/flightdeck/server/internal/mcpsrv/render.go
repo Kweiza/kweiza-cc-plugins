@@ -193,7 +193,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 
 	blocks := make([]string, 0, len(v.Sessions))
 	for _, c := range v.Sessions {
-		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail))
+		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
 	var foot []string
@@ -262,7 +262,9 @@ func joinAll(head, blocks, foot []string, tail string) string {
 }
 
 // boardCard 는 세션 하나의 블록이다.
-func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool) string {
+//
+// asks·blocked 는 보드 전체의 사건 목록이다 — 이 카드는 그중 자기 세션 것만 걸러 싣는다.
+func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool, asks, blocked []model.Judgment) string {
 	v := c.View
 	mark := " "
 	if c.IsSelf {
@@ -305,6 +307,11 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool)
 		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
 		lines[1] += " | 경로 축에서 아무도 안 막는다"
 	}
+	// 이 세션이 남긴 ask·blocked 를 카드 안에 붙인다 — 전역 꼬리만으로는
+	// 누가 남겼는지가 카드와 안 이어진다. detail 여부와 무관하게 붙인다:
+	// 예산 때문에 카드째 접히는 것은 brief 모드에서만 일어나고,
+	// 그때의 안전망은 (제거하지 않는) 전역 꼬리·전역 목록이 맡는다.
+	lines = append(lines, noteLines(v.Session.ID, asks, blocked, now)...)
 	if detail {
 		if c.DeriveError != "" {
 			lines = append(lines, "   파생 결손: "+clip(c.DeriveError, 200))
@@ -316,6 +323,25 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// noteLines 는 이 카드가 실을 사건 줄이다.
+//
+// ★ 전역 꼬리를 없애지 않는다. 카드가 접히면 사건도 접히므로 꼬리가 그 안전망이다.
+func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) []string {
+	var out []string
+	add := func(kind string, js []model.Judgment) {
+		for _, j := range js {
+			if j.SessionID != sessionID {
+				continue
+			}
+			out = append(out, fmt.Sprintf("   [%s %s] %s",
+				kind, FormatAge(now.Sub(j.At)), clip(firstLine(j.Title, j.Body), 100)))
+		}
+	}
+	add("ask", asks)
+	add("blocked", blocked)
+	return out
 }
 
 func boardBriefFoot(v service.BoardView) []string {
@@ -357,16 +383,32 @@ func boardDetailFoot(v service.BoardView) []string {
 	} else {
 		out = append(out, "자원 점유 없음")
 	}
+
+	// 카드가 있는 세션의 사건은 그 카드 안에 이미 실린다(boardCard 의 noteLines).
+	// 여기서 또 그 본문을 그대로 되풀이하면 "카드에 붙었다"는 사실과 별개로
+	// 화면에 같은 글이 두 번 나온다. 그래서 여기서는 건수는 늘 다 세되,
+	// 본문 목록은 **카드가 없는(이미 죽었거나 화면 밖인) 세션의 사건**만 — 즉
+	// 카드가 접혀도 사라지지 않는 진짜 안전망 몫만 — 보인다.
+	known := make(map[string]bool, len(v.Sessions))
+	for _, c := range v.Sessions {
+		known[c.View.Session.ID] = true
+	}
 	if len(v.Blocked) > 0 {
 		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
 		for _, j := range v.Blocked {
-			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
+			if known[j.SessionID] {
+				continue
+			}
+			out = append(out, "  · (카드 없음) "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
 	if len(v.Asks) > 0 {
 		out = append(out, fmt.Sprintf("요청(ask) %d건", len(v.Asks)))
 		for _, j := range v.Asks {
-			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
+			if known[j.SessionID] {
+				continue
+			}
+			out = append(out, "  · (카드 없음) "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
 	return out
