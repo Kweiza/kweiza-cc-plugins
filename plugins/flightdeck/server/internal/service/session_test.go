@@ -189,3 +189,58 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// Windows 경로를 주면 "절대경로가 아니다"가 아니라 **원인**을 말해야 한다.
+// 사용자는 자기가 준 것이 절대경로라고 알고 있어서, 그 사유로는 고칠 수 없다.
+func TestJudgeOpenSessionNamesWindowsPathAsTheCause(t *testing.T) {
+	base := OpenSessionInput{
+		Project: "p", MachineID: "m", CCSessionID: "cc",
+	}
+	cases := []struct {
+		name     string
+		worktree string
+		want     string
+	}{
+		{"드라이브 절대경로", `C:\Users\a\repo`, "드라이브 절대경로"},
+		{"UNC", `\\host\share\repo`, "UNC"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			in.Worktree = c.worktree
+			v := JudgeOpenSession(in)
+			if v.OK {
+				t.Fatal("Windows 경로를 통과시켰다")
+			}
+			if !strings.Contains(v.Reason, c.want) {
+				t.Fatalf("사유 %q 가 원인(%q)을 안 짚는다", v.Reason, c.want)
+			}
+			if !strings.Contains(v.Reason, "WSL") {
+				t.Errorf("사유에 처방(WSL)이 없다: %s", v.Reason)
+			}
+		})
+	}
+}
+
+// 좌표계 판정이 기존 축을 가리면 안 된다 — 상대경로는 여전히 상대경로 사유를 받는다.
+func TestJudgeOpenSessionKeepsExistingAxes(t *testing.T) {
+	base := OpenSessionInput{Project: "p", MachineID: "m", CCSessionID: "cc"}
+
+	in := base
+	in.Worktree = "relative/path"
+	if v := JudgeOpenSession(in); v.OK || !strings.Contains(v.Reason, "절대경로") {
+		t.Errorf("상대경로 사유가 바뀌었다: ok=%v reason=%s", v.OK, v.Reason)
+	}
+
+	in = base
+	in.Worktree = ""
+	if v := JudgeOpenSession(in); v.OK || !strings.Contains(v.Reason, "worktree 가 비었다") {
+		t.Errorf("빈 worktree 사유가 바뀌었다: ok=%v reason=%s", v.OK, v.Reason)
+	}
+
+	in = base
+	in.Worktree = "/home/a/repo"
+	if v := JudgeOpenSession(in); !v.OK {
+		t.Errorf("정상 POSIX 경로를 거절했다: %s", v.Reason)
+	}
+}
