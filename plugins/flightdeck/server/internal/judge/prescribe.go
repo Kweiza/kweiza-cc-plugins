@@ -23,6 +23,11 @@ const (
 // PrescribeMax 는 한 번에 **문구로** 내는 처방 수다. 넘는 것은 요약 한 줄이 되지만
 // **키는 호출자가 전부 발화 기록한다** — 요약된 것도 이미 낸 것이다.
 // 대규모 리팩터 한 턴이 outside 처방 수십 건을 쏟는 경로를 이 상수가 막는다.
+//
+// ★ **이 값에도 근거가 없다.** 위 시나리오(리팩터 한 턴이 outside 수십 건을 쏟는다)는
+// 추론이지 실측이 아니다 — 아래 SilentNewPaths·SilentGap, service.go 의
+// DefaultLiveWindow 와 같은 처지의 잠정값이다. 처방 발화·확인율이 실측되면(설계 §10)
+// 이 상수도 그때 조정한다.
 const PrescribeMax = 3
 
 // silent 임계.

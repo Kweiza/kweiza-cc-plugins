@@ -98,7 +98,7 @@ REST 가 없으면 서버를 만지는 순간 전 세션의 조정이 끊기고,
     bin/fd          클라이언트 (셸 런처 → 캐시된 정적 바이너리)
     .mcp.json       stdio MCP: ${CLAUDE_PLUGIN_ROOT}/bin/fd mcp
     hooks/          5종
-    skills/         2개
+    skills/         3개
 ```
 
 **MCP 를 로컬 stdio 로 두는 것이 첫 결정이다.** 원격 http MCP 는 끊기면 재연결 실패 후 전 세션이 수동

@@ -128,3 +128,49 @@ func TestHookStopIsSilentOnReentry(t *testing.T) {
 		t.Fatalf("재진입인데 뭔가 냈다 — 이게 무한 루프의 씨앗이다: %q", out)
 	}
 }
+
+// ★ 두 번째로 중요한 시험이다.
+//
+// Stop 페이로드가 JSON 으로 못 읽히면 runHook 은(session-start 가 페이로드 없이도
+// 배너를 내야 하므로) 경고만 남기고 **제로값** HookPayload 로 계속 진행한다 — 그러면
+// StopHookActive 는 항상 false 로 읽힌다. 플랫폼이 Stop 페이로드 모양을 바꾸는 날
+// 이 훅의 모든 호출이 파싱에 실패하고, 그러면 재진입 가드가 **매번** 꺼진다.
+// 그때 유일한 방벽은 우연한 edge-triggering(억제가 이미 걸린 키는 다시 안 뜬다)뿐이고,
+// 재진입 턴이 새 경로를 편집하면(새 outside:<path> 키) 그 방벽도 뚫린다.
+//
+// hookStop 은 파싱 성패로 가드를 걸어야 한다 — 억제가 우연히 막아 주는 것에 기대면 안 된다.
+func TestHookStopStaysSilentWhenPayloadFailsToParse(t *testing.T) {
+	h := newHarness(t)
+
+	// 세션을 실제로 연다. 환경(CLAUDE_CODE_SESSION_ID)과 같은 id 를 페이로드에도 써서
+	// "페이로드가 깨져 환경으로 떨어져도 같은 세션을 가리킨다"는 실제 조건을 맞춘다.
+	//
+	// ★ 페이로드에 cwd 를 안 싣는다 — 실으면(예: "/tmp") 이 훅 호출의 App 이 그 값으로
+	// a.proj 를 덮어써, 파싱이 실패해 cwd 를 못 읽는 마지막 호출(App 이 새로 만들어지며
+	// 실제 프로세스 cwd 로 되돌아간다)과 워크트리가 어긋난다 — 그러면 세 호출이 서로 다른
+	// 세션을 봐 이 시험이 재현하려는 조건(같은 세션, 파싱만 실패) 자체가 안 선다.
+	// cwd 를 생략하면 세 호출 전부 App 생성 시점의 실제 프로세스 cwd 로 일치한다.
+	const cc = "cc-session-uuid-1"
+	if code, _ := h.run(`{"session_id":"`+cc+`","hook_event_name":"SessionStart"}`,
+		"hook", "session-start"); code != 0 {
+		t.Fatal("세션 열기 실패")
+	}
+	// 선점 없이 편집 — "unclaimed" 처방 조건을 실제로 성립시킨다(재진입 턴이
+	// 새 경로를 편집하는 상황과 같은 모양이다).
+	if code, _ := h.run(`{"session_id":"`+cc+`","tool_name":"Edit",`+
+		`"tool_input":{"file_path":"pipeline/x.py"}}`, "hook", "post-tool"); code != 0 {
+		t.Fatal("post-tool 훅 실패")
+	}
+
+	// ★ Stop 페이로드가 깨졌다 — 플랫폼이 모양을 바꾼 날을 흉내낸다.
+	// session_id 는 페이로드가 안 읽히므로 환경의 CLAUDE_CODE_SESSION_ID 로 떨어진다 —
+	// 하네스 기본 env 가 그 값을 "cc-session-uuid-1" 로 준다(harness_test.go).
+	code, out := h.run("이건 JSON 이 아니다", "hook", "stop")
+	if code != 0 {
+		t.Fatalf("훅이 종료코드 %d 를 냈다 — fail-open 이 깨졌다", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("Stop 페이로드가 안 읽혔는데 처방을 냈다 — "+
+			"파싱 실패가 재진입 가드를 0값(false)으로 만들었다:\n%s", out)
+	}
+}
