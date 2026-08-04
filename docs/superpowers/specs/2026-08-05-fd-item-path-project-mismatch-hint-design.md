@@ -97,7 +97,7 @@
 
 ---
 
-## 2. 판정 — 다섯 갈래
+## 2. 판정 — 여섯 갈래
 
 진입점은 **"경로가 전부 이 프로젝트에 없다"** 이고, 거기서 진단이 갈린다.
 
@@ -185,15 +185,36 @@ type ItemPathInput struct {
 }
 
 type ItemPathVerdict struct {
-	Kind       Kind
-	Suggest    string   // 유일 지목일 때 그 프로젝트 id
-	Candidates []string // 여럿이 지목될 때 전부(정렬)
-	Unreadable []string // 판정 근거가 그만큼 약하다
-	Summary    string   // 한 줄. ★ 항상 채운다
+	Kind       Kind     `json:"kind"`
+	Suggest    string   `json:"suggest,omitempty"`    // 유일 지목일 때 그 프로젝트 id
+	Candidates []string `json:"candidates,omitempty"` // 여럿이 지목될 때 전부(정렬)
+	Unreadable []string `json:"unreadable,omitempty"` // 판정 근거가 그만큼 약하다
+	Summary    string   `json:"summary"`              // 한 줄. ★ 항상 채운다
 }
 
 func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict
 ```
+
+**json 태그를 반드시 단다.** 이 값은 REST 를 왕복한다(§4). `internal/judge` 안에 판례가
+갈려 있어서 — `prescribe.go` 는 소문자 태그를 달고 `eligible.go`·`after.go` 는 안 단다 —
+안 달면 `"Kind"`·`"Summary"` 처럼 대문자 키가 나가고, 그 모양이 굳으면 되돌릴 수 없다.
+
+### `PickResult` 에 붙는 필드는 **포인터**다
+
+```go
+PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
+```
+
+값 타입이면 안 되는 이유가 둘이다.
+
+1. **§4 의 "`none` 에는 내지 않는다"가 값 타입으로는 표현이 안 된다.** 제로값 구조체가
+   실려 나가고, 그 제로값의 `Kind` 는 `""` 라 여섯 갈래 어디에도 없는 유령 상태다.
+2. **오프라인 `fd next` 는 디스크 캐시의 옛 바이트를 그대로 다시 낸다.** 이 필드가 생기기
+   전에 저장된 캐시에는 그 키가 없으므로 역직렬화 후 제로값이 온다. 포인터면 `nil` 이고,
+   `nil` 은 **"이 응답은 그 축을 안 읽었다"** 로 정확히 읽힌다. 값 타입이면 그 상황이
+   `Kind: ""` 가 되어, 낡은 캐시가 관측한 적 없는 사실을 단정하게 된다.
+
+`RenderPick` 은 `nil` 을 침묵으로 접지 않는다 — §5 의 마지막 문구가 그 자리다.
 
 ### `internal/service` — I/O 한 겹
 
@@ -230,30 +251,56 @@ Pick
 
 `recommended` · `claimed` · `resumed` 세 모드 전부에서 낸다.
 셋 다 워크트리 준비 명령을 내므로 셋 다 같은 해를 낼 수 있다.
-`none`(적격 0건)에는 항목이 없으므로 내지 않는다.
+`none`(적격 0건)에는 항목이 없으므로 내지 않는다 — 관측할 대상이 없다.
+렌더에서는 이것이 **`if r.Item != nil` 블록 안**이라는 사실로 자연히 표현된다.
+
+**손으로 옮겨 적는 자리가 없다.** `internal/api/handlers_items.go` 가 `PickResult` 를
+통째로 `writeJSON` 하고, `cmd/fd/mcpbackend.go` 와 `cmd/fd/cmds.go` 가 통째로
+`json.Unmarshal` 한다. 그래서 필드 하나를 `pick.go` 에 더하면 REST 를 자동으로 왕복한다.
+`mcpsrv.Backend` 의 `Pick` 서명도 안 바뀌므로 구현 셋(`*service.Service` ·
+`cmd/fd` 의 `*mcpBackend` · 시험용 `serialProbe`)이 그대로 컴파일된다.
+
+**렌더러도 하나뿐이다.** `fd next` 와 `fd pick` 은 자기 렌더러가 없고 둘 다
+`mcpsrv.RenderPick` 을 부른다. 그래서 `render.go` 한 자리를 고치면
+MCP `pick` 도구 · `fd next` · `fd pick` 셋이 동시에 새 줄을 낸다.
+
+**자동으로 안 흐르는 곳 둘 — 이번 범위 밖이다.**
+① 웹 대시보드(`internal/web`)는 `PickResult` 를 한 번도 안 만지고 자기 SQL 로 `pick_eval` 을 읽는다.
+② SSE 알림(`handlers_items.go` 의 `publish`)은 손으로 고른 두 축만 싣는다.
 
 ---
 
 ## 5. 문구 — 실물 그대로
 
+**접두는 `경로 실재:` 다.** `RenderPick` 은 이미 `경로: <목록>` 으로 항목이 선언한 경로를
+찍고 있다(`render.go:546`). 같은 접두를 쓰면 한 응답에 `경로:` 로 시작하는 줄이 둘 생겨
+어느 쪽이 선언이고 어느 쪽이 관측인지 읽는 쪽이 못 가른다.
+그리고 이 블록은 **그 선언 줄 바로 아래**에 붙는다 — 선언과 관측이 나란히 읽혀야 한다.
+
 ```
-경로: 3개 전부 이 프로젝트(kweiza-cc-plugins)에 있다.
+경로: plugins/flightdeck/server/internal/mcpsrv/, DESIGN.md
+경로 실재: 2개 전부 이 프로젝트(kweiza-cc-plugins)에 있다.
 
-경로: 3개 전부 이 프로젝트(context-platform)에 없다 — kweiza-cc-plugins 에 3개 다 있다.
-      오등록일 수 있다. 맞다면: fd move fd-migrate-oneshot --project kweiza-cc-plugins
+경로 실재: 3개 전부 이 프로젝트(context-platform)에 없다 — kweiza-cc-plugins 에 3개 다 있다.
+           오등록일 수 있다. 맞다면: fd move fd-migrate-oneshot --project kweiza-cc-plugins
 
-경로: 1개 전부 이 프로젝트(context-platform)에 없다. 등록된 다른 3개 프로젝트에도
-      같은 이름이 있어 어느 하나를 지목하지 못한다(docs/) — 근거로 쓰지 않는다.
+경로 실재: 1개 전부 이 프로젝트(context-platform)에 없다. 등록된 다른 3개 프로젝트에도
+           같은 이름이 있어 어느 하나를 지목하지 못한다(docs/) — 근거로 쓰지 않는다.
 
-경로: 1개 전부 이 프로젝트(kweiza-cc-plugins)에 없고 등록된 어느 프로젝트에도 없다.
-      경로가 틀렸거나(뿌리가 잘렸을 수 있다) 그 레포가 아직 등록 안 됐다.
-      지금 이 항목은 겹침 축에서 아무도 안 막는다.
+경로 실재: 1개 전부 이 프로젝트(kweiza-cc-plugins)에 없고 등록된 어느 프로젝트에도 없다.
+           경로가 틀렸거나(뿌리가 잘렸을 수 있다) 그 레포가 아직 등록 안 됐다.
+           지금 이 항목은 겹침 축에서 아무도 안 막는다.
 
-경로: 3개 중 1개를 못 읽었다 — '없다'가 아니다(plugins/…: permission denied).
-      나머지 2개는 이 프로젝트에 없다. 이 축은 판정하지 않았다.
+경로 실재: 3개 중 1개를 못 읽었다 — '없다'가 아니다(plugins/…: permission denied).
+           나머지 2개는 이 프로젝트에 없다. 이 축은 판정하지 않았다.
 
-경로 0 — 이 항목은 겹침 축에 안 잡힌다. 아무도 안 막고, 아무도 이 항목을 못 피한다.
+경로 실재: 경로 0 — 이 항목은 겹침 축에 안 잡힌다. 아무도 안 막고, 아무도 이 항목을 못 피한다.
+
+경로 실재: 이 응답은 그 축을 읽지 않았다(낡은 캐시일 수 있다).
 ```
+
+마지막 줄은 `PathCheck == nil` 일 때다(§3 의 포인터 근거를 보라).
+**침묵으로 접지 않는다** — 그러면 낡은 캐시가 "이상 없다"처럼 보인다.
 
 `Unreadable` 이 비어 있지 않으면 어느 갈래든 뒤에 붙인다(이름은 실제 못 읽은 프로젝트다):
 
@@ -274,14 +321,59 @@ Pick
 
 | 상황 | 처리 |
 |---|---|
+| **루트를 먼저 stat 한다** | 저장소 루트가 디렉토리가 아니면 그 프로젝트의 경로를 **하나도 안 본다** |
 | `proj.Path` 가 비었다 | 전부 `PathUnknown` → `KindUnknown`. **`nowhere` 로 접지 않는다** |
 | 이 프로젝트를 못 열었다 | 같음. 사유(errno 문자열)를 문장에 싣는다 |
 | 다른 프로젝트를 못 열었다 | 이름을 `Unreadable` 에 담고 **문장에 낸다** — 유일 지목이 그만큼 약해진다 |
+| 경로 토큰이 루트 **밖으로** 나간다(`..`) | `PathUnknown` + 그 사실을 문장에 낸다. **stat 하지 않는다** |
 | `Stat` 이 `ErrNotExist` | `PathAbsent` |
 | `Stat` 이 그 밖의 오류(권한·I/O) | `PathUnknown`. 절대 `Absent` 가 아니다 |
 | 경로 일부만 `PathUnknown` | `KindUnknown`. 남은 것이 전부 `Absent` 여도 오등록이라 말하지 않는다 |
 | 심볼릭 링크 | `os.Stat` 이 따라간다. 그대로 둔다 |
 | 프로젝트가 이것 하나뿐 | `Elsewhere` 가 비어 `nowhere` 로 간다 — 정확하다 |
+
+### 루트를 먼저 재는 이유 — 이게 없으면 표의 두 행이 서로 모순이다
+
+"프로젝트를 못 열었으면 `Unknown`" 과 "`Stat` 이 `ErrNotExist` 면 `Absent`" 는
+루트가 통째로 없을 때 **같은 errno 로 충돌한다**. `os.Stat(filepath.Join(없는루트, p))` 도
+`ErrNotExist` 이므로, 루트를 따로 재지 않으면 죽은 프로젝트가 전부 `Absent` 로 접히고
+그 항목이 `nowhere` 나 `misregistered` 로 고발당한다.
+
+**루트 stat 이 그 충돌을 없애는 유일한 단계다.** 시험 5번이 정확히 이 경로를 친다.
+
+### `..` 를 정규화하지 않고 거절하는 이유
+
+`judge.components`(`paths.go:93`)가 `..` 를 **일부러 안 걷어낸다** — "등록 목록에 `..` 가
+들어오는 것은 입력 오류이고, 조용히 정규화하면 그 오류가 안 보인다"가 그 자리의 주석이다.
+같은 규율을 여기서도 지킨다. 그리고 `filepath.Join(root, "../../etc")` 에 그대로 stat 하면
+**프로젝트 밖을 관측한다** — 판정이 남의 디렉토리에 기대게 된다.
+
+밖으로 나가는지는 `RelPath`(`service.go:363`)와 같은 방식으로 본다:
+`filepath.Rel` 로 성분 단위 계산 후 결과가 `..` 로 시작하면 밖이다.
+**문자열 접두로 자르지 않는다** — 그 결함이 이 레포에 실재했다.
+
+### `derive`(`Freshness`·`Failures`)를 건드리지 않는다
+
+stat 성공을 `d.ok()` 로 세면 **git 을 한 번도 안 읽은 응답이 `Source: "git"`** 이 되고,
+stat 실패를 `d.fail()` 로 세면 **git 이 멀쩡한 응답이 `Stale: true`** 가 된다.
+`FreshnessOf`(`service.go:265`)가 `reads == 0 → "db"`, `failures > 0 → Stale` 로
+정의돼 있어서 어느 쪽이든 다른 축의 뜻을 오염시킨다.
+
+그래서 이 축은 **자기 상태를 자기 안에서 말한다** — `Unreadable` 과 `KindUnknown` 이 그 자리다.
+`Derived` 는 git 파생 전용으로 남긴다.
+
+### stat 에 상한을 두지 않는다
+
+죽은 NFS 마운트에서 `os.Stat` 은 멈출 수 있다. 그래도 시임을 안 만든다:
+
+- 같은 위험을 이미 `diskFreePct`(`disk_unix.go`, `syscall.Statfs`)가 상한 없이 안고 있다.
+  여기만 다르게 하면 두 자리의 규율이 갈린다.
+- 호출 수가 **항목 하나의 경로수 × 프로젝트수**로 구조적으로 묶여 있다(실측 27회).
+- 상한을 두려면 `Service` 에 Option 과 필드를 새로 만들어야 하는데,
+  그것은 이 기능이 아니라 **파일 관측 전반**의 결정이다.
+
+**이 판단이 뒤집히는 조건**: 원격 마운트를 프로젝트로 등록하는 날. 그때는 `diskFreePct` 와
+함께 한 축으로 다룬다 — 이 기능만 따로 고치지 않는다.
 
 **막지 않는다.** 어느 갈래에서도 `pick` 은 그대로 선점한다.
 §5 의 규율 그대로다 — 거르지 않고 알린다. 거르면 이 축의 오판이 곧 큐의 막힘이 된다.
