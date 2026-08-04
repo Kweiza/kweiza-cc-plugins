@@ -56,6 +56,27 @@ func TestEnsureSessionPrefersTheBeaconCC(t *testing.T) {
 	}
 }
 
+// ★ 사유를 두 번 말하지 않는다. window.Load 의 오류는 이미 "비콘을 못 읽었다(파일명)" 로
+// 시작한다 — 그 앞에 같은 말을 또 붙이면 화면에 그 구절이 겹쳐서 뜨고, 겹친 문구는
+// 사람이 진짜 원인(파일명·errno)에 닿기 전에 읽기를 멈추게 한다.
+func TestBeaconMissDoesNotSayTheSameThingTwice(t *testing.T) {
+	dir := t.TempDir()
+	s := newServerWithBeacon(t, dir, "cc-1")
+	if _, ok := s.BeaconKey(); !ok {
+		t.Fatal("비콘 좌표가 없다")
+	}
+	if err := os.RemoveAll(dir); err != nil { // 심어 둔 비콘을 없앤다 — 읽기가 실패하는 갈래
+		t.Fatalf("비콘 디렉토리를 못 지웠다: %v", err)
+	}
+	got := s.beaconMiss()
+	if got == "" {
+		t.Fatal("비콘이 없는데 사유가 비었다 — why 가 그 자리에서 침묵하면 폴백 문구가 할 말이 없다")
+	}
+	if n := strings.Count(got, "비콘을 못 읽었다"); n != 1 {
+		t.Errorf("같은 말이 %d번 겹쳤다: %q", n, got)
+	}
+}
+
 // cardsInWorktree 는 이 워크트리의 카드를 **서비스에서 직접** 센다.
 // 응답 문자열로 세면 지금 시험하는 렌더가 전제까지 통과시킨다(순환).
 func cardsInWorktree(t *testing.T, svc *service.Service, project, worktree string) []string {

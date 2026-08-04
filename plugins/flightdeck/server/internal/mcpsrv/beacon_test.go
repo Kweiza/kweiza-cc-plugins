@@ -2,10 +2,14 @@ package mcpsrv
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // ★ 이 파일은 **모든 플랫폼에서 돈다.** 여기 단정은 전부 "비콘이 없을 때"의 것이라
@@ -123,6 +127,24 @@ func lastOpenSessionCC(t *testing.T, s *Server) string {
 	}
 	t.Fatalf("세션 %q 이 보드에 없다", sessionID)
 	return ""
+}
+
+// ★ why 는 사람이 **원인에 도달하라고** 있는 자리다. 그래서 틀린 원인을 이름으로 대는 것이
+// 아무 이름도 안 대는 것보다 나쁘다. 리눅스 밖에서는 StartedOf 가 ErrUnsupported 를 내는데,
+// 그 오류를 삼키고 "부모가 claude 가 아니다"라고 말하면 읽는 사람이 아무 문제도 없는
+// 자기 프로세스 계보를 뒤진다.
+func TestBeaconMissReasonNamesTheUnsupportedPlatform(t *testing.T) {
+	got := beaconMissReason(fmt.Errorf("부모(pid 7)의 시작 시각을 못 읽었다: %w", window.ErrUnsupported))
+	if !strings.Contains(got, "플랫폼") {
+		t.Errorf("ErrUnsupported 인데 플랫폼을 이름으로 대지 않는다: %q", got)
+	}
+	if strings.Contains(got, "부모") {
+		t.Errorf("틀린 원인을 댄다 — 계보를 읽을 수 없는 플랫폼이지 부모가 이상한 것이 아니다: %q", got)
+	}
+	// 그 밖의 사유는 오류가 이미 자기 말을 갖고 있다. 덧칠하지 않는다.
+	if got := beaconMissReason(errors.New("이 프로세스의 정체가 반쪽이라 비콘 좌표를 만들 수 없다")); got != "이 프로세스의 정체가 반쪽이라 비콘 좌표를 만들 수 없다" {
+		t.Errorf("사유를 덧칠했다: %q", got)
+	}
 }
 
 // ★ 비콘이 없으면 오늘 거동이다 — 자기 env cc 로 연다. 새 실패 모드를 만들지 않는다.
