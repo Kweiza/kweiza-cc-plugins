@@ -28,7 +28,9 @@ type Key struct {
 // FileName 은 이 좌표의 파일 이름이다.
 //
 // ★ machine id 는 hostname 에서 온다(mcpsrv/identity.go). 즉 **외부 입력**이고
-// 경로 구분자가 들어올 수 있다. 그대로 쓰면 디렉토리를 벗어나므로 안전 문자만 남긴다.
+// 경로 구분자가 들어올 수 있다. 그대로 쓰면 디렉토리를 벗어나므로 안전하게 바꾼다.
+// scrub 함수는 여러 입력이 같은 파일명으로 붕괴하지 않도록 전사 함수(injective)여야 한다 —
+// 다르면 여러 머신이 한 파일을 공유하게 된다.
 func (k Key) FileName() string {
 	return scrub(k.MachineID) + "-" + strconv.Itoa(k.ClaudePID) + "-" + scrub(k.Started) + ".json"
 }
@@ -41,15 +43,16 @@ func (k Key) Valid() bool {
 
 func scrub(s string) string {
 	var b strings.Builder
-	for _, r := range s {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			b.WriteRune(r)
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-':
+			b.WriteByte(c)
 		default:
-			b.WriteRune('-')
+			fmt.Fprintf(&b, "_%02x", c)
 		}
 	}
-	out := strings.Trim(b.String(), "-")
+	out := b.String()
 	if out == "" {
 		return "x"
 	}
