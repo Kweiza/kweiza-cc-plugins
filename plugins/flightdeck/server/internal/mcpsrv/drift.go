@@ -1,5 +1,7 @@
 package mcpsrv
 
+import "strings"
+
 // cc_session_id 표류 — 알아채기(따라가기가 **아니다**).
 //
 // ★ 사실관계는 실측이다(2026-08-04, drift_test.go 머리에 방법과 값이 있다):
@@ -59,7 +61,12 @@ func DriftedTwins(mine Identity, live []LiveIdentity) []CoordinateTwin {
 // RenderDrift 는 표류 하나를 사람이 읽는 문구로 만든다. 순수 함수다.
 //
 // 표류가 없으면 **빈 문자열**이다 — 매 board 마다 빈 절이 붙으면 예산이 토큰인 화면이 상한다.
-func RenderDrift(twins []CoordinateTwin, mineCC string) string {
+//
+// ★ why 는 **수리가 왜 안 됐나**다. 이제 표류는 훅이 비콘으로 고친다 — 훅이 조상 사슬을
+// 밟아 이 MCP 프로세스의 비콘을 찾고 카드를 rekey 한다. 그래도 여기 문구가 뜬다면 그 수리가
+// 어딘가에서 멈춘 것이고, 그 자리를 이름으로 말하지 않으면 사람이 원인에 도달할 길이 없다 —
+// "재기동해라"는 더 이상 맞는 조언이 아니다(재기동 없이도 다음 SessionStart 에 고쳐진다).
+func RenderDrift(twins []CoordinateTwin, mineCC, why string) string {
 	if len(twins) == 0 {
 		return ""
 	}
@@ -69,9 +76,10 @@ func RenderDrift(twins []CoordinateTwin, mineCC string) string {
 	for _, t := range twins {
 		s += "  갈린 카드: " + clip(t.SessionID, 64) + " · cc=" + clip(t.CCSessionID, 64) + "\n"
 	}
-	s += "  /clear·compact·재개로 대화의 cc 가 갈렸는데 이 프로세스는 옛 값을 계속 쓴다. " +
-		"프로세스의 환경은 기동 뒤 안 바뀌므로 이 자리에서 따라갈 방법이 없다 — " +
-		"합치려면 Claude Code 를 재기동해라(MCP 서버가 새 값으로 다시 뜬다)."
+	s += "  훅이 다음 SessionStart 에 이것을 합친다."
+	if strings.TrimSpace(why) != "" {
+		s += " 이번에 못 합친 사유: " + clip(why, 200)
+	}
 	return s
 }
 
