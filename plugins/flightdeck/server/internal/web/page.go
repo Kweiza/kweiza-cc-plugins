@@ -57,6 +57,11 @@ type LivePanel struct {
 	Sessions []SessionRow
 	Empty    string
 	Targets  []ClaimTarget // 선점 회수 폼의 선택지
+
+	// OutOfWindow 는 창 밖이라 표에 안 나온 세션이 있다는 사실을 사람이 읽는 한 줄로 낸다.
+	// 0건이면 빈 문자열이다 — **화면이 반드시 말한다**, MCP board 와 같은 이유다.
+	// 침묵하면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다(설계 §4).
+	OutOfWindow string
 }
 
 // ClaimTarget 은 회수 가능한 선점 하나다. **근거를 함께 낸다**(설계 §4 의 다섯 축 중 표시분).
@@ -365,6 +370,15 @@ func (h *handler) livePanel(now time.Time, board service.BoardView, boardErr err
 		//   "창이 좁아 안 보인다"가 구분된다.
 		pan.Empty = fmt.Sprintf("살아 있는 세션 0건 — 최근 %s 안에 신호가 있거나 그 뒤에 열린 세션이 없다.",
 			span(board.Window))
+	}
+	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
+	// MCP board 는 이미 말하는데 이 화면만 빠뜨리면 같은 사실이 표면마다 다르게 읽힌다.
+	if board.OutOfWindow > 0 {
+		pan.OutOfWindow = fmt.Sprintf("창 밖 %d건", board.OutOfWindow)
+		if !board.OldestOutside.IsZero() {
+			pan.OutOfWindow += fmt.Sprintf(" (가장 오래된 신호 %s)", Age(now.Sub(board.OldestOutside)))
+		}
+		pan.OutOfWindow += " — 창은 표시 구간이지 생존 판정이 아니다."
 	}
 	return pan
 }

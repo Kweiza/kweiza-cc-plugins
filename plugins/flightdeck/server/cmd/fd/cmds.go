@@ -441,6 +441,9 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 		map[bool]string{true: "설정됨", false: "없음"}[a.cli.Token != ""], a.cli.Endpoint.TokenSource)
 	fmt.Fprintf(out, "  프로젝트 %s · 주 저장소 %s · 워크트리 %s\n", a.proj.ID, a.proj.Path, a.proj.Worktree)
 	fmt.Fprintf(out, "  좌표 판정: %s\n", a.proj.Detail)
+	// 처방 채널은 부재를 기본값으로 접지 않는다 — 2026-08-04 에 실측한 사실 그대로 찍는다
+	// (Claude Code 2.1.221: Stop 훅 stdout 의 additionalContext 가 실제로 주입된다).
+	fmt.Fprintln(out, "  처방 채널   Stop 훅 stdout      (2026-08-04 실측: 주입됨)")
 	// ★ 아웃박스는 **상태 디렉토리마다 따로 쌓인다**(채널마다 다르다 — 훅·MCP 는
 	// CLAUDE_PLUGIN_DATA, 사용자 셸은 XDG_STATE_HOME|~/.local/state). 그래서 이 줄이
 	// 세는 것은 "이 머신의 대기"가 아니라 **이 채널의 대기**다. 자리를 함께 찍지 않으면

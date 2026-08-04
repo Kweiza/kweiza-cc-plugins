@@ -36,12 +36,19 @@ const (
 	// 플러그인은 자동 갱신되므로 스큐는 운영자가 아무것도 안 해도 발생한다(설계 §7).
 	APIVersion = "1"
 
-	// DefaultLiveWindow 는 Board 가 "이 안에 신호가 있었나"를 자르는 기본 구간이다.
+	// DefaultLiveWindow 는 Board 가 "이 안에 신호가 있었나"로 자르는 기본 구간이다.
 	//
-	// ★ 이것은 생존 **판정**이 아니다. 자르는 지점일 뿐이고, 결과에는 각 신호의 시각이
-	// 그대로 실린다. 나이를 숫자로만 내는 것이 설계 §4 의 요구다 —
-	// 불리언을 만드는 순간 그것이 회수·회피·탈락 셋의 상류가 되고, 그 판정은 실측에서 두 번 틀렸다.
-	DefaultLiveWindow = 8 * time.Hour
+	// ★ **이 값에는 근거가 없다.** 8시간이었을 때 이 머신의 보드에 세션 19건이 떠서
+	// 그중 9건이 예산에 접혔고, 그 화면은 조정에 쓸 수 없었다. 2시간은 그것을
+	// 줄이려고 고른 잠정값이지 실측이 아니다.
+	//
+	// ★ 근거는 만들 수 있고 재료가 이미 DB 에 있다 — signal 표로 "마지막 신호 후 다음
+	// 신호까지의 간격 분포"를 재면 "이 구간 뒤엔 사실상 안 돌아온다"가 나온다.
+	// 그 실측은 큐 항목 fd-live-window-baseline 이다.
+	//
+	// ★ **생존 판정이 아니다.** 창 밖으로 잘린 건수는 BoardView.OutOfWindow 로 나가고
+	// 화면이 그것을 반드시 말한다(설계 §4: "죽었다"고 쓰지 않는다).
+	DefaultLiveWindow = 2 * time.Hour
 )
 
 // GitReader 는 이 계층이 git 에서 읽는 사실의 전부다.
@@ -70,6 +77,14 @@ type Service struct {
 	git    GitFactory
 	window time.Duration
 	getenv func(string) (string, bool)
+
+	// outOfWindowLister 는 창 밖 건수를 세는 질의다. nil 이면 s.st.ListLive 를 그대로 쓴다.
+	//
+	// ★ 카드용 질의(sessionCards 가 부르는 s.st.ListLive)와 **표·함수가 같다**.
+	// 그래서 실물 DB 로는 이 질의만 골라 실패시킬 수 없다 — 표를 깨면 카드용 질의도
+	// 같이 죽어 Board 자체가 하드 에러로 먼저 죽는다. GitReader 를 인터페이스로 둔 것과
+	// 같은 이유로(주입은 실물로 만들기 어려운 실패만 덮는다) 시험 전용 후크를 둔다.
+	outOfWindowLister func(ctx context.Context, project string, since time.Time) ([]model.SessionView, error)
 
 	// derives 는 **세션 카드 파생을 실제로 돌린 횟수**의 누산기다. DeriveStats 참조.
 	derives      atomic.Uint64

@@ -97,8 +97,8 @@ REST 가 없으면 서버를 만지는 순간 전 세션의 조정이 끊기고,
   플러그인 flightdeck
     bin/fd          클라이언트 (셸 런처 → 캐시된 정적 바이너리)
     .mcp.json       stdio MCP: ${CLAUDE_PLUGIN_ROOT}/bin/fd mcp
-    hooks/          4종
-    skills/         2개
+    hooks/          5종
+    skills/         3개
 ```
 
 **MCP 를 로컬 stdio 로 두는 것이 첫 결정이다.** 원격 http MCP 는 끊기면 재연결 실패 후 전 세션이 수동
@@ -322,7 +322,7 @@ GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
-GET    /dashboard.json              GET    /notices      (꼬리 전용)
+GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /sessions/{id}/prescriptions (세션 카드 파생 안 돎)
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
 ```
@@ -338,7 +338,7 @@ GET    /metrics
 **루프백은 토큰 없이 허용하되 그 사실을 `/healthz` 가 알린다.**
 모든 쓰기에 `Idempotency-Key: <session>:<seq>`.
 
-### 훅 4종 — 전부 fail-open, 전부 `${CLAUDE_PLUGIN_ROOT}/bin/fd` 절대경로
+### 훅 5종 — 전부 fail-open, 전부 `${CLAUDE_PLUGIN_ROOT}/bin/fd` 절대경로
 
 | 이벤트 | matcher | 하는 일 |
 |---|---|---|
@@ -346,6 +346,7 @@ GET    /metrics
 | `UserPromptSubmit` | — | `fd beat --kind prompt` (2초 타임아웃) + 미확인 알림 주입 |
 | `PostToolUse` | `Edit\|Write` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
 | `PreCompact` | — | `async` `fd note --draft` — 압축으로 판단이 날아가는 것만 막는다 |
+| `Stop` | — | `fd hook stop` → 처방(발화 4조건, 전이 1회) 주입. **fail-open, 3초** |
 
 **`SessionEnd` 는 쓰지 않는다.** reason 열거에 크래시·컨텍스트 소진이 없고, 출력과 종료코드가 무시되며,
 `clear`·`resume` 는 세션이 계속 사는 경우다. 세션 종료를 신뢰성 있게 감지할 수단이 없다는 것이
@@ -427,7 +428,7 @@ GET    /metrics
 | 롤백 명령 | **없음** | 되돌리는 서브명령이 없다. 되돌릴 길은 백업 파일 손 복사뿐이다 |
 
 **지금 구조를 유지하기로 한 판단과 근거.** 증분이 한 단(`002_idempotency`)이고 순수 가산이라
-실질 위험이 낮다. 반면 적용을 기동에서 떼면 **모든 명령**(fail-open 훅 4종 포함)이
+실질 위험이 낮다. 반면 적용을 기동에서 떼면 **모든 명령**(fail-open 훅 5종 포함)이
 "스키마가 아직 안 올라간 DB" 를 만나는 새 경로가 생기고, 훅은 정의상 조용히 죽으므로
 그 경로의 실패가 침묵한다. 제거하는 위험보다 새로 만드는 위험이 크다.
 
@@ -547,6 +548,8 @@ recipes:
   그래서 꼬리가 도구 호출마다 그것을 한 번씩 더 돌리는 동안 아무도 몰랐다.
   요청 지표(`flightdeck_request_duration_seconds`)와 **다른 축**이다: 그쪽은 라우트별 총 시간,
   이쪽은 그중 파생이 먹은 몫이라 둘을 겹쳐 봐야 "느린 것이 파생인가"가 갈린다
+- 처방 발화·확인율 — `prescribe` 대비 `prescribe_ack`. **떨어지면 조건을 줄인다, 문구를 키우지 않는다**
+- 사건이 있는 세션 비율 — 착수 시점 19건 중 1건
 
 ---
 
@@ -583,7 +586,7 @@ recipes:
 
 **추측을 사실로 적지 않는다.** 아래는 이 설계가 기대는 플랫폼 동작이다.
 
-### 확인됨 (Claude Code 2.1.220, 2026-08-03 실측)
+### 확인됨 (Claude Code 2.1.220, 2026-08-03 실측 — ③ 은 2.1.221, 2026-08-04 실측)
 
 **① MCP stdio 서버는 세션 식별자를 환경으로 받는다.**
 
@@ -616,10 +619,31 @@ CLAUDECODE=1 · CLAUDE_CODE_ENTRYPOINT=cli · CLAUDE_CODE_SSE_PORT=<포트>
 Bash 도구와 같다는 보장이 없고, 절대경로는 어느 쪽에서든 작동한다.
 바로 부르는 `fd` 는 사람이 터미널에서 쓰는 경로다.
 
+**③ `Stop` 훅의 stdin 은 세션 id 를 실어 오고, 그 stdout 주입은 모델을 다시 부른다.**
+
+프로젝트 `settings.json` 의 임시 훅으로(플러그인 릴리스 없이) 잰다 — 계획 Task 1 참고.
+
+stdin 페이로드가 싣는 키: `session_id` · `transcript_path` · `cwd` · `prompt_id` ·
+`permission_mode` · `effort{level}` · `hook_event_name` · `stop_hook_active` ·
+`last_assistant_message` · `background_tasks` · `session_crons`.
+**`session_id` 가 실제로 온다** — 이 채널에 한해 확인됐다. `SessionStart`·`UserPromptSubmit`·
+`PostToolUse`·`PreCompact` 네 채널의 stdin 은 이 축을 아직 못 쟀다(아래 "아직 아님" 3).
+
+stdout 은 주입된다 — `hookSpecificOutput.additionalContext` 로, 모델에는 `<system-reminder>` 로 도착한다.
+
+> **★★ 주입은 붙기만 하는 게 아니라 모델을 다시 부른다.** `additionalContext` 가 실리면
+> 그것이 새 assistant 턴을 낳고, 그 턴은 다시 `Stop` 으로 끝나 또 주입한다 — **가드가 없으면
+> 무한 루프다.** 무가드 판을 실제로 돌려 루프를 냈고, 사람이 인터럽트로 끊어서야 멈췄다.
+> 재진입한 호출에는 `stop_hook_active` 가 `true` 로 온다. `cmd/fd/hook.go` 의 `hookStop` 이
+> 이 값을 확인해 재진입이면 아무것도 안 낸다 — **이 가드가 없으면 이 기능 전체가 세션을
+> 못 쓰게 만든다.**
+
 ### 아직 아님
 
-3. **훅 stdin 페이로드에 `session_id` 가 실려 오는가.** 아직 실물로 못 쟀다.
-   그래서 훅은 **환경변수(`CLAUDE_CODE_SESSION_ID`)를 먼저 보고**, 없을 때만 stdin 페이로드를 본다.
+3. **훅 stdin 페이로드에 `session_id` 가 실려 오는가 — `Stop` 채널은 쟀다(위 ③), 나머지 넷은 아직이다.**
+   `SessionStart`·`UserPromptSubmit`·`PostToolUse`·`PreCompact` 는 아직 실물로 못 쟀다.
+   그래서 훅은 **stdin 페이로드의 `session_id` 를 먼저 보고**(`ccSessionID`, `cmd/fd/app.go`),
+   비어 있을 때만 환경변수(`CLAUDE_CODE_SESSION_ID`)를 본다.
    둘 다 없으면 조용히 익명으로 진행하지 않고 그 사실을 출력에 낸다.
    **어느 채널이 실제로 관측됐는지는 `fd doctor` 가 이름으로 낸다.**
 4. `monitors` 실물 동작. experimental 이라 스키마가 바뀔 수 있다.

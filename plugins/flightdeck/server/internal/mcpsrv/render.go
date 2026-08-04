@@ -191,14 +191,32 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 			len(v.Sessions), FormatAge(v.Window)),
 	)
 
-	blocks := make([]string, 0, len(v.Sessions))
-	for _, c := range v.Sessions {
-		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail))
+	ranked := rankCards(v, opt.Self, now)
+	blocks := make([]string, 0, len(ranked))
+	for _, c := range ranked {
+		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
 	var foot []string
 	if len(v.Sessions) == 0 {
 		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
+	}
+	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
+	// 이 줄이 없으면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
+	if v.OutOfWindow > 0 {
+		age := ""
+		if !v.OldestOutside.IsZero() {
+			age = fmt.Sprintf("(가장 오래된 신호 %s 전) ", FormatAge(now.Sub(v.OldestOutside)))
+		}
+		// ★ 창 값은 v.Window 에서 그대로 가져온다 — 숫자를 박아 두면 기본값이
+		// 바뀔 때마다(0113b35 처럼) 조용히 낡는다. 그리고 "이렇게 본다"에서 멈춘다 —
+		// "window=Nh 로 본다"처럼 손잡이를 돌리라는 투로 쓰지 않는다. MCP board 도구는
+		// window 인자를 받지 않고(tools.go), 그 인자를 새로 만들지도 않는다(설계가
+		// 도구 수를 6개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
+		// 웹 패널(internal/web/page.go)이 이미 이렇게 한다: 사실만 말하고 지시하지 않는다.
+		foot = append(foot, fmt.Sprintf(
+			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
+			v.OutOfWindow, age, FormatAge(v.Window)))
 	}
 	if opt.Detail {
 		foot = append(foot, boardDetailFoot(v)...)
@@ -261,8 +279,85 @@ func joinAll(head, blocks, foot []string, tail string) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// rankCards 는 예산이 자를 순서를 정한다. 자르는 것은 이 순서의 **뒤부터**다.
+//
+//	① 나 ② 사건(ask·blocked)이 붙은 카드 ③ 나와 경로가 겹치는 카드 ④ 나머지 — 신호 최신순
+//
+// ★ 앞선 판은 목록 위치 순으로 잘랐다. 그래서 열린 ask 가 붙은 카드가 조용한 카드보다
+// 먼저 접힐 수 있었고, 사건을 카드에 붙여도 예산이 그것을 먼저 버렸다.
+func rankCards(v service.BoardView, self string, now time.Time) []service.SessionCard {
+	hasNote := map[string]bool{}
+	for _, j := range v.Asks {
+		hasNote[j.SessionID] = true
+	}
+	for _, j := range v.Blocked {
+		hasNote[j.SessionID] = true
+	}
+
+	var selfPaths []string
+	for _, c := range v.Sessions {
+		if c.View.Session.ID == self || c.IsSelf {
+			selfPaths = c.View.Paths
+		}
+	}
+
+	rank := func(c service.SessionCard) int {
+		switch {
+		case c.IsSelf || c.View.Session.ID == self:
+			return 0
+		case hasNote[c.View.Session.ID]:
+			return 1
+		case len(selfPaths) > 0 && judge.PathsOverlap(selfPaths, c.View.Paths):
+			return 2
+		default:
+			return 3
+		}
+	}
+
+	// ★ rank 를 미리 한 번씩만 계산해 카드 옆에 붙여 둔다. 비교자 안에서 다시 부르면
+	// sort.SliceStable 이 O(n log n) 번 부르게 되고, judge.PathsOverlap 은 경로쌍 비교라
+	// 그 반복이 그대로 헛일이 된다 — 카드 수가 늘면 정렬 하나가 매 렌더마다 그 값을 다시 문다.
+	// rank 를 카드와 같은 구조체에 넣어 두는 이유: 정렬이 원소를 맞바꿀 때 rank 도
+	// 같이 옮겨가야 하고, 인덱스로 따로 든 슬라이스는 스왑을 안 따라간다.
+	type withRank struct {
+		card service.SessionCard
+		rank int
+	}
+	tmp := make([]withRank, len(v.Sessions))
+	for i, c := range v.Sessions {
+		tmp[i] = withRank{card: c, rank: rank(c)}
+	}
+	sort.SliceStable(tmp, func(i, j int) bool {
+		if tmp[i].rank != tmp[j].rank {
+			return tmp[i].rank < tmp[j].rank
+		}
+		// 같은 등급이면 최근 신호가 앞이다. 신호가 아예 없으면 뒤로.
+		return lastSignal(tmp[i].card, now).After(lastSignal(tmp[j].card, now))
+	})
+	out := make([]service.SessionCard, len(tmp))
+	for i, r := range tmp {
+		out[i] = r.card
+	}
+	return out
+}
+
+// lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.
+// **합치지 않는다** — 여기서 최댓값을 쓰는 것은 정렬 키일 뿐이고,
+// 카드 본문은 종류별로 따로 낸다(설계 §4).
+func lastSignal(c service.SessionCard, now time.Time) time.Time {
+	var out time.Time
+	for _, at := range c.View.Signals {
+		if at.After(out) {
+			out = at
+		}
+	}
+	return out
+}
+
 // boardCard 는 세션 하나의 블록이다.
-func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool) string {
+//
+// asks·blocked 는 보드 전체의 사건 목록이다 — 이 카드는 그중 자기 세션 것만 걸러 싣는다.
+func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool, asks, blocked []model.Judgment) string {
 	v := c.View
 	mark := " "
 	if c.IsSelf {
@@ -305,6 +400,11 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool)
 		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
 		lines[1] += " | 경로 축에서 아무도 안 막는다"
 	}
+	// 이 세션이 남긴 ask·blocked 를 카드 안에 붙인다 — 전역 꼬리만으로는
+	// 누가 남겼는지가 카드와 안 이어진다. detail 여부와 무관하게 붙인다:
+	// 예산 때문에 카드째 접히는 것은 brief 모드에서만 일어나고,
+	// 그때의 안전망은 (제거하지 않는) 전역 꼬리·전역 목록이 맡는다.
+	lines = append(lines, noteLines(v.Session.ID, asks, blocked, now)...)
 	if detail {
 		if c.DeriveError != "" {
 			lines = append(lines, "   파생 결손: "+clip(c.DeriveError, 200))
@@ -316,6 +416,25 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// noteLines 는 이 카드가 실을 사건 줄이다.
+//
+// ★ 전역 꼬리를 없애지 않는다. 카드가 접히면 사건도 접히므로 꼬리가 그 안전망이다.
+func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) []string {
+	var out []string
+	add := func(kind string, js []model.Judgment) {
+		for _, j := range js {
+			if j.SessionID != sessionID {
+				continue
+			}
+			out = append(out, fmt.Sprintf("   [%s %s] %s",
+				kind, FormatAge(now.Sub(j.At)), clip(firstLine(j.Title, j.Body), 100)))
+		}
+	}
+	add("ask", asks)
+	add("blocked", blocked)
+	return out
 }
 
 func boardBriefFoot(v service.BoardView) []string {
@@ -357,6 +476,7 @@ func boardDetailFoot(v service.BoardView) []string {
 	} else {
 		out = append(out, "자원 점유 없음")
 	}
+
 	if len(v.Blocked) > 0 {
 		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
 		for _, j := range v.Blocked {

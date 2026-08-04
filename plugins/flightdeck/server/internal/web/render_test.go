@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -164,7 +165,7 @@ func TestPageHasSixSectionsAndSurvivesZeroLiveSessions(t *testing.T) {
 	}
 	// ① 0건이 빈칸이 아니라 문장이다. 창을 함께 말해야 "아무도 없다"와 "창이 좁다"가 갈린다.
 	mustContain(t, html, "살아 있는 세션 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
-	mustContain(t, html, "8시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
+	mustContain(t, html, "2시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
 
 	// ② 섹션 여섯이 전부 있다(그 이상도 만들지 않는다).
 	for _, h := range []string{
@@ -183,6 +184,36 @@ func TestPageHasSixSectionsAndSurvivesZeroLiveSessions(t *testing.T) {
 
 	// ④ "죽었다"류 생존 판정을 쓰지 않는다.
 	for _, bad := range []string{"죽었다", "죽은 세션", "무갱신 경고"} {
+		mustNotContain(t, html, bad, "생존 판정 어휘를 만들지 않는다(설계 §4)")
+	}
+}
+
+// TestDashboardSaysWhatTheWindowCutOff 는 섹션 ①이 MCP board 와 같은 것을 침묵하지
+// 않는다는 것을 단정한다. 웹 대시보드도 같은 service.BoardView 로 화면을 만들므로,
+// 창 밖으로 잘린 건수를 이 표면에서만 조용히 빠뜨리면 "그런 세션이 없다"와
+// "안 보여 준다"가 여기서만 구분되지 않는다.
+func TestDashboardSaysWhatTheWindowCutOff(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	now := time.Now().UTC()
+
+	// 숨은 세션 — 개시 시각도 신호도 창(기본 2시간) 밖인 3시간 전으로 되돌린다.
+	hidden := f.openSession("cc-hidden", "숨은 세션")
+	hiddenAt := now.Add(-3 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
+	if _, err := f.st.DB().Exec(`UPDATE session SET opened_at = ? WHERE id = ?`, hiddenAt, hidden.ID); err != nil {
+		t.Fatalf("세션 개시 시각 되돌리기 실패: %v", err)
+	}
+	if _, err := f.st.DB().Exec(`UPDATE signal SET at = ? WHERE session_id = ?`, hiddenAt, hidden.ID); err != nil {
+		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
+	}
+	// 보이는 세션 하나 — 대조군.
+	f.openSession("cc-visible", "보이는 세션")
+
+	code, html := f.get("")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, 기대 200\n%s", code, html)
+	}
+	mustContain(t, html, "창 밖 1건", "창 밖 건수를 안 말한다 — MCP 표면은 말하는데 웹만 침묵한다")
+	for _, bad := range []string{"죽었다", "죽은 세션"} {
 		mustNotContain(t, html, bad, "생존 판정 어휘를 만들지 않는다(설계 §4)")
 	}
 }

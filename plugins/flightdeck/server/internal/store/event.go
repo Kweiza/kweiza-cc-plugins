@@ -91,6 +91,46 @@ func (s *Store) ListEvents(ctx context.Context, kind string, since time.Time, li
 	return out, nil
 }
 
+// ListSessionEvents 는 세션 하나의 이벤트를 **오래된 순**으로 낸다. kind 가 비면 전 종류다.
+//
+// ★ ListEvents 와 정렬이 반대다. 그쪽은 "무슨 일이 있었나"(최신순)에 답하고, 이쪽은
+// "이 키를 언제 냈나"(억제 판정)에 답한다. 최신순으로 주면 호출자가 뒤집어야 하고,
+// 그 뒤집기를 잊으면 억제가 조용히 틀린다.
+//
+// ★ 상한이 없다. 세션 하나의 처방 이벤트는 조건 넷 × 대상 수라 원리적으로 작고,
+// 상한을 걸면 오래된 키가 잘려 **이미 낸 처방이 다시 뜬다** — 이 함수가 막으려는 바로 그 사고다.
+func (s *Store) ListSessionEvents(ctx context.Context, sessionID, kind string, since time.Time) ([]model.Event, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, at, project, session_id, kind, payload FROM event
+		WHERE session_id = ? AND (? = '' OR kind = ?) AND at >= ?
+		ORDER BY at ASC, id ASC`,
+		sessionID, kind, kind, fmtTime(since))
+	if err != nil {
+		return nil, fmt.Errorf("세션 이벤트 조회 실패(session_id=%q kind=%q): %w",
+			clip(sessionID, 64), clip(kind, 64), err)
+	}
+	defer rows.Close()
+
+	var out []model.Event
+	for rows.Next() {
+		var e model.Event
+		var project, session sql.NullString
+		var at string
+		if err := rows.Scan(&e.ID, &at, &project, &session, &e.Kind, &e.Payload); err != nil {
+			return nil, fmt.Errorf("세션 이벤트 행 해석 실패: %w", err)
+		}
+		e.Project, e.SessionID = str(project), str(session)
+		if e.At, err = parseTime(at); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("세션 이벤트 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
 // CountEvents 는 종류별 건수다. §10 의 지표(세션당 쓰기 호출 수 등)가 이걸로 나온다.
 func (s *Store) CountEvents(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int
