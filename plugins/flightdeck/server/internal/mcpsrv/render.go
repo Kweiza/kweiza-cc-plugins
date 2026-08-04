@@ -297,15 +297,30 @@ func rankCards(v service.BoardView, self string, now time.Time) []service.Sessio
 		}
 	}
 
-	out := append([]service.SessionCard(nil), v.Sessions...)
-	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := rank(out[i]), rank(out[j])
-		if ri != rj {
-			return ri < rj
+	// ★ rank 를 미리 한 번씩만 계산해 카드 옆에 붙여 둔다. 비교자 안에서 다시 부르면
+	// sort.SliceStable 이 O(n log n) 번 부르게 되고, judge.PathsOverlap 은 경로쌍 비교라
+	// 그 반복이 그대로 헛일이 된다 — 카드 수가 늘면 정렬 하나가 매 렌더마다 그 값을 다시 문다.
+	// rank 를 카드와 같은 구조체에 넣어 두는 이유: 정렬이 원소를 맞바꿀 때 rank 도
+	// 같이 옮겨가야 하고, 인덱스로 따로 든 슬라이스는 스왑을 안 따라간다.
+	type withRank struct {
+		card service.SessionCard
+		rank int
+	}
+	tmp := make([]withRank, len(v.Sessions))
+	for i, c := range v.Sessions {
+		tmp[i] = withRank{card: c, rank: rank(c)}
+	}
+	sort.SliceStable(tmp, func(i, j int) bool {
+		if tmp[i].rank != tmp[j].rank {
+			return tmp[i].rank < tmp[j].rank
 		}
 		// 같은 등급이면 최근 신호가 앞이다. 신호가 아예 없으면 뒤로.
-		return lastSignal(out[i], now).After(lastSignal(out[j], now))
+		return lastSignal(tmp[i].card, now).After(lastSignal(tmp[j].card, now))
 	})
+	out := make([]service.SessionCard, len(tmp))
+	for i, r := range tmp {
+		out[i] = r.card
+	}
 	return out
 }
 
