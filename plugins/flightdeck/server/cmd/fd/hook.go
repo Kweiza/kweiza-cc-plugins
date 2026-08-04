@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -175,6 +176,31 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	// 뒤바꿔도 컴파일도 되고 대부분의 시험도 초록이라, 그 축은 시험이 따로 붙들고 있다
 	// (TestClearKeepsOneCardAndItsClaim).
 	beaconKey, beacon, haveBeacon := a.findWindow()
+
+	// ★ **워크트리를 한 번 더 대조한다. 지우지 마라 — Find 는 이 축을 안 본다.**
+	// window.Find 가 맞추는 것은 (머신·조상 pid·시작 시각) 셋뿐이다. 그런데 바로 아래
+	// rekey 가 고치는 카드의 키는 **3중키(머신·워크트리·cc)** 다. 그래서 한 창 안에서
+	// MCP 의 워크트리 관측(자기 cwd)과 훅의 것(페이로드 cwd → resolveProject)이 갈리면,
+	// 여기서 남의 워크트리 카드의 cc 를 갈아엎고 아래 upsert 는 내 워크트리로 새 카드를
+	// 또 만든다 — 그 카드의 선점이 아무 잘못도 없는 워크트리 쪽에 **고아로** 남는다.
+	// 이 기능이 없애려는 바로 그 결과를 이 기능이 만들어 내는 것이다(설계 §2 둘째 층:
+	// "읽은 비콘의 워크트리가 내 것과 다르면 남의 창이다 — 거절한다").
+	//
+	// ★ 거절은 **오류가 아니다** — 비콘을 못 찾은 것과 같은 급이라 그냥 아래 OpenSession 으로
+	// 떨어진다(=오늘 거동). 다만 Debug 로 묻지 않는다: 두 채널이 같은 좌표를 다르게 풀었다는
+	// 것은 **다른 데의 진짜 결함**이고, 이 레포는 그 축이 갈려 한 세션이 카드 3장으로 뜬 일을
+	// 이미 겪었으며 그것이 오래 안 보였다(internal/window/dir.go 머리말).
+	if haveBeacon && !sameWorktree(beacon.Worktree, a.proj.Worktree) {
+		a.log.Warn("비콘의 워크트리가 이 훅의 것과 다르다 — 남의 창으로 보고 수리하지 않는다",
+			"beacon", clip(beacon.Worktree, 200), "hook", clip(a.proj.Worktree, 200))
+		in.Notice = strings.TrimSpace(in.Notice +
+			" 이 창의 비콘이 다른 워크트리(" + clip(beacon.Worktree, 120) + ")를 가리켜 카드 합치기를 건너뛴다 — " +
+			"훅과 MCP 가 좌표를 다르게 풀었다는 뜻이다(fd doctor 가 그 축을 잰다).")
+		// 비콘 자체를 안 믿는다. 아래 SaveIdentity 까지 막는다 —
+		// 남의 트리 비콘에 내 cc·카드를 적으면 그것도 같은 오염이다.
+		haveBeacon = false
+	}
+
 	if haveBeacon && beacon.SessionID != "" && beacon.CCSessionID != cc {
 		if _, rerr := a.Rekey(ctx, beacon.SessionID, cc); rerr != nil {
 			// ★ 삼키고 알린다. 409(이미 남이 쓰는 cc)는 미도달이 아니라 *APIError 로 오므로
@@ -240,6 +266,24 @@ func (a *App) findWindow() (window.Key, window.Beacon, bool) {
 		return window.Key{}, window.Beacon{}, false
 	}
 	return m.Key, m.Beacon, true
+}
+
+// sameWorktree 는 두 워크트리 경로가 같은 트리를 가리키는지다. 순수 함수다.
+//
+// 양쪽 다 이미 정리된 절대경로로 저장된다(훅은 resolveProject 의 filepath.Clean,
+// MCP 는 ResolveIdentity 의 filepath.Clean + canAttribute 의 IsAbs). 그래도 여기서 한 번 더
+// 정리하는 이유는 이 함수가 **거절 판정**이기 때문이다 — 한쪽에 슬래시 하나가 더 붙었다는
+// 이유로 남의 창이라고 읽으면 표류 수리가 조용히 꺼진다.
+//
+// ★ 빈 값은 **같지 않다**로 본다. filepath.Clean("") 은 "." 이라 그냥 Clean 해서 비교하면
+// 양쪽이 다 비었을 때 "." == "." 로 통과한다. 좌표를 못 읽은 둘을 같다고 읽는 순간
+// 이 가드가 하는 일이 없어진다 — 못 읽은 것은 맞은 것이 아니다.
+func sameWorktree(x, y string) bool {
+	x, y = strings.TrimSpace(x), strings.TrimSpace(y)
+	if x == "" || y == "" {
+		return false
+	}
+	return filepath.Clean(x) == filepath.Clean(y)
 }
 
 // pruneWindows 는 죽은 창의 비콘을 치운다.
