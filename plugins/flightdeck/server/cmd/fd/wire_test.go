@@ -155,3 +155,40 @@ func TestEventsAliasIsReachable(t *testing.T) {
 		t.Fatalf("/events 가 %d 를 냈다: %s", ae.Status, ae.Message)
 	}
 }
+
+// 경로 실재 판정이 서버 → JSON → 클라이언트 → 렌더까지 살아 오는지 본다.
+//
+// ★ 이 축을 지키는 시험이 없으면, 어느 계층이 이 필드를 떨어뜨려도 조용하다.
+// 레포에 구조체 필드 왕복을 reflect 로 강제하는 그물이 없다.
+func TestPathCheckSurvivesTheRestRoundTrip(t *testing.T) {
+	h := newHarness(t)
+
+	// ★ open 이 먼저다 — 프로젝트 행을 만드는 것이 이 명령이고, 없으면 add 가 FK 로 죽는다.
+	code, out := h.run("", "open", "--label", "경로축")
+	if code != 0 {
+		t.Fatalf("open 실패(%d): %s", code, out)
+	}
+
+	// 이 프로젝트에 없는 경로를 선언한 항목. 등록된 프로젝트가 이것 하나뿐이라 nowhere 다.
+	// 플래그는 `--path` 다(단수·반복) — `--paths` 가 아니다.
+	code, out = h.run("", "add",
+		"--id", "t-path-rt",
+		"--title", "경로 실재 왕복",
+		"--body", "본문이다",
+		"--path", "internal/nope/gone.go")
+	if code != 0 {
+		t.Fatalf("add 실패(%d): %s", code, out)
+	}
+
+	code, out = h.run("", "next")
+	if code != 0 {
+		t.Fatalf("next 실패(%d): %s", code, out)
+	}
+	mustContain(t, "fd next 출력", out, "경로 실재:", "어느 프로젝트에도 없다")
+
+	code, out = h.run("", "pick", "t-path-rt")
+	if code != 0 {
+		t.Fatalf("pick 실패(%d): %s", code, out)
+	}
+	mustContain(t, "fd pick 출력", out, "경로 실재:")
+}
