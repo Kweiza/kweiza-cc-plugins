@@ -117,6 +117,34 @@ func RenderHealth(h healthzResponse, reachable bool, url string) string {
 	return b.String()
 }
 
+// PrescriptionLine 은 낼 처방 하나다.
+//
+// 태그가 서버 응답(internal/judge.Prescription 의 json 태그)과 맞아야 한다 —
+// 어긋나면 처방이 조용히 빈 목록이 된다. hook_stop_test.go 의 통합 시험이 그 축을 잡는다.
+type PrescriptionLine struct {
+	Key  string `json:"key"`
+	Text string `json:"text"`
+}
+
+// RenderPrescriptions 는 훅 stdout 에 실을 문구다. 순수 함수다.
+//
+// ★ 0건이면 **빈 문자열이다.** 빈 머리글을 매 턴 내면 컨텍스트를 먹고,
+// 그러면 세션이 이 채널 자체를 읽지 않게 된다 — 설계 §4 가 고발한 상시 점등의 다른 얼굴이다.
+func RenderPrescriptions(shown []PrescriptionLine, folded int) string {
+	if len(shown) == 0 && folded == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "flightdeck 처방 %d건 — 지금 남기지 않으면 남의 화면에 안 뜬다\n", len(shown)+folded)
+	for _, p := range shown {
+		fmt.Fprintf(&b, "  %s\n", strings.ReplaceAll(p.Text, "\n", "\n  "))
+	}
+	if folded > 0 {
+		fmt.Fprintf(&b, "  … %d건을 접었다. 접힌 것도 이미 발화된 것이라 다시 안 뜬다\n", folded)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func firstLine(title, body string) string {
 	if t := strings.TrimSpace(title); t != "" {
 		return t
