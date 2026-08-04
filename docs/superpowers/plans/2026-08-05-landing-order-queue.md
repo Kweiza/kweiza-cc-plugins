@@ -288,6 +288,22 @@ git commit -am "feat(flightdeck): 랜딩 줄 행의 모델과 오류 좌표"
 - Modify: `internal/store/resource.go` — `ListHeld` 본문을 `listHeld(ctx, q dbtx, project)` 자유 함수로 빼고 `Store.ListHeld`/**신규 `Tx.ListHeld`** 가 그것을 부른다. **신규 `Tx.HeldBy`** 는 기존 자유 함수 `heldBy`(:146) 위임 3줄.
 - Modify: `internal/store/session.go` — `Signals`(:429) 뒤에 `LastSignal` 추가
 
+**Step 0 (Task 2 리뷰가 잡은 자리): 003 증분의 CHECK 에 값 열거를 더한다.**
+
+지금 `003_landing_queue.sql` 의 CHECK 는 `ok`·`finish` 를 **사유 면제 대상으로만** 특별 취급하고, `left_kind` 가 다섯 값 중 하나인지는 **아무것도 안 막는다.** `left_kind='bogus'` 가 그대로 들어간다. 이 레포는 `job.fail_kind` 를 값 열거 CHECK 로 잡는 선례가 있고, "판정을 애플리케이션이 아니라 DB 제약으로 둔다"가 `resource.go:78-81` 의 규율이다.
+
+증분이 **아직 랜딩 안 됐으므로 003 을 직접 고친다**(004 를 새로 만들지 마라 — 안 나간 증분을 쪼개면 이력만 는다). 표 정의에 CHECK 를 하나 더한다:
+
+```sql
+  -- ★ 종류는 다섯뿐이다. Go 쪽 ValidateLandingLeave 가 1차 방어이고 이것이 최종 방어다 —
+  --   판정을 애플리케이션에만 두면 우회할 코드가 언제든 생긴다(resource.go:78-81 규율).
+  --   job.fail_kind 가 같은 모양으로 값을 열거한다.
+  CHECK (left_kind IS NULL
+         OR left_kind IN ('ok','fail','leave','finish','force'))
+```
+
+시험은 매번 새 DB 를 만들므로 영향이 없다. 손으로 띄운 서버의 DB 가 이미 003 을 적용했다면 `schema_version` 이 3 이라 다시 안 도니 그 파일을 지우고 다시 만들어라.
+
 **왜 `Tx.ListHeld`/`Tx.HeldBy` 가 필요한가:** `finish` 의 holds 읽기를 트랜잭션 안으로 옮기는 것과 `ReleaseLaneRow` 의 "점유가 있을 때만 회수" 판정을 트랜잭션 안에 두는 데 필요하다. 밖에서 판정하면 그 사이에 남이 잡아 **남의 점유를 반납한다.**
 
 **Interfaces:**
