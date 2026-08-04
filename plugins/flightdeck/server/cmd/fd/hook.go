@@ -228,8 +228,14 @@ func (a *App) hookUserPrompt(ctx context.Context, p HookPayload, out io.Writer) 
 }
 
 // hookPostTool 은 tool 신호와 **미커밋 발자국**을 남긴다.
+//
+// ★ 보내기 전에 git 이 무시하는 경로를 뺀다. 안 빼면 스크래치가 발자국이 되고, 그러면
+// 표류 처방이 그것을 근거로 헛발화하고 두 세션이 각자 워크트리에서 같은 이름의 스크래치를
+// 쓸 때 **물리적으로 충돌할 수 없는 것**에 겹침이 뜬다(DropIgnoredPaths 주석 참조).
+// 여기서 거르는 이유는 좌표계다 — 무시 여부는 그 경로가 든 트리만 답할 수 있고,
+// 그 트리를 아는 것은 서버가 아니라 이 프로세스다.
 func (a *App) hookPostTool(ctx context.Context, p HookPayload) {
-	a.beatFromHook(ctx, p, model.SignalTool, EditedPaths(p.ToolInput))
+	a.beatFromHook(ctx, p, model.SignalTool, DropIgnoredPaths(a.log, EditedPaths(p.ToolInput)))
 }
 
 // hookPreCompact 는 압축 직전에 초안 판단을 남긴다.
