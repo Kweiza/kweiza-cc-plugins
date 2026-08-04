@@ -35,18 +35,30 @@ type CoordinateTwin struct {
 
 // DriftedTwins 는 표류한 쌍둥이를 찾는다. 순수 함수다.
 //
+// mine 이 Identity 가 아니라 LiveIdentity 인 것이 요점이다 — 기준점은 **이 프로세스가
+// 관측한 정체**가 아니라 **실제로 연 카드**여야 한다. 그 둘은 이 기능이 도는 동안 정상적으로
+// 갈린다(ensureSession 이 비콘의 cc 로 여는 것이 이 기능의 본체다).
+//
 // ★ 축을 (machine, worktree) 로 **고정**하고 cc 만 본다. 워크트리가 다르면 카드가 둘인 것이
 // 옳으므로(워크트리로 일하는 것이 이 제품의 정상 흐름이다) 그것까지 표류로 부르면
 // 경고가 상시가 되고, 상시 경고는 읽히지 않는다.
 //
+// ★★ **자기 카드는 session id 로도 뺀다.** cc 축만으로 빼면 자기 자신이 쌍둥이로 잡힌다:
+// mine.CCSessionID 는 카드를 연 시점의 값인데, 그 뒤 /clear 가 한 번 더 오면 훅이 같은
+// 카드의 cc 를 또 바꾼다. 그러면 같은 id 의 카드가 "다른 cc" 로 보인다. id 는 rekey 를
+// 건너 보존되므로(설계 제약 ⑥) 그 축만이 안정적이다.
+//
 // ★ 어느 한쪽 cc 가 비면 세지 않는다. 빈 값을 "다르다"로 접으면 정체가 반쪽인 세션 하나가
 // 살아 있는 세션 전부를 표류로 고발한다.
-func DriftedTwins(mine Identity, live []LiveIdentity) []CoordinateTwin {
+func DriftedTwins(mine LiveIdentity, live []LiveIdentity) []CoordinateTwin {
 	if mine.CCSessionID == "" || mine.MachineID == "" || mine.Worktree == "" {
 		return nil
 	}
 	var out []CoordinateTwin
 	for _, l := range live {
+		if mine.SessionID != "" && l.SessionID == mine.SessionID {
+			continue
+		}
 		if l.CCSessionID == "" || l.CCSessionID == mine.CCSessionID {
 			continue
 		}
@@ -66,19 +78,27 @@ func DriftedTwins(mine Identity, live []LiveIdentity) []CoordinateTwin {
 // 밟아 이 MCP 프로세스의 비콘을 찾고 카드를 rekey 한다. 그래도 여기 문구가 뜬다면 그 수리가
 // 어딘가에서 멈춘 것이고, 그 자리를 이름으로 말하지 않으면 사람이 원인에 도달할 길이 없다 —
 // "재기동해라"는 더 이상 맞는 조언이 아니다(재기동 없이도 다음 SessionStart 에 고쳐진다).
+//
+// ★★ **맺음말이 합쳐진다고 단정하지 않는다.** 자기 카드를 id 로 뺀 뒤(DriftedTwins)
+// 여기 남는 것은 둘 중 하나다: 같은 워크트리에 열린 **다른 창**(claude 부모가 다른 별개
+// 대화 — 이 머신에 다섯이 있다, 설계 개정 ③)이거나, 진짜로 멈춘 수리다. 전자에게는
+// 수리가 영영 안 오고 **안 오는 것이 옳다.** 단정형은 그 경우에 오지 않을 약속을 하고,
+// 그 약속을 믿고 기다리면 "왜 아직 두 장이냐"에 아무도 답을 못 한다.
+// 그래서 두 갈래를 그대로 말하고, 어느 쪽인지는 사람이 가른다 — 이 함수는 못 가른다.
 func RenderDrift(twins []CoordinateTwin, mineCC, why string) string {
 	if len(twins) == 0 {
 		return ""
 	}
 	s := "⚠ 이 워크트리에 cc_session_id 가 갈린 세션이 " +
 		itoa(len(twins)) + "건 더 있다 — 카드가 여러 장인 이유가 이것이다.\n" +
-		"  이 MCP 프로세스가 든 값: " + clip(mineCC, 64) + " (기동 시 주입된 뒤 안 바뀐다)\n"
+		"  이 MCP 프로세스가 카드를 연 값: " + clip(mineCC, 64) + "\n"
 	for _, t := range twins {
 		s += "  갈린 카드: " + clip(t.SessionID, 64) + " · cc=" + clip(t.CCSessionID, 64) + "\n"
 	}
-	s += "  훅이 다음 SessionStart 에 이것을 합친다."
+	s += "  같은 창의 카드라면 훅이 다음 SessionStart 에 합친다. " +
+		"같은 워크트리에 열린 **다른 창**이라면 안 합쳐진다 — 그쪽이 맞다."
 	if strings.TrimSpace(why) != "" {
-		s += " 이번에 못 합친 사유: " + clip(why, 200)
+		s += " 이 프로세스가 아는 사유: " + clip(why, 200)
 	}
 	return s
 }
