@@ -296,3 +296,95 @@ func TestPickSurfacesMissingDependencyInsteadOfCallingItWaiting(t *testing.T) {
 		t.Fatalf("탈락 사유가 %s 여야 한다: %+v", judge.AfterUnknown, res.Rejected)
 	}
 }
+
+// TestPickCountsTheQueueAfterTheClaimNotBefore 는 이 설계에서 가장 쉽게 틀리는 자리다.
+//
+// 진입부에서 세면 방금 집은 항목이 아직 state='open' 이라 카운트에 들어간다
+// (ClaimItem 이 open→claimed 로 옮긴다). 그러면 pick 응답이 board 보다 정확히 1 크고,
+// 같은 응답의 항목 블록은 [claimed] 라고 찍혀 있다 — 한 화면이 자기를 반박한다.
+func TestPickCountsTheQueueAfterTheClaimNotBefore(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	if got.Mode != PickClaimed {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickClaimed)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다 — nil 은 '이 응답에 없다'는 뜻이고 선점 경로에는 있어야 한다")
+	}
+	if *got.QueueOpen != 2 {
+		t.Fatalf("큐 열림 %d건 (기대 2) — 방금 집은 a 를 아직 열림으로 세고 있다", *got.QueueOpen)
+	}
+}
+
+// TestPickResumeReportsTheSameQueueSizeAsTheClaim 은 재개가 **재출력**임을 단정한다.
+//
+// pick.go 는 재개 경로가 "아무것도 쓰지 않는다"고 못박아 뒀다. 재출력이 원본과 다른 수를
+// 내면 그건 재출력이 아니고, 이 경로에 오는 세션은 정의상 앞 응답의 기억이 없어서
+// 그 차이를 "큐가 하나 줄었다"로 읽는다 — 아무도 아무것도 안 끝냈는데.
+func TestPickResumeReportsTheSameQueueSizeAsTheClaim(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	first, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	again, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if again.Mode != PickResumed {
+		t.Fatalf("mode = %s, 기대 %s", again.Mode, PickResumed)
+	}
+	if first.QueueOpen == nil || again.QueueOpen == nil {
+		t.Fatalf("큐 열림 수가 안 실렸다: 선점 %v, 재개 %v", first.QueueOpen, again.QueueOpen)
+	}
+	if *first.QueueOpen != *again.QueueOpen {
+		t.Fatalf("선점 %d건 → 재개 %d건 — 그 사이에 add 도 finish 도 없었다",
+			*first.QueueOpen, *again.QueueOpen)
+	}
+}
+
+// TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine 은
+// 추천 응답의 두 줄이 **같은 관측**에서 나왔음을 단정한다.
+//
+// 진입부에서 따로 세면 그 사이에 sessionCards(이 서버에서 가장 비싼 함수)가 끼어들어
+// 인접한 두 줄이 다른 수를 찍을 수 있다. candidates() 가 쥔 값을 그대로 쓰면 구조적으로 못 갈린다.
+func TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if got.Mode != PickRecommended {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickRecommended)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다")
+	}
+	if *got.QueueOpen != 3 {
+		t.Fatalf("큐 열림 %d건 (기대 3) — 추천은 선점하지 않으므로 셋 다 열림이다", *got.QueueOpen)
+	}
+	if !strings.Contains(got.Scope, "열린 항목 3건") {
+		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
+	}
+}

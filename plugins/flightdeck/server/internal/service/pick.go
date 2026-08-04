@@ -50,6 +50,15 @@ type PickResult struct {
 	Branch   string            `json:"branch,omitempty"`   // 항목 id 가 곧 브랜치 이름이다(전역 유일)
 	Setup    []string          `json:"setup,omitempty"`    // 워크트리 준비 명령
 	Scope    string            `json:"scope"`              // 무엇을 후보로 봤나 — 안 본 것을 침묵하지 않는다
+	// QueueOpen 은 **남은** 열린 항목 수다(이 호출이 집은 것을 뺀 값).
+	//
+	// ★ 포인터인 이유가 둘이다.
+	//  1. 서버는 독립 컨테이너인데 플러그인은 자동 갱신된다. 구서버 + 신 클라이언트면
+	//     이 키가 응답에 없고, 값 타입이면 0 으로 접혀 **신선한 온라인 응답이
+	//     "큐 열림 0건" 을 단정한다**. SkewBanner 는 api_version 문자열만 보므로 안 뜬다.
+	//  2. 오프라인 캐시에는 스키마 버전축이 없다 — 이 필드가 생기기 전에 굳은 next 응답이
+	//     그대로 재생된다. nil 이면 "이 응답은 그 축을 안 낸다"로 정확히 읽힌다.
+	QueueOpen *int `json:"queue_open,omitempty"`
 	Derived
 }
 
@@ -152,10 +161,47 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 	}
 	live := liveFor(cards)
 
+	var res PickResult
 	if strings.TrimSpace(in.ItemID) != "" {
-		return s.pickExplicit(ctx, proj, in, live, d, now)
+		res, err = s.pickExplicit(ctx, proj, in, live, d, now)
+	} else {
+		res, err = s.pickRecommend(ctx, proj, in, live, d, now)
 	}
-	return s.pickRecommend(ctx, proj, in, live, d, now)
+	if err != nil {
+		return PickResult{}, err
+	}
+	// ★ 큐 규모는 **선점 쓰기가 끝난 뒤에** 센다.
+	//
+	// 먼저 세면 claimed 응답의 수에 방금 집은 항목이 들어간다(ClaimItem 이 open→claimed
+	// 로 옮긴다). 그러면 같은 응답이 항목을 [claimed] 로 찍어 놓고 두 줄 밑에서 열림으로
+	// 세고, 쓰기가 없는 재개 경로는 같은 세계에 대해 1 작은 수를 낸다 — 재출력이 원본과
+	// 다른 수를 내면 그건 재출력이 아니다.
+	//
+	// 각주로는 못 덮는다: JudgeClaim 의 "상태가 claimed 인데 점유자가 없다" 갈래로 들어온
+	// 선점은 항목이 애초에 open 이 아니라 오프셋이 0 이다. 고정 각주는 그 절반에서 거짓말이 된다.
+	s.fillQueueOpen(ctx, proj.ID, &res)
+	return res, nil
+}
+
+// fillQueueOpen 은 응답에 남은 큐 열림 수를 싣는다.
+//
+// **실패해도 pick 을 실패시키지 않는다.** 표시용 숫자 하나 때문에 선점을 잃는 것이
+// 더 나쁘고, nil 은 렌더가 "이 응답에 없다"로 정확히 말한다.
+//
+// derive(d.note/d.fail)에 넣지 않는다 — FreshnessOf 가 failures>0 을 **git 축** Stale 로
+// 접기 때문에, DB 카운트 한 번이 실패했을 뿐인데 세션이 브랜치·HEAD·조상 판정이
+// 낡았다고 읽게 된다.
+func (s *Service) fillQueueOpen(ctx context.Context, project string, res *PickResult) {
+	if res.QueueOpen != nil {
+		return // 추천 경로가 candidates() 의 관측을 이미 실었다. 같은 사실을 두 번 세지 않는다
+	}
+	n, err := s.st.CountOpen(ctx, project)
+	if err != nil {
+		s.log.WarnContext(ctx, "큐 열림 수 조회 실패",
+			"project", clip(project, 64), "error", err.Error())
+		return
+	}
+	res.QueueOpen = &n
 }
 
 // pickExplicit 은 지정된 항목을 선점한다(또는 재개 맥락을 낸다).
@@ -250,7 +296,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in PickInput,
 	live []judge.LiveSession, d *derive, now time.Time) (PickResult, error) {
 
-	cands, scope, err := s.candidates(ctx, proj, live)
+	cands, scope, openCount, err := s.candidates(ctx, proj, live)
 	if err != nil {
 		return PickResult{}, err
 	}
@@ -264,7 +310,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 		Self: in.SessionID, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
 	})
 
-	res := PickResult{Rejected: rejected, Scope: scope}
+	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
 	eval := model.PickEval{Project: proj.ID, SessionID: in.SessionID, Rejected: rejected}
 	if picked != nil {
 		eval.Picked = picked.Item.ID
@@ -317,10 +363,10 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 // ★ 살아 있지 않은 세션이 쥔 항목은 여기 안 들어온다(저장 계층에 전 항목 열거가 없다).
 // 그 사실을 Scope 문장으로 낸다 — 안 본 것을 침묵하면 "겹침 없음"과 "이 축을 안 본다"가
 // 구분되지 않는 것과 똑같은 실패가 후보 집합에서 재현된다.
-func (s *Service) candidates(ctx context.Context, proj model.Project, live []judge.LiveSession) ([]judge.Candidate, string, error) {
+func (s *Service) candidates(ctx context.Context, proj model.Project, live []judge.LiveSession) ([]judge.Candidate, string, int, error) {
 	open, err := s.st.ListOpen(ctx, proj.ID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	items := make([]model.Item, 0, len(open))
 	seen := map[string]bool{}
@@ -333,7 +379,7 @@ func (s *Service) candidates(ctx context.Context, proj model.Project, live []jud
 	for _, l := range live {
 		ids, err := s.st.ClaimedItems(ctx, l.ID)
 		if err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		for _, id := range ids {
 			if seen[id] {
@@ -344,7 +390,7 @@ func (s *Service) candidates(ctx context.Context, proj model.Project, live []jud
 				continue // 다른 프로젝트의 선점이다
 			}
 			if err != nil {
-				return nil, "", err
+				return nil, "", 0, err
 			}
 			seen[id] = true
 			items = append(items, it)
@@ -359,10 +405,10 @@ func (s *Service) candidates(ctx context.Context, proj model.Project, live []jud
 		if cl, err := s.st.GetClaim(ctx, proj.ID, it.ID); err == nil && cl.ReleasedAt == nil {
 			c.ClaimedBy = cl.SessionID
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		if c.Dependents, err = s.st.Dependents(ctx, proj.ID, it.ID); err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		// Needs 는 .flightdeck.yaml 의 resources 에서 온다. Tier A 에는 그 파일을 읽는
 		// 코드가 없으므로 **비어 있다** — 지어내지 않는다. 자원 축은 그때 살아난다.
@@ -370,7 +416,10 @@ func (s *Service) candidates(ctx context.Context, proj model.Project, live []jud
 	}
 	scope := fmt.Sprintf("후보 = 열린 항목 %d건 + 살아 있는 세션이 쥔 항목 %d건. "+
 		"살아 있지 않은 세션이 쥔 항목은 후보에 없다", len(open), claimedCount)
-	return cands, scope, nil
+	// ★ len(open) 을 scope 문자열과 **같은 자리에서** 낸다. 호출부가 따로 세면 그 사이에
+	// sessionCards 가 끼어들어 인접한 두 줄이 다른 수를 찍을 수 있고, 나중에 이 함수의
+	// 술어가 바뀌면 두 줄이 영구히 갈린다.
+	return cands, scope, len(open), nil
 }
 
 // afterFacts 는 선행 조건 판정에 필요한 **사실**을 모은다. 판정은 judge 가 한다.
