@@ -156,8 +156,15 @@ func JudgePathCoordinate(p string) CoordinateVerdict {
 		return CoordinateVerdict{OK: true,
 			Reason: "빈 경로다 — 좌표계 축은 통과시킨다(호출부가 따로 다룬다)"}
 	case isWindowsDriveAbs(q):
+		// ★ 백슬래시 분기와 같은 이유로 여기도 막는 것을 소리 내어 말한다 — "C:/repo/x.go" 는
+		// "C:" 라는 이름의 디렉토리 아래의 합법 POSIX 상대경로**일 수도** 있다. 문자열만으로는
+		// 그것과 Windows 드라이브 절대경로를 가를 규칙이 없으므로(§3.2 와 같은 사정),
+		// 정말 그런 상대경로라도 이 도구는 지원하지 않는다는 것을 사유에 명시한다.
 		return CoordinateVerdict{Reason: fmt.Sprintf(
-			"%q 는 Windows 드라이브 절대경로다. %s", clipPath(q), coordinateGuidance)}
+			"%q 는 Windows 드라이브 절대경로다. %s. "+
+				"%q 라는 이름의 디렉토리 아래의 POSIX 상대경로일 수도 있지만, "+
+				"그런 경로라도 이 도구는 지원하지 않는다 — 드라이브 절대경로와 문자열만으로 못 가른다",
+			clipPath(q), coordinateGuidance, string(q[0])+":")}
 	case strings.HasPrefix(q, `\\`):
 		return CoordinateVerdict{Reason: fmt.Sprintf(
 			"%q 는 Windows UNC 경로다. %s", clipPath(q), coordinateGuidance)}
@@ -175,6 +182,14 @@ func JudgePathCoordinate(p string) CoordinateVerdict {
 //
 // 구분자까지 함께 보는 이유는 "a:b" 같은 정상 POSIX 파일명을 드라이브로 오인하지 않기
 // 위해서다 — 콜론은 POSIX 파일명에 합법이다.
+//
+// ★ 드라이브 상대 경로("C:foo/bar.txt" — 콜론 뒤에 구분자가 없는 형태)는 **알면서
+// 통과시킨다.** 문자열만으로는 그것과 "C:" 라는 디렉토리 아래의 POSIX 상대경로를 가를
+// 규칙이 없다 — 위 세 분기 어느 것에도 안 걸린다. 느슨하게(콜론만 보고) 잡으면 §3.2 가
+// 기각한 것과 같은 종류의 오탐이 돌아온다: `TestJudgePathCoordinate` 의
+// "콜론이 있어도 드라이브가 아니면"(`a:b`, 통과)이 그 기각을 못박고 있다. 여기 주석은
+// `a:b` 만 정당화했었는데, 드라이브 상대 형태도 같은 이유로 의도적으로 통과한다는 것을
+// 남긴다 — 안 남으면 다음 사람이 이것을 버그로 보고 오탐으로 "고친다".
 func isWindowsDriveAbs(p string) bool {
 	if len(p) < 3 || p[1] != ':' {
 		return false
