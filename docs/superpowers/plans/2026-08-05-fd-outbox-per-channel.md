@@ -2,49 +2,56 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 아웃박스와 격리 파일을 채널 무관한 고정 자리(`~/.flightdeck/outbox`)로 옮기고, 옛 채널별 자리에 남은 줄을 원자적 청구로 흡수한다.
+**Goal:** 새 판단은 채널 무관한 고정 자리(`~/.flightdeck/outbox`)에 쌓고, 옛 채널별 자리에 남은 큐는 **옮기지 말고 재생이 함께 돌려 전송으로 비운다.**
 
-**Architecture:** `env.go` 에 `OutboxPath`·`LegacyOutboxDirs` 순수 함수를 두고(`MachineIDPath`·`ConfigPath` 와 같은 규칙의 셋째 적용), `Outbox` 가 `path` 대신 `dir` 을 들게 바꾼다. 흡수는 `os.Rename` 청구로 원자화해 `Replay` 맨 앞에서 돈다. `fd doctor` 는 자리·잔량·**못 보는 범위**를 함께 찍는다.
+**Architecture:** `env.go` 에 `OutboxPath`·`LegacyOutboxDirs` 순수 함수를 둔다(`MachineIDPath`·`ConfigPath` 와 같은 규칙의 셋째 적용). `Outbox` 는 `path` 대신 `dir` 을 들고, 옛 자리마다 같은 타입의 값을 하나씩 만들어 **기존 `Replay` 를 그대로** 돌린다. 새 기구가 없다 — 청구·고아·보존본이라는 개념 자체가 없다.
 
-**Tech Stack:** Go 1.x, 표준 라이브러리만. 시험은 `go test ./... -race`.
+**Tech Stack:** Go, 표준 라이브러리만. 시험은 `go test ./... -race`.
+
+> **⚠ 이 계획은 2판이다.** 1판은 옛 자리 파일을 `os.Rename` 으로 "청구"해 고정 자리로 흡수하려 했고, 그 설계가 적대적 검토에서 **반증됐다**(재현: `-race -count=50` 중 28회 실패). 무엇이 왜 틀렸는지는 스펙 §4 의 "왜 옮기지 않기로 했나"에 있다. **읽고 시작해라** — 안 읽으면 "왜 이렇게 안 하고 저렇게 했나"를 다시 묻게 되고, 최악은 청구를 되살리러 간다.
 
 ## Global Constraints
 
 - **모듈 루트**: `plugins/flightdeck/server`. 모든 `go` 명령은 이 디렉토리에서 돈다.
 - **작업 트리**: `/home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-outbox-per-channel` (브랜치 `fd-outbox-per-channel`).
-- **`cmd/fd` 비시험 코드에 `sync`·`atomic` 을 새로 들이지 않는다.** `client.go:67-83` 이 "한 번에 한 호출" 전제를 명시했고 `internal/mcpsrv` 의 `TestServeNeverOverlapsBackend` 가 그것을 지킨다. 이 작업의 동시성 안전은 **잠금이 아니라 `os.Rename` 의 원자성**으로 얻는다.
-- **판정은 순수 함수로 빼고 환경 조회를 인자로 받는다**(`env.go:16-18` 의 규율). `os.Getenv` 를 본문에 박지 않는다.
-- **조용히 버리는 것이 하나도 없어야 한다**(설계 §9). 흡수한 원본은 지우지 않고 `.migrated-*` 로 남긴다.
+- **`cmd/fd` 비시험 코드에 `sync`·`atomic` 을 새로 들이지 않는다.** `client.go:67-83` 이 "한 번에 한 호출" 전제를 명시했고 `internal/mcpsrv` 의 `TestServeNeverOverlapsBackend` 가 지킨다.
+- **`server/internal/` 은 하나도 안 만진다.** 겹치는 세션들에 그렇게 알렸다.
+- **판정은 순수 함수로 빼고 환경 조회를 인자로 받는다**(`env.go:16-18`). `os.Getenv` 를 본문에 박지 않는다.
+- **조용히 버리는 것이 하나도 없어야 한다**(설계 §9).
 - **주석은 "무엇을"이 아니라 "왜 그렇게 정했나"를 적는다.** 이 레포는 주석이 판단의 저장소다.
 - 매 과제 끝에 커밋한다. 검증은 `go build ./... && go vet ./... && gofmt -l . && go test ./... -race`.
+  **`go build ./...` 는 `_test.go` 를 안 본다** — 시험 컴파일 오류는 `go vet` 이나 `go test` 에서만 난다.
 
 ## 파일 구조
 
 | 파일 | 책임 | 변경 |
 |---|---|---|
-| `cmd/fd/env.go` | 좌표 판정(순수 함수) | `OutboxPath`·`LegacyOutboxDirs` 추가. `StateDir` 주석 정정 |
-| `cmd/fd/outbox.go` | 대기열·격리·재생·흡수 | `Outbox.path` → `dir`. `adopt`·`claimAndDrain`·`LegacyLeftovers` 추가 |
-| `cmd/fd/client.go` | 조립 | `newOutbox(sd)` → `newOutbox(get, home)` |
+| `cmd/fd/env.go` | 좌표 판정(순수 함수) | `OutboxPath`·`LegacyOutboxDirs` 추가. `StateDir`·`MachineIDPath` 주석 정정 |
+| `cmd/fd/outbox.go` | 대기열·격리·재생 | `Outbox.path` → `dir`. `Dir`·`Source`·`LegacyLeftovers` 추가. **재생 로직은 안 바꾼다** |
+| `cmd/fd/client.go` | 조립·재생 구동 | `newOutbox(get,home)` · `Legacy []*Outbox` · `Flush` 가 큐 전부를 돌고 침묵을 막는다 |
 | `cmd/fd/config.go` | 설정 자리 | 반증된 주석 정정만 |
 | `cmd/fd/cmds.go` | `runDoctor` | 자리·잔량·사각 출력 |
-| `cmd/fd/harness_test.go` | 시험 하네스 | **`HOME` 을 기본 env 에 고정**(과제 1) |
-| `cmd/fd/outbox_adopt_test.go` | **새 파일** — 흡수 시험 전부 | 신규 |
+| `cmd/fd/harness_test.go` | 시험 하네스 | `HOME` 을 기본 env 에 고정(과제 1) |
+| `cmd/fd/hook_stop_test.go` | 훅 시험 | 손으로 만든 env 에 `HOME` 추가(과제 1) |
+| `cmd/fd/degrade_test.go` | 열화 시험 | `newOutbox` 호출부 2곳(과제 4) |
+| `cmd/fd/degrade_path_test.go` | 열화 경로 시험 | `newOutbox` 호출부 4곳 + `sd.sub("outbox")` 좌표계 + 아웃박스 단정 |
+| `cmd/fd/outbox_legacy_test.go` | **새 파일** — 옛 자리 재생 시험 | 신규 |
 | `cmd/fd/env_test.go` | 좌표 시험 | 채널 무관 시험 추가 |
 | `cmd/fd/outbox_stuck_test.go` | 재생 시험 | `mkOutbox` 를 `dir` 기반으로 |
-| `cmd/fd/degrade_path_test.go` | 열화 경로 통합 시험 | 아웃박스 단정만 고정 자리로 |
-| `DESIGN.md` | 설계 | §7 의 398행 한 줄 |
+| `DESIGN.md` | 설계 | §7 의 398행 |
 
 ---
 
 ### Task 1: 하네스가 진짜 홈에 쓰는 구멍을 먼저 막는다
 
-**왜 이것이 첫 과제인가.** `LegacyOutboxDirs` 는 `~/.local/state/flightdeck/outbox` 를 훑고 `adopt` 는 거기 있는 것을 **옮긴다.** 하네스 기본 환경(`harness_test.go:71-77`)에는 `HOME` 이 없고, `homeDir` 은 주입된 HOME 이 없으면 `os.UserHomeDir()`(프로세스 환경)로 떨어진다. 이 구멍을 안 막고 뒤 과제를 하면 **시험이 개발자의 진짜 아웃박스를 임시 디렉토리로 옮겨 버린다.**
+**왜 첫 과제인가.** `LegacyOutboxDirs` 는 `~/.local/state/flightdeck/outbox` 를 후보로 내고 재생이 **거기 있는 것을 서버로 보낸다.** 하네스 기본 env(`harness_test.go:71-77`)에는 `HOME` 이 없고 `homeDir` 은 주입된 HOME 이 없으면 `os.UserHomeDir()`(프로세스 환경)로 떨어진다. 안 막으면 **시험이 개발자의 진짜 판단을 시험 서버로 보내고 큐를 비운다.**
 
-이것은 추측이 아니다. 실측(2026-08-05): `HOME=<임시>` 로 `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 를 돌리면 `<임시>/.flightdeck/machine-id` 가 **생성된다.** 그 시험이 `unpinnedEnv` 대신 손으로 env 를 만들어 `TestUnpinnedEnvNeverReachesTheRealHome` 의 감시를 우회하기 때문이다 — `runEnv` 의 주석(`harness_test.go:221-222`)이 정확히 그 위험을 경고해 뒀는데 이 시험이 그것을 어긴 상태다.
+추측이 아니다. 실측(2026-08-05): `HOME=<임시>` 로 `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 를 돌리면 `<임시>/.flightdeck/machine-id` 가 **생성된다.** 그 시험이 `unpinnedEnv` 대신 손으로 env 를 만들어 `TestUnpinnedEnvNeverReachesTheRealHome` 의 감시를 우회하기 때문이다 — `runEnv` 주석(`harness_test.go:221-222`)이 정확히 그 위험을 경고해 뒀다.
 
 **Files:**
-- Modify: `plugins/flightdeck/server/cmd/fd/harness_test.go:71-77`
+- Modify: `plugins/flightdeck/server/cmd/fd/harness_test.go:71-78`
 - Modify: `plugins/flightdeck/server/cmd/fd/degrade_path_test.go:350-358`
+- Modify: `plugins/flightdeck/server/cmd/fd/hook_stop_test.go:45-56`
 - Test: `plugins/flightdeck/server/cmd/fd/harness_env_test.go` (추가)
 
 **Interfaces:**
@@ -58,38 +65,31 @@
 ```go
 // 하네스 기본 환경이 HOME 을 고정하는지.
 //
-// ★ 왜 이 축이 생겼나. 아웃박스 흡수(Outbox.adopt)가 옛 채널 자리
-// ~/.local/state/flightdeck/outbox 를 훑고 거기 있는 줄을 **옮긴다.** 그래서 HOME 이
-// 안 고정되면 시험이 개발자의 진짜 판단을 임시 디렉토리로 옮겨 버린다 —
-// 사각이 아니라 사고다.
+// ★ 왜 이 축이 생겼나. 옛 채널 자리 재생(Client.Flush)이 ~/.local/state/flightdeck/outbox 를
+// 후보로 삼아 **거기 있는 판단을 서버로 보내고 큐를 비운다.** HOME 이 안 고정되면
+// 시험이 개발자의 진짜 판단을 시험 서버로 보낸다 — 사각이 아니라 사고다.
 //
 // TestUnpinnedEnvNeverReachesTheRealHome 은 unpinnedEnv 갈래만 지킨다. 그런데
-// degrade_path_test.go 가 손으로 env 를 만들어 그 감시를 우회한 전례가 있다
-// (실측 2026-08-05: HOME=<임시> 로 돌리면 <임시>/.flightdeck/machine-id 가 생겼다).
+// degrade_path_test.go 와 hook_stop_test.go 가 손으로 env 를 만들어 그 감시를 우회한
+// 전례가 있다(실측 2026-08-05: HOME=<임시> 로 돌리면 <임시>/.flightdeck/machine-id 가 생겼다).
 // 그래서 **기본 env 자체**를 단정한다.
-func TestHarnessPinsHomeSoAdoptNeverReachesTheRealHome(t *testing.T) {
+func TestHarnessPinsHomeSoLegacyReplayNeverReachesTheRealHome(t *testing.T) {
 	h := newHarness(t)
 	if got := h.env["HOME"]; got != h.home {
 		t.Fatalf("하네스 기본 환경의 HOME 이 %q 다 — 가짜 홈 %q 여야 한다.\n"+
-			"안 고정하면 아웃박스 흡수가 개발자의 진짜 ~/.local/state 를 훑어 옮긴다", got, h.home)
-	}
-	// 값만 보면 부족하다 — 실제로 위험한 것은 **합성 결과**이므로 그것을 계산해 단정한다.
-	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
-	if !strings.HasPrefix(filepath.Clean(dir), filepath.Clean(h.home)) &&
-		!strings.HasPrefix(filepath.Clean(dir), filepath.Clean(h.state)) {
-		t.Errorf("아웃박스 자리가 하네스 밖이다: %s", dir)
+			"안 고정하면 옛 자리 재생이 개발자의 진짜 ~/.local/state 를 비운다", got, h.home)
 	}
 }
 ```
 
 - [ ] **Step 2: 실패를 확인한다**
 
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run TestHarnessPinsHomeSoAdoptNeverReachesTheRealHome -count=1`
-Expected: FAIL — `OutboxPath` 가 아직 없어 **컴파일 오류**(`undefined: OutboxPath`). 그것이 이 시점의 정상이다. `OutboxPath` 를 쓰는 두 줄을 잠시 주석 처리하고 돌리면 `HOME 이 "" 다` 로 빨강이 나야 한다 — 확인 후 주석을 되돌린다.
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run TestHarnessPinsHome -count=1`
+Expected: FAIL — `하네스 기본 환경의 HOME 이 "" 다`
 
 - [ ] **Step 3: 하네스에 HOME 을 고정한다**
 
-`harness_test.go:71-77` 을 이렇게 바꾼다:
+`harness_test.go` 의 `hs.env = map[string]string{...}` 블록(71-77행)을 이것으로 바꾸고, 바로 뒤에 디렉토리 생성을 넣는다:
 
 ```go
 	hs.env = map[string]string{
@@ -99,26 +99,27 @@ Expected: FAIL — `OutboxPath` 가 아직 없어 **컴파일 오류**(`undefine
 		"FD_LOG":                 "error",
 		"CLAUDE_CODE_SESSION_ID": "cc-session-uuid-1",
 		// ★ HOME 을 **기본 env 에서** 고정한다. FD_STATE_DIR 만으로는 부족하다 —
-		// Outbox.adopt 가 옛 채널 자리(~/.local/state/flightdeck/outbox)를 훑어
-		// 거기 있는 줄을 옮기므로, HOME 이 안 잡히면 homeDir 이 os.UserHomeDir()
-		// (프로세스 환경, 시험이 못 바꾼다)로 떨어져 **개발자의 진짜 판단을 옮긴다.**
+		// 옛 채널 자리 재생이 ~/.local/state/flightdeck/outbox 를 후보로 삼아 거기 있는
+		// 판단을 **보내고 큐를 비우므로**, HOME 이 안 잡히면 homeDir 이 os.UserHomeDir()
+		// (프로세스 환경, 시험이 못 바꾼다)로 떨어져 개발자의 진짜 판단을 보낸다.
 		// unpinnedEnv 는 이 값을 그대로 물려받고 FD_STATE_DIR 만 뺀다.
 		"HOME": hs.home,
 	}
 	if err := os.MkdirAll(hs.home, 0o755); err != nil {
 		t.Fatalf("가짜 홈을 못 만들었다(%s): %v", hs.home, err)
 	}
+	return hs
 ```
 
-`newHarnessAuth` 안, `return hs` 바로 앞에 둔다.
+`harness_test.go` 의 import 에 `"os"` 가 없으면 넣는다.
 
-- [ ] **Step 4: 손으로 만든 env 를 고친다**
+- [ ] **Step 4: 손으로 만든 env 둘을 고친다**
 
-`degrade_path_test.go:350-358` 의 env 조립을 `unpinnedEnv` 로 바꾼다:
+**① `degrade_path_test.go:350-358`** — `env := map[string]string{}` / 복사 루프 / `delete(env,"FD_STATE_DIR")` / 두 대입을 이것으로 대체한다:
 
 ```go
-	// ★ 손으로 env 를 만들지 않는다 — runEnv 의 주석이 경고하는 그대로,
-	// 손으로 만들면 HOME 을 잊고 시험이 진짜 홈에 쓴다(실측 2026-08-05).
+	// ★ 손으로 env 를 만들지 않는다 — runEnv 주석이 경고하는 그대로, 손으로 만들면
+	// HOME 을 잊고 시험이 진짜 홈을 건드린다(실측 2026-08-05).
 	// unpinnedEnv 가 FD_STATE_DIR 를 빼고 가짜 홈을 함께 주는 정식 갈래다.
 	env := h.unpinnedEnv(map[string]string{
 		"CLAUDE_PLUGIN_DATA": data,
@@ -126,50 +127,69 @@ Expected: FAIL — `OutboxPath` 가 아직 없어 **컴파일 오류**(`undefine
 	})
 ```
 
-기존 `env := map[string]string{}` / 복사 루프 / `delete(env, "FD_STATE_DIR")` / 두 줄의 대입을 이것으로 대체한다. **아래 전제 검사(359-362행)와 그 뒤 본문은 손대지 않는다.**
+359-362행의 전제 검사와 그 뒤 본문은 이 과제에서 손대지 않는다.
 
-- [ ] **Step 5: 시험이 통과하는지 본다**
-
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -count=1`
-Expected: `TestHarnessPinsHomeSoAdoptNeverReachesTheRealHome` 은 아직 `OutboxPath` 가 없어 컴파일이 안 된다. **이 과제에서는 그 시험을 아직 넣지 않고**(Step 1 의 파일을 저장하지 않은 채 두거나 `OutboxPath` 부분을 뺀 축소판으로 넣고), 나머지 전 시험이 초록인지만 본다. 과제 2에서 온전한 형태로 되살린다.
-
-축소판(이 과제에서 넣을 것):
+**② `hook_stop_test.go:45-56`** 의 `runHookForTest` — 하네스를 안 쓰고 실물 `run()` 을 타므로 하네스 가드가 원리적으로 못 잡는다. `HOME` 을 준다:
 
 ```go
-func TestHarnessPinsHomeSoAdoptNeverReachesTheRealHome(t *testing.T) {
-	h := newHarness(t)
-	if got := h.env["HOME"]; got != h.home {
-		t.Fatalf("하네스 기본 환경의 HOME 이 %q 다 — 가짜 홈 %q 여야 한다.\n"+
-			"안 고정하면 아웃박스 흡수가 개발자의 진짜 ~/.local/state 를 훑어 옮긴다", got, h.home)
-	}
+// runHookForTest 는 `fd hook <event>` 한 번을 실물 진입점(run)으로 돌리고 stdout 을 낸다.
+// FD_STATE_DIR 를 매번 새 임시 디렉토리로 줘 시험 간 캐시·아웃박스가 안 섞인다.
+//
+// ★ HOME 도 임시로 준다. 안 주면 homeDir 이 os.UserHomeDir()(프로세스 환경)로 떨어지고,
+// 그 값으로 만들어지는 옛 채널 자리 후보에 개발자의 진짜 ~/.local/state/flightdeck/outbox 가
+// 들어간다 — 훅이 재생을 돌리므로 **그 판단이 시험 서버로 나간다.**
+// 이 함수는 하네스를 안 쓰므로 하네스의 HOME 고정이 여기까지 안 온다.
+func runHookForTest(t *testing.T, url, event, stdin string) string {
+	t.Helper()
+	env := envOf(map[string]string{
+		"FD_URL":       url,
+		"FD_STATE_DIR": t.TempDir(),
+		"FD_PROJECT":   "testproj",
+		"FD_LOG":       "error",
+		"HOME":         t.TempDir(),
+	})
+	var out, errb bytes.Buffer
+	run([]string{"hook", event}, env, strings.NewReader(stdin), &out, &errb)
+	return out.String()
 }
 ```
 
-- [ ] **Step 6: 진짜 홈을 안 건드리는지 실측으로 확인한다**
+- [ ] **Step 5: 전 시험 초록을 확인한다**
+
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -count=1`
+Expected: PASS 전부. `HOME` 이 붙어서 깨지는 시험이 있으면 그것은 지금까지 진짜 홈을 보고 있었다는 뜻이므로, 그 시험을 고쳐라(하네스 고정이 옳다).
+
+- [ ] **Step 6: 진짜 홈을 안 건드리는지 실측한다**
 
 Run:
 ```bash
 cd plugins/flightdeck/server
 SB=$(mktemp -d) && env HOME="$SB" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" \
-  go test ./cmd/fd/ -count=1 >/dev/null 2>&1; find "$SB" -type f | head; chmod -R u+w "$SB"; rm -rf "$SB"
+  go test ./cmd/fd/ -count=1 >/dev/null 2>&1
+echo "flightdeck 흔적:"; find "$SB" -path '*flightdeck*'
+chmod -R u+w "$SB" 2>/dev/null; rm -rf "$SB"
 ```
-Expected: `find` 가 **아무것도 안 낸다.** 파일이 나오면 아직 새는 자리가 있는 것이다.
-(`GOMODCACHE`·`GOCACHE` 를 넘기는 이유: 안 넘기면 go 가 가짜 홈에 모듈 캐시를 만들어 결과가 안 읽힌다.)
+Expected: `flightdeck 흔적:` 뒤에 **아무것도 안 나온다.**
+
+★ 판정을 `-path '*flightdeck*'` 로 좁히는 이유: go 툴체인이 `$HOME/.config/go/telemetry/…` 를
+항상 쓰므로 "아무 파일도 안 생긴다"는 원리적으로 성립하지 않는다. 그대로 두면 없는 누수를
+쫓거나, 반대로 이 검증을 못 믿게 돼 진짜 누수를 놓친다.
 
 - [ ] **Step 7: 커밋**
 
 ```bash
 git add plugins/flightdeck/server/cmd/fd/harness_test.go \
         plugins/flightdeck/server/cmd/fd/harness_env_test.go \
-        plugins/flightdeck/server/cmd/fd/degrade_path_test.go
-git commit -m "test(flightdeck): 하네스가 HOME 을 고정하게 해 시험이 진짜 홈에 못 쓰게 한다
+        plugins/flightdeck/server/cmd/fd/degrade_path_test.go \
+        plugins/flightdeck/server/cmd/fd/hook_stop_test.go
+git commit -m "test(flightdeck): 하네스가 HOME 을 고정하게 해 시험이 진짜 홈에 못 닿게 한다
 
-아웃박스 흡수가 옛 채널 자리(~/.local/state/flightdeck/outbox)를 훑어 줄을 옮기므로,
-HOME 이 안 고정된 시험은 개발자의 진짜 판단을 임시 디렉토리로 옮긴다.
+옛 채널 자리 재생이 ~/.local/state/flightdeck/outbox 의 판단을 **보내고 큐를 비우므로**,
+HOME 이 안 고정된 시험은 개발자의 진짜 판단을 시험 서버로 보낸다.
 
-degrade_path_test 가 손으로 env 를 만들어 TestUnpinnedEnvNeverReachesTheRealHome 의
-감시를 우회하고 있었다 — 실측하면 HOME=<임시> 에서 <임시>/.flightdeck/machine-id 가
-생긴다. unpinnedEnv 를 쓰게 고쳤고, 기본 env 자체를 단정하는 시험을 뒀다."
+degrade_path_test 와 hook_stop_test 가 손으로 env 를 만들어
+TestUnpinnedEnvNeverReachesTheRealHome 의 감시를 우회하고 있었다 — 실측하면
+HOME=<임시> 에서 <임시>/.flightdeck/machine-id 가 생긴다."
 ```
 
 ---
@@ -179,11 +199,10 @@ degrade_path_test 가 손으로 env 를 만들어 TestUnpinnedEnvNeverReachesThe
 **Files:**
 - Modify: `plugins/flightdeck/server/cmd/fd/env.go` (93행 뒤, `MachineID` 앞)
 - Test: `plugins/flightdeck/server/cmd/fd/env_test.go`
-- Test: `plugins/flightdeck/server/cmd/fd/harness_env_test.go` (과제 1의 시험을 온전한 형태로)
 
 **Interfaces:**
 - Consumes: 없음
-- Produces: `func OutboxPath(get func(string) (string, bool), home string) (dir, source string)` — 디렉토리와 그것을 고른 사유. 과제 4가 `newOutbox` 에서 쓴다.
+- Produces: `func OutboxPath(get func(string) (string, bool), home string) (dir, source string)`
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -198,7 +217,7 @@ degrade_path_test 가 손으로 env 를 만들어 TestUnpinnedEnvNeverReachesThe
 // 왜 상태 디렉토리가 아닌가: ResolveStateDir 은 CLAUDE_PLUGIN_DATA(훅·MCP 에만 있다)와
 // XDG_STATE_HOME|~/.local/state(사용자 셸)로 **일부러 갈리게** 만든 축이다. 캐시는
 // 재생성 가능하니 갈려도 되지만 아웃박스는 설계 §7 이 "재생성 불가한 유일한 자산"이라
-// 부른 것을 담는다. 갈린 자리에 두면 셸에서 쌓인 판단을 훅·MCP 가 영영 못 보낸다.
+// 부른 것을 담는다.
 func TestOutboxPathIsChannelIndependent(t *testing.T) {
 	home := "/h"
 	envs := []map[string]string{
@@ -221,8 +240,7 @@ func TestOutboxPathIsChannelIndependent(t *testing.T) {
 }
 
 // FD_STATE_DIR 는 채널이 아니라 **사람이** 지정하는 축이라 이것만은 존중한다
-// (MachineIDPath·ConfigPath 가 같은 예외를 같은 이유로 둔다 — 시험이 진짜 홈에
-// 쓰지 않게 막는 유일한 자리이기도 하다).
+// (MachineIDPath·ConfigPath 가 같은 예외를 같은 이유로 둔다).
 func TestOutboxPathHonoursExplicitStateDir(t *testing.T) {
 	got, src := OutboxPath(envOf(map[string]string{"FD_STATE_DIR": "/explicit"}), "/h")
 	if want := filepath.Join("/explicit", "outbox"); got != want {
@@ -234,7 +252,6 @@ func TestOutboxPathHonoursExplicitStateDir(t *testing.T) {
 }
 
 // HOME 도 FD_STATE_DIR 도 없으면 임시 디렉토리로 떨어지되 **그 사실을 사유에 적는다.**
-// 값은 나오지만 재부팅하면 사라지므로, 조용히 잃지 않게 사유가 그것을 말해야 한다.
 func TestOutboxPathSaysWhenItWillNotSurviveReboot(t *testing.T) {
 	_, src := OutboxPath(envOf(map[string]string{}), "")
 	if !strings.Contains(src, "임시") {
@@ -252,7 +269,7 @@ Expected: FAIL — `undefined: OutboxPath`
 
 - [ ] **Step 3: `OutboxPath` 를 쓴다**
 
-`env.go` 의 `MachineIDPath` 함수 바로 뒤(93행 다음)에 넣는다:
+`env.go` 의 `MachineIDPath` 바로 뒤(93행 다음)에 넣는다:
 
 ```go
 // OutboxPath 는 아웃박스와 격리 파일을 두는 디렉토리다. 순수 함수다.
@@ -277,7 +294,7 @@ Expected: FAIL — `undefined: OutboxPath`
 // 채널 분기 자체를 방어한 적이 없다.
 //
 // FD_STATE_DIR 만 예외로 남긴다 — 채널이 아니라 **사람이** 명시 지정하는 축이라
-// 프로세스마다 갈리지 않고, 시험이 진짜 홈에 판단을 쓰지 않게 막는 유일한 자리다.
+// 프로세스마다 갈리지 않고, 시험이 진짜 홈의 판단을 건드리지 않게 막는 유일한 자리다.
 func OutboxPath(get func(string) (string, bool), home string) (dir, source string) {
 	if v, ok := get("FD_STATE_DIR"); ok && strings.TrimSpace(v) != "" {
 		return filepath.Join(filepath.Clean(strings.TrimSpace(v)), "outbox"), "FD_STATE_DIR (명시 지정)"
@@ -290,19 +307,15 @@ func OutboxPath(get func(string) (string, bool), home string) (dir, source strin
 }
 ```
 
-- [ ] **Step 4: 통과를 확인하고 과제 1의 시험을 온전한 형태로 되살린다**
+- [ ] **Step 4: 통과를 확인한다**
 
-`harness_env_test.go` 의 `TestHarnessPinsHomeSoAdoptNeverReachesTheRealHome` 을 과제 1 Step 1 의 **온전한 판본**(합성 결과까지 단정하는 것)으로 바꾼다.
-
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -count=1`
-Expected: PASS 전부
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run TestOutboxPath -count=1 -v`
+Expected: PASS 3건
 
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add plugins/flightdeck/server/cmd/fd/env.go \
-        plugins/flightdeck/server/cmd/fd/env_test.go \
-        plugins/flightdeck/server/cmd/fd/harness_env_test.go
+git add plugins/flightdeck/server/cmd/fd/env.go plugins/flightdeck/server/cmd/fd/env_test.go
 git commit -m "feat(flightdeck): OutboxPath — 아웃박스 자리를 채널 환경에서 떼어낸다
 
 MachineIDPath·ConfigPath 와 같은 규칙의 셋째 적용이다. 가르는 축은 '열화 상태인가'가
@@ -311,7 +324,7 @@ MachineIDPath·ConfigPath 와 같은 규칙의 셋째 적용이다. 가르는 �
 
 ---
 
-### Task 3: `LegacyOutboxDirs` — 이 채널이 계산할 수 있는 옛 자리만
+### Task 3: `LegacyOutboxDirs` — 재생이 함께 돌 옛 자리
 
 **Files:**
 - Modify: `plugins/flightdeck/server/cmd/fd/env.go` (`OutboxPath` 바로 뒤)
@@ -319,7 +332,7 @@ MachineIDPath·ConfigPath 와 같은 규칙의 셋째 적용이다. 가르는 �
 
 **Interfaces:**
 - Consumes: `OutboxPath`(과제 2)
-- Produces: `func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []string` — 훑을 옛 디렉토리 목록. 목표와 같은 자리와 중복은 뺀다. 과제 4가 `newOutbox` 에서, 과제 5가 `adopt` 에서 쓴다.
+- Produces: `func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []string`
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -330,11 +343,8 @@ MachineIDPath·ConfigPath 와 같은 규칙의 셋째 적용이다. 가르는 �
 //
 // ★ ~/.claude/plugins/data/*/flightdeck 를 glob 하지 않는다. 그 경로에는 플러그인
 // 버전과 마켓 이름이 들어가고, 설계 §13 이 "그 경로를 어디에도 저장하지 않는다"고
-// 판정했다. 추측해 박으면 그 판정을 어긴다.
-//
-// 대신 각 채널이 제 자리만 비우고 고정 자리로 모인다 — 훅·MCP 는 CLAUDE_PLUGIN_DATA 가
-// 있으니 SessionStart 마다, 셸은 사람이 부를 때. 어느 채널이 한 번도 안 돌면 그 자리는
-// 안 비워지고, 그 구멍은 fd doctor 가 말로 찍는다.
+// 판정했다. 대신 각 채널이 제 자리를 **전송으로** 비우고, 그래서 어느 채널이 한 번도
+// 안 돌면 그 자리는 안 비워진다 — 그 구멍은 fd doctor 가 말로 찍는다.
 func TestLegacyOutboxDirsCoversOnlyWhatThisChannelCanCompute(t *testing.T) {
 	home := "/h"
 	target := filepath.Join(home, ".flightdeck", "outbox")
@@ -348,6 +358,7 @@ func TestLegacyOutboxDirsCoversOnlyWhatThisChannelCanCompute(t *testing.T) {
 		filepath.Join("/plugin/data", "flightdeck", "outbox"),
 		filepath.Join("/xdg/state", "flightdeck", "outbox"),
 		filepath.Join(home, ".local", "state", "flightdeck", "outbox"),
+		filepath.Join(os.TempDir(), "flightdeck", "outbox"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("옛 자리 목록이\n  %v\n여야 하는데\n  %v\n다", want, got)
@@ -359,41 +370,50 @@ func TestLegacyOutboxDirsCoversOnlyWhatThisChannelCanCompute(t *testing.T) {
 	}
 }
 
-// 목표와 같은 자리는 옮길 것이 없다. 넣으면 자기 자신을 청구해 대기열을 흔든다.
+// ★ FD_STATE_DIR 를 **새로 켠** 사용자를 위한 자리.
+//
+// 그러면 목표가 FD_STATE_DIR/outbox 로 바뀌는데, ~/.flightdeck/outbox 가 후보에 없으면
+// 그때까지 고정 자리에 쌓인 판단 전량이 조용히 안 보이게 된다(doctor 가 '대기 0건'을 찍는다).
+// home 은 이미 인자로 들어오므로 계산 불가한 것이 아니라 그냥 빠뜨리기 쉬운 자리다.
+func TestLegacyOutboxDirsIncludesFixedPlaceWhenStateDirIsExplicit(t *testing.T) {
+	home := "/h"
+	got := LegacyOutboxDirs(envOf(map[string]string{"FD_STATE_DIR": "/explicit"}),
+		home, filepath.Join("/explicit", "outbox"))
+	fixed := filepath.Join(home, ".flightdeck", "outbox")
+	for _, d := range got {
+		if d == fixed {
+			return
+		}
+	}
+	t.Fatalf("FD_STATE_DIR 를 켰는데 고정 자리(%s)가 후보에 없다 — "+
+		"그때까지 쌓인 판단이 조용히 안 보이게 된다: %v", fixed, got)
+}
+
+// 목표와 같은 자리는 돌 것이 없다. 넣으면 같은 큐를 두 번 재생한다.
 func TestLegacyOutboxDirsExcludesTheTarget(t *testing.T) {
-	target := filepath.Join("/xdg/state", "flightdeck", "outbox")
-	got := LegacyOutboxDirs(envOf(map[string]string{"XDG_STATE_HOME": "/xdg/state"}), "", target)
+	target := filepath.Join("/h", ".flightdeck", "outbox")
+	got := LegacyOutboxDirs(envOf(map[string]string{}), "/h", target)
 	for _, d := range got {
 		if filepath.Clean(d) == filepath.Clean(target) {
-			t.Fatalf("목표 자리(%s)가 옛 자리 목록에 들어 있다 — 자기 자신을 청구한다", target)
+			t.Fatalf("목표 자리(%s)가 옛 자리 목록에 들어 있다 — 같은 큐를 두 번 돈다", target)
 		}
 	}
 }
 
-// 같은 자리를 두 축이 가리켜도 한 번만 훑는다.
+// 같은 자리를 두 축이 가리켜도 한 번만 돈다.
 func TestLegacyOutboxDirsDeduplicates(t *testing.T) {
 	got := LegacyOutboxDirs(envOf(map[string]string{
 		"CLAUDE_PLUGIN_DATA": "/same",
 		"XDG_STATE_HOME":     "/same",
 	}), "", "/target/outbox")
-	if len(got) != 1 {
-		t.Errorf("같은 자리를 %d번 훑는다: %v", len(got), got)
-	}
-}
-
-// ★ 임시 디렉토리는 **일부러 목록에 안 넣는다.**
-//
-// ResolveStateDir 의 마지막 폴백이 <tmp>/flightdeck 이지만, 그 갈래가 실제로 걸리는
-// 조건(HOME 도 FD_STATE_DIR 도 없다)에서는 **목표 자리도 <tmp>/flightdeck/outbox** 라
-// 어차피 목표와 같아 걸러진다. 즉 넣어도 아무 때도 쓸모가 없다.
-// 반면 여러 사용자가 쓰는 머신에서 /tmp/flightdeck 은 **남의 것일 수 있고**, 훑으면
-// 남의 판단을 내 자리로 옮기게 된다. 쓸모 0 · 위험 있음이라 안 넣는다.
-func TestLegacyOutboxDirsNeverScansTempDir(t *testing.T) {
-	got := LegacyOutboxDirs(envOf(map[string]string{}), "/h", "/h/.flightdeck/outbox")
+	n := 0
 	for _, d := range got {
-		if strings.HasPrefix(filepath.Clean(d), filepath.Clean(os.TempDir())) {
-			t.Errorf("임시 디렉토리를 훑는다(%q) — 공용 머신에서 남의 판단을 옮긴다", d)
+		if d == filepath.Join("/same", "flightdeck", "outbox") {
+			n++
 		}
+	}
+	if n != 1 {
+		t.Errorf("같은 자리를 %d번 돈다: %v", n, got)
 	}
 }
 ```
@@ -410,22 +430,30 @@ Expected: FAIL — `undefined: LegacyOutboxDirs`
 `env.go` 의 `OutboxPath` 바로 뒤에 넣는다:
 
 ```go
-// LegacyOutboxDirs 는 아웃박스가 채널마다 갈려 있던 시절의 자리 후보다. 순수 함수다.
+// LegacyOutboxDirs 는 재생이 **함께 돌아 줘야 하는** 다른 아웃박스 자리다. 순수 함수다.
 //
-// ★ **이 채널이 계산할 수 있는 것만 담는다.** ~/.claude/plugins/data/*/flightdeck 를
-// glob 하지 않는다 — 그 경로에는 플러그인 버전과 마켓 이름이 들어가고, 설계 §13 이
-// "버전이 경로에 들어가므로 그 경로를 어디에도 저장하지 않는다"고 판정했다.
-// 추측해 박으면 그 판정을 어기고, 마켓 이름이 바뀌는 날 조용히 빗나간다.
+// 아웃박스가 채널마다 갈려 있던 시절의 자리와, 이 실행이 목표를 바꿨을 때 뒤에 남는 자리다.
+//
+// ★ **파일을 옮기지 않는다.** 재생이 각 큐를 제자리에서 돌려 **전송으로** 비우고,
+// 마지막 줄까지 나가면 keep() 이 그 파일을 지운다 — 이미 있는 동작이다.
+// (앞선 판에서는 os.Rename 청구로 고정 자리에 흡수하려 했는데, 그 설계가 반증됐다.
+// 스펙 §4 "왜 옮기지 않기로 했나"에 재현 결과가 있다. 되살리지 마라.)
+//
+// ★ **~/.claude/plugins/data/*/flightdeck 를 glob 하지 않는다.** 그 경로에는 플러그인
+// 버전과 마켓 이름이 들어가고, 설계 §13 이 "버전이 경로에 들어가므로 그 경로를 어디에도
+// 저장하지 않는다"고 판정했다. 추측해 박으면 마켓 이름이 바뀌는 날 조용히 빗나간다.
 //
 // 그래서 수렴은 이렇게 일어난다: 훅·MCP 채널은 CLAUDE_PLUGIN_DATA 가 있으니
-// SessionStart 마다 제 자리를 비우고, 셸 채널은 제 자리를 비운다. 서로의 배치를
-// 추측하지 않고 양쪽이 고정 자리로 모인다.
-//
+// SessionStart 마다 제 자리를 비우고, 셸 채널은 제 자리를 비운다.
 // **정직한 구멍**: 어떤 채널이 이 변경 뒤 fd 를 한 번도 안 돌리면 그 자리는 영영
 // 안 비워진다. 그 사실은 runDoctor 가 말로 찍는다 — 안 잰 축을 잰 척하지 않는다(§13).
 //
-// 임시 디렉토리는 안 넣는다. 그 갈래가 걸리는 조건에서는 목표도 같은 자리라 쓸모가 없고,
-// 공용 머신에서는 /tmp/flightdeck 이 남의 것일 수 있어 훑으면 남의 판단을 옮긴다.
+// 임시 디렉토리도 넣는다. **앞선 판에서 이것을 뺐던 근거가 틀렸다** — "그 갈래가 걸리는
+// 조건에서는 목표도 같은 자리라 어차피 걸러진다"고 적었는데, 이 목록이 판정하는 것은
+// **과거 실행의** 환경이고 목표를 정하는 것은 **지금** 환경이다. HOME 없이(데몬·컨테이너
+// 진입점) 돌아 tmp 에 쌓은 머신이 나중에 HOME 을 갖게 되면 그 판단이 영영 안 나간다.
+// 공용 머신에서 남의 것을 건드리는 위험은 파일 권한이 막는다(아웃박스 파일은 0600 이라
+// 읽기가 실패하고, 그 실패는 사유로 올라온다).
 func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []string {
 	var out []string
 	tgt := filepath.Clean(target)
@@ -435,7 +463,7 @@ func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []st
 		}
 		p = filepath.Clean(p)
 		if p == tgt {
-			return // 목표와 같은 자리는 옮길 것이 없다
+			return // 목표와 같은 자리는 재생이 이미 돈다
 		}
 		for _, x := range out {
 			if x == p {
@@ -452,7 +480,11 @@ func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []st
 	}
 	if strings.TrimSpace(home) != "" {
 		add(filepath.Join(home, ".local", "state", "flightdeck", "outbox"))
+		// ★ 고정 자리 자신. FD_STATE_DIR 를 새로 켜면 목표가 그쪽으로 옮겨 가는데,
+		// 이 줄이 없으면 그때까지 여기 쌓인 판단이 조용히 안 보이게 된다.
+		add(filepath.Join(home, ".flightdeck", "outbox"))
 	}
+	add(filepath.Join(os.TempDir(), "flightdeck", "outbox"))
 	return out
 }
 ```
@@ -466,63 +498,76 @@ Expected: PASS 4건
 
 ```bash
 git add plugins/flightdeck/server/cmd/fd/env.go plugins/flightdeck/server/cmd/fd/env_test.go
-git commit -m "feat(flightdeck): LegacyOutboxDirs — 이 채널이 계산할 수 있는 옛 자리만 훑는다
+git commit -m "feat(flightdeck): LegacyOutboxDirs — 재생이 함께 돌 옛 자리를 센다
 
-plugins/data/* 를 glob 하지 않는다(§13). 임시 디렉토리도 안 넣는다 —
-그 갈래가 걸리는 조건에서는 목표와 같은 자리라 쓸모가 없고, 공용 머신에서는
-남의 판단을 옮기게 된다."
+파일을 옮기지 않는다. 재생이 제자리에서 돌려 전송으로 비운다.
+고정 자리 자신도 후보에 넣는다 — FD_STATE_DIR 를 새로 켜면 목표가 옮겨 가고,
+그때 이 줄이 없으면 쌓인 판단이 조용히 안 보이게 된다.
+plugins/data/* 를 glob 하지 않는다(§13)."
 ```
 
 ---
 
-### Task 4: `Outbox` 를 디렉토리 기반으로 바꾸고 배선한다
+### Task 4: `Outbox` 를 디렉토리 기반으로 바꾸고 호출부를 **전부** 고친다
 
-이 과제는 **동작을 바꾸지 않는다.** 자리만 옮기고 기존 시험이 전부 초록으로 남는지 본다.
+동작을 안 바꾼다. 자리만 옮기고 기존 시험이 초록으로 남는지 본다.
+
+**⚠ `newOutbox` 호출부가 시험에 6곳 있다.** 하나라도 빠뜨리면 **시험 바이너리가 컴파일되지 않아** 이 과제의 검증이 원리적으로 불가능해진다. `go build ./...` 는 `_test.go` 를 안 보므로 통과한다 — 반드시 `go vet ./...` 나 `go test` 로 확인해라.
 
 **Files:**
-- Modify: `plugins/flightdeck/server/cmd/fd/outbox.go:169-190, 198-287, 369-372`
-- Modify: `plugins/flightdeck/server/cmd/fd/client.go:115, 130`
-- Modify: `plugins/flightdeck/server/cmd/fd/outbox_stuck_test.go:31-38`
+- Modify: `cmd/fd/outbox.go` (169-190, 198-287, 369-372, 394-415행)
+- Modify: `cmd/fd/client.go:115, 130`
+- Modify: `cmd/fd/outbox_stuck_test.go:31-38`
+- Modify: `cmd/fd/degrade_test.go:38, 132`
+- Modify: `cmd/fd/degrade_path_test.go:84, 232-233, 425, 458`
 
 **Interfaces:**
 - Consumes: `OutboxPath`·`LegacyOutboxDirs`(과제 2·3)
 - Produces:
   - `func newOutbox(get func(string) (string, bool), home string) *Outbox`
+  - `func newOutboxAt(dir string) *Outbox` — 자리를 직접 주는 생성자. 옛 자리 큐와 시험이 쓴다.
   - `func (o *Outbox) Dir() string` · `func (o *Outbox) Source() string`
-  - `Outbox` 필드 `dir string` · `source string` · `legacy []string` · `now func() time.Time`
+  - 필드 `dir string` · `source string` · `now func() time.Time`
   - 상수 `pendingName = "pending.jsonl"` · `rejectedName = "rejected.jsonl"`
   - `func readEntries(path string) ([]OutboxEntry, error)` · `func readRejected(path string) ([]RejectedEntry, error)`
 
-- [ ] **Step 1: `Outbox` 구조와 파일 이름 상수를 바꾼다**
+- [ ] **Step 1: `Outbox` 구조를 바꾼다**
 
-`outbox.go:169-190` 을 이것으로 교체한다:
+`outbox.go:169-190` 을 교체한다:
 
 ```go
-// 대기열·격리 파일의 이름. 한 자리에 모은다 — 흡수(adopt)가 이 이름으로 옛 자리를 훑으므로
-// 두 자리에 흩어 두면 한쪽만 고칠 때 흡수가 조용히 빗나간다.
+// 대기열·격리 파일의 이름. 한 자리에 모은다 — 옛 자리 재생이 이 이름으로 큐를 찾으므로
+// 두 자리에 흩어 두면 한쪽만 고칠 때 그 큐가 조용히 안 보이게 된다.
 const (
 	pendingName  = "pending.jsonl"
 	rejectedName = "rejected.jsonl"
 )
 
-// Outbox 는 **채널 무관한 고정 자리**의 대기열 하나다. 파일 하나에 JSONL 로 쌓는다.
+// Outbox 는 디렉토리 하나의 대기열이다. 파일 하나에 JSONL 로 쌓는다.
 //
-// ★ 예전에는 상태 디렉토리 아래였다. 그 자리가 채널마다 갈려서 셸에서 쌓인 판단을
-// 훅·MCP 가 영영 못 보내는 결함이 있었다 — OutboxPath 주석에 그 판정이 있다.
+// ★ 예전에는 상태 디렉토리 아래였고, 그 자리가 채널마다 갈려서 셸에서 쌓인 판단을
+// 훅·MCP 가 영영 못 보내는 결함이 있었다(OutboxPath 주석에 판정 전문이 있다).
+// 지금은 새 쓰기가 고정 자리로 가고, 옛 자리는 **같은 타입의 값을 하나씩 만들어**
+// 재생이 함께 돈다(Client.Legacy). 큐 하나가 이 값 하나다.
 type Outbox struct {
-	dir    string   // 대기열·격리 파일이 있는 디렉토리
-	source string   // 왜 이 자리인가. fd doctor 가 찍는다 — machineSrc 가 선례다
-	legacy []string // 갈려 있던 시절의 자리. adopt 가 비운다
-	// now 는 격리·보존 시각을 찍는 시계다. 시험이 갈아 끼울 자리이기도 하다.
+	dir    string // 대기열·격리 파일이 있는 디렉토리
+	source string // 왜 이 자리인가. fd doctor 가 찍는다 — machineSrc 가 선례다
+	// now 는 격리 시각을 찍는 시계다. 시험이 갈아 끼울 자리이기도 하다.
 	now func() time.Time
 }
 
 func newOutbox(get func(string) (string, bool), home string) *Outbox {
 	dir, src := OutboxPath(get, home)
+	o := newOutboxAt(dir)
+	o.source = src
+	return o
+}
+
+// newOutboxAt 은 자리를 직접 주는 생성자다. 옛 자리 큐(Client.Legacy)와 시험이 쓴다.
+func newOutboxAt(dir string) *Outbox {
 	return &Outbox{
 		dir:    dir,
-		source: src,
-		legacy: LegacyOutboxDirs(get, home, dir),
+		source: "직접 지정",
 		now:    func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -531,7 +576,8 @@ func newOutbox(get func(string) (string, bool), home string) *Outbox {
 func (o *Outbox) Dir() string    { return o.dir }
 func (o *Outbox) Source() string { return o.source }
 
-// pendingPath·rejectedPath 는 두 파일의 자리다. 같은 디렉토리에 둔다 — 같은 축의 같은 자산이다.
+// pendingPath·rejectedPath 는 두 파일의 자리다. 같은 디렉토리에 둔다 —
+// 같은 축의 같은 자산이고, 격리는 제 큐 옆에 남아야 '어디서 온 것인가'가 안 사라진다.
 func (o *Outbox) pendingPath() string  { return filepath.Join(o.dir, pendingName) }
 func (o *Outbox) rejectedPath() string { return filepath.Join(o.dir, rejectedName) }
 
@@ -546,11 +592,13 @@ func (o *Outbox) stamp() time.Time {
 
 기존 369-372행의 `rejectedPath` 는 **지운다**(위로 옮겼다).
 
-- [ ] **Step 2: `o.path` 를 쓰던 자리를 전부 바꾼다**
+- [ ] **Step 2: `o.path` 사용처를 바꾸고 읽기를 함수로 뺀다**
 
-`outbox.go` 안에서 `o.path` → `o.pendingPath()`. 걸리는 자리는 `Append`(208·215행), `List`(231행), `keep`(265·279·283행)이다.
+`outbox.go` 안 `o.path` → `o.pendingPath()` (`Append` 208·215행, `keep` 265·279·283행).
 
-`List` 와 `Rejected` 는 읽기 부분을 재사용 가능한 함수로 뺀다 — 흡수가 **옛 자리의 파일**을 같은 규칙으로 읽어야 하기 때문이다:
+`List`(230-260행)와 `Rejected`(394-415행)를 이렇게 바꾼다 — 옛 자리 잔량을 **읽기만** 세는
+`LegacyLeftovers`(과제 6)가 같은 규칙으로 읽어야 "여기서는 버려지고 저기서는 안 버려지는"
+자리가 안 생긴다:
 
 ```go
 // List 는 대기 중인 전부를 순서대로 낸다. 파일이 없으면 빈 목록이다(오류가 아니다).
@@ -559,11 +607,7 @@ func (o *Outbox) List() ([]OutboxEntry, error) { return readEntries(o.pendingPat
 // readEntries 는 JSONL 대기열 파일 하나를 읽는다.
 //
 // ★ 깨진 줄을 **조용히 버리지 않는다.** 이 파일은 재생성 불가한 자산이므로
-// 해석 실패는 **읽은 데까지와 함께** 오류로 올려 사람이 보게 한다
-// (설계 §9 "조용히 버리는 것이 하나도 없어야 한다").
-//
-// 흡수(adopt)가 옛 자리의 파일에도 이 함수를 쓴다 — 같은 규칙으로 읽어야
-// "여기서는 버려지고 저기서는 안 버려지는" 자리가 안 생긴다.
+// 해석 실패는 **읽은 데까지와 함께** 오류로 올려 사람이 보게 한다(설계 §9).
 func readEntries(path string) ([]OutboxEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -599,7 +643,7 @@ func readEntries(path string) ([]OutboxEntry, error) {
 // Rejected 는 격리된 줄 전부다. 파일이 없으면 빈 목록이다(오류가 아니다).
 func (o *Outbox) Rejected() ([]RejectedEntry, error) { return readRejected(o.rejectedPath()) }
 
-// readRejected 는 격리 파일 하나를 읽는다. 흡수가 옛 자리에도 쓴다.
+// readRejected 는 격리 파일 하나를 읽는다. doctor 의 잔량 합산도 이것을 쓴다.
 func readRejected(path string) ([]RejectedEntry, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -623,11 +667,11 @@ func readRejected(path string) ([]RejectedEntry, error) {
 }
 ```
 
-기존 `List`(230-260행)와 `Rejected`(394-415행)의 본문을 위 형태로 대체한다.
+**`Replay` 는 한 글자도 안 바꾼다.** 이 계획의 핵심이 그것이다 — 이미 있고 이미 시험된 절차를 그대로 쓴다.
 
 - [ ] **Step 3: 배선을 바꾼다**
 
-`client.go:130` 을 바꾼다:
+`client.go:130`:
 
 ```go
 		Outbox:   newOutbox(get, home),
@@ -635,64 +679,100 @@ func readRejected(path string) ([]RejectedEntry, error) {
 
 `newClient` 의 `sd StateDir` 인자는 **그대로 둔다** — `newCache(sd)` 가 계속 쓴다.
 
-- [ ] **Step 4: 시험 도우미를 고친다**
+- [ ] **Step 4: `newOutbox` 호출부 6곳을 전부 고친다**
 
-`outbox_stuck_test.go:31-38` 을 바꾼다:
+**① `outbox_stuck_test.go:31-38`**:
 
 ```go
 func mkOutbox(t *testing.T) *Outbox {
 	t.Helper()
 	at := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
-	return &Outbox{
-		dir: filepath.Join(t.TempDir(), "outbox"),
-		now: func() time.Time { return at },
-	}
+	o := newOutboxAt(filepath.Join(t.TempDir(), "outbox"))
+	o.now = func() time.Time { return at }
+	return o
 }
 ```
 
-- [ ] **Step 5: 전 시험이 초록인지 본다**
+**② `degrade_test.go:38` 과 `degrade_test.go:132`** — 둘 다 같은 모양이다:
 
-Run: `cd plugins/flightdeck/server && go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1`
-Expected: 전 패키지 ok. **`degrade_path_test.go` 의 `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 는 여기서 빨강이 난다** — 아웃박스가 이제 plugin-data 아래가 아니기 때문이다. 그것이 이 시점의 **정상**이고, 과제 8에서 고친다. 다른 시험이 빨갛다면 그것은 회귀다.
-
-빨강이 그 하나뿐인지 확인:
-```bash
-go test ./cmd/fd/ -count=1 2>&1 | grep -E '^(---|ok|FAIL)' | head -20
+```go
+	ob := newOutbox(envOf(h.env), h.home)
 ```
+
+**③ `degrade_path_test.go:84`** — 바로 위 `sd := ResolveStateDir(...)` 는 남는다(다른 데서 쓸 수 있다. 안 쓰면 컴파일러가 알려 준다):
+
+```go
+	ob := newOutbox(envOf(h.env), h.home)
+```
+
+**④ `degrade_path_test.go:232-233`** — 여기가 중요하다. `outboxPath` 가
+`sd.sub("outbox")` 로 **이 항목이 없애려는 결합을 좌표계로 삼고 있다.** 지금 초록인 이유는
+하네스가 `FD_STATE_DIR` 를 고정해 두 경로가 우연히 같기 때문이지 시험이 새 자리를 보기
+때문이 아니다:
+
+```go
+	// ★ 아웃박스 자리를 sd.sub("outbox") 로 구하지 않는다 — 그 결합이 이 항목이 없앤 것이다.
+	//   하네스가 FD_STATE_DIR 를 고정해 우연히 같은 경로가 나오더라도, 시험이 단정하는
+	//   좌표계는 **소비자가 실제로 쓰는 자리**여야 한다.
+	ob := newOutbox(envOf(h.env), h.home)
+	outboxPath := filepath.Join(ob.Dir(), pendingName)
+```
+
+바로 위 `sd := ResolveStateDir(envOf(h.env), "")` 줄은 안 쓰이면 지운다.
+
+**⑤ `degrade_path_test.go:425`**:
+
+```go
+	pend, err := newOutbox(envOf(h.env), h.home).List()
+```
+
+**⑥ `degrade_path_test.go:458`**:
+
+```go
+	if left, err := newOutbox(envOf(h.env), h.home).List(); err != nil || len(left) != 2 {
+```
+
+- [ ] **Step 5: 컴파일과 시험을 확인한다**
+
+Run:
+```bash
+cd plugins/flightdeck/server
+go vet ./...            # ← _test.go 를 본다. 호출부를 빠뜨렸으면 여기서 잡힌다
+go test ./cmd/fd/ -count=1 2>&1 | grep -E '^(---|ok|FAIL|# )' | head -20
+```
+Expected: `go vet` 무출력. 시험은 `TestOfflineStateLandsUnderPluginDataNotPluginRoot` **하나만** 빨강(과제 7에서 고친다). 다른 것이 빨갛거나 `# github.com/...` 빌드 오류가 나오면 호출부를 빠뜨린 것이다.
 
 - [ ] **Step 6: 커밋**
 
 ```bash
-git add plugins/flightdeck/server/cmd/fd/outbox.go \
-        plugins/flightdeck/server/cmd/fd/client.go \
-        plugins/flightdeck/server/cmd/fd/outbox_stuck_test.go
+git add plugins/flightdeck/server/cmd/fd/outbox.go plugins/flightdeck/server/cmd/fd/client.go \
+        plugins/flightdeck/server/cmd/fd/outbox_stuck_test.go \
+        plugins/flightdeck/server/cmd/fd/degrade_test.go \
+        plugins/flightdeck/server/cmd/fd/degrade_path_test.go
 git commit -m "refactor(flightdeck): Outbox 를 고정 자리 디렉토리 기반으로 바꾼다
 
-동작은 안 바꾼다. 읽기를 readEntries·readRejected 로 빼는 이유는 흡수가 옛 자리의
-파일을 **같은 규칙으로** 읽어야 해서다 — 규칙이 갈리면 한쪽에서만 줄이 조용히 버려진다.
+동작은 안 바꾼다. Replay 는 한 글자도 안 건드렸다.
 
-degrade_path_test 의 아웃박스 단정은 여기서 빨강이다. 그 시험은 자리가 옮겨진 것을
-아직 모른다 — 다음 커밋에서 고친다."
+degrade_path_test 가 아웃박스 자리를 sd.sub(\"outbox\") 로 구하고 있었다 —
+이 항목이 없애려는 결합을 시험이 좌표계로 삼은 것이다. 지금 초록인 이유는 하네스가
+FD_STATE_DIR 를 고정해 우연히 같은 경로가 나오기 때문이었다."
 ```
 
 ---
 
-### Task 5: `adopt` — 청구 후 흡수
+### Task 5: 재생이 옛 자리 큐를 함께 돈다
 
 **Files:**
-- Modify: `plugins/flightdeck/server/cmd/fd/outbox.go` (`Replay` 앞)
-- Create: `plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go`
+- Modify: `plugins/flightdeck/server/cmd/fd/client.go:84-134, 290-310`
+- Create: `plugins/flightdeck/server/cmd/fd/outbox_legacy_test.go`
 
 **Interfaces:**
-- Consumes: `readEntries`·`readRejected`·`Append`·`quarantine`·`Outbox.legacy`(과제 4)
-- Produces:
-  - `func (o *Outbox) adopt() []string` — 못 한 것의 사유 목록(빈 슬라이스면 전부 됐다)
-  - `func claimSuffix() string`
-  - `func claimables(dir, base string) []string`
+- Consumes: `newOutbox`·`newOutboxAt`·`LegacyOutboxDirs`(과제 3·4)
+- Produces: `Client.Legacy []*Outbox` · `Client.Flush` 가 큐 전부를 돌고 각 큐의 사유를 낸다.
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
-새 파일 `outbox_adopt_test.go`:
+새 파일 `outbox_legacy_test.go`:
 
 ```go
 package main
@@ -702,18 +782,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
 // 이 파일이 지키는 것은 하나다: **어느 채널에서 쌓인 판단도 결국 나간다.**
 //
-// 아웃박스가 채널마다 갈려 있던 시절의 자리에 남은 줄을 고정 자리로 흡수한다.
-// 그 흡수가 판단을 잃지 않고, 두 번 만들지 않고, 도중에 죽어도 스스로 낫는지를 본다.
+// ★ 옮기지 않는다. 재생이 각 큐를 제자리에서 돌려 전송으로 비우고, 마지막 줄까지
+// 나가면 keep() 이 그 파일을 지운다. 앞선 판에서는 os.Rename 청구로 고정 자리에
+// 흡수하려 했는데 그 설계가 반증됐다 — 스펙 §4 "왜 옮기지 않기로 했나"를 보라.
 
-// mkAdoptable 은 옛 자리 하나와 그 안의 대기열 파일을 만든다.
-func mkAdoptable(t *testing.T, dir string, keys ...string) {
+// seedQueue 는 옛 자리 하나와 그 안의 대기열 파일을 만든다.
+func seedQueue(t *testing.T, dir string, keys ...string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("옛 자리를 못 만들었다(%s): %v", dir, err)
@@ -732,8 +811,11 @@ func mkAdoptable(t *testing.T, dir string, keys ...string) {
 	}
 }
 
-// keysOf 는 대기열의 키를 순서대로 낸다.
-func keysOf(t *testing.T, o *Outbox) []string {
+// queuedKeys 는 큐에 남은 키를 순서대로 낸다.
+//
+// ★ 이름에 주의. keysOf 는 plugin_test.go 에 제네릭으로 이미 있어서 못 쓴다
+// (같은 패키지라 재선언 오류가 난다).
+func queuedKeys(t *testing.T, o *Outbox) []string {
 	t.Helper()
 	es, err := o.List()
 	if err != nil {
@@ -746,559 +828,274 @@ func keysOf(t *testing.T, o *Outbox) []string {
 	return out
 }
 
-// ── 흡수가 판단을 옮기고 원본을 보존한다 ─────────────────────────────────────
+// ── 옛 자리 큐가 전송으로 비고 파일이 사라진다 ───────────────────────────────
 
-func TestAdoptDrainsLegacyOutboxes(t *testing.T) {
-	o := mkOutbox(t)
+func TestFlushDrainsLegacyQueuesBySending(t *testing.T) {
+	h := newHarness(t)
+
 	legacyA := filepath.Join(t.TempDir(), "chanA", "outbox")
 	legacyB := filepath.Join(t.TempDir(), "chanB", "outbox")
-	o.legacy = []string{legacyA, legacyB}
+	seedQueue(t, legacyA, "a1", "a2")
+	seedQueue(t, legacyB, "b1")
 
-	mkAdoptable(t, legacyA, "a1", "a2")
-	mkAdoptable(t, legacyB, "b1")
-
-	if notes := o.adopt(); len(notes) != 0 {
-		t.Fatalf("흡수가 사유를 냈다 — 전부 됐어야 한다: %v", notes)
-	}
-
-	got := keysOf(t, o)
-	want := []string{"a1", "a2", "b1"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("고정 자리의 키가 %v 다 — %v 여야 한다", got, want)
-	}
-
-	// ★ 원본을 **지우지 않았는지.** 큐를 비우는 것과 기록을 없애는 것은 다르다(§9).
-	for _, dir := range []string{legacyA, legacyB} {
-		if _, err := os.Stat(filepath.Join(dir, pendingName)); !os.IsNotExist(err) {
-			t.Errorf("%s 의 원본이 아직 정규 이름으로 있다 — 흡수가 안 끝났다", dir)
-		}
-		ms, _ := filepath.Glob(filepath.Join(dir, pendingName+".migrated-*"))
-		if len(ms) != 1 {
-			t.Errorf("%s 에 보존본이 %d개다 — 정확히 1개여야 한다(지웠거나 안 옮겼다)", dir, len(ms))
-		}
-		cs, _ := filepath.Glob(filepath.Join(dir, pendingName+".claimed-*"))
-		if len(cs) != 0 {
-			t.Errorf("%s 에 청구본이 %d개 남았다 — 성공했으면 없어야 한다", dir, len(cs))
-		}
-	}
-}
-
-// 격리 파일도 함께 온다. 보관소가 채널마다 갈리면 '어디에 뭐가 있나'가 채널별 질문으로 남는다.
-func TestAdoptDrainsLegacyRejected(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	if err := os.MkdirAll(legacy, 0o755); err != nil {
-		t.Fatalf("옛 자리를 못 만들었다: %v", err)
-	}
-	r := RejectedEntry{Entry: entry("r1"), Reason: "서버가 409 로 거절했다", At: time.Unix(0, 0).UTC()}
-	buf, _ := json.Marshal(r)
-	if err := os.WriteFile(filepath.Join(legacy, rejectedName), append(buf, '\n'), 0o600); err != nil {
-		t.Fatalf("옛 격리를 못 썼다: %v", err)
-	}
-
-	if notes := o.adopt(); len(notes) != 0 {
-		t.Fatalf("흡수가 사유를 냈다: %v", notes)
-	}
-	got, err := o.Rejected()
-	if err != nil {
-		t.Fatalf("격리를 못 읽었다: %v", err)
-	}
-	if len(got) != 1 || got[0].Entry.Key != "r1" {
-		t.Fatalf("격리가 안 왔다: %+v", got)
-	}
-	if got[0].Reason == "" {
-		t.Error("격리 사유가 비었다 — 왜 격리됐는지가 사라지면 보관의 의미가 없다")
-	}
-}
-
-// ── 두 번 돌려도 판단이 두 벌이 되지 않는다 ──────────────────────────────────
-
-func TestAdoptIsIdempotent(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "k1", "k2")
-
-	o.adopt()
-	o.adopt() // 두 번째는 집을 것이 없다
-
-	got := keysOf(t, o)
-	if len(got) != 2 {
-		t.Errorf("두 번 흡수했더니 키가 %d개다 — 2개여야 한다: %v", len(got), got)
-	}
-}
-
-// ── 도중에 죽어도 스스로 낫는다 ──────────────────────────────────────────────
-
-// 흡수 도중 실패하면 **원본으로 되돌리지 않는다.** 그 사이 새 오프라인 쓰기가 원본을
-// 만들었으면 rename 이 그것을 덮어써 판단을 잃기 때문이다. 청구본을 그대로 두고
-// 다음 흡수가 그 고아를 집는다.
-func TestAdoptFailureKeepsClaimAndSelfHeals(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "k1")
-
-	// 고정 자리를 **파일로** 만들어 쓰기를 막는다 — MkdirAll 이 실패한다.
-	if err := os.MkdirAll(filepath.Dir(o.dir), 0o755); err != nil {
-		t.Fatalf("상위 디렉토리를 못 만들었다: %v", err)
-	}
-	if err := os.WriteFile(o.dir, []byte("나는 디렉토리가 아니다"), 0o600); err != nil {
-		t.Fatalf("막이 파일을 못 만들었다: %v", err)
-	}
-
-	notes := o.adopt()
-	if len(notes) == 0 {
-		t.Fatal("흡수가 실패했는데 사유가 안 나왔다 — 침묵하면 판단이 조용히 갇힌다")
-	}
-	cs, _ := filepath.Glob(filepath.Join(legacy, pendingName+".claimed-*"))
-	if len(cs) != 1 {
-		t.Fatalf("청구본이 %d개다 — 실패했으면 정확히 1개가 남아야 한다", len(cs))
-	}
-	if _, err := os.Stat(filepath.Join(legacy, pendingName)); !os.IsNotExist(err) {
-		t.Error("원본이 되돌려졌다 — 새 오프라인 쓰기를 덮어쓸 수 있어 되돌리면 안 된다")
-	}
-
-	// ── 낫는다 ──
-	if err := os.Remove(o.dir); err != nil {
-		t.Fatalf("막이를 못 치웠다: %v", err)
-	}
-	if notes := o.adopt(); len(notes) != 0 {
-		t.Fatalf("복구 후에도 사유가 났다: %v", notes)
-	}
-	if got := keysOf(t, o); len(got) != 1 || got[0] != "k1" {
-		t.Errorf("고아를 안 집었다 — 판단이 그 자리에 영원히 남는다: %v", got)
-	}
-}
-
-// ── 동시에 흡수해도 한쪽만 이긴다 ────────────────────────────────────────────
-
-// ★ 이것이 §4 의 TTL 구멍을 닫았다는 단정이다.
-//
-// 판단 POST 는 DB 에 남는 멱등이지만 그 표의 TTL 이 24시간이고 판단은 추가 전용이다.
-// 즉 같은 키가 24시간을 넘겨 두 번 재생되면 **되돌릴 수 없는 판단 한 줄**이 생긴다.
-// 잠금 없이 흡수하면 두 프로세스가 같은 줄을 각자 쌓아 그 경로가 열린다.
-// os.Rename 청구가 그것을 원리적으로 막는다 — 원본 하나는 한 쪽만 집는다.
-func TestConcurrentAdoptClaimsOnce(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "k1", "k2", "k3")
-
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// 같은 디렉토리를 보는 **다른 Outbox 값**이다 — 프로세스 여럿을 흉내 낸다.
-			// 필드를 공유하지 않으므로 -race 가 볼 것은 파일시스템 경합뿐이다.
-			other := &Outbox{dir: o.dir, legacy: o.legacy, now: o.now}
-			other.adopt()
-		}()
-	}
-	wg.Wait()
-
-	ms, _ := filepath.Glob(filepath.Join(legacy, pendingName+".migrated-*"))
-	if len(ms) != 1 {
-		t.Errorf("보존본이 %d개다 — 청구가 원자였다면 정확히 1개다: %v", len(ms), ms)
-	}
-	got := keysOf(t, o)
-	seen := map[string]int{}
-	for _, k := range got {
-		seen[k]++
-	}
-	for k, n := range seen {
-		if n != 1 {
-			t.Errorf("키 %q 가 대기열에 %d줄이다 — 24시간을 넘겨 재생되면 판단이 두 벌이 된다", k, n)
-		}
-	}
-	if len(got) != 3 {
-		t.Errorf("대기열에 %d줄이다 — 3줄이어야 한다: %v", len(got), got)
-	}
-}
-
-// ── 보존본은 다시 안 집는다 ──────────────────────────────────────────────────
-
-// .migrated-* 를 다시 집으면 흡수가 무한히 반복되고, 그때마다 Append 가 중복 검사를
-// 도느라 대기열 전체를 읽는다. 집지 않는 것이 옳다.
-func TestAdoptIgnoresMigratedFiles(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	if err := os.MkdirAll(legacy, 0o755); err != nil {
-		t.Fatalf("옛 자리를 못 만들었다: %v", err)
-	}
-	buf, _ := json.Marshal(entry("old"))
-	if err := os.WriteFile(filepath.Join(legacy, pendingName+".migrated-20260101T000000Z-abc"),
-		append(buf, '\n'), 0o600); err != nil {
-		t.Fatalf("보존본을 못 만들었다: %v", err)
-	}
-	if notes := o.adopt(); len(notes) != 0 {
-		t.Fatalf("사유가 났다: %v", notes)
-	}
-	if got := keysOf(t, o); len(got) != 0 {
-		t.Errorf("보존본을 다시 집었다 — 흡수가 무한 반복된다: %v", got)
-	}
-}
-```
-
-- [ ] **Step 2: 실패를 확인한다**
-
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestAdopt|TestConcurrentAdopt' -count=1`
-Expected: FAIL — `o.adopt undefined`
-
-- [ ] **Step 3: 구현한다**
-
-`outbox.go` 의 `ReplayResult` 정의 앞에 넣는다:
-
-```go
-// ── 흡수 ─────────────────────────────────────────────────────────────────────
-//
-// 아웃박스가 채널마다 갈려 있던 시절의 자리에 남은 줄을 고정 자리로 옮긴다.
-// 옮기지 않으면 그 줄은 그 채널이 다시 돌 때까지 안 나가고, 채널이 안 돌면 영영 안 나간다.
-
-// claimSuffix 는 청구 이름의 유일값이다.
-//
-// ★ **시각을 쓰지 않는다.** 같은 초에 둘이 들어오면 이름이 겹쳐 청구가 청구가 아니게 된다
-// (FreshKey 가 같은 이유로 같은 선택을 한다). 난수를 못 읽으면 나노초로 대신한다 —
-// 유일성은 떨어지지만 값이 없는 것보다 낫다.
-func claimSuffix() string {
-	buf := make([]byte, 12)
-	if _, err := rand.Read(buf); err != nil {
-		return fmt.Sprintf("n%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(buf)
-}
-
-// claimables 는 이 디렉토리에서 청구할 수 있는 파일 전부다. 순수 함수는 아니다(glob 을 돈다).
-//
-// 정규 이름 하나와 **고아 청구본 전부**다. 고아는 앞선 실행이 흡수 도중 죽으며 남긴 것이라
-// (claimAndDrain 의 실패 가지) 안 집으면 판단이 그 자리에 영원히 남는다.
-//
-// ★ .migrated-* 는 **안 집는다.** 흡수가 끝난 보존본이라 다시 집으면 무한히 반복된다.
-func claimables(dir, base string) []string {
-	out := []string{filepath.Join(dir, base)}
-	orphans, err := filepath.Glob(filepath.Join(dir, base+".claimed-*"))
-	if err != nil {
-		return out // 패턴이 상수라 여기 오지 않는다. 와도 정규 이름은 집는다
-	}
-	sort.Strings(orphans) // 순서를 고정한다 — 시험이 단정할 수 있어야 한다
-	return append(out, orphans...)
-}
-
-// claimAndDrain 은 파일 하나를 청구해 옮긴다. 못 한 사유를 낸다(빈 문자열이면 됐다).
-//
-// ★ **청구가 이 설계의 핵심이다.** os.Rename 은 원자라 둘이 동시에 들어와도 한쪽만 이긴다.
-// 그것이 없으면 두 프로세스가 같은 줄을 각자 쌓고, 판단 POST 의 멱등 표 TTL(24시간)을
-// 넘겨 재생되는 순간 **되돌릴 수 없는 판단 한 줄**이 생긴다(판단은 추가 전용이다).
-func (o *Outbox) claimAndDrain(src, dir, base string, move func(claimed string) error) string {
-	sfx := claimSuffix()
-	claimed := filepath.Join(dir, base+".claimed-"+sfx)
-	if err := os.Rename(src, claimed); err != nil {
-		if os.IsNotExist(err) {
-			return "" // 없거나 남이 먼저 집었다. 둘 다 정상이다
-		}
-		return fmt.Sprintf("%s 를 청구하지 못했다: %v", clip(src, 200), err)
-	}
-	if err := move(claimed); err != nil {
-		// ★ 원본으로 **되돌리지 않는다.** 그 사이 새 오프라인 쓰기가 원본을 만들었으면
-		// rename 이 그것을 덮어써 판단을 잃는다. 청구본을 그대로 두면 다음 흡수가 집는다.
-		return fmt.Sprintf("%s 를 옮기지 못해 청구본 %s 를 남겼다: %v",
-			clip(src, 200), base+".claimed-"+sfx, err)
-	}
-	// 보존 이름에 청구 유일값을 함께 넣는다 — 같은 초에 둘이 끝나면 이름이 겹쳐
-	// 뒤엣것이 앞엣것을 덮어쓰고, 그러면 보존한다면서 기록을 지우게 된다.
-	done := filepath.Join(dir, base+".migrated-"+o.stamp().UTC().Format("20060102T150405Z")+"-"+sfx)
-	if err := os.Rename(claimed, done); err != nil {
-		return fmt.Sprintf("%s 를 옮겼지만 보존 이름으로 못 바꿨다 — 청구본 %s 가 남는다: %v",
-			clip(src, 200), base+".claimed-"+sfx, err)
-	}
-	return ""
-}
-
-// movePending 은 청구한 대기열 파일의 줄을 고정 자리로 옮긴다.
-//
-// Append 가 키 중복 검사를 하므로 재시도가 겹쳐도 한 줄이다.
-//
-// ★ 읽기 오류는 **읽은 데까지 옮긴 뒤에** 올린다. 깨진 줄 하나 때문에 앞의 멀쩡한 줄을
-// 통째로 남기면 그쪽이 더 나쁘다. 오류를 올리면 청구본이 남고 다음 흡수가 다시 집는데,
-// 그때도 같은 자리에서 깨지므로 **사람이 볼 때까지 사유가 계속 나온다** — 그것이 옳다.
-// 조용히 지우면 재생성 불가한 판단이 사라진다(§9).
-func (o *Outbox) movePending(claimed string) error {
-	es, rerr := readEntries(claimed)
-	for _, e := range es {
-		if err := o.Append(e); err != nil {
-			return err
-		}
-	}
-	return rerr
-}
-
-// moveRejected 는 청구한 격리 파일의 줄을 고정 보관소로 옮긴다.
-//
-// 격리는 큐가 아니라 보관소라 순서·중복의 의미가 다르다. 다만 재시도가 겹쳤을 때
-// 같은 줄이 두 번 남지 않게 **이미 보관된 키는 건너뛴다** — 한 번 격리된 키가 큐로
-// 돌아가는 경로는 없으므로 키가 같으면 같은 줄이다.
-func (o *Outbox) moveRejected(claimed string) error {
-	rs, rerr := readRejected(claimed)
-	have := map[string]bool{}
-	if cur, err := o.Rejected(); err == nil {
-		for _, r := range cur {
-			have[r.Entry.Key] = true
-		}
-	}
-	for _, r := range rs {
-		if have[r.Entry.Key] {
-			continue
-		}
-		if err := o.quarantine(r); err != nil {
-			return err
-		}
-		have[r.Entry.Key] = true
-	}
-	return rerr
-}
-
-// adopt 는 옛 채널별 자리에 남은 줄을 고정 자리로 흡수한다. 못 한 것을 사유로 낸다.
-//
-// 실패해도 **다음 자리로 계속 간다** — 한 자리가 막혔다고 나머지를 인질로 잡지 않는다
-// (Replay 가 영구 거절에 대해 내린 것과 같은 판정이다).
-func (o *Outbox) adopt() []string {
-	var notes []string
-	for _, dir := range o.legacy {
-		for _, base := range []string{pendingName, rejectedName} {
-			move := o.movePending
-			if base == rejectedName {
-				move = o.moveRejected
-			}
-			for _, src := range claimables(dir, base) {
-				if n := o.claimAndDrain(src, dir, base, move); n != "" {
-					notes = append(notes, n)
-				}
-			}
-		}
-	}
-	return notes
-}
-```
-
-`outbox.go` 의 import 에 `"sort"` 를 넣는다. `crypto/rand`·`encoding/hex`·`fmt`·`os`·`path/filepath`·`time` 은 이미 있다.
-
-- [ ] **Step 4: 통과를 확인한다**
-
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestAdopt|TestConcurrentAdopt' -race -count=1 -v`
-Expected: PASS 6건. `TestConcurrentAdoptClaimsOnce` 는 `-race` 로 돌려야 의미가 있다.
-
-- [ ] **Step 5: 커밋**
-
-```bash
-git add plugins/flightdeck/server/cmd/fd/outbox.go \
-        plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go
-git commit -m "feat(flightdeck): adopt — 옛 채널 자리의 판단을 원자적 청구로 흡수한다
-
-os.Rename 청구가 핵심이다. 판단 POST 의 멱등 표 TTL 이 24시간이고 판단은 추가 전용이라,
-잠금 없이 흡수하면 중복 사본이 24시간을 넘겨 재생될 때 되돌릴 수 없는 한 줄이 생긴다.
-
-실패하면 원본으로 되돌리지 않는다 — 그 사이 새 오프라인 쓰기가 원본을 만들었으면
-rename 이 그것을 덮어써 판단을 잃는다. 청구본을 남기고 다음 흡수가 고아를 집는다."
-```
-
----
-
-### Task 6: `Replay` 가 흡수를 먼저 돌린다
-
-**Files:**
-- Modify: `plugins/flightdeck/server/cmd/fd/outbox.go` (`Replay` 296-367행)
-- Test: `plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go` (추가)
-
-**Interfaces:**
-- Consumes: `adopt`(과제 5)
-- Produces: `ReplayResult.Detail` 이 흡수 사유를 함께 나른다. 없으면 지금과 같다.
-
-- [ ] **Step 1: 실패하는 시험을 쓴다**
-
-`outbox_adopt_test.go` 에 붙인다:
-
-```go
-// 재생이 흡수를 **먼저** 돌린다. 안 그러면 옛 자리의 줄은 이번 재생에서 안 나가고,
-// 그 채널이 다시 돌 때까지 기다린다 — 안 돌면 영영이다.
-func TestReplayAdoptsBeforeSending(t *testing.T) {
-	o := mkOutbox(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "old1", "old2")
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(legacyA), newOutboxAt(legacyB)}
 
 	var sent []string
-	res, err := o.Replay(context.Background(), func(_ context.Context, e OutboxEntry) error {
+	res := cli.flushAll(t.Context(), func(_ *Outbox, e OutboxEntry) error {
 		sent = append(sent, e.Key)
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("재생 실패: %v", err)
+	if len(sent) != 3 {
+		t.Fatalf("보낸 것이 %d건이다 — 옛 자리 큐가 안 돌았다: %v", len(sent), sent)
 	}
-	if len(sent) != 2 {
-		t.Fatalf("보낸 것이 %d건이다 — 흡수가 재생 앞에 안 돈 것이다: %v", len(sent), sent)
+	if res.Sent != 3 {
+		t.Errorf("Sent 가 %d 다 — 3 이어야 한다", res.Sent)
 	}
-	if res.Sent != 2 {
-		t.Errorf("Sent 가 %d 다 — 2 여야 한다", res.Sent)
+
+	// ★ 큐 파일이 **사라진다** — keep() 의 기존 동작이다.
+	for _, d := range []string{legacyA, legacyB} {
+		if _, err := os.Stat(filepath.Join(d, pendingName)); !os.IsNotExist(err) {
+			t.Errorf("%s 의 큐가 안 비었다(err=%v)", d, err)
+		}
+	}
+	// ★ 고정 자리에는 **아무것도 안 생긴다** — 옮기는 게 아니라 보내는 것이다.
+	if got := queuedKeys(t, cli.Outbox); len(got) != 0 {
+		t.Errorf("고정 자리에 %v 가 생겼다 — 옮기지 않기로 했다", got)
 	}
 }
 
-// 흡수가 못 한 것이 있으면 **재생 결과에 사유가 실린다.** 침묵하면 판단이 조용히 갇힌다.
-func TestReplayReportsAdoptFailures(t *testing.T) {
-	o := mkOutbox(t)
+// 옛 큐가 막혀도 고정 큐는 나간다. 한 큐의 정체가 다른 큐를 인질로 잡지 않는다.
+func TestStuckLegacyQueueDoesNotBlockTheFixedQueue(t *testing.T) {
+	h := newHarness(t)
 	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "k1")
+	seedQueue(t, legacy, "stuck1", "stuck2")
 
-	if err := os.MkdirAll(filepath.Dir(o.dir), 0o755); err != nil {
-		t.Fatalf("상위 디렉토리를 못 만들었다: %v", err)
-	}
-	if err := os.WriteFile(o.dir, []byte("나는 디렉토리가 아니다"), 0o600); err != nil {
-		t.Fatalf("막이 파일을 못 만들었다: %v", err)
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+	if err := cli.Outbox.Append(entry("fixed1")); err != nil {
+		t.Fatalf("고정 큐에 못 쌓았다: %v", err)
 	}
 
-	res, _ := o.Replay(context.Background(), func(context.Context, OutboxEntry) error { return nil })
-	if !strings.Contains(res.Detail, "흡수") {
-		t.Errorf("흡수가 실패했는데 재생 사유가 그것을 안 말한다: %q", res.Detail)
+	var sent []string
+	cli.flushAll(t.Context(), func(o *Outbox, e OutboxEntry) error {
+		if o.Dir() == legacy {
+			return ErrUnreachable // 옛 큐만 막는다
+		}
+		sent = append(sent, e.Key)
+		return nil
+	})
+	if len(sent) != 1 || sent[0] != "fixed1" {
+		t.Errorf("고정 큐가 %v 를 보냈다 — 옛 큐가 막혔다고 고정 큐가 막히면 안 된다", sent)
+	}
+	if got := queuedKeys(t, newOutboxAt(legacy)); len(got) != 2 {
+		t.Errorf("막힌 옛 큐가 %v 다 — 2건 그대로 남아야 한다", got)
+	}
+}
+
+// 옛 큐의 영구 거절은 **그 자리의** 격리 파일로 간다. 보관소가 제 큐 옆에 남는다.
+func TestLegacyQueueQuarantinesIntoItsOwnDir(t *testing.T) {
+	h := newHarness(t)
+	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
+	seedQueue(t, legacy, "bad1")
+
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+
+	cli.flushAll(t.Context(), func(*Outbox, OutboxEntry) error {
+		return &APIError{Status: 409, Message: "이미 있다"}
+	})
+
+	rej, err := newOutboxAt(legacy).Rejected()
+	if err != nil {
+		t.Fatalf("옛 자리 격리를 못 읽었다: %v", err)
+	}
+	if len(rej) != 1 {
+		t.Fatalf("옛 자리에 격리가 %d건이다 — 1건이어야 한다", len(rej))
+	}
+	if fixed, _ := cli.Outbox.Rejected(); len(fixed) != 0 {
+		t.Errorf("고정 자리에 격리가 %d건 생겼다 — 보관소는 제 큐 옆에 남아야 한다", len(fixed))
 	}
 }
 ```
-
-import 에 `"context"` 를 넣는다.
 
 - [ ] **Step 2: 실패를 확인한다**
 
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestReplayAdopts|TestReplayReports' -count=1`
-Expected: FAIL — 흡수가 안 돌아 `보낸 것이 0건이다`
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestFlushDrains|TestStuckLegacy|TestLegacyQueueQuarantines' -count=1`
+Expected: FAIL — `cli.Legacy undefined` · `cli.flushAll undefined`
 
-- [ ] **Step 3: `Replay` 에 흡수를 넣는다**
+- [ ] **Step 3: `Client` 에 옛 큐를 달고 `Flush` 를 큐 전부로 넓힌다**
 
-`Replay` 의 첫 두 줄을 바꾼다:
+`client.go` 의 `Client` 구조체에 필드를 넣는다(`Outbox` 필드 바로 아래):
 
 ```go
-func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEntry) error) (ReplayResult, error) {
-	// ★ 흡수를 **먼저** 돈다. 옛 채널 자리의 줄을 여기서 안 집으면 그 줄은 이번 재생에서
-	// 안 나가고, 그 채널이 다시 돌 때까지 기다린다 — 안 돌면 영영이다.
-	adopted := o.adopt()
-	entries, err := o.List()
-	if err != nil {
-		return ReplayResult{Detail: withAdopt("", adopted)}, err
-	}
-	if len(entries) == 0 {
-		return ReplayResult{Detail: withAdopt("대기 중인 판단이 없다", adopted)}, nil
-	}
+	// Legacy 는 아웃박스가 채널마다 갈려 있던 시절의 큐다. **옮기지 않는다** —
+	// 재생이 제자리에서 돌려 전송으로 비우고, 마지막 줄까지 나가면 keep() 이 파일을 지운다.
+	// (os.Rename 청구로 고정 자리에 흡수하려던 앞선 설계는 반증됐다 — 스펙 §4.)
+	Legacy []*Outbox
 ```
 
-그리고 `Replay` 끝의 `switch` 뒤, `return res, nil` 앞에 한 줄 넣는다:
+`newClient` 의 `return &Client{...}` 를 바꾼다:
 
 ```go
-	res.Detail = withAdopt(res.Detail, adopted)
-	return res, nil
-```
-
-`keep` 실패로 일찍 도는 가지(352-354행)도 사유를 잃지 않게 고친다:
-
-```go
-	if err := o.keep(left); err != nil {
-		return ReplayResult{Sent: sent, Remaining: len(left), Rejected: rejected,
-			Detail: withAdopt("", adopted)}, err
+	ob := newOutbox(get, home)
+	var legacy []*Outbox
+	for _, d := range LegacyOutboxDirs(get, home, ob.Dir()) {
+		legacy = append(legacy, newOutboxAt(d))
+	}
+	return &Client{
+		Endpoint: ep,
+		URL:      url,
+		Token:    token,
+		HTTP:     &http.Client{Timeout: timeout},
+		Cache:    newCache(sd),
+		Outbox:   ob,
+		Legacy:   legacy,
+		Log:      log,
+		Now:      func() time.Time { return time.Now().UTC() },
 	}
 ```
 
-그리고 helper 를 `adopt` 옆에 둔다:
+`Flush`(294-310행)를 이렇게 바꾼다:
 
 ```go
-// withAdopt 는 재생 사유에 흡수가 못 한 것을 붙인다.
+// Flush 는 쌓인 판단을 재생한다. **모든 명령의 앞에서 불린다** —
+// 재연결을 감지하는 별도 기구를 만들지 않는다(감지 기구는 자기가 안 돌 때 조용하다).
 //
-// 별도 필드를 만들지 않는 이유: 이 값을 읽는 자리가 전부 사람에게 보여 주는 문장이라
-// (fd doctor · SessionStart 배너 · MCP 열화 사유) 필드를 늘리면 소비자마다
-// 붙일지 말지를 각자 정하게 되고, 그러면 어딘가에서 조용히 사라진다.
-func withAdopt(detail string, notes []string) string {
-	if len(notes) == 0 {
-		return detail
+// ★ 고정 큐를 돌고 **옛 채널 자리 큐도 함께 돈다.** 큐마다 독립이라 한쪽이 막혀도
+// 다른 쪽은 나간다 — 한 큐의 정체가 다른 큐를 인질로 잡지 않는다.
+func (c *Client) Flush(ctx context.Context) ReplayResult {
+	return c.flushAll(ctx, func(_ *Outbox, e OutboxEntry) error {
+		var body any
+		if uerr := json.Unmarshal(e.Body, &body); uerr != nil {
+			// 해석 불가한 줄은 보낼 수 없다. 버리지 않고 남긴 채 사유를 올린다.
+			return fmt.Errorf("본문 해석 실패: %w", uerr)
+		}
+		_, _, err := c.do(ctx, http.MethodPost, e.Path, body, e.Key)
+		return err
+	})
+}
+
+// flushAll 은 큐 전부를 돌고 결과를 합산한다. 전송 함수를 인자로 받는 이유는
+// 시험이 서버 없이 갈래를 볼 수 있어야 해서다(하네스를 띄우면 그 갈래가 안 보인다).
+func (c *Client) flushAll(ctx context.Context, send func(*Outbox, OutboxEntry) error) ReplayResult {
+	var total ReplayResult
+	var details []string
+	for _, ob := range append([]*Outbox{c.Outbox}, c.Legacy...) {
+		res, err := ob.Replay(ctx, func(ctx context.Context, e OutboxEntry) error {
+			return send(ob, e)
+		})
+		total.Sent += res.Sent
+		total.Rejected += res.Rejected
+		total.Remaining += res.Remaining
+		switch {
+		case err != nil:
+			c.Log.Error("아웃박스 재생 실패", "dir", ob.Dir(), "error", err.Error(), "count", res.Sent)
+			details = append(details, ob.Dir()+": "+err.Error())
+		case res.Remaining > 0 || res.Rejected > 0:
+			// ★ 이 가지가 없어서 **완전 침묵**이었다. 옛 코드는 err!=nil 이거나 Sent>0
+			// 일 때만 로그를 냈는데, 남거나 격리만 된 경우가 정확히 err==nil·Sent==0 이다.
+			// 큐가 여럿이 된 지금 그 침묵은 "어느 큐가 왜 안 나갔나"에 답할 자리를 없앤다(§9).
+			c.Log.Warn("아웃박스가 안 비었다", "dir", ob.Dir(),
+				"sent", res.Sent, "remaining", res.Remaining, "rejected", res.Rejected)
+			details = append(details, ob.Dir()+": "+res.Detail)
+		case res.Sent > 0:
+			c.Log.Info("아웃박스 재생", "dir", ob.Dir(), "count", res.Sent)
+		}
 	}
-	msg := "옛 자리 흡수에서 못 한 것: " + strings.Join(notes, " · ")
-	if strings.TrimSpace(detail) == "" {
-		return msg
+	switch {
+	case len(details) > 0:
+		total.Detail = strings.Join(details, " · ")
+	case total.Sent > 0:
+		total.Detail = fmt.Sprintf("판단 %d건을 재생했다", total.Sent)
+	default:
+		total.Detail = "대기 중인 판단이 없다"
 	}
-	return detail + " · " + msg
+	return total
 }
 ```
 
+`client.go` 의 import 에 `"strings"` 가 없으면 넣는다(이미 있다 — 확인만).
+
 - [ ] **Step 4: 통과를 확인한다**
 
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestReplay|TestAdopt|TestConcurrent|TestPermanent|TestReachable|TestAlwaysFailing|TestOldEntries|TestLongOffline' -race -count=1`
-Expected: PASS 전부. 기존 재생 시험이 빨개지면 회귀다.
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestFlushDrains|TestStuckLegacy|TestLegacyQueueQuarantines' -race -count=1 -v`
+Expected: PASS 3건
+
+그리고 회귀를 본다:
+Run: `go test ./cmd/fd/ -count=1 2>&1 | grep -E '^(---|ok|FAIL)' | head`
+Expected: `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 만 빨강.
 
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add plugins/flightdeck/server/cmd/fd/outbox.go \
-        plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go
-git commit -m "feat(flightdeck): 재생이 흡수를 먼저 돌리고 못 한 것을 사유에 싣는다"
+git add plugins/flightdeck/server/cmd/fd/client.go \
+        plugins/flightdeck/server/cmd/fd/outbox_legacy_test.go
+git commit -m "feat(flightdeck): 재생이 옛 채널 자리 큐를 함께 돈다 — 옮기지 않고 보낸다
+
+큐 하나가 Outbox 값 하나다. 기존 Replay 를 그대로 재사용하므로 새 기구가 없다.
+큐마다 독립이라 한쪽이 막혀도 다른 쪽은 나간다.
+
+함께 막은 것: Flush 가 err!=nil 이거나 Sent>0 일 때만 로그를 내서, 남거나 격리만 된
+경우(err==nil·Sent==0)가 **완전 침묵**이었다. 큐가 여럿이 된 지금 그 침묵은
+'어느 큐가 왜 안 나갔나'에 답할 자리를 없앤다(§9)."
 ```
 
 ---
 
-### Task 7: `fd doctor` 가 자리·잔량·**못 보는 범위**를 찍는다
+### Task 6: `fd doctor` 가 자리·잔량·**못 보는 범위**를 찍는다
 
 **Files:**
 - Modify: `plugins/flightdeck/server/cmd/fd/outbox.go` (`LegacyLeftovers` 추가)
 - Modify: `plugins/flightdeck/server/cmd/fd/cmds.go:444-464`
-- Test: `plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go` (추가)
+- Test: `plugins/flightdeck/server/cmd/fd/outbox_legacy_test.go` (추가)
 
 **Interfaces:**
-- Consumes: `Outbox.legacy`·`Dir()`·`Source()`(과제 4)
-- Produces: `type Leftover struct { Dir string; Pending, Rejected, Claimed int; Err string }` · `func (o *Outbox) LegacyLeftovers() []Leftover` — **읽기만 한다.**
+- Consumes: `readEntries`·`readRejected`·`Client.Legacy`(과제 4·5)
+- Produces: `type Leftover struct { Dir string; Pending, Rejected int; Err string }` · `func (c *Client) LegacyLeftovers() []Leftover` — **읽기만 한다.**
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
-`outbox_adopt_test.go` 에 붙인다:
+`outbox_legacy_test.go` 에 붙인다:
 
 ```go
-// doctor 가 옛 자리 잔량을 세되 **아무것도 옮기지 않는다.** 진단이 부작용을 가지면
+// doctor 가 옛 자리 잔량을 세되 **아무것도 보내지 않는다.** 진단이 부작용을 가지면
 // "찍어 봤더니 상태가 달라졌다"가 되고, 그러면 진단을 믿을 수 없다.
-func TestLegacyLeftoversCountsWithoutMoving(t *testing.T) {
-	o := mkOutbox(t)
+func TestLegacyLeftoversCountsWithoutSending(t *testing.T) {
+	h := newHarness(t)
 	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	o.legacy = []string{legacy}
-	mkAdoptable(t, legacy, "k1", "k2")
+	seedQueue(t, legacy, "k1", "k2")
 
-	got := o.LegacyLeftovers()
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+
+	got := cli.LegacyLeftovers()
 	if len(got) != 1 {
-		t.Fatalf("잔량 보고가 %d건이다 — 1건이어야 한다", len(got))
+		t.Fatalf("잔량 보고가 %d건이다 — 1건이어야 한다: %+v", len(got), got)
 	}
 	if got[0].Pending != 2 {
 		t.Errorf("대기 %d건으로 셌다 — 2건이어야 한다", got[0].Pending)
 	}
 	if _, err := os.Stat(filepath.Join(legacy, pendingName)); err != nil {
-		t.Errorf("원본이 사라졌다 — 진단이 옮겼다: %v", err)
-	}
-	if got := keysOf(t, o); len(got) != 0 {
-		t.Errorf("고정 자리에 %v 가 생겼다 — 진단이 옮겼다", got)
+		t.Errorf("큐가 사라졌다 — 진단이 보냈다: %v", err)
 	}
 }
 
-// 옛 자리가 없으면 보고도 없다. 없는 것을 있다고 찍으면 사람이 헛것을 쫓는다.
+// 빈 자리는 안 찍는다. 없는 것을 찍으면 사람이 헛것을 쫓는다.
 func TestLegacyLeftoversIsEmptyWhenNothingLeft(t *testing.T) {
-	o := mkOutbox(t)
-	o.legacy = []string{filepath.Join(t.TempDir(), "nope", "outbox")}
-	if got := o.LegacyLeftovers(); len(got) != 0 {
+	h := newHarness(t)
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(filepath.Join(t.TempDir(), "nope", "outbox"))}
+	if got := cli.LegacyLeftovers(); len(got) != 0 {
 		t.Errorf("빈 자리를 %d건으로 보고했다: %+v", len(got), got)
 	}
 }
-```
 
-그리고 doctor 출력 시험을 `machine_identity_test.go` 옆의 스타일로 새 파일에 둔다 — 여기서는 `outbox_adopt_test.go` 에 붙인다:
-
-```go
 // doctor 는 자리와 **못 보는 범위**를 함께 찍는다.
 //
 // ★ 후자가 이 시험의 핵심이다. 옛 자리 목록은 이 채널이 계산할 수 있는 것만이라
-// (LegacyOutboxDirs), 다른 채널의 자리는 여기서 원리적으로 안 보인다. 그 사실을 안 찍으면
-// "0건"이 '깨끗하다'로 읽히고, 그것은 안 잰 축을 잰 척하는 것이다(§13).
+// 다른 채널의 자리는 원리적으로 안 보인다. 그 사실을 안 찍으면 "0건"이 '깨끗하다'로
+// 읽히고, 그것은 안 잰 축을 잰 척하는 것이다(§13).
 func TestDoctorReportsOutboxPlaceAndItsOwnBlindness(t *testing.T) {
 	h := newHarness(t)
 	code, out := h.run("", "doctor")
@@ -1309,7 +1106,10 @@ func TestDoctorReportsOutboxPlaceAndItsOwnBlindness(t *testing.T) {
 	if !strings.Contains(out, dir) {
 		t.Errorf("doctor 가 아웃박스 자리(%s)를 안 찍었다:\n%s", dir, out)
 	}
-	if !strings.Contains(out, "채널") {
+	// ★ 단정 문자열은 **그 줄 고유의 문구**여야 한다. "채널" 로 단정하면 기존
+	//   `처방 채널   Stop 훅 stdout` 줄(cmds.go:446)에 걸려서, 사각 문장을 통째로
+	//   빼먹어도 초록이 된다 — 이 레포가 반복해서 경계한 '전 시험 초록 상태로 사는 결함'이다.
+	if !strings.Contains(out, "옛 자리 탐색") {
 		t.Errorf("doctor 가 못 보는 범위를 안 말한다 — 0건이 '깨끗하다'로 읽힌다:\n%s", out)
 	}
 }
@@ -1318,47 +1118,53 @@ func TestDoctorReportsOutboxPlaceAndItsOwnBlindness(t *testing.T) {
 - [ ] **Step 2: 실패를 확인한다**
 
 Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -run 'TestLegacyLeftovers|TestDoctorReportsOutbox' -count=1`
-Expected: FAIL — `o.LegacyLeftovers undefined`
+Expected: FAIL — `cli.LegacyLeftovers undefined`
 
 - [ ] **Step 3: `LegacyLeftovers` 를 구현한다**
 
-`outbox.go` 의 `adopt` 뒤에 넣는다:
+`outbox.go` 의 `Rejected` 뒤에 넣는다:
 
 ```go
 // Leftover 는 옛 자리 하나에 아직 남아 있는 것이다.
 type Leftover struct {
 	Dir      string
 	Pending  int    // 대기열 줄 수
-	Rejected int    // 격리 줄 수
-	Claimed  int    // 고아 청구본 파일 수 — 앞선 흡수가 도중에 죽은 흔적이다
+	Rejected int    // 격리 줄 수 — 이것은 안 비워진다(보관소는 제 큐 옆에 남는다)
 	Err      string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
 }
 
-// LegacyLeftovers 는 옛 자리에 남은 것을 **읽기만 해서** 센다.
+// leftover 는 이 큐에 남은 것을 **읽기만 해서** 센다.
 //
-// ★ 옮기지 않는다. 진단이 부작용을 가지면 "찍어 봤더니 상태가 달라졌다"가 되고,
-// 그러면 진단을 믿을 수 없다. 흡수는 Replay 경로에서만 돈다.
-func (o *Outbox) LegacyLeftovers() []Leftover {
+// ★ 보내지 않는다. 진단이 부작용을 가지면 "찍어 봤더니 상태가 달라졌다"가 되고,
+// 그러면 진단을 믿을 수 없다. 재생은 Flush 경로에서만 돈다.
+func (o *Outbox) leftover() Leftover {
+	lo := Leftover{Dir: o.dir}
+	if es, err := o.List(); err != nil {
+		lo.Err = err.Error()
+	} else {
+		lo.Pending = len(es)
+	}
+	if rs, err := o.Rejected(); err != nil {
+		lo.Err = strings.TrimSpace(lo.Err + " " + err.Error())
+	} else {
+		lo.Rejected = len(rs)
+	}
+	return lo
+}
+```
+
+`client.go` 에 넣는다(`flushAll` 뒤):
+
+```go
+// LegacyLeftovers 는 옛 자리 큐에 아직 남아 있는 것이다. **읽기만 한다.**
+//
+// 빈 자리는 안 낸다 — 없는 것을 찍으면 사람이 헛것을 쫓는다.
+func (c *Client) LegacyLeftovers() []Leftover {
 	var out []Leftover
-	for _, dir := range o.legacy {
-		lo := Leftover{Dir: dir}
-		if es, err := readEntries(filepath.Join(dir, pendingName)); err != nil {
-			lo.Err = err.Error()
-		} else {
-			lo.Pending = len(es)
-		}
-		if rs, err := readRejected(filepath.Join(dir, rejectedName)); err != nil {
-			lo.Err = strings.TrimSpace(lo.Err + " " + err.Error())
-		} else {
-			lo.Rejected = len(rs)
-		}
-		for _, base := range []string{pendingName, rejectedName} {
-			if cs, err := filepath.Glob(filepath.Join(dir, base+".claimed-*")); err == nil {
-				lo.Claimed += len(cs)
-			}
-		}
-		if lo.Pending == 0 && lo.Rejected == 0 && lo.Claimed == 0 && lo.Err == "" {
-			continue // 빈 자리는 안 찍는다 — 없는 것을 찍으면 사람이 헛것을 쫓는다
+	for _, ob := range c.Legacy {
+		lo := ob.leftover()
+		if lo.Pending == 0 && lo.Rejected == 0 && lo.Err == "" {
+			continue
 		}
 		out = append(out, lo)
 	}
@@ -1368,7 +1174,7 @@ func (o *Outbox) LegacyLeftovers() []Leftover {
 
 - [ ] **Step 4: `runDoctor` 의 아웃박스 절을 바꾼다**
 
-`cmds.go:444-464` 의 아웃박스·격리 부분을 이것으로 교체한다(`처방 채널` 줄 다음부터):
+`cmds.go` 의 `처방 채널` 줄(446행) **다음부터** 451-464행까지를 이것으로 교체한다:
 
 ```go
 	// ★ 아웃박스는 이제 **채널 무관한 고정 자리**에 있다(OutboxPath). 그래서 이 줄이 세는
@@ -1389,59 +1195,55 @@ func (o *Outbox) LegacyLeftovers() []Leftover {
 			fmt.Fprintf(out, "      %s · %s\n", r.At.Format(time.RFC3339), clip(r.Reason, 200))
 		}
 	}
-	// ★ 옛 채널별 자리에 남은 것과 **이 목록이 못 보는 범위**를 함께 찍는다.
-	// 후자를 빼면 "0건"이 '깨끗하다'로 읽히는데, 그것은 안 잰 축을 잰 척하는 것이다(§13).
-	for _, lo := range a.cli.Outbox.LegacyLeftovers() {
-		fmt.Fprintf(out, "  ! 옛 자리에 남았다 %s — 대기 %d · 격리 %d · 청구본 %d (다음 재생이 흡수한다)\n",
-			lo.Dir, lo.Pending, lo.Rejected, lo.Claimed)
+	// ★ 옛 채널 자리에 남은 것. 대기는 다음 재생이 **보내서** 비우고, 격리는 그 자리에 남는다
+	// (보관소는 제 큐 옆에 남는 것이 설계다 — '어디서 온 것인가'가 사라지면 안 된다).
+	for _, lo := range a.cli.LegacyLeftovers() {
+		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 %d건(그 자리에 남는다)\n",
+			lo.Dir, lo.Pending, lo.Rejected)
 		if lo.Err != "" {
 			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))
 		}
 	}
-	fmt.Fprintln(out, "  옛 자리 탐색은 **이 채널이 계산할 수 있는 자리**만이다 — "+
-		"다른 채널(훅·MCP 는 CLAUDE_PLUGIN_DATA, 셸은 XDG_STATE_HOME)의 자리는 여기서 안 보인다.")
+	// ★ **이 목록이 못 보는 범위를 함께 찍는다.** 빼면 "0건"이 '깨끗하다'로 읽히는데,
+	// 그것은 안 잰 축을 잰 척하는 것이다(§13). 이 문장이 그 축의 유일한 파수꾼이다.
+	fmt.Fprintln(out, "  옛 자리 탐색은 이 채널이 계산할 수 있는 자리만이다 — "+
+		"다른 채널(훅·MCP 는 CLAUDE_PLUGIN_DATA)의 자리는 여기서 안 보인다.")
 ```
 
 - [ ] **Step 5: 통과를 확인한다**
 
-Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -count=1`
-Expected: `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 하나만 빨강(과제 8에서 고친다).
+Run: `cd plugins/flightdeck/server && go test ./cmd/fd/ -count=1 2>&1 | grep -E '^(---|ok|FAIL)' | head`
+Expected: `TestOfflineStateLandsUnderPluginDataNotPluginRoot` 만 빨강.
 
-`fd doctor` 출력을 눈으로 본다:
-```bash
-cd plugins/flightdeck/server && go run ./cmd/fd doctor 2>&1 | head -25
-```
-Expected: `아웃박스 대기 0건 (/home/aaron/.flightdeck/outbox · ~/.flightdeck — 채널 환경과 무관한 고정 자리)` 와 옛 자리 잔량 한 줄(이 머신에는 `~/.local/state/flightdeck/outbox` 에 격리 1건이 있다), 그리고 사각 문장.
+**시험이 진짜로 무언가를 지키는지 확인한다** — 사각 문장 두 줄을 잠시 지우고 돌려서
+`TestDoctorReportsOutboxPlaceAndItsOwnBlindness` 가 **빨개지는지** 본다. 안 빨개지면
+단정이 공허한 것이다. 확인 후 되돌린다.
 
 - [ ] **Step 6: 커밋**
 
 ```bash
-git add plugins/flightdeck/server/cmd/fd/outbox.go plugins/flightdeck/server/cmd/fd/cmds.go \
-        plugins/flightdeck/server/cmd/fd/outbox_adopt_test.go
+git add plugins/flightdeck/server/cmd/fd/outbox.go plugins/flightdeck/server/cmd/fd/client.go \
+        plugins/flightdeck/server/cmd/fd/cmds.go \
+        plugins/flightdeck/server/cmd/fd/outbox_legacy_test.go
 git commit -m "feat(flightdeck): doctor 가 아웃박스 자리·옛 자리 잔량·못 보는 범위를 찍는다
 
 잔량 세기는 읽기만 한다 — 진단이 부작용을 가지면 진단을 믿을 수 없다.
-'못 보는 범위' 문장이 핵심이다. 빼면 0건이 '깨끗하다'로 읽힌다(§13)."
+'못 보는 범위' 문장이 핵심이라 단정 문자열을 그 줄 고유의 문구로 잡았다.
+'채널' 로 잡으면 기존 '처방 채널' 줄에 걸려 문장을 빼먹어도 초록이 된다."
 ```
 
 ---
 
-### Task 8: 반증된 주석과 설계를 고치고, 열화 경로 시험을 갈라진 축에 맞춘다
+### Task 7: 반증된 주석과 설계를 고치고, 열화 경로 시험을 갈라진 축에 맞춘다
 
 **Files:**
-- Modify: `plugins/flightdeck/server/cmd/fd/config.go:11-21`
-- Modify: `plugins/flightdeck/server/cmd/fd/env.go:20-27, 74-76`
-- Modify: `plugins/flightdeck/server/cmd/fd/degrade_path_test.go:330-401`
+- Modify: `cmd/fd/config.go:11-21` · `cmd/fd/env.go:20-27, 74-76`
+- Modify: `cmd/fd/degrade_path_test.go:330-401`
 - Modify: `plugins/flightdeck/DESIGN.md:398`
-- Modify: `docs/superpowers/specs/2026-08-05-fd-outbox-per-channel-design.md`
-
-**Interfaces:**
-- Consumes: 앞 과제 전부
-- Produces: 없음(문서·주석·시험만)
 
 - [ ] **Step 1: `config.go` 의 반증된 주장을 고친다**
 
-`config.go:13-17` 의 두 문장을 바꾼다:
+`config.go:13-17` 을 바꾼다:
 
 ```go
 // ★ 왜 상태 디렉토리가 아닌가. ResolveStateDir 은 CLAUDE_PLUGIN_DATA(훅·MCP 프로세스에만
@@ -1453,12 +1255,11 @@ git commit -m "feat(flightdeck): doctor 가 아웃박스 자리·옛 자리 잔�
 // **열화 여부가 아니라 재생성 가능성**이고, 아웃박스는 그래서 고정 자리로 갔다(OutboxPath).
 //
 // 서버 주소는 정반대 요구다: **같은 머신이면 어느 채널에서 물어도 같아야 한다.**
-// 갈린 자리에 두면 셸에서 설정한 주소를 훅·MCP 가 못 보고, 그 반대도 마찬가지다.
 ```
 
-- [ ] **Step 2: `env.go` 의 `StateDir` 주석을 좁힌다**
+- [ ] **Step 2: `env.go` 의 주석 둘을 좁힌다**
 
-`env.go:20-23` 을 바꾼다:
+`env.go:20-23`:
 
 ```go
 // StateDir 는 **재생성 가능한** 열화 상태(캐시)를 두는 자리다.
@@ -1470,7 +1271,7 @@ git commit -m "feat(flightdeck): doctor 가 아웃박스 자리·옛 자리 잔�
 // 갱신될 때마다 자리가 바뀌고, 그러면 쌓아 둔 캐시가 갱신 한 번에 사라진다(설계 §7).
 ```
 
-그리고 `env.go:74-76`(MachineIDPath 주석의 "두 축은 요구가 정반대다" 문단)을 이렇게 좁힌다:
+`env.go:74-76`:
 
 ```go
 // 두 축은 요구가 정반대다. 상태 디렉토리는 "**재생성 가능한** 열화 상태(캐시)가 플러그인
@@ -1489,13 +1290,14 @@ git commit -m "feat(flightdeck): doctor 가 아웃박스 자리·옛 자리 잔�
     상태 디렉토리는 훅·MCP(`CLAUDE_PLUGIN_DATA`)와 사용자 셸(`XDG_STATE_HOME`)로 갈리는데,
     거기 두면 **셸에서 쌓인 판단을 훅·MCP 가 영영 못 보낸다**(2026-08-03 실측: 판단 하나가
     그렇게 갇혔다). `machine-id`·`config.json` 이 이미 같은 이유로 같은 자리에 있다.
-    옛 자리에 남은 줄은 `os.Rename` 청구로 흡수한다 — 두 프로세스가 같은 줄을 각자 재생하면
-    멱등 표 TTL(24시간)을 넘긴 순간 되돌릴 수 없는 판단 한 줄이 생긴다.
+    옛 자리에 남은 큐는 **옮기지 않는다** — 재생이 제자리에서 돌려 전송으로 비운다.
+    옮기려면 "읽고·쓰고·원본을 치운다"는 세 단계를 원자화해야 하는데 `os.Rename` 하나로는
+    그것이 안 된다(이 자리에서 한 번 틀렸다가 재현으로 뒤집혔다).
 ```
 
 - [ ] **Step 4: 열화 경로 시험을 갈라진 축에 맞춘다**
 
-`degrade_path_test.go:330-338` 의 절 제목과 주석을 바꾼다:
+`degrade_path_test.go:330-338` 의 절 제목·주석·함수 이름을 바꾼다:
 
 ```go
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1516,7 +1318,7 @@ git commit -m "feat(flightdeck): doctor 가 아웃박스 자리·옛 자리 잔�
 func TestOfflineStateSplitsByRegenerabilityAndNeverLandsUnderPluginRoot(t *testing.T) {
 ```
 
-`379-382행`의 아웃박스 단정을 바꾼다:
+379-382행의 아웃박스 단정을 바꾼다:
 
 ```go
 	// ── L1 쓰기: 아웃박스는 **고정 자리**로 간다(plugin-data 아래가 아니다) ──
@@ -1535,124 +1337,107 @@ func TestOfflineStateSplitsByRegenerabilityAndNeverLandsUnderPluginRoot(t *testi
 
 import 에 `"strings"` 가 없으면 넣는다.
 
-- [ ] **Step 5: 설계 문서에 구현 중 드러난 사실을 덧붙인다**
+- [ ] **Step 5: 전 시험 초록을 확인한다**
 
-`docs/superpowers/specs/2026-08-05-fd-outbox-per-channel-design.md` 의 §4 끝에 붙인다:
+Run: `cd plugins/flightdeck/server && go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1`
+Expected: `gofmt -l .` 무출력, 전 패키지 ok.
 
-```markdown
-### 구현 중 드러난 것 (2026-08-05)
-
-- **하네스가 진짜 홈에 쓰고 있었다.** `degrade_path_test.go` 가 `unpinnedEnv` 대신 손으로
-  env 를 만들어 `TestUnpinnedEnvNeverReachesTheRealHome` 의 감시를 우회했고, 그래서
-  `os.UserHomeDir()` 로 떨어져 프로세스의 진짜 홈에 `machine-id` 를 만들었다(실측 확인).
-  흡수가 `~/.local/state` 를 훑으므로 그대로 두면 **시험이 개발자의 진짜 판단을 옮긴다.**
-  하네스 기본 env 에 `HOME` 을 고정하는 것이 이 작업의 첫 과제가 된 이유다.
-- **깨진 줄은 영원히 사유를 낸다.** 옛 자리 파일에 해석 불가한 줄이 있으면 흡수가 읽은
-  데까지 옮기고 청구본을 남기며, 다음 흡수도 같은 자리에서 걸린다. **그것이 옳다** —
-  조용히 지우면 재생성 불가한 판단이 사라진다(§9). 사람이 볼 때까지 doctor 가 찍는다.
-- **보존 이름에 청구 유일값을 함께 넣는다.** 시각만 쓰면 같은 초에 끝난 둘이 이름이 겹쳐
-  뒤엣것이 앞엣것을 덮어쓰고, 그러면 보존한다면서 기록을 지우게 된다.
-- **격리 흡수는 키로 중복을 거른다.** 한 번 격리된 키가 큐로 돌아가는 경로는 없으므로
-  키가 같으면 같은 줄이다. 재시도가 겹쳐도 보관소에 같은 줄이 두 번 안 남는다.
-```
-
-- [ ] **Step 6: 전 시험 초록을 확인한다**
-
-Run:
-```bash
-cd plugins/flightdeck/server && go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
-```
-Expected: `gofmt -l .` 출력 없음, 전 패키지 ok.
-
-- [ ] **Step 7: 커밋**
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add plugins/flightdeck/server/cmd/fd/config.go plugins/flightdeck/server/cmd/fd/env.go \
-        plugins/flightdeck/server/cmd/fd/degrade_path_test.go plugins/flightdeck/DESIGN.md \
-        docs/superpowers/specs/2026-08-05-fd-outbox-per-channel-design.md
+        plugins/flightdeck/server/cmd/fd/degrade_path_test.go plugins/flightdeck/DESIGN.md
 git commit -m "docs(flightdeck): 반증된 '캐시·아웃박스는 갈려도 된다'를 전 자리에서 고친다
 
 이 레포는 주석이 판단의 저장소라, 틀린 주석을 남기면 다음 사람이 그 위에서 돈다.
 축은 열화 여부가 아니라 재생성 가능성이었다.
 
 degrade_path 시험은 본 판정(PLUGIN_ROOT 아래에 아무것도 안 생긴다)을 그대로 두고
-아웃박스 단정만 고정 자리로 옮겼다. 보호를 약화한 것이 아니라 갈라진 두 축을
-시험에서도 가른 것이다."
+아웃박스 단정만 고정 자리로 옮겼다."
 ```
 
 ---
 
-### Task 9: 실물로 확인하고 마무리한다
+### Task 8: 실물로 확인하고 마무리한다
 
-**Files:** 없음(검증만)
+- [ ] **Step 1: 이 머신의 실제 상태를 본다**
 
-**Interfaces:**
-- Consumes: 과제 1-8 전부
-- Produces: 없음
-
-- [ ] **Step 1: 이 머신의 실제 흡수를 눈으로 본다**
-
-이 머신에는 `~/.local/state/flightdeck/outbox/rejected.jsonl` 에 격리 1건이 있다(8/3 판단, 409).
+이 머신 `~/.local/state/flightdeck/outbox/rejected.jsonl` 에 격리 1건이 있다(8/3 판단, 409).
 
 ```bash
 cd plugins/flightdeck/server
-echo "== 흡수 전"; ls -la ~/.local/state/flightdeck/outbox/ ~/.flightdeck/outbox/ 2>&1 | head -20
-go run ./cmd/fd doctor 2>&1 | head -25
+echo "== 전"; ls -la ~/.local/state/flightdeck/outbox/ ~/.flightdeck/outbox/ 2>&1 | head -20
+go run ./cmd/fd doctor 2>&1 | head -30
 ```
-Expected: doctor 가 옛 자리 잔량 `격리 1` 을 찍는다. **doctor 는 안 옮긴다.**
+Expected: doctor 가 고정 자리(`~/.flightdeck/outbox`)를 찍고, 옛 자리 줄에 `격리 1건(그 자리에 남는다)` 을 찍고, 사각 문장을 찍는다. **doctor 는 아무것도 안 보낸다.**
 
-- [ ] **Step 2: 재생을 한 번 돌려 흡수를 일으킨다**
+- [ ] **Step 2: 재생을 돌려 본다**
 
 ```bash
 cd plugins/flightdeck/server && go run ./cmd/fd status >/dev/null 2>&1
-echo "== 흡수 후"; ls -la ~/.local/state/flightdeck/outbox/ ~/.flightdeck/outbox/ 2>&1
-go run ./cmd/fd doctor 2>&1 | grep -A3 '격리\|옛 자리'
+echo "== 후"; ls -la ~/.local/state/flightdeck/outbox/ ~/.flightdeck/outbox/ 2>&1
 ```
-Expected:
-- `~/.flightdeck/outbox/rejected.jsonl` 에 그 1건이 생긴다.
-- `~/.local/state/flightdeck/outbox/rejected.jsonl.migrated-*` 가 생기고 **정규 이름은 사라진다.**
-- doctor 가 격리 1건을 고정 자리에서 찍고, 옛 자리 잔량 줄은 사라진다.
+Expected: 옛 자리의 `rejected.jsonl` 이 **그대로 있다**(격리는 안 옮긴다). `pending.jsonl` 은 원래 없었다. 고정 자리에는 새로 생기는 것이 없다.
 
-**원본이 지워졌으면 그것은 결함이다** — `.migrated-*` 로 남아야 한다.
-
-- [ ] **Step 3: 전 검증을 한 번 더 돌린다**
+- [ ] **Step 3: 전 검증**
 
 ```bash
 cd plugins/flightdeck/server && go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 ```
-Expected: 전부 통과, `gofmt -l` 무출력.
 
-- [ ] **Step 4: 시험이 진짜 홈을 안 건드리는지 마지막으로 확인한다**
+- [ ] **Step 4: 시험이 진짜 홈을 안 건드리는지 마지막 확인**
 
 ```bash
 cd plugins/flightdeck/server
 SB=$(mktemp -d) && env HOME="$SB" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" \
-  go test ./... -count=1 >/dev/null 2>&1; echo "가짜 홈에 생긴 파일:"; find "$SB" -type f
+  go test ./... -count=1 >/dev/null 2>&1
+echo "flightdeck 흔적:"; find "$SB" -path '*flightdeck*'
 chmod -R u+w "$SB" 2>/dev/null; rm -rf "$SB"
 ```
 Expected: **아무것도 안 나온다.**
 
-- [ ] **Step 5: 커밋이 필요하면 하고, 판단을 남긴다**
+- [ ] **Step 5: 판단을 남긴다**
 
-검증 과정에서 고친 것이 있으면 커밋한다. 그리고 `fd note` 로 `verified` 판단을 남긴다 —
-무엇을 실제로 돌려 확인했고 무엇은 못 쟀는지를 함께 적는다.
+`fd note --kind verified` 로 무엇을 실제로 돌려 확인했고 무엇은 못 쟀는지를 적는다.
+특히 **동시 재생 경합은 안 닫았다**는 사실을 다시 적는다 — 스펙 §4 끝의 그 문단이
+구현에서도 그대로임을 확인하는 것이 이 단계의 일이다.
 
 ## 자체 검토
 
-**스펙 범위 대조** — 설계 문서의 절마다 담당 과제가 있는지:
+**스펙 범위 대조:**
 
 | 스펙 절 | 과제 |
 |---|---|
-| §3 자리(`OutboxPath`, `StateDir` 은 캐시만) | 2, 4, 8 |
-| §4 이전(청구·흡수·보존·중간 실패) | 5 |
-| §4 24시간 TTL 구멍 | 5 (`TestConcurrentAdoptClaimsOnce`) |
-| §4 순서는 뒤에 붙인다 | 5 (`movePending` 이 `Append` 로 뒤에 붙인다) |
-| §5 후보 목록·고아·`.migrated-*` 제외 | 3, 5 |
-| §5 정직한 구멍(doctor 가 사각을 찍는다) | 7 |
-| §6 반증된 주석 6자리 | 8 |
-| §7 시험 6종 + 기존 시험 정정 | 2, 5, 6, 7, 8 |
-| §8 안 하는 것 | 3(tmp 제외·glob 안 함), 계획 전체가 `internal/` 을 안 건드린다 |
+| §3 자리(`OutboxPath`, `StateDir` 은 캐시만) | 2, 4, 7 |
+| §4 옮기지 말고 보낸다 | 5 |
+| §4 왜 옮기지 않기로 했나(반증 기록) | 7 Step 3(DESIGN), 3·5 의 주석 |
+| §4 24시간 TTL — 닫았다고 안 적는다 | 5 주석 + 8 Step 5 |
+| §5 후보 다섯 자리(고정 자리·tmp 포함) | 3 |
+| §5 정직한 구멍 | 6 |
+| §6 반증된 주석 | 7 |
+| §7 시험 + 침묵 구멍 + 기존 시험 ①②③④ | 1, 2, 3, 5, 6, 7 |
+| §8 안 하는 것 | 계획 전체가 `internal/` 을 안 건드린다 |
 
-**빠졌던 것을 채웠다**: 스펙에 없던 **하네스 HOME 고정**(과제 1)이 필요하다는 것이 구현 준비 중 실측으로 드러났다. 과제 8 Step 5 가 그 사실을 스펙에 되먹인다.
+**1판 검토에서 확정된 26건 대조:**
 
-**타입 일관성**: `Outbox.dir`·`source`·`legacy`·`now` 는 과제 4에서 정의하고 5·6·7이 그대로 쓴다. `readEntries`·`readRejected` 는 과제 4에서 만들고 5·7이 쓴다. `pendingName`·`rejectedName` 는 과제 4에서 정의하고 5·7·8이 쓴다. `claimSuffix`·`claimables`·`claimAndDrain`·`movePending`·`moveRejected`·`adopt` 는 과제 5, `withAdopt` 는 과제 6, `Leftover`·`LegacyLeftovers` 는 과제 7이다. 시험 도우미 `mkAdoptable`·`keysOf` 는 과제 5에서 만들고 6·7이 쓴다. `entry(key)` 와 `mkOutbox(t)` 는 `outbox_stuck_test.go` 의 기존 것을 쓴다.
+| 결함 | 어디서 없앴나 |
+|---|---|
+| 청구가 살아 있는 청구를 뺏는다 | 청구 자체를 없앴다(과제 5) |
+| `Append` 멱등이 재전송을 못 막는다 | 옮기지 않으므로 재청구 경로가 없다 |
+| `newOutbox` 호출부 6곳 | 과제 4 Step 4 에 6곳 전부 |
+| `keysOf` 재선언 | `queuedKeys` 로 개명(과제 5 Step 1) |
+| `withAdopt` 를 읽는 코드 없음 | `flushAll` 이 로그를 내고 doctor 가 잔량을 찍는다(과제 5·6) |
+| `FD_STATE_DIR` 전환 시 고정 자리 고아 | `LegacyOutboxDirs` 가 고정 자리를 후보에 넣는다(과제 3) |
+| tmp 를 뺀 근거가 틀렸다 | 후보에 되넣었다(과제 3) |
+| doctor 단정이 `채널` 에 걸려 공허 | `옛 자리 탐색` 으로 좁혔고 과제 6 Step 5 가 그것을 실측한다 |
+| `moveRejected` 가 오류를 삼킨다 | 그 함수가 없어졌다(격리를 안 옮긴다) |
+| `hook_stop_test.go` 에 HOME 없음 | 과제 1 Step 4 ② |
+| `degrade_path_test.go:233` 의 `sd.sub("outbox")` | 과제 4 Step 4 ④ |
+| telemetry 때문에 `find` 가 항상 실패 | `-path '*flightdeck*'` 로 좁혔다(과제 1 Step 6, 과제 8 Step 4) |
+| 청구 뺏긴 쪽이 틀린 사유를 올린다 | 청구가 없어졌다 |
+
+**타입 일관성**: `Outbox.dir`·`source`·`now` 는 과제 4에서 정의하고 5·6이 쓴다.
+`newOutboxAt` 은 과제 4, `Client.Legacy`·`flushAll` 은 과제 5, `Leftover`·`leftover`·
+`LegacyLeftovers` 는 과제 6이다. 시험 도우미 `seedQueue`·`queuedKeys` 는 과제 5에서
+만들고 6이 쓴다. `entry(key)`·`mkOutbox(t)`·`quietLogger()`·`ErrUnreachable`·`APIError` 는
+기존 것을 쓴다.
