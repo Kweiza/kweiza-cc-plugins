@@ -244,12 +244,40 @@ type ProjectCoord struct {
 	Detail   string // 어떻게 알아냈나 · 무엇을 못 알아냈나. 항상 채운다
 }
 
+// RevParseCoords 는 `git rev-parse --git-common-dir --show-toplevel` 출력을 가른다. 순수 함수다.
+//
+// git 은 인자를 **준 순서대로** 한 줄씩 낸다. 순서를 여기 한 자리에 못 박아 두는 이유는,
+// 호출부에서 줄 번호로 집으면 인자를 하나 더할 때 두 값이 조용히 뒤바뀌기 때문이다 —
+// 그러면 워크트리 자리에 `.git` 경로가 들어가고 그 사실이 어느 화면에도 안 뜬다.
+//
+// 줄이 하나만 오면 그것을 --git-common-dir 로 본다(그쪽이 먼저 온다). 빈 줄은 버린다 —
+// bare 저장소에서는 --show-toplevel 이 빈 줄을 내고, 그때 워크트리는 접지 않는 것이 맞다.
+func RevParseCoords(out string) (commonDir, topLevel string) {
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > 0 {
+		commonDir = lines[0]
+	}
+	if len(lines) > 1 {
+		topLevel = lines[1]
+	}
+	return commonDir, topLevel
+}
+
 // MainRepoRoot 는 `git rev-parse --git-common-dir` 결과에서 주 저장소 경로를 낸다. 순수 함수다.
 //
 // ★ 워크트리에서 부르면 --git-dir 는 `<주저장소>/.git/worktrees/<이름>` 을 주지만
 // --git-common-dir 는 `<주저장소>/.git` 을 준다. 서버는 주 저장소로 worktree list 를 돌려야
 // 전 세션의 브랜치를 한 번에 얻으므로(service.worktreeIndex), 링크된 워크트리 경로를 주면
 // **다른 세션들이 통째로 안 보인다.**
+//
+// ★ 이것은 **프로젝트** 축이다. 세션의 워크트리 축은 --show-toplevel 이 답한다(resolveProject
+// 참조) — 둘을 같은 값으로 접으면 링크된 워크트리가 주 저장소에 흡수돼 §3 이 없앤
+// 조상 트리 상속이 돌아온다.
 func MainRepoRoot(gitCommonDir string) string {
 	p := strings.TrimSpace(gitCommonDir)
 	if p == "" {
@@ -299,10 +327,30 @@ func resolveProject(get func(string) (string, bool), cwd string) ProjectCoord {
 	wt = filepath.Clean(wt)
 
 	c := ProjectCoord{Worktree: wt, Path: wt, Detail: "git 을 못 읽어 워크트리를 주 저장소로 뒀다"}
-	if out, err := gitOut(wt, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
-		if root := MainRepoRoot(out); root != "" {
+	// ★ 한 프로세스에서 값 **둘**을 받는다. 훅 이벤트마다 이 함수가 도는데(beatFromHook →
+	//   OpenSession) 여기에 git 호출을 하나 더 얹으면 가장 잦은 경로에 프로세스가 하나 는다.
+	//   `git rev-parse` 는 인자를 준 순서대로 한 줄씩 내므로 --show-toplevel 은 공짜다.
+	if out, err := gitOut(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"); err == nil {
+		common, top := RevParseCoords(out)
+		if root := MainRepoRoot(common); root != "" {
 			c.Path = root
 			c.Detail = "git rev-parse --git-common-dir 로 주 저장소를 찾았다"
+		}
+		// ★ 워크트리 좌표를 **git 이 답한 트리 루트**로 접는다.
+		//
+		//   세션 유니크 키가 (machine_id, worktree, cc_session_id) 3중키인데 여기에 날 cwd 가
+		//   들어가면 대화 하나가 cwd 수만큼 세션 행을 만든다 — 서브에이전트가 하위 디렉토리에서
+		//   go test 를 돌리는 것만으로 새 정체가 발급된다(실측: 원장에 행 50개, 실제 대화 18개).
+		//   그러면 처방이 자기 자신과 조율하라 하고, 보드의 세션 수가 부풀고, 선점은 한 행에
+		//   발자국은 다른 행에 쌓인다.
+		//
+		//   ★ 접두 일치가 아니다. DESIGN §3 이 접두 일치를 **일부러** 없앴고(조상 트리의 등록을
+		//   물려받는 사고를 겨냥했다) 그것을 되살리면 안 된다. --show-toplevel 은 링크된
+		//   워크트리 안에서 **그 워크트리의 루트**를 답한다 — 주 저장소가 아니다. 그래서
+		//   하위 디렉토리는 접히고 서로 다른 워크트리는 여전히 갈린다. §3 이 지키려던 것 그대로다.
+		if top != "" {
+			c.Worktree = filepath.Clean(top)
+			c.Detail += " · 워크트리는 --show-toplevel 로 트리 루트에 맞췄다"
 		}
 	} else {
 		c.Detail = "git rev-parse 실패(" + clip(err.Error(), 200) + ") — 워크트리를 주 저장소로 뒀다"

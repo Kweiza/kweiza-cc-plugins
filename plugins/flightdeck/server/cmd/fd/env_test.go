@@ -288,3 +288,34 @@ func TestLegacyOutboxDirsDeduplicates(t *testing.T) {
 		t.Errorf("같은 자리를 %d번 돈다: %v", n, got)
 	}
 }
+
+// TestRevParseCoordsKeepsTheArgumentOrder 는 두 값이 뒤바뀌지 않음을 못 박는다.
+//
+// ★ 이 순수 함수가 따로 있는 이유가 이 시험이다. 호출부에서 줄 번호로 집으면 인자를
+// 하나 더하는 순간 두 값이 조용히 뒤바뀌고, 그러면 세션의 워크트리 자리에 `.git` 경로가
+// 들어간다 — 3중키가 통째로 어긋나는데 어느 화면에도 안 뜬다.
+func TestRevParseCoordsKeepsTheArgumentOrder(t *testing.T) {
+	cases := []struct {
+		name                string
+		in                  string
+		wantCommon, wantTop string
+	}{
+		{"주 워크트리", "/repo/.git\n/repo\n", "/repo/.git", "/repo"},
+		{"링크된 워크트리", "/repo/.git\n/repo/.flightdeck/worktrees/wt-a\n",
+			"/repo/.git", "/repo/.flightdeck/worktrees/wt-a"},
+		// bare 저장소는 --show-toplevel 이 빈 줄을 낸다. 그때 워크트리는 접지 않는 것이 맞다.
+		{"줄이 하나뿐", "/repo.git\n", "/repo.git", ""},
+		{"빈 출력", "", "", ""},
+		{"공백만", "  \n\n  \n", "", ""},
+		{"앞뒤 공백", "  /repo/.git  \n  /repo  \n", "/repo/.git", "/repo"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			common, top := RevParseCoords(c.in)
+			if common != c.wantCommon || top != c.wantTop {
+				t.Fatalf("RevParseCoords(%q) = (%q, %q), 기대 (%q, %q)",
+					c.in, common, top, c.wantCommon, c.wantTop)
+			}
+		})
+	}
+}
