@@ -37,6 +37,7 @@ import (
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 	"github.com/kweiza/flightdeck/internal/store"
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // ★ 이 서버는 DB 를 열지 않는다. 조정 서버에 붙는 통로는 Backend 하나뿐이고,
@@ -57,8 +58,11 @@ type Server struct {
 
 	id Identity
 
+	beaconDir string // 창 비콘을 둘 디렉토리. 빈 값이면 심지 않는다(WithBeaconDir 참고)
+
 	mu        sync.Mutex
 	sessionID string // 게으르게 연다. 도구를 한 번도 안 부르면 세션 행도 안 생긴다
+	openedCC  string // 그 카드를 **실제로 연** cc. 비콘이 있으면 s.id.CCSessionID 와 다르다
 }
 
 // Option 은 Server 의 선택 설정이다. 시험이 환경을 인자로 주기 위한 자리다 —
@@ -75,6 +79,7 @@ type builder struct {
 	hostname    string
 	hostErr     error
 	now         func() time.Time
+	beaconDir   string
 }
 
 // WithEnv 는 환경 조회를 바꾼다. nil 은 무시한다.
@@ -186,6 +191,10 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 			"project", id.ProjectID, "worktree", clip(id.Worktree, 200),
 			"cc_session", clip(id.CCSessionID, 64))
 	}
+
+	s.beaconDir = b.beaconDir
+	s.plantBeacon()
+
 	return s
 }
 
@@ -431,6 +440,88 @@ func (s *Server) canAttribute() bool {
 	return s.id.CCSessionID != "" && s.id.ProjectID != "" && filepath.IsAbs(s.id.Worktree)
 }
 
+// BeaconKey 는 이 프로세스가 심을 창 좌표다. 심을 수 없으면 ok=false 다.
+//
+// ★ 부모가 claude 라는 보장이 없다. 실측: Cursor 가 띄운 fd mcp 의 부모는 node 이고
+// 조상 사슬 어디에도 claude 가 없으며 CLAUDE_* 환경이 하나도 없다. 그 자리에 심으면
+// 어떤 훅도 못 맞추는 pid 로 키가 잡히므로, 정체가 온전할 때만(canAttribute) 심는다 —
+// beaconDir 이 비었을 때도 마찬가지다(시험 격리, WithBeaconDir 주석 참고).
+func (s *Server) BeaconKey() (window.Key, bool) {
+	k, err := s.beaconKey()
+	return k, err == nil
+}
+
+// beaconKey 는 BeaconKey 와 **같은 판정이되 사유를 잃지 않는다.**
+//
+// ★ 사유를 나르는 갈래가 따로 있는 이유: BeaconKey 의 bool 은 심기 판정에 딱 맞지만
+// (심을까 말까), beaconMiss 는 그 실패를 **사람에게 이름으로 말해야** 한다. 오류를
+// 삼키면 리눅스 밖의 ErrUnsupported 가 "부모가 claude 가 아니다"로 둔갑하고, 그것을 읽은
+// 사람은 아무 문제 없는 자기 프로세스 계보를 뒤지게 된다 — why 가 존재하는 이유가
+// 원인에 도달시키는 것이라, 틀린 원인을 대는 것은 아무 원인도 안 대는 것보다 나쁘다.
+func (s *Server) beaconKey() (window.Key, error) {
+	if s.beaconDir == "" {
+		return window.Key{}, errors.New("이 MCP 프로세스에 비콘 디렉토리가 설정되지 않았다")
+	}
+	if !s.canAttribute() {
+		return window.Key{}, errors.New("이 프로세스의 정체가 반쪽이라 비콘 좌표를 만들 수 없다")
+	}
+	ppid := os.Getppid()
+	started, err := window.StartedOf(ppid)
+	if err != nil {
+		return window.Key{}, fmt.Errorf("부모(pid %d)의 시작 시각을 못 읽었다: %w", ppid, err)
+	}
+	k := window.Key{MachineID: s.id.MachineID, ClaudePID: ppid, Started: started}
+	if !k.Valid() {
+		return window.Key{}, fmt.Errorf("창 좌표가 반쪽이다(machine=%q pid=%d)", clip(k.MachineID, 40), k.ClaudePID)
+	}
+	return k, nil
+}
+
+// plantBeacon 은 이 창의 자리를 표시한다. 실패해도 서버를 막지 않는다 —
+// 비콘이 없으면 훅이 폴백하고, 그 폴백이 오늘 거동이다.
+func (s *Server) plantBeacon() {
+	k, ok := s.BeaconKey()
+	if !ok {
+		return
+	}
+	if _, err := window.Plant(s.beaconDir, k, s.id.Worktree, s.id.CCSessionID, s.now()); err != nil {
+		s.log.WarnContext(context.Background(), "창 비콘 심기 실패", "error", err.Error())
+	}
+}
+
+// beaconMiss 는 이 프로세스가 비콘으로 표류를 못 짚은 사유다. RenderDrift 의 why 로 간다.
+//
+// ★ 훅의 사유는 여기서 알 수 없다 — 훅은 다른 프로세스다. 그래서 훅이 낼 사유를 흉내내지
+// 않고 **이 서버가 실제로 아는 것**만 말한다: 비콘 디렉토리가 있는지, 이 프로세스의 비콘
+// 좌표를 만들 수 있는지(BeaconKey), 그 좌표로 비콘을 읽을 수 있는지(ensureSession 이
+// 이미 쓰는 판정과 같다) — 딱 그 셋이다. 셋 다 통과했다면(비콘을 읽었다면) 이 프로세스
+// 쪽에서는 막힌 데가 없다는 뜻이라 사유를 비운다 — 표류는 **남의** 카드 얘기라 내 비콘이
+// 멀쩡해도 남을 수 있고, 그 경우의 진짜 사유는 이 프로세스가 알 길이 없다.
+func (s *Server) beaconMiss() string {
+	k, err := s.beaconKey()
+	if err != nil {
+		return beaconMissReason(err)
+	}
+	if _, lerr := window.Load(s.beaconDir, k); lerr != nil {
+		// ★ 앞에 "비콘을 못 읽었다:" 를 덧붙이지 않는다 — window.Load 의 오류가 이미 그 말로
+		// 시작한다. 겹쳐 쓰면 사람이 진짜 원인(파일명·errno)에 닿기 전에 읽기를 멈춘다.
+		return beaconMissReason(lerr)
+	}
+	return ""
+}
+
+// beaconMissReason 은 좌표 실패 하나를 사람이 읽는 사유로 만든다. 순수 함수다.
+//
+// ★ ErrUnsupported 만 갈라 낸다. 그 경우의 진짜 원인은 이 프로세스의 계보가 아니라
+// **플랫폼**이고, 그것을 말해 주지 않으면 읽는 사람이 멀쩡한 부모 사슬을 뒤진다.
+// 나머지는 오류가 이미 자기 말을 갖고 있으므로 덧칠하지 않는다.
+func beaconMissReason(err error) string {
+	if errors.Is(err, window.ErrUnsupported) {
+		return "이 플랫폼에서는 프로세스 계보를 읽을 수 없다 — 비콘 통로 자체가 없다(리눅스 전용)"
+	}
+	return err.Error()
+}
+
 // ensureSession 은 세션을 한 번만 연다. 같은 3중키면 같은 세션이므로 재호출도 안전하지만,
 // 매번 열면 git 파생이 도구 호출마다 돌아 첫 명령이 느려진다 — 그 느림이 기존 도구의 병목 3위였다.
 func (s *Server) ensureSession(ctx context.Context) (string, error) {
@@ -439,13 +530,29 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	if s.sessionID != "" {
 		return s.sessionID, nil
 	}
+
+	// ★ 비콘이 있으면 cc 만 그 값을 쓴다. 기동 시 주입된 s.id.CCSessionID 는 exec 이후
+	// 못 바뀌지만, 훅은 매번 새 프로세스라 /clear·compact 로 갈린 새 cc 를 비콘에 적어 둔다.
+	// 여기서 그 값을 집어야 두 프로세스(훅·MCP)가 같은 3중키로 같은 카드를 연다.
+	//
+	// s.id 자체는 안 고친다 — s.id 는 뮤텍스 없이 여러 곳에서 읽힌다(callTool·toolBoard·
+	// errText·tail 응답 등). 그 필드를 가변으로 만들면 지금 코드에 없는 경쟁이 생긴다.
+	// 대신 **s.sessionID 옆에**(같은 뮤텍스 아래) 적어 둔다 — 이 둘은 한 쌍이다:
+	// "어느 카드를, 어느 cc 로 열었나". 표류 판정은 그 쌍을 기준점으로 써야 한다(openedIdentity).
+	cc := s.id.CCSessionID
+	if k, ok := s.BeaconKey(); ok {
+		if b, err := window.Load(s.beaconDir, k); err == nil && strings.TrimSpace(b.CCSessionID) != "" {
+			cc = b.CCSessionID
+		}
+	}
+
 	res, err := s.be.OpenSession(ctx, service.OpenSessionInput{
 		Project:     s.id.ProjectID,
 		ProjectPath: s.id.ProjectPath,
 		MachineID:   s.id.MachineID,
 		Hostname:    s.id.Hostname,
 		Worktree:    s.id.Worktree,
-		CCSessionID: s.id.CCSessionID,
+		CCSessionID: cc,
 	})
 	// 서버가 죽었어도 이 머신에 캐시된 마지막 세션이 있으면 그 좌표로 진행한다 —
 	// 여기서 끊으면 아웃박스에 쌓아야 할 판단까지 함께 죽는다(설계 §7 L1 의 open 처방).
@@ -459,7 +566,7 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.sessionID = res.Session.ID
+	s.sessionID, s.openedCC = res.Session.ID, cc
 	s.log.InfoContext(ctx, "세션 귀속",
 		"session_id", res.Session.ID, "project", res.Project.ID,
 		"created", res.Created, "branch", res.Branch)
@@ -506,7 +613,20 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	// 꼬리가 아니라 notice 에 싣는 이유는 꼬리가 **모든 도구 응답**에 붙기 때문이다 —
 	// 그러려면 도구 호출마다 보드를 파생해야 하고, 그 비용은 이미 한 번 문제가 됐다
 	// (RecentNotes 주석). 증상이 보이는 자리에서만 말한다.
-	if d := RenderDrift(DriftedTwins(s.id, liveIdentitiesOf(view.Sessions)), s.id.CCSessionID); d != "" {
+	//
+	// why 는 twins 가 있을 때만 구한다 — beaconMiss 가 비콘 파일을 읽으므로, 표류가 없는
+	// (대부분의) board 호출에서까지 그 I/O 를 낼 이유가 없다.
+	//
+	// ★★ 기준점은 s.id 가 **아니다.** s.id.CCSessionID 는 exec 때 주입된 뒤 안 바뀌는 값이고,
+	// 카드는 비콘의 cc 로 열린다(ensureSession) — /clear 뒤에는 그 둘이 **정상적으로** 다르다.
+	// s.id 로 재면 방금 수리에 성공한 자기 카드를 자기가 표류로 고발한다.
+	self := s.openedIdentity(sessionID)
+	twins := DriftedTwins(self, liveIdentitiesOf(view.Sessions))
+	why := ""
+	if len(twins) > 0 {
+		why = s.beaconMiss()
+	}
+	if d := RenderDrift(twins, self.CCSessionID, why); d != "" {
 		if notice != "" {
 			notice += "\n"
 		}
@@ -531,6 +651,27 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	return textResult(RenderBoard(view, BoardRenderOptions{
 		Self: sessionID, Detail: a.Detail, Now: s.now(), Tail: tail, Notice: notice,
 	}), false)
+}
+
+// openedIdentity 는 표류 판정의 기준점이다 — 이 프로세스가 **실제로 연 카드**의 좌표다.
+//
+// ★ sessionID 를 인자로 받는 이유: 호출부(toolBoard)가 이미 그 값을 들고 있고, 그것이
+// 이번 호출이 자기 카드로 삼은 값이다. 여기서 s.sessionID 를 다시 읽으면 그 사이에 바뀐
+// 값을 볼 수 있어 "응답이 self 로 표시한 카드"와 "표류 판정이 자기라고 본 카드"가 갈린다.
+//
+// ★ 아직 카드를 안 열었으면(canAttribute 가 거짓이거나 열기가 실패한 경우) env 의 cc 로
+// 떨어진다 — 오늘 거동이고, 그 경우 s.id 축이 대개 반쪽이라 DriftedTwins 가 어차피 nil 이다.
+func (s *Server) openedIdentity(sessionID string) LiveIdentity {
+	s.mu.Lock()
+	cc := s.openedCC
+	s.mu.Unlock()
+	if cc == "" {
+		cc = s.id.CCSessionID
+	}
+	return LiveIdentity{
+		SessionID: sessionID, MachineID: s.id.MachineID,
+		Worktree: s.id.Worktree, CCSessionID: cc,
+	}
 }
 
 // liveIdentitiesOf 는 표류 판정에 필요한 좌표만 뽑는다.
@@ -845,4 +986,14 @@ func WithProject(id, path string) Option {
 // 프로젝트 축이 먼저 같은 사고를 겪고 주입으로 고쳤는데 머신 축만 그 교정에서 빠져 있었다.
 func WithMachine(id string) Option {
 	return func(b *builder) { b.machineID = strings.TrimSpace(id) }
+}
+
+// WithBeaconDir 는 창 비콘을 둘 디렉토리를 준다.
+//
+// ★ **이 옵션이 없으면 심지 않는다.** 여기서 기본 경로로 떨어지면 go test 가 개발자의
+// 진짜 ~/.flightdeck/windows/ 에 파일을 쓴다 — cmd/fd 는 그 사고를
+// TestUnpinnedEnvNeverReachesTheRealHome 으로 막지만 이 패키지에는 그런 방어가 없다.
+// 경로를 고르는 판단은 window.Dir 하나가 갖고, 그것을 부르는 것은 배선(cmd/fd)의 일이다.
+func WithBeaconDir(dir string) Option {
+	return func(b *builder) { b.beaconDir = dir }
 }

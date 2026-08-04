@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
@@ -24,6 +25,7 @@ type App struct {
 	machine    string
 	notice     string // 도구가 스스로 못 한 것. 침묵하지 않는다
 	machineSrc string // machine-id 를 읽은 자리. doctor 가 찍는다 — 값이 갈리면 여기가 원인이다
+	beaconDir  string // 창 비콘 디렉토리(BeaconDir). mcp.go 가 mcpsrv.WithBeaconDir 에 그대로 넘긴다
 	host       string
 	stdin      io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
 	now        func() time.Time
@@ -33,6 +35,7 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 	home := homeDir(env)
 	sd := ResolveStateDir(env, home)
 	mid, midSrc, warn := MachineID(env, home)
+	beaconDir, _ := BeaconDir(env, home)
 	host, herr := os.Hostname()
 	if herr != nil {
 		host = "unknown"
@@ -50,6 +53,7 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 		proj:       resolveProject(env, cwd),
 		machine:    mid,
 		machineSrc: midSrc,
+		beaconDir:  beaconDir,
 		notice:     warn,
 		host:       host,
 		stdin:      stdin,
@@ -132,6 +136,47 @@ func (a *App) openSession(ctx context.Context, in openReq) (res service.SessionR
 	}
 	a.cli.Session = res.Session.ID
 	return res, true, nil
+}
+
+// moveSessionCache 는 세션 캐시를 새 cc 키로 옮긴다. rekey 가 성공한 직후에만 부른다.
+//
+// ★ openSession 은 응답을 sessionCachePath+"/"+cc 에 캐시한다(위 참조). cc 가 갈리면
+// 그 키가 낡아 오프라인 읽기가 빗나가고 "이 세션의 캐시도 없다"가 된다 —
+// **서버가 안 닿는 순간에만** 드러나는 결함이라, 안 옮기면 정작 필요한 그날 아무도 못 찾는다.
+//
+// 옛 키는 지우지 않는다. 지우는 쪽이 얻는 것은 파일 하나이고, 잃는 것은 rekey 직후
+// 옛 cc 로 들어오는 실행(예: 아직 안 끝난 다른 채널)의 마지막 스냅숏이다.
+func (a *App) moveSessionCache(oldCC, newCC string) {
+	if oldCC == "" || newCC == "" || oldCC == newCC {
+		return
+	}
+	ent, err := a.cli.Cache.Get(sessionCachePath + "/" + oldCC)
+	if err != nil {
+		return // 옮길 것이 없다. 캐시가 없는 것은 결함이 아니다
+	}
+	if err := a.cli.Cache.Put(sessionCachePath+"/"+newCC, ent.Body, a.now()); err != nil {
+		a.log.Warn("세션 캐시 키 이전 실패", "error", err.Error())
+	}
+}
+
+// Rekey 는 /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영한다.
+//
+// ★ a.cli.do 를 쓴다 — a.cli.Write 가 아니다. Write 는 JudgeOffline·IdempotencyStable 을 거치는데
+// 둘 다 "rekey" 를 모르는 명령으로 보고 "정책이 정의되어 있지 않다"로 거절한다(offline.go 의
+// default 갈래). 그러면 서버가 안 닿을 때마다 이 호출이 실패한다. 그리고 rekey 는 애초에
+// 오프라인 큐에 쌓을 일이 아니다 — 다음 SessionStart 훅이 어차피 다시 시도하고, 그때는
+// 그 시점의 cc 가 맞다. 낡은 rekey 를 나중에 재생하면 오히려 틀린 값을 심는다.
+func (a *App) Rekey(ctx context.Context, sessionID, cc string) (model.Session, error) {
+	raw, _, err := a.cli.do(ctx, "POST", "/api/v1/sessions/"+urlPath(sessionID)+"/rekey",
+		rekeyReq{CCSessionID: cc}, FreshKey(a.cli.Session))
+	if err != nil {
+		return model.Session{}, err
+	}
+	var out model.Session
+	if uerr := json.Unmarshal(raw, &out); uerr != nil {
+		return model.Session{}, fmt.Errorf("rekey 응답 해석 실패: %w", uerr)
+	}
+	return out, nil
 }
 
 // clientAPIVersion 은 이 바이너리가 아는 계약 버전이다.

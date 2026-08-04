@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // 훅 — 전부 **fail-open**. 어떤 입력에도, 어떤 실패에도 종료코드 0 이다.
@@ -173,6 +176,83 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		return
 	}
 
+	// ★ 표류 수리. **순서가 전부다 — rekey 가 아래 OpenSession 보다 앞이어야 한다.**
+	// 뒤에 두면 그 upsert 가 새 cc 로 카드 B 를 먼저 만들고, 그러면 rekey 가 3중키
+	// UNIQUE 에 걸려 두 카드를 진짜로 병합하는 경로가 또 필요해진다 — 이 설계에 그 경로는
+	// 일부러 없다. 앞에 두면 같은 upsert 가 이미 고쳐진 카드 A 로 그냥 떨어진다.
+	// 뒤바꿔도 컴파일도 되고 대부분의 시험도 초록이라, 그 축은 시험이 따로 붙들고 있다
+	// (TestClearKeepsOneCardAndItsClaim).
+	beaconKey, beacon, haveBeacon := a.findWindow()
+
+	// ★ **워크트리를 한 번 더 대조한다. 지우지 마라 — Find 는 이 축을 안 본다.**
+	// window.Find 가 맞추는 것은 (머신·조상 pid·시작 시각) 셋뿐이다. 그런데 바로 아래
+	// rekey 가 고치는 카드의 키는 **3중키(머신·워크트리·cc)** 다. 그래서 한 창 안에서
+	// MCP 의 워크트리 관측(자기 cwd)과 훅의 것(페이로드 cwd → resolveProject)이 갈리면,
+	// 여기서 남의 워크트리 카드의 cc 를 갈아엎고 아래 upsert 는 내 워크트리로 새 카드를
+	// 또 만든다 — 그 카드의 선점이 아무 잘못도 없는 워크트리 쪽에 **고아로** 남는다.
+	// 이 기능이 없애려는 바로 그 결과를 이 기능이 만들어 내는 것이다(설계 §2 둘째 층:
+	// "읽은 비콘의 워크트리가 내 것과 다르면 남의 창이다 — 거절한다").
+	//
+	// ★ 거절은 **오류가 아니다** — 비콘을 못 찾은 것과 같은 급이라 그냥 아래 OpenSession 으로
+	// 떨어진다(=오늘 거동). 다만 Debug 로 묻지 않는다: 두 채널이 같은 좌표를 다르게 풀었다는
+	// 것은 **다른 데의 진짜 결함**이고, 이 레포는 그 축이 갈려 한 세션이 카드 3장으로 뜬 일을
+	// 이미 겪었으며 그것이 오래 안 보였다(internal/window/dir.go 머리말).
+	if haveBeacon && !sameWorktree(beacon.Worktree, a.proj.Worktree) {
+		a.log.Warn("비콘의 워크트리가 이 훅의 것과 다르다 — 남의 창으로 보고 수리하지 않는다",
+			"beacon", clip(beacon.Worktree, 200), "hook", clip(a.proj.Worktree, 200))
+		in.Notice = strings.TrimSpace(in.Notice +
+			" 이 창의 비콘이 다른 워크트리(" + clip(beacon.Worktree, 120) + ")를 가리켜 카드 합치기를 건너뛴다 — " +
+			"훅과 MCP 가 좌표를 다르게 풀었다는 뜻이다(fd doctor 가 그 축을 잰다).")
+		// 비콘 자체를 안 믿는다. 아래 SaveIdentity 까지 막는다 —
+		// 남의 트리 비콘에 내 cc·카드를 적으면 그것도 같은 오염이다.
+		haveBeacon = false
+	}
+
+	// ★ 비콘의 session_id 가 비었으면 **옛 cc 로 카드를 되찾는다.**
+	//
+	// 그 자리를 적는 것은 훅뿐이고(아래 SaveIdentity), 훅은 비콘을 찾은 뒤에만 적는다.
+	// 그래서 심기가 첫 SessionStart 보다 늦으면 그 자리는 빈 채로 남는다 — 그리고 늦는 것은
+	// 가정이 아니다(설계 개정 ②: `fd mcp` 가 부모 claude 보다 ≈6.6시간 늦게 뜬 실측이 있다).
+	// 그 상태의 /clear 는 rekey 대상을 몰라 건너뛰고 카드가 두 장이 되는데, 그때 고아가 되는
+	// 것이 하필 **첫 구간의 선점과 판단을 든 카드**다.
+	//
+	// OpenSession 은 3중키 upsert 라 옛 cc 로 부르면 그 카드 A 를 **그대로** 돌려준다
+	// (새로 만들지 않는다). 못 찾는 경우에도 손해가 없다 — 아래 rekey 가 그 카드를 새 cc 로
+	// 옮기고, 이어지는 OpenSession(cc) 이 같은 카드로 떨어진다.
+	//
+	// ★ 자리는 여기여야 한다 — **아래 OpenSession 보다 앞이다.** 이 되찾기까지가 "rekey 먼저"
+	// 한 덩이다. 뒤로 밀면 새 cc 의 카드 B 가 먼저 생겨 rekey 가 3중키 UNIQUE 에 걸린다.
+	if haveBeacon && beacon.SessionID == "" && beacon.CCSessionID != "" && beacon.CCSessionID != cc {
+		old, _, oerr := a.OpenSession(ctx, beacon.CCSessionID, "")
+		switch {
+		case oerr != nil:
+			// 못 찾아도 오류가 아니다 — 비콘을 못 찾은 것과 같은 급이라 폴백한다(오늘 거동).
+			a.log.Warn("비콘의 옛 cc 로 카드를 못 찾았다 — 이번 전환은 합치지 못한다",
+				"error", oerr.Error(), "cc", clip(beacon.CCSessionID, 40))
+		case old.Session.ID != "":
+			beacon.SessionID = old.Session.ID
+		}
+	}
+
+	if haveBeacon && beacon.SessionID != "" && beacon.CCSessionID != cc {
+		if _, rerr := a.Rekey(ctx, beacon.SessionID, cc); rerr != nil {
+			// ★ 삼키고 알린다. 409(이미 남이 쓰는 cc)는 미도달이 아니라 *APIError 로 오므로
+			// 기존 열화 경로가 이걸 안 잡아 준다 — 아래 OpenSession 실패를 다루는 꼴과 같이 간다.
+			// 여기서 오류를 위로 올리면 훅이 세션을 막는다(이 파일 머리말).
+			a.log.Warn("세션 rekey 실패", "error", rerr.Error(),
+				"session", clip(beacon.SessionID, 40), "cc", clip(cc, 40))
+			// ★ 화면에는 **서버가 닿을 때만** 싣는다(일곱 줄 아래 OpenSession 실패와 같은 규율).
+			// 서버가 죽었으면 rekey 는 정의상 매번 실패하고, 그 사실은 배너가 이미 말하고 있다 —
+			// 여기서 또 얹으면 /clear 마다 같은 말이 배너 위에 한 줄씩 쌓인다.
+			if reachable {
+				in.Notice = strings.TrimSpace(in.Notice +
+					" cc 가 갈렸는데 카드를 못 합쳤다: " + clip(rerr.Error(), 200))
+			}
+		} else {
+			a.moveSessionCache(beacon.CCSessionID, cc)
+		}
+	}
+
 	res, stale, err := a.OpenSession(ctx, cc, "")
 	if err != nil {
 		a.log.Error("훅에서 세션 열기 실패", "mode", "session-start", "error", err.Error())
@@ -186,6 +266,14 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		}
 	}
 
+	// 비콘에 이번 cc 와 그 카드를 적어 둔다. 다음 전환에서 이 값이 rekey 의 대상이 된다.
+	if haveBeacon && in.SessionID != "" {
+		if _, werr := window.SaveIdentity(a.beaconDir, beaconKey, cc, in.SessionID, a.now()); werr != nil {
+			a.log.Warn("창 비콘 갱신 실패", "error", werr.Error())
+		}
+	}
+	a.pruneWindows()
+
 	v, boardBanner, berr := a.Board(ctx, in.SessionID)
 	if berr != nil {
 		a.log.Error("훅에서 보드 조회 실패", "mode", "session-start", "error", berr.Error())
@@ -198,6 +286,58 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		in.Asks, in.Blocked = v.Asks, v.Blocked
 	}
 	emitContext(out, "SessionStart", RenderSessionStart(in))
+}
+
+// findWindow 는 내 조상 사슬 위의 비콘을 찾는다.
+//
+// 못 찾아도 **오류가 아니다** — 설계 §5 의 폴백이고, 그 폴백이 오늘 거동이다.
+// 그래서 사유는 로그로만 남긴다: 이 자리에서 화면에 문구를 얹으면 비콘을 안 쓰는
+// 대다수 실행(Cursor·비리눅스·MCP 미기동)이 매번 배너를 하나씩 더 달게 된다.
+func (a *App) findWindow() (window.Key, window.Beacon, bool) {
+	if a.beaconDir == "" {
+		return window.Key{}, window.Beacon{}, false
+	}
+	anc := window.Ancestors(os.Getpid(), window.PPidOf, 24)
+	m, ok, why := window.Find(a.beaconDir, a.machine, anc, window.StartedOf)
+	if !ok {
+		a.log.Debug("창 비콘을 못 찾았다", "why", why)
+		return window.Key{}, window.Beacon{}, false
+	}
+	return m.Key, m.Beacon, true
+}
+
+// sameWorktree 는 두 워크트리 경로가 같은 트리를 가리키는지다. 순수 함수다.
+//
+// 양쪽 다 이미 정리된 절대경로로 저장된다(훅은 resolveProject 의 filepath.Clean,
+// MCP 는 ResolveIdentity 의 filepath.Clean + canAttribute 의 IsAbs). 그래도 여기서 한 번 더
+// 정리하는 이유는 이 함수가 **거절 판정**이기 때문이다 — 한쪽에 슬래시 하나가 더 붙었다는
+// 이유로 남의 창이라고 읽으면 표류 수리가 조용히 꺼진다.
+//
+// ★ 빈 값은 **같지 않다**로 본다. filepath.Clean("") 은 "." 이라 그냥 Clean 해서 비교하면
+// 양쪽이 다 비었을 때 "." == "." 로 통과한다. 좌표를 못 읽은 둘을 같다고 읽는 순간
+// 이 가드가 하는 일이 없어진다 — 못 읽은 것은 맞은 것이 아니다.
+func sameWorktree(x, y string) bool {
+	x, y = strings.TrimSpace(x), strings.TrimSpace(y)
+	if x == "" || y == "" {
+		return false
+	}
+	return filepath.Clean(x) == filepath.Clean(y)
+}
+
+// pruneWindows 는 죽은 창의 비콘을 치운다.
+//
+// ★ **훅에서만 한다.** SessionStart 타임아웃이 10초(plugins/flightdeck/hooks/hooks.json)라
+// 디렉토리 하나를 훑을 여유가 있는 쪽이고, MCP 는 도구 응답 지연에 민감하다 —
+// 그 지연은 매 도구 호출마다 사람이 기다리는 시간이다.
+func (a *App) pruneWindows() {
+	if a.beaconDir == "" {
+		return
+	}
+	// 머신 축을 함께 넘긴다 — 이 프로세스는 **남의 머신 pid** 가 살았는지 알 수 없다
+	// (공유 홈, window.Prune 주석).
+	if _, err := window.Prune(a.beaconDir, a.machine, window.Alive); err != nil {
+		a.log.Debug("비콘 가지치기 실패", "error", err.Error())
+	}
 }
 
 // hookUserPrompt 는 prompt 신호를 남기고 미확인 알림만 주입한다.
