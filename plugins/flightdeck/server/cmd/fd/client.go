@@ -354,6 +354,21 @@ func (c *Client) flushAll(ctx context.Context, send func(*Outbox, OutboxEntry) e
 	return total
 }
 
+// LegacyLeftovers 는 옛 자리 큐에 아직 남아 있는 것이다. **읽기만 한다.**
+//
+// 빈 자리는 안 낸다 — 없는 것을 찍으면 사람이 헛것을 쫓는다.
+func (c *Client) LegacyLeftovers() []Leftover {
+	var out []Leftover
+	for _, ob := range c.Legacy {
+		lo := ob.leftover()
+		if lo.Pending == 0 && lo.Rejected == 0 && lo.Err == "" {
+			continue
+		}
+		out = append(out, lo)
+	}
+	return out
+}
+
 // healthzResponse 는 /healthz 본문이다(internal/api.HealthzBody 와 같은 모양).
 //
 // 미도달이면 오류를 낸다 — **캐시로 대신하지 않는다.**

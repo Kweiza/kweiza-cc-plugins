@@ -444,14 +444,14 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 처방 채널은 부재를 기본값으로 접지 않는다 — 2026-08-04 에 실측한 사실 그대로 찍는다
 	// (Claude Code 2.1.221: Stop 훅 stdout 의 additionalContext 가 실제로 주입된다).
 	fmt.Fprintln(out, "  처방 채널   Stop 훅 stdout      (2026-08-04 실측: 주입됨)")
-	// ★ 아웃박스는 **상태 디렉토리마다 따로 쌓인다**(채널마다 다르다 — 훅·MCP 는
-	// CLAUDE_PLUGIN_DATA, 사용자 셸은 XDG_STATE_HOME|~/.local/state). 그래서 이 줄이
-	// 세는 것은 "이 머신의 대기"가 아니라 **이 채널의 대기**다. 자리를 함께 찍지 않으면
-	// 같은 머신에서 채널을 바꿔 물었을 때 숫자가 달라지는 이유를 알 길이 없다.
+	// ★ 아웃박스는 이제 **채널 무관한 고정 자리**에 있다(OutboxPath). 그래서 이 줄이 세는
+	// 것은 이 채널의 대기가 아니라 **이 머신의 대기**다 — 예전에는 채널마다 달랐다.
+	// 자리와 사유를 함께 찍는 것은 그대로다: 값이 예상과 다를 때 "왜 저기냐"에 답할 자리다.
 	if pend, err := a.cli.Outbox.List(); err != nil {
 		fmt.Fprintf(out, "  ! 아웃박스를 못 읽었다: %v\n", err)
 	} else {
-		fmt.Fprintf(out, "  아웃박스 대기 %d건 (이 채널의 자리: %s)\n", len(pend), a.sd.Path)
+		fmt.Fprintf(out, "  아웃박스 대기 %d건 (%s · %s)\n",
+			len(pend), a.cli.Outbox.Dir(), a.cli.Outbox.Source())
 	}
 	// 격리된 판단은 **버려진 것이 아니라 옮겨진 것**이다. 안 찍으면 조용히 사라진 것과 같다.
 	if rej, err := a.cli.Outbox.Rejected(); err != nil {
@@ -462,6 +462,19 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 			fmt.Fprintf(out, "      %s · %s\n", r.At.Format(time.RFC3339), clip(r.Reason, 200))
 		}
 	}
+	// ★ 옛 채널 자리에 남은 것. 대기는 다음 재생이 **보내서** 비우고, 격리는 그 자리에 남는다
+	// (보관소는 제 큐 옆에 남는 것이 설계다 — '어디서 온 것인가'가 사라지면 안 된다).
+	for _, lo := range a.cli.LegacyLeftovers() {
+		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 %d건(그 자리에 남는다)\n",
+			lo.Dir, lo.Pending, lo.Rejected)
+		if lo.Err != "" {
+			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))
+		}
+	}
+	// ★ **이 목록이 못 보는 범위를 함께 찍는다.** 빼면 "0건"이 '깨끗하다'로 읽히는데,
+	// 그것은 안 잰 축을 잰 척하는 것이다(§13). 이 문장이 그 축의 유일한 파수꾼이다.
+	fmt.Fprintln(out, "  옛 자리 탐색은 이 채널이 계산할 수 있는 자리만이다 — "+
+		"다른 채널(훅·MCP 는 CLAUDE_PLUGIN_DATA)의 자리는 여기서 안 보인다.")
 	if a.notice != "" {
 		fmt.Fprintf(out, "  ! %s\n", a.notice)
 	}

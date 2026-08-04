@@ -240,3 +240,60 @@ func TestNewClientWiresLegacyOutboxFromHome(t *testing.T) {
 		t.Errorf("%s 의 큐가 안 비었다(err=%v)", legacyHome, err)
 	}
 }
+
+// ── doctor 가 옛 자리 잔량과 못 보는 범위를 찍는다 ─────────────────────────────
+
+// doctor 가 옛 자리 잔량을 세되 **아무것도 보내지 않는다.** 진단이 부작용을 가지면
+// "찍어 봤더니 상태가 달라졌다"가 되고, 그러면 진단을 믿을 수 없다.
+func TestLegacyLeftoversCountsWithoutSending(t *testing.T) {
+	h := newHarness(t)
+	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
+	seedQueue(t, legacy, "k1", "k2")
+
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+
+	got := cli.LegacyLeftovers()
+	if len(got) != 1 {
+		t.Fatalf("잔량 보고가 %d건이다 — 1건이어야 한다: %+v", len(got), got)
+	}
+	if got[0].Pending != 2 {
+		t.Errorf("대기 %d건으로 셌다 — 2건이어야 한다", got[0].Pending)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, pendingName)); err != nil {
+		t.Errorf("큐가 사라졌다 — 진단이 보냈다: %v", err)
+	}
+}
+
+// 빈 자리는 안 찍는다. 없는 것을 찍으면 사람이 헛것을 쫓는다.
+func TestLegacyLeftoversIsEmptyWhenNothingLeft(t *testing.T) {
+	h := newHarness(t)
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+	cli.Legacy = []*Outbox{newOutboxAt(filepath.Join(t.TempDir(), "nope", "outbox"))}
+	if got := cli.LegacyLeftovers(); len(got) != 0 {
+		t.Errorf("빈 자리를 %d건으로 보고했다: %+v", len(got), got)
+	}
+}
+
+// doctor 는 자리와 **못 보는 범위**를 함께 찍는다.
+//
+// ★ 후자가 이 시험의 핵심이다. 옛 자리 목록은 이 채널이 계산할 수 있는 것만이라
+// 다른 채널의 자리는 원리적으로 안 보인다. 그 사실을 안 찍으면 "0건"이 '깨끗하다'로
+// 읽히고, 그것은 안 잰 축을 잰 척하는 것이다(§13).
+func TestDoctorReportsOutboxPlaceAndItsOwnBlindness(t *testing.T) {
+	h := newHarness(t)
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
+	}
+	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
+	if !strings.Contains(out, dir) {
+		t.Errorf("doctor 가 아웃박스 자리(%s)를 안 찍었다:\n%s", dir, out)
+	}
+	// ★ 단정 문자열은 **그 줄 고유의 문구**여야 한다. "채널" 로 단정하면 기존
+	//   `처방 채널   Stop 훅 stdout` 줄(cmds.go:446)에 걸려서, 사각 문장을 통째로
+	//   빼먹어도 초록이 된다 — 이 레포가 반복해서 경계한 '전 시험 초록 상태로 사는 결함'이다.
+	if !strings.Contains(out, "옛 자리 탐색") {
+		t.Errorf("doctor 가 못 보는 범위를 안 말한다 — 0건이 '깨끗하다'로 읽힌다:\n%s", out)
+	}
+}
