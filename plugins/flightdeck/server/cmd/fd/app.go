@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
@@ -26,16 +27,20 @@ type App struct {
 	notice     string // 도구가 스스로 못 한 것. 침묵하지 않는다
 	machineSrc string // machine-id 를 읽은 자리. doctor 가 찍는다 — 값이 갈리면 여기가 원인이다
 	beaconDir  string // 창 비콘 디렉토리(BeaconDir). mcp.go 가 mcpsrv.WithBeaconDir 에 그대로 넘긴다
-	host       string
-	stdin      io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
-	now        func() time.Time
+	// beaconSrc 는 그 자리를 **고른 사유**다. machineSrc 가 선례다 — 값이 예상과 다를 때
+	// "왜 저 값인가"에 답할 자리가 없으면 /proc 을 뒤지게 된다. 새 정체 경로를 더해 놓고
+	// 같은 줄을 빼먹었던 것이 fd-doctor-beacon-axis 다.
+	beaconSrc string
+	host      string
+	stdin     io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
+	now       func() time.Time
 }
 
 func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin io.Reader) *App {
 	home := homeDir(env)
 	sd := ResolveStateDir(env, home)
 	mid, midSrc, warn := MachineID(env, home)
-	beaconDir, _ := BeaconDir(env, home)
+	beaconDir, beaconSrc := BeaconDir(env, home)
 	host, herr := os.Hostname()
 	if herr != nil {
 		host = "unknown"
@@ -54,6 +59,7 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 		machine:    mid,
 		machineSrc: midSrc,
 		beaconDir:  beaconDir,
+		beaconSrc:  beaconSrc,
 		notice:     warn,
 		host:       host,
 		stdin:      stdin,
@@ -211,6 +217,12 @@ func (a *App) ServerBanner(ctx context.Context) (banner string, reachable bool) 
 			clip(a.cli.URL, 120), clip(err.Error(), 200)), false
 	}
 	b := SkewBanner(clientAPIVersion, h.APIVersion)
+	// ★ 스큐 배너와 **따로** 붙인다. 계약 버전이 같아도 판 나이는 갈릴 수 있고,
+	// 실제로 그 구간에서 pick 응답의 축 하나가 통째로 사라진 채 아무 신호도 안 났다.
+	// 둘을 한 문장으로 접으면 api_version 이 같은 그 구간이 다시 침묵한다.
+	if v := buildinfo.VintageBanner(buildinfo.Self(), h.Build); v != "" {
+		b = strings.TrimSpace(b + "\n" + v)
+	}
 	if !h.DBOK {
 		b = strings.TrimSpace(b + "\n⚠ 서버는 살아 있으나 DB 가 열려 있지 않다 — 쓰기가 전부 실패한다.")
 	}

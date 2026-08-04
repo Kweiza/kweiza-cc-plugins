@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -373,7 +374,7 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 		DBPath:    "/home/user/.flightdeck/fd.db",
 		DBError:   "unable to open database file /home/user/.flightdeck/fd.db",
 		DiskError: "statfs /home/user/.flightdeck: no such file",
-	}, true, true)
+	}, true, true, buildinfo.Coord{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
