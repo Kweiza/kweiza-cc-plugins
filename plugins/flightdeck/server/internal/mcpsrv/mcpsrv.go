@@ -447,16 +447,34 @@ func (s *Server) canAttribute() bool {
 // 어떤 훅도 못 맞추는 pid 로 키가 잡히므로, 정체가 온전할 때만(canAttribute) 심는다 —
 // beaconDir 이 비었을 때도 마찬가지다(시험 격리, WithBeaconDir 주석 참고).
 func (s *Server) BeaconKey() (window.Key, bool) {
-	if s.beaconDir == "" || !s.canAttribute() {
-		return window.Key{}, false
+	k, err := s.beaconKey()
+	return k, err == nil
+}
+
+// beaconKey 는 BeaconKey 와 **같은 판정이되 사유를 잃지 않는다.**
+//
+// ★ 사유를 나르는 갈래가 따로 있는 이유: BeaconKey 의 bool 은 심기 판정에 딱 맞지만
+// (심을까 말까), beaconMiss 는 그 실패를 **사람에게 이름으로 말해야** 한다. 오류를
+// 삼키면 리눅스 밖의 ErrUnsupported 가 "부모가 claude 가 아니다"로 둔갑하고, 그것을 읽은
+// 사람은 아무 문제 없는 자기 프로세스 계보를 뒤지게 된다 — why 가 존재하는 이유가
+// 원인에 도달시키는 것이라, 틀린 원인을 대는 것은 아무 원인도 안 대는 것보다 나쁘다.
+func (s *Server) beaconKey() (window.Key, error) {
+	if s.beaconDir == "" {
+		return window.Key{}, errors.New("이 MCP 프로세스에 비콘 디렉토리가 설정되지 않았다")
+	}
+	if !s.canAttribute() {
+		return window.Key{}, errors.New("이 프로세스의 정체가 반쪽이라 비콘 좌표를 만들 수 없다")
 	}
 	ppid := os.Getppid()
 	started, err := window.StartedOf(ppid)
 	if err != nil {
-		return window.Key{}, false
+		return window.Key{}, fmt.Errorf("부모(pid %d)의 시작 시각을 못 읽었다: %w", ppid, err)
 	}
 	k := window.Key{MachineID: s.id.MachineID, ClaudePID: ppid, Started: started}
-	return k, k.Valid()
+	if !k.Valid() {
+		return window.Key{}, fmt.Errorf("창 좌표가 반쪽이다(machine=%q pid=%d)", clip(k.MachineID, 40), k.ClaudePID)
+	}
+	return k, nil
 }
 
 // plantBeacon 은 이 창의 자리를 표시한다. 실패해도 서버를 막지 않는다 —
@@ -480,17 +498,28 @@ func (s *Server) plantBeacon() {
 // 쪽에서는 막힌 데가 없다는 뜻이라 사유를 비운다 — 표류는 **남의** 카드 얘기라 내 비콘이
 // 멀쩡해도 남을 수 있고, 그 경우의 진짜 사유는 이 프로세스가 알 길이 없다.
 func (s *Server) beaconMiss() string {
-	if s.beaconDir == "" {
-		return "이 MCP 프로세스에 비콘 디렉토리가 설정되지 않았다"
+	k, err := s.beaconKey()
+	if err != nil {
+		return beaconMissReason(err)
 	}
-	k, ok := s.BeaconKey()
-	if !ok {
-		return "이 프로세스에서 비콘 좌표를 만들 수 없다(부모가 claude 가 아니거나 정체가 반쪽이다)"
-	}
-	if _, err := window.Load(s.beaconDir, k); err != nil {
-		return "비콘을 못 읽었다: " + err.Error()
+	if _, lerr := window.Load(s.beaconDir, k); lerr != nil {
+		// ★ 앞에 "비콘을 못 읽었다:" 를 덧붙이지 않는다 — window.Load 의 오류가 이미 그 말로
+		// 시작한다. 겹쳐 쓰면 사람이 진짜 원인(파일명·errno)에 닿기 전에 읽기를 멈춘다.
+		return beaconMissReason(lerr)
 	}
 	return ""
+}
+
+// beaconMissReason 은 좌표 실패 하나를 사람이 읽는 사유로 만든다. 순수 함수다.
+//
+// ★ ErrUnsupported 만 갈라 낸다. 그 경우의 진짜 원인은 이 프로세스의 계보가 아니라
+// **플랫폼**이고, 그것을 말해 주지 않으면 읽는 사람이 멀쩡한 부모 사슬을 뒤진다.
+// 나머지는 오류가 이미 자기 말을 갖고 있으므로 덧칠하지 않는다.
+func beaconMissReason(err error) string {
+	if errors.Is(err, window.ErrUnsupported) {
+		return "이 플랫폼에서는 프로세스 계보를 읽을 수 없다 — 비콘 통로 자체가 없다(리눅스 전용)"
+	}
+	return err.Error()
 }
 
 // ensureSession 은 세션을 한 번만 연다. 같은 3중키면 같은 세션이므로 재호출도 안전하지만,

@@ -179,7 +179,6 @@ func TestClearKeepsOneCardAndItsClaim(t *testing.T) {
 // 그대로 돌려준다 — 대상을 못 찾을 이유가 없다.
 func TestALatePlantStillMergesTheFirstClear(t *testing.T) {
 	h := newHarness(t)
-	ctx := context.Background()
 	cwd := t.TempDir()
 
 	app := newApp(envOf(h.env), quietLogger(), cwd, strings.NewReader(""))
@@ -238,7 +237,6 @@ func TestALatePlantStillMergesTheFirstClear(t *testing.T) {
 		t.Fatalf("남은 카드가 %s/%s 다 — %s/cc-new 여야 한다. 첫 구간의 선점과 판단이 든 카드가 그것이다",
 			cards[0].ID, cards[0].CCSessionID, cardA.ID)
 	}
-	_ = ctx
 
 	// ⑤ 다음 전환의 재료도 갖췄다 — 비콘이 이제 카드 id 를 든다.
 	if b, err = window.Load(app.beaconDir, key); err != nil {
