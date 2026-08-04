@@ -160,7 +160,8 @@ var notFoundGuidance = map[store.NotFoundKind]string{
 	store.NFIdempotency:  "그 멱등 키의 기록이 없다 — 보존 구간이 지났거나 처음 보는 키다.",
 	store.NFRefState: "그 ref 의 관측 기록이 아직 없다 — 보드를 한 번 부르면 서버가 git 에서 읽어 남긴다. " +
 		"프로젝트 경로가 비어 있으면 파생 자체가 안 돈다(fd doctor).",
-	store.NFChangeSet: "그 두 커밋 사이의 변경집합이 보관돼 있지 않다 — 보드 파생이 아직 그 구간을 안 읽었다.",
+	store.NFChangeSet:      "그 두 커밋 사이의 변경집합이 보관돼 있지 않다 — 보드 파생이 아직 그 구간을 안 읽었다.",
+	store.NFLiveLandingRow: "줄에 선 적이 없거나 이미 빠졌다 — land 로 다시 서라.",
 }
 
 // NotFoundAdvice 는 없음 하나를 소비자가 읽을 응답으로 옮긴다. 순수 함수다.
@@ -284,6 +285,11 @@ var conflictWordTable = map[store.ConflictTarget]conflictWords{
 		Name: "멱등 기록",
 		Dup:  "같은 키의 기록이 이미 있다.",
 		Ref:  "가리키는 좌표가 없다.",
+	},
+	store.TargetLandingQueue: {
+		Name: "랜딩 줄",
+		Dup:  "이미 살아 있는 줄 행이 있다 — 한 세션은 한 자리만 선다.",
+		Ref:  "프로젝트와 세션이 먼저 등록돼 있어야 한다 — fd open 으로 세션을 열어라.",
 	},
 }
 

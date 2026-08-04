@@ -257,6 +257,37 @@ type ResourceHold struct {
 	ForceReason string
 }
 
+// LandingLeftKind 는 랜딩 줄에서 빠진 종류다. schema 의 CHECK 와 문자열이 정확히 일치해야 한다.
+//
+// 종류를 사유와 한 컬럼에 뭉개지 않는다 — `force:<사유>` 접두 파싱은
+// api/idempotency.go 가 이미 기각한 방식이다. 종류는 CHECK 로, 사유는 별도 컬럼으로 둔다.
+type LandingLeftKind string
+
+const (
+	// LandingLeftOK 는 **"랜딩됐다"가 아니다.** 세션이 ok 로 보고하고 레인을 놓았다는 뜻뿐이다.
+	// 랜딩 sha 의 출처는 러너가 실제로 fast-forward 한 sha 하나이고(설계 §5),
+	// 클라이언트 자기 보고를 그 자리에 넣으면 "남의 커밋이 이 항목의 랜딩 sha 로 박힌"
+	// 결함(3회 관측)이 이름만 바꿔 부활한다. Item.LandedRef 를 이 값으로 채우지 마라.
+	LandingLeftOK LandingLeftKind = "ok"
+
+	LandingLeftFail   LandingLeftKind = "fail"   // 검증 실패. left_detail 필수(스키마 CHECK)
+	LandingLeftLeave  LandingLeftKind = "leave"  // 줄 서 놓고 스스로 빠졌다. left_detail 필수
+	LandingLeftFinish LandingLeftKind = "finish" // 세션이 마무리하며 함께 닫혔다
+	LandingLeftForce  LandingLeftKind = "force"  // 사람이 회수했다. left_detail 필수
+)
+
+// LandingRow 는 랜딩 레인 줄의 한 자리다. **ID 가 곧 순번이다.**
+// GrantedAt 이 없다 — "쥐었나"는 resource_hold 의 부분 유니크 인덱스가 정본이다.
+type LandingRow struct {
+	ID         int64
+	Project    string
+	SessionID  string
+	EnqueuedAt time.Time
+	LeftAt     *time.Time // nil 이면 아직 줄에 있다
+	LeftKind   LandingLeftKind
+	LeftDetail string
+}
+
 type Event struct {
 	ID        int64
 	At        time.Time
