@@ -54,6 +54,16 @@ type PrescribeInput struct {
 	Now       time.Time
 	SessionID string
 	Claims    []ClaimView
+	// Closed 는 이 구간에 이 세션이 **제대로 끝낸** 항목과 그 선언 경로다.
+	//
+	// ★ 왜 별도 축인가. finish 는 선점을 반납하므로 그 직후 Claims 가 빈다. 그러면
+	// 방금 끝낸 그 일의 경로를 근거로 unclaimed 가 뜬다 — 가장 성실하게 마무리한 세션이
+	// 가장 확실하게 잔소리를 듣는다. "한 번도 안 집었다"와 "방금 제대로 끝냈다"는
+	// 다른 상태인데 `len(Claims)==0` 하나로는 안 갈린다. 그 둘을 가르는 축이다.
+	//
+	// Claims 와 합치지 않는다 — 합치면 outside 처방이 이미 닫힌 항목의 선언 경로를 기준으로
+	// 돌게 되고, 끝낸 항목이 살아 있는 항목처럼 남의 겹침 판정에 계속 끼어든다.
+	Closed []ClaimView
 	// TurnPaths 는 마지막 처방 이후 새로 만진 경로다(처방이 없었으면 세션 시작 이후).
 	TurnPaths []string
 	// Others 는 살아 있는 세션 목록이다. 자기 자신이 섞여 있어도 이 함수가 뺀다 —
@@ -174,8 +184,16 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // ③ 선점 없이 편집 — 세션당 1회.
 //
 // ★ 이 조건은 흔하다. 세션당 1회로 눌러 잡지 않으면 편집마다 떠서 §4 의 실패가 된다.
+//
+// ★ **"선점 0건"이 셋을 뭉갠다.** 한 번도 안 집었다(처방이 맞다) · 집고 일하는 중
+// (Claims 가 막는다) · **방금 제대로 끝냈다**(처방이 틀리다). finish 가 선점을 반납하므로
+// 셋째가 첫째와 똑같이 보이고, 그래서 성실하게 마무리한 세션이 잔소리를 듣는다.
+// coveredByClosed 가 그 셋째만 갈라낸다.
 func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 	if len(in.Claims) > 0 || len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
+		return Prescription{}, false
+	}
+	if coveredByClosed(in) {
 		return Prescription{}, false
 	}
 	return Prescription{
@@ -187,6 +205,27 @@ func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 				"무엇을 왜 하는지 남겨라.",
 			strings.Join(clipList(in.TurnPaths, 3), ", ")),
 	}, true
+}
+
+// coveredByClosed 는 이번 구간에 만진 경로가 **전부** 방금 끝낸 항목의 선언 경로 안인지 본다.
+//
+// ★ 전부여야 한다. 하나라도 밖이면 그것은 새 일이고, 새 일에 대고 "무엇을 하는지가 큐에 없다"는
+// 여전히 참이다 — 부분 일치로 접으면 큰 항목 하나를 닫은 세션이 그 뒤 무엇을 하든 안 걸린다.
+//
+// ★ 선언 경로가 없는 항목은 접을 근거를 못 준다. 빈 선언을 "전부 덮음"으로 읽으면
+// paths 를 안 적은 항목 하나가 이 축을 통째로 끈다 — outsidePrescriptions 가 빈 선언에
+// 대고 "밖"을 판정하지 않는 것과 같은 이유다.
+func coveredByClosed(in PrescribeInput) bool {
+	declared := declaredPaths(in.Closed)
+	if len(declared) == 0 {
+		return false
+	}
+	for _, p := range in.TurnPaths {
+		if !PathsOverlap([]string{p}, declared) {
+			return false
+		}
+	}
+	return true
 }
 
 // ④ 오래 일했는데 판단이 0건.

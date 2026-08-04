@@ -807,6 +807,39 @@ func (s *Store) FinishItem(ctx context.Context, project, itemID, sessionID strin
 }
 
 // ClaimedItems 는 세션이 지금 쥐고 있는 항목 id 를 낸다.
+// ReleasedItems 는 이 세션이 since 이후에 **반납한** 항목이다.
+//
+// ★ ClaimedItems 의 짝이다. 처방이 "선점 0건"만 보면 "한 번도 안 집었다"와
+// "방금 finish 로 제대로 끝냈다"가 똑같이 보인다 — finish 가 선점을 반납하기 때문이다.
+// 그 둘을 가르려면 반납 사실이 필요하고, 그 사실은 claim.released_at 에만 있다.
+//
+// 항목 상태(done/dropped)로 거르지 않는다. 이 질문은 "이 세션이 손을 뗐나"이지
+// "항목이 어떻게 끝났나"가 아니다 — 남이 회수해 간 경우까지 여기 걸리는 편이 맞다.
+// 그때도 이 세션은 더 이상 그 항목을 쥐고 있지 않다는 것이 참이기 때문이다.
+func (s *Store) ReleasedItems(ctx context.Context, sessionID string, since time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT item_id FROM claim
+		 WHERE session_id = ? AND released_at IS NOT NULL AND released_at > ?
+		 ORDER BY item_id`, sessionID, fmtTime(since))
+	if err != nil {
+		return nil, fmt.Errorf("반납 목록 조회 실패(session_id=%q): %w", clip(sessionID, 64), err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("반납 행 해석 실패: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("반납 목록 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) ClaimedItems(ctx context.Context, sessionID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT item_id FROM claim WHERE session_id = ? AND released_at IS NULL ORDER BY item_id`, sessionID)

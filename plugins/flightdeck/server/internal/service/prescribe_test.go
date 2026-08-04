@@ -186,3 +186,75 @@ func claimItemForPrescribeTest(t *testing.T, s *Service, st *store.Store, sessio
 		t.Fatalf("선점 실패(%s): %v", itemID, err)
 	}
 }
+
+// TestFinishedItemDoesNotLookLikeUnclaimedWork 는 **제대로 끝낸 세션이 잔소리를 안 듣는다**를
+// 배선 전체(store → service → judge)로 단정한다.
+//
+// ★ 왜 순수 함수 시험만으론 부족한가. judge 는 in.Closed 를 보고 접지만, 그 축을 아무도
+// 안 채우면 판정은 초록불인 채 화면은 그대로 틀린다. 이 시험이 그 배선을 잡는다.
+//
+// ★ 무엇이 문제였나. finish 는 선점을 반납한다. 그래서 그 직후 ClaimedItems 가 비고,
+// "선점 0건인데 경로를 편집했다"가 참이 된다 — 방금 그 항목의 일을 끝냈는데도.
+// `len(Claims)==0` 하나로는 "한 번도 안 집었다"와 "방금 제대로 끝냈다"가 안 갈린다.
+func TestFinishedItemDoesNotLookLikeUnclaimedWork(t *testing.T) {
+	svc, st := newSvc(t)
+	sess := openSessionForPrescribeTest(t, svc)
+	claimItemForPrescribeTest(t, svc, st, sess, "fd-x", []string{"cmd/fd"})
+	touchPathForPrescribeTest(t, st, sess, "cmd/fd/hook.go")
+
+	// 규율대로 끝낸다 — 판단·종료·반납이 한 트랜잭션이다.
+	if _, err := svc.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: sess, ItemID: "fd-x", Outcome: model.ItemDone,
+		Title: "끝냈다", Body: "무엇을 정했고 무엇을 기각했나",
+	}); err != nil {
+		t.Fatalf("finish 실패: %v", err)
+	}
+
+	res, err := svc.Prescriptions(ctx(), sess)
+	if err != nil {
+		t.Fatalf("처방 실패: %v", err)
+	}
+	for _, p := range res.All {
+		if p.Key == "unclaimed" {
+			t.Fatalf("방금 제대로 끝낸 세션에게 미선점 처방이 떴다:\n  %s\n"+
+				"finish 가 선점을 반납한다는 이유로 '한 번도 안 집었다'와 같은 취급을 받는다\n"+
+				"전체: %+v", p.Reason, res.All)
+		}
+	}
+}
+
+// TestUnclaimedStillFiresForNewWorkAfterFinish 는 반대 방향이다 —
+// 끝낸 뒤 **다른** 일을 시작하면 처방이 살아 있어야 한다.
+//
+// 이 시험이 없으면 위 시험은 "unclaimed 를 통째로 끈다"로도 초록불이 난다.
+// 그러면 진짜 미선점 작업을 잡을 마지막 그물이 사라진다.
+func TestUnclaimedStillFiresForNewWorkAfterFinish(t *testing.T) {
+	svc, st := newSvc(t)
+	sess := openSessionForPrescribeTest(t, svc)
+	claimItemForPrescribeTest(t, svc, st, sess, "fd-x", []string{"cmd/fd"})
+	touchPathForPrescribeTest(t, st, sess, "cmd/fd/hook.go")
+
+	if _, err := svc.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: sess, ItemID: "fd-x", Outcome: model.ItemDone,
+		Title: "끝냈다", Body: "무엇을 정했고 무엇을 기각했나",
+	}); err != nil {
+		t.Fatalf("finish 실패: %v", err)
+	}
+	// 끝낸 항목이 선언하지 않은 자리에 새 일을 시작한다.
+	touchPathForPrescribeTest(t, st, sess, "internal/store/item.go")
+
+	res, err := svc.Prescriptions(ctx(), sess)
+	if err != nil {
+		t.Fatalf("처방 실패: %v", err)
+	}
+	var found bool
+	for _, p := range res.All {
+		if p.Key == "unclaimed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("끝낸 항목의 선언 경로 밖에서 새 일을 시작했는데 미선점 처방이 안 떴다: %+v\n"+
+			"이 그물이 죽으면 진짜 미선점 작업을 잡을 자리가 없다", res.All)
+	}
+}

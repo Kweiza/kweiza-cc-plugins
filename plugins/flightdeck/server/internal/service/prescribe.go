@@ -67,6 +67,23 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		in.Claims = append(in.Claims, judge.ClaimView{ItemID: it.ID, Paths: it.Paths})
 	}
 
+	// 이 구간에 반납한 항목 — "한 번도 안 집었다"와 "방금 제대로 끝냈다"를 가르는 축이다.
+	// **TurnPaths 와 같은 since 를 쓴다.** 두 창이 갈리면 "이번 턴에 만진 경로"와
+	// "이번 턴에 끝낸 항목"이 서로 다른 구간을 가리키게 되고, 그 어긋남은 화면에 안 뜬다.
+	released, err := s.st.ReleasedItems(ctx, sessionID, since)
+	if err != nil {
+		return PrescribeResult{}, err
+	}
+	for _, id := range released {
+		it, err := s.st.GetItem(ctx, sess.Project, id)
+		if err != nil {
+			s.log.WarnContext(ctx, "처방: 반납 항목을 못 읽었다",
+				"session_id", sessionID, "item", id, "error", err.Error())
+			continue
+		}
+		in.Closed = append(in.Closed, judge.ClaimView{ItemID: it.ID, Paths: it.Paths})
+	}
+
 	// 이번 구간에 새로 만진 경로 · 마지막 판단 이후 새로 만진 경로.
 	prints, err := s.st.Footprints(ctx, sessionID)
 	if err != nil {
