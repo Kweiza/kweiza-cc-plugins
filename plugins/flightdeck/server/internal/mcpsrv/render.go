@@ -384,31 +384,16 @@ func boardDetailFoot(v service.BoardView) []string {
 		out = append(out, "자원 점유 없음")
 	}
 
-	// 카드가 있는 세션의 사건은 그 카드 안에 이미 실린다(boardCard 의 noteLines).
-	// 여기서 또 그 본문을 그대로 되풀이하면 "카드에 붙었다"는 사실과 별개로
-	// 화면에 같은 글이 두 번 나온다. 그래서 여기서는 건수는 늘 다 세되,
-	// 본문 목록은 **카드가 없는(이미 죽었거나 화면 밖인) 세션의 사건**만 — 즉
-	// 카드가 접혀도 사라지지 않는 진짜 안전망 몫만 — 보인다.
-	known := make(map[string]bool, len(v.Sessions))
-	for _, c := range v.Sessions {
-		known[c.View.Session.ID] = true
-	}
 	if len(v.Blocked) > 0 {
 		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
 		for _, j := range v.Blocked {
-			if known[j.SessionID] {
-				continue
-			}
-			out = append(out, "  · (카드 없음) "+clip(firstLine(j.Title, j.Body), 120))
+			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
 	if len(v.Asks) > 0 {
 		out = append(out, fmt.Sprintf("요청(ask) %d건", len(v.Asks)))
 		for _, j := range v.Asks {
-			if known[j.SessionID] {
-				continue
-			}
-			out = append(out, "  · (카드 없음) "+clip(firstLine(j.Title, j.Body), 120))
+			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
 	return out
