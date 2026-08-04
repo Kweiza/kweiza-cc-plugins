@@ -78,6 +78,14 @@ type Service struct {
 	window time.Duration
 	getenv func(string) (string, bool)
 
+	// outOfWindowLister 는 창 밖 건수를 세는 질의다. nil 이면 s.st.ListLive 를 그대로 쓴다.
+	//
+	// ★ 카드용 질의(sessionCards 가 부르는 s.st.ListLive)와 **표·함수가 같다**.
+	// 그래서 실물 DB 로는 이 질의만 골라 실패시킬 수 없다 — 표를 깨면 카드용 질의도
+	// 같이 죽어 Board 자체가 하드 에러로 먼저 죽는다. GitReader 를 인터페이스로 둔 것과
+	// 같은 이유로(주입은 실물로 만들기 어려운 실패만 덮는다) 시험 전용 후크를 둔다.
+	outOfWindowLister func(ctx context.Context, project string, since time.Time) ([]model.SessionView, error)
+
 	// derives 는 **세션 카드 파생을 실제로 돌린 횟수**의 누산기다. DeriveStats 참조.
 	derives      atomic.Uint64
 	deriveCards  atomic.Uint64
