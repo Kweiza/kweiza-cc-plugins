@@ -201,8 +201,11 @@ func FilterPathCoordinate(paths []string) (kept []string, rejected []RejectedPat
 	return kept, rejected
 }
 
-// clipPath 는 사유에 싣는 경로를 자른다.
-// 사유가 화면을 덮으면 사유가 없는 것과 같아진다(verify.go 의 clipPat 과 같은 이유다).
+// clipPath 는 사유에 싣는 경로를 자른다 — 절단만 한다, 제어문자를 걷어내지 않는다.
+// 제어문자 방어는 호출부의 %q 가 맡는다(verify.go 참조). 따라서 이 함수 결과를
+// %q 없이 쓰면 제어문자가 그대로 나온다.
+// 자르는 이유: 사유가 화면을 덮으면 사유가 없는 것과 같아진다.
+// 같은 패키지의 clipPat(예산 120, 패턴용)이 따로 있지만 경로에는 200 이상이 필요하므로 쓰지 않는다.
 func clipPath(p string) string {
 	const n = 200
 	rs := []rune(p)
