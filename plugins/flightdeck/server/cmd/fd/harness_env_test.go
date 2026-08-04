@@ -174,3 +174,21 @@ func TestUnpinnedRunActuallyUsesTheResolvedStateDir(t *testing.T) {
 		t.Errorf("doctor 가 여전히 하네스의 고정 상태 디렉토리(%s)를 쓴다 — 축이 안 풀렸다:\n%s", h.state, out)
 	}
 }
+
+// 하네스 기본 환경이 HOME 을 고정하는지.
+//
+// ★ 왜 이 축이 생겼나. 옛 채널 자리 재생(Client.Flush)이 ~/.local/state/flightdeck/outbox 를
+// 후보로 삼아 **거기 있는 판단을 서버로 보내고 큐를 비운다.** HOME 이 안 고정되면
+// 시험이 개발자의 진짜 판단을 시험 서버로 보낸다 — 사각이 아니라 사고다.
+//
+// TestUnpinnedEnvNeverReachesTheRealHome 은 unpinnedEnv 갈래만 지킨다. 그런데
+// degrade_path_test.go 와 hook_stop_test.go 가 손으로 env 를 만들어 그 감시를 우회한
+// 전례가 있다(실측 2026-08-05: HOME=<임시> 로 돌리면 <임시>/.flightdeck/machine-id 가 생겼다).
+// 그래서 **기본 env 자체**를 단정한다.
+func TestHarnessPinsHomeSoLegacyReplayNeverReachesTheRealHome(t *testing.T) {
+	h := newHarness(t)
+	if got := h.env["HOME"]; got != h.home {
+		t.Fatalf("하네스 기본 환경의 HOME 이 %q 다 — 가짜 홈 %q 여야 한다.\n"+
+			"안 고정하면 옛 자리 재생이 개발자의 진짜 ~/.local/state 를 비운다", got, h.home)
+	}
+}

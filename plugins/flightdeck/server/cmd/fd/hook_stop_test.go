@@ -42,6 +42,11 @@ func fakeServer(t *testing.T, routes map[string]string) *httptest.Server {
 
 // runHookForTest 는 `fd hook <event>` 한 번을 실물 진입점(run)으로 돌리고 stdout 을 낸다.
 // FD_STATE_DIR 를 매번 새 임시 디렉토리로 줘 시험 간 캐시·아웃박스가 안 섞인다.
+//
+// ★ HOME 도 임시로 준다. 안 주면 homeDir 이 os.UserHomeDir()(프로세스 환경)로 떨어지고,
+// 그 값으로 만들어지는 옛 채널 자리 후보에 개발자의 진짜 ~/.local/state/flightdeck/outbox 가
+// 들어간다 — 훅이 재생을 돌리므로 **그 판단이 시험 서버로 나간다.**
+// 이 함수는 하네스를 안 쓰므로 하네스의 HOME 고정이 여기까지 안 온다.
 func runHookForTest(t *testing.T, url, event, stdin string) string {
 	t.Helper()
 	env := envOf(map[string]string{
@@ -49,6 +54,7 @@ func runHookForTest(t *testing.T, url, event, stdin string) string {
 		"FD_STATE_DIR": t.TempDir(),
 		"FD_PROJECT":   "testproj",
 		"FD_LOG":       "error",
+		"HOME":         t.TempDir(),
 	})
 	var out, errb bytes.Buffer
 	run([]string{"hook", event}, env, strings.NewReader(stdin), &out, &errb)
