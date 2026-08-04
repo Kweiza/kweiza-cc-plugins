@@ -120,7 +120,9 @@ func TestOneClaudeSessionIsOneRowAcrossChannels(t *testing.T) {
 	h := newHarness(t)
 	const cc = "cc-fanout-uuid-1"
 
-	home := t.TempDir()
+	// ★ 홈은 하네스의 가짜 홈을 쓴다. 여기서 t.TempDir() 로 따로 만들면
+	// unpinnedEnv 가 주는 HOME 과 갈려, 아래 ResolveStateDir 대조가 딴 자리를 잰다.
+	home := h.home
 	// MCP 의 프로젝트 좌표는 CLAUDE_PROJECT_DIR 의 마지막 성분이다(설계 §13).
 	// 하네스의 프로젝트와 같은 이름의 디렉토리를 만들어 좌표를 맞춘다.
 	dir := filepath.Join(filepath.Dir(h.state), h.project)
@@ -128,22 +130,21 @@ func TestOneClaudeSessionIsOneRowAcrossChannels(t *testing.T) {
 		t.Fatalf("프로젝트 디렉토리 생성 실패: %v", err)
 	}
 
+	// ★ 상태 디렉토리 축을 푸는 일은 **하네스의 정식 갈래**가 한다(unpinnedEnv).
+	// 앞선 판은 여기서 손으로 FD_STATE_DIR 를 지우고 HOME 을 끼웠는데, 그것은 이 시험
+	// 하나의 국소 해법이라 다음 시험은 그 짝(HOME)을 잊는다 — 잊으면 시험이 사용자의
+	// 진짜 ~/.flightdeck/machine-id 를 읽고 덮어쓴다. 짝을 강제하는 것은
+	// TestUnpinnedEnvNeverReachesTheRealHome 이다.
 	base := func(extra map[string]string) map[string]string {
-		e := map[string]string{}
-		for k, v := range h.env {
-			e[k] = v
+		e := map[string]string{
+			"CLAUDE_CODE_SESSION_ID": cc,
+			"CLAUDE_PROJECT_DIR":     dir,
+			"FD_WORKTREE":            dir,
 		}
-		// ★ FD_STATE_DIR 를 **뺀다.** 하네스가 그것을 한 값으로 고정하면
-		// CLAUDE_PLUGIN_DATA·XDG_STATE_HOME 갈림이 평가조차 되지 않는다.
-		delete(e, "FD_STATE_DIR")
-		e["HOME"] = home
-		e["CLAUDE_CODE_SESSION_ID"] = cc
-		e["CLAUDE_PROJECT_DIR"] = dir
-		e["FD_WORKTREE"] = dir
 		for k, v := range extra {
 			e[k] = v
 		}
-		return e
+		return h.unpinnedEnv(e)
 	}
 	hookEnv := base(map[string]string{"CLAUDE_PLUGIN_DATA": t.TempDir()})
 	cliEnv := base(map[string]string{"XDG_STATE_HOME": t.TempDir()})
