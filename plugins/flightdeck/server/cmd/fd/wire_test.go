@@ -141,7 +141,7 @@ func TestNoteReportsRecipients(t *testing.T) {
 // /events 별칭이 살아 있어야 한다 — 화면(internal/web)이 그 경로를 구독한다.
 func TestEventsAliasIsReachable(t *testing.T) {
 	h := newHarness(t)
-	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env), quietLogger())
+	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env), h.home, quietLogger())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*timeUnit)
 	defer cancel()
 	// SSE 는 끝나지 않는 응답이라 타임아웃으로 끊는다. 여기서 보는 것은

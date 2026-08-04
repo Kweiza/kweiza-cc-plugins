@@ -90,6 +90,10 @@ type Client struct {
 	Log    *slog.Logger
 	Now    func() time.Time
 
+	// Endpoint 는 URL·Token 을 **어디서 읽었는지**다. 값은 위 두 필드가 들고 있고
+	// 여기 있는 것은 그 출처와 경고다 — 값이 예상과 다를 때 "왜 저 주소인가"에 답할 자리다.
+	Endpoint Endpoint
+
 	// Session 은 멱등 키의 앞 절반이다. 없을 수 있다(세션 열기 전).
 	//
 	// ★ **공유 가변 상태다.** 읽는 자리는 KeyFor 하나뿐이지만, 쓰는 자리는 여럿이고
@@ -103,15 +107,14 @@ type Client struct {
 	Session string
 }
 
-func newClient(sd StateDir, get func(string) (string, bool), log *slog.Logger) *Client {
-	url := DefaultURL
-	if v, ok := get("FD_URL"); ok && strings.TrimSpace(v) != "" {
-		url = strings.TrimRight(strings.TrimSpace(v), "/")
-	}
-	token := ""
-	if v, ok := get("FD_TOKEN"); ok {
-		token = strings.TrimSpace(v)
-	}
+// newClient 는 클라이언트를 조립한다.
+//
+// ★ 주소·토큰의 우선순위는 **한 자리에서** 정한다(ResolveEndpoint). 여기서 다시 풀면
+// CLI·훅·MCP 가 각자 다른 규칙을 갖게 되고, 이 레포는 "같은 판정을 두 자리에 두면
+// 한쪽만 고칠 때 조용히 어긋난다"를 세 번 겪었다.
+func newClient(sd StateDir, get func(string) (string, bool), home string, log *slog.Logger) *Client {
+	ep := ResolveEndpoint(get, home)
+	url, token := ep.URL, ep.Token
 	timeout := 5 * time.Second
 	if v, ok := get("FD_TIMEOUT"); ok {
 		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
@@ -119,13 +122,14 @@ func newClient(sd StateDir, get func(string) (string, bool), log *slog.Logger) *
 		}
 	}
 	return &Client{
-		URL:    url,
-		Token:  token,
-		HTTP:   &http.Client{Timeout: timeout},
-		Cache:  newCache(sd),
-		Outbox: newOutbox(sd),
-		Log:    log,
-		Now:    func() time.Time { return time.Now().UTC() },
+		Endpoint: ep, // 출처를 들고 있는다 — fd doctor·fd setup 이 '왜 저 주소인가'를 찍는다
+		URL:      url,
+		Token:    token,
+		HTTP:     &http.Client{Timeout: timeout},
+		Cache:    newCache(sd),
+		Outbox:   newOutbox(sd),
+		Log:      log,
+		Now:      func() time.Time { return time.Now().UTC() },
 	}
 }
 

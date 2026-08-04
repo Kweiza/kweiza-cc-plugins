@@ -114,6 +114,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runMove(ctx, args[1:], stdout)
 	case "alloc":
 		return app.runAlloc(ctx, args[1:], stdout)
+	case "setup":
+		return app.runSetup(ctx, args[1:], stdout)
 	case "doctor":
 		return app.runDoctor(ctx, args[1:], stdout)
 	case "import":

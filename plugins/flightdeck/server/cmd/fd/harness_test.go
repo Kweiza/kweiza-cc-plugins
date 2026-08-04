@@ -135,7 +135,7 @@ func (h *harness) restartProcess() {
 func (h *harness) down() {
 	h.t.Helper()
 	h.srv.Close()
-	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env),
+	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env), h.home,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := cli.Healthz(context.Background()); !Unreachable(err, 0) {
 		h.t.Fatalf("대조 전제가 깨졌다 — 서버를 죽였는데 미도달이 아니다(err=%v)", err)
@@ -158,7 +158,7 @@ func (h *harness) up() {
 	h.srv = srv
 	h.t.Cleanup(srv.Close)
 
-	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env),
+	cli := newClient(ResolveStateDir(envOf(h.env), ""), envOf(h.env), h.home,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := cli.Healthz(context.Background()); err != nil {
 		h.t.Fatalf("대조 전제가 깨졌다 — 서버를 다시 띄웠는데 도달이 안 된다: %v", err)

@@ -12,6 +12,10 @@
 
 ## 5분 설치
 
+**플러그인을 이미 켰다면 `fd-setup` 스킬이 아래를 대신 해 준다** — 상태를 재고, 서버로 쓸지
+클라이언트로 붙을지 묻고, 없는 것의 설치 명령을 **승인받아** 실행한다. 판정은 `fd setup` 이
+내므로 그 명령을 직접 쳐도 같은 값이 나온다. 아래는 그 스킬이 하는 일의 정본이다.
+
 ### 1. 서버를 띄운다 (한 머신에서 한 번)
 
 ```bash
@@ -42,7 +46,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PostToolUse`(Edit\|Write) 훅 | `tool` 신호 + **미커밋 발자국** — 경로 겹침 축의 유일한 원천 |
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | MCP 도구 6개 | `board` `pick` `note` `add` `finish` `alloc` |
-| 스킬 2개 | `fd-pickup` · `fd-handoff` |
+| 스킬 3개 | `fd-pickup` · `fd-handoff` · `fd-setup` |
 
 `bin/fd` 는 셸 런처다. 첫 훅이 `server/` 를 빌드해 `${CLAUDE_PLUGIN_DATA}` 에 캐시한다.
 **Go 가 없으면 안내만 내고 세션은 그대로 진행된다**(훅은 세션을 막지 않는다).
