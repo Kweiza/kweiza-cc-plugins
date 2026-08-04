@@ -60,11 +60,25 @@ Windows 드라이브 문자 경로도 0건. **마이그레이션은 이 설계�
 | workspace — `api.ValidateWorkspacePath` | `filepath.IsAbs` (치는 클라이언트 0건) | 66 |
 | 발자국 — `api.NormalizeFootprints` → `service.RelPath` | **없음** | 298 |
 | **항목 경로 — `add` → `handlers_items.go:94`** | **없음 — 아무 검증도 없다** | **321** |
+| **항목 경로 — `finish` followup(`service.Finish`, `finish.go:114-126`)** | **없음 — `AddItem` 의 검증 루프를 안 거치고 `t.AddItem` 을 직접 부른다** | (위 321 에 포함) |
+
+**정정(전수 리뷰에서 잡힘):** 위 표는 처음 작성될 때 `handlers_items.go` 의 `add` 핸들러 하나만
+세고 "항목 경로 입구"를 다 센 것으로 착각했다. 실제로는 `item.paths` 로 들어가는 코드 경로가
+둘이다 — `add`(`AddItem`)와 `finish` 의 `followups[].paths`(`Finish` 가 `t.AddItem` 을 직접 부른다).
+**핸들러 단위가 아니라 "이 컬럼에 쓰는 모든 코드 경로" 단위로 세야 한다** — 다음 census 는 컬럼을
+쓰는 함수를 전부 grep 해서 세고, 눈에 보이는 진입점 하나를 세는 것으로 끝내지 마라.
 
 `add` 는 임의 문자열을 그대로 `item.paths` 에 넣는다. §2.2 의 두 칸과 달리 여기엔
 **클라이언트 OS 라는 관문이 아예 없다** — 사람이 무엇을 붙여넣든 들어간다. Linux 에서
 작업하는 사람이 Windows 쪽 문서나 IDE 에서 경로를 복사해 오는 것으로 충분하다.
 그러면 그 항목의 경로 축은 조용히 죽는다. **가장 큰 입구가 가장 무방비다.**
+
+`finish` followup 도 같은 컬럼에 쓰고 같은 무방비 상태였다 — `plugins/flightdeck/skills/fd-handoff/SKILL.md:19`
+가 `followups: [{ id, title, body, paths }]` 를 후속 경로를 등록하는 권장 방법으로 문서화까지 한다.
+이벤트 원장 실측으로 `item.add` 24건 대 `finish` followup 15건, 같은 트래픽의 약 38%가 이 문으로
+들어왔다. 관문을 `add` 에만 세우고 `finish` 를 놓치면 같은 사람이 같은 세션에서 add 는 거절당하고
+finish 는 조용히 통과하는 **반쪽 발화**가 된다 — 균일한 부재보다 나쁘다. 전수 리뷰에서 잡혀
+§4.2 관문 표와 코드 양쪽에 반영했다.
 
 `components` 주석은 `..` 를 일부러 안 걷어낸다며 "등록 목록에 `..` 가 들어오는 것은 입력
 오류이고, 조용히 정규화하면 그 오류가 안 보인다"라고 적어 뒀다. 오류를 보이게 하겠다는
@@ -139,6 +153,7 @@ func JudgePathCoordinate(p string) PathVerdict
 |---|---|---|
 | `service.JudgeOpenSession` (worktree) | **거절** | 이미 거절하지만 `C:\repo` 에 "절대경로가 아니다"라고 답해 원인을 못 짚는다. 사유를 정확하게 바꾼다. 세션 정체가 틀리면 그 뒤 전부가 틀린다 |
 | `add` (`item.paths`) | **거절** | 사람이 대화형으로 넣으므로 즉시 고칠 수 있다. 통과시키면 그 항목의 경로 축이 영영 죽는다 |
+| `finish` followup (`followups[].paths`) | **거절** | §2.3 정정에서 드러났다 — `add` 와 같은 컬럼에 쓰고 같은 근거(사람이 대화형으로 넣는다)가 그대로 적용된다. 훅이 자동으로 보내는 것이 아니다. 여기만 통과시키면 같은 사람이 add 는 거절당하고 finish 는 조용히 통과하는 반쪽 관문이 된다 |
 | 발자국 (`api.handleFootprints`, `service.Beat`) | **버리되 버린 것을 관측 가능하게 남긴다** | 훅이 자동으로 보낸다. 400 으로 죽이면 세션 생존 신호가 끊긴다 — 그것이 침묵보다 나쁘다 |
 
 발자국만 통과시키는 것이 이 설계에서 유일하게 비대칭인 자리다. 근거는 **실패의 대가**다:
@@ -153,6 +168,22 @@ func JudgePathCoordinate(p string) PathVerdict
   실으려면 `Beat` 의 시그니처를 바꿔야 하는데 호출처가 5곳이고 그중 `mcpsrv.go:395` 는 다른
   세션이 만지는 중이다. 그리고 이 표면의 응답은 훅이 삼켜 사람이 읽지 않는다 — 원장이 더 강한
   자리다(영구적이고 대시보드에서 보인다).
+
+**정정(전수 리뷰에서 잡힘 — §4.2 의 전제가 거짓이었다):** 위 `handleFootprints` 응답 강화의
+근거는 "이 표면은 명시적 호출이고 응답을 사람이 읽는다"였다. 그런데 `POST /api/v1/footprints`
+(`internal/api/api.go:187` 에 등록)를 실제로 치는 클라이언트가 **0건**이다 — `cmd/fd`·`hooks/`·
+`mcpsrv`·웹 자산 어디에도 없다. 실제 발자국 기록 경로는 `fd beat --path` → `POST
+/sessions/{id}/signals` → `Beat` 하나뿐이다. 이 정정 시점에는 `handleFootprints` 를 부르는
+표면을 새로 만드는 계획이 없으므로, 저 응답 강화는 **지금 있는 클라이언트를 위한 것이 아니라
+앞을 내다본 것**임을 밝혀 둔다 — 근거를 실제와 다르게 적어 두면 다음 사람이 "이 표면이 활발히
+쓰인다"고 오독한다.
+
+이 정정은 §6 이 `ValidateWorkspacePath` 를 범위에서 뺀 것과 **같은 기준으로 재보면 어긋난다**
+— §6 은 "이 표면을 치는 클라이언트가 0건"을 죽은 표면으로 보고 손대지 않기로 했는데, 여기서는
+클라이언트가 0건인 `handleFootprints` 를 오히려 강화했다. 스펙 내부 비일관성이었다는 것을
+인정한다. `Beat`(살아 있는 유일한 표면)의 원장에 버린 경로 목록을 함께 싣는 것으로 이번
+정정에서 균형을 맞췄다(§4.2 표 · `session.go` 의 `Beat`, `session.beat` payload 의
+`dropped_paths`).
 
 ### 4.3 계약을 주석이 아니라 코드로
 
