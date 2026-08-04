@@ -65,8 +65,16 @@ func TestFlushDrainsLegacyQueuesBySending(t *testing.T) {
 	cli.Legacy = []*Outbox{newOutboxAt(legacyA), newOutboxAt(legacyB)}
 
 	var sent []string
-	res := cli.flushAll(t.Context(), func(_ *Outbox, e OutboxEntry) error {
+	// ★ sentFrom 은 각 키가 **어느 큐에서** send 로 넘어왔는지를 잰다. 이것 없이
+	// len(sent)==3·res.Sent==3·고정 자리 비어 있음만 보면, 반증된 os.Rename 설계
+	// (옛 파일을 고정 자리로 옮긴 뒤 거기서 보내는 것)도 이 값들을 똑같이 낸다 —
+	// 그 설계에서도 결국 3건이 나가고 legacyA·legacyB 파일은 사라지고 고정 자리엔
+	// pending.jsonl 이 안 남는다(옮겨진 뒤 다 나갔으므로). 어느 디렉토리에서
+	// 보냈는지를 확인해야만 "제자리에서 보냈다"와 "옮긴 뒤 보냈다"가 갈린다.
+	sentFrom := map[string]string{}
+	res := cli.flushAll(t.Context(), func(o *Outbox, e OutboxEntry) error {
 		sent = append(sent, e.Key)
+		sentFrom[e.Key] = o.Dir()
 		return nil
 	})
 	if len(sent) != 3 {
@@ -74,6 +82,16 @@ func TestFlushDrainsLegacyQueuesBySending(t *testing.T) {
 	}
 	if res.Sent != 3 {
 		t.Errorf("Sent 가 %d 다 — 3 이어야 한다", res.Sent)
+	}
+	for _, k := range []string{"a1", "a2"} {
+		if sentFrom[k] != legacyA {
+			t.Errorf("%s 가 %s 에서 나갔다 — legacyA(%s)에서 나갔어야 한다(제자리에서 보낸다)",
+				k, sentFrom[k], legacyA)
+		}
+	}
+	if sentFrom["b1"] != legacyB {
+		t.Errorf("b1 이 %s 에서 나갔다 — legacyB(%s)에서 나갔어야 한다(제자리에서 보낸다)",
+			sentFrom["b1"], legacyB)
 	}
 
 	// ★ 큐 파일이 **사라진다** — keep() 의 기존 동작이다.
@@ -89,29 +107,44 @@ func TestFlushDrainsLegacyQueuesBySending(t *testing.T) {
 }
 
 // 옛 큐가 막혀도 고정 큐는 나간다. 한 큐의 정체가 다른 큐를 인질로 잡지 않는다.
+//
+// ★ 옛 큐가 **둘**이어야 한다. flushAll 은 append([]*Outbox{c.Outbox}, c.Legacy...) 로
+// 도므로 고정 큐는 항상 0번째다 — 옛 큐가 하나뿐이면 "fixed1 이 나갔다"는 그 뒤에서
+// 무슨 일이 나도(가령 "막힌 큐를 보면 나머지를 통째로 건너뛴다"는 코드가 들어와도)
+// 계속 참으로 남는다. 순서상 fixed1 은 막힌 큐보다 **먼저** 처리되기 때문이다.
+// 막힌 옛 큐(legacyStuck) *뒤에* 오는 둘째 옛 큐(legacyOK)가 실제로 나가는지를 봐야만
+// "한 큐가 막혀도 그 뒤가 인질로 안 잡힌다"를 잰다.
 func TestStuckLegacyQueueDoesNotBlockTheFixedQueue(t *testing.T) {
 	h := newHarness(t)
-	legacy := filepath.Join(t.TempDir(), "chan", "outbox")
-	seedQueue(t, legacy, "stuck1", "stuck2")
+	legacyStuck := filepath.Join(t.TempDir(), "chanStuck", "outbox")
+	legacyOK := filepath.Join(t.TempDir(), "chanOK", "outbox")
+	seedQueue(t, legacyStuck, "stuck1", "stuck2")
+	seedQueue(t, legacyOK, "ok1")
 
 	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
-	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
+	cli.Legacy = []*Outbox{newOutboxAt(legacyStuck), newOutboxAt(legacyOK)}
 	if err := cli.Outbox.Append(entry("fixed1")); err != nil {
 		t.Fatalf("고정 큐에 못 쌓았다: %v", err)
 	}
 
 	var sent []string
 	cli.flushAll(t.Context(), func(o *Outbox, e OutboxEntry) error {
-		if o.Dir() == legacy {
-			return ErrUnreachable // 옛 큐만 막는다
+		if o.Dir() == legacyStuck {
+			return ErrUnreachable // 첫 옛 큐만 막는다
 		}
 		sent = append(sent, e.Key)
 		return nil
 	})
-	if len(sent) != 1 || sent[0] != "fixed1" {
-		t.Errorf("고정 큐가 %v 를 보냈다 — 옛 큐가 막혔다고 고정 큐가 막히면 안 된다", sent)
+	// 순서는 결정적이다: 고정 큐(0번째) → legacyStuck(막힘, 아무것도 안 보냄) → legacyOK.
+	if len(sent) != 2 || sent[0] != "fixed1" || sent[1] != "ok1" {
+		t.Fatalf("보낸 것이 %v 다 — [fixed1 ok1] 이어야 한다(고정 큐도, 막힌 큐 뒤의 "+
+			"둘째 옛 큐도 나가야 한다)", sent)
 	}
-	if got := queuedKeys(t, newOutboxAt(legacy)); len(got) != 2 {
+	// ★ legacyOK 는 실제로 나갔으니 파일도 사라져야 한다 — "나갔다"는 주장을 파일로도 잰다.
+	if _, err := os.Stat(filepath.Join(legacyOK, pendingName)); !os.IsNotExist(err) {
+		t.Errorf("legacyOK 의 큐가 안 비었다(err=%v) — 나갔다면 keep() 이 지웠어야 한다", err)
+	}
+	if got := queuedKeys(t, newOutboxAt(legacyStuck)); len(got) != 2 {
 		t.Errorf("막힌 옛 큐가 %v 다 — 2건 그대로 남아야 한다", got)
 	}
 }
@@ -125,7 +158,7 @@ func TestLegacyQueueQuarantinesIntoItsOwnDir(t *testing.T) {
 	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
 	cli.Legacy = []*Outbox{newOutboxAt(legacy)}
 
-	cli.flushAll(t.Context(), func(*Outbox, OutboxEntry) error {
+	res := cli.flushAll(t.Context(), func(*Outbox, OutboxEntry) error {
 		return &APIError{Status: 409, Message: "이미 있다"}
 	})
 
@@ -138,5 +171,72 @@ func TestLegacyQueueQuarantinesIntoItsOwnDir(t *testing.T) {
 	}
 	if fixed, _ := cli.Outbox.Rejected(); len(fixed) != 0 {
 		t.Errorf("고정 자리에 격리가 %d건 생겼다 — 보관소는 제 큐 옆에 남아야 한다", len(fixed))
+	}
+
+	// ★ 여기부터가 §9 의 "완전 침묵" 공백을 막는 부분이다. flushAll 에서
+	// `case res.Remaining > 0 || res.Rejected > 0:` 가지를 지워도 위 파일 단정은
+	// 전부 그대로 초록이다(quarantine 은 Outbox.Replay 안에서 일어나지 total 집계와
+	// 무관하다) — 그러니 집계·사유 보고 자체를 재는 단정이 따로 있어야 한다.
+	if res.Rejected != 1 {
+		t.Errorf("res.Rejected 가 %d 다 — 1 이어야 한다(옛 큐의 격리가 총합에 안 잡혔다)", res.Rejected)
+	}
+	if !strings.Contains(res.Detail, legacy) {
+		t.Errorf("res.Detail(%q)에 옛 자리(%s)가 안 보인다 — 어느 큐가 격리했는지 이름을 대야 한다",
+			res.Detail, legacy)
+	}
+}
+
+// ── newClient 자신이 옛 자리를 채운다 ─────────────────────────────────────────
+
+// 위의 세 시험은 전부 cli.Legacy 를 손으로 덮어쓴다. 그래서 newClient 안의
+// LegacyOutboxDirs 루프와 `Legacy: legacy` 필드(client.go 의 newClient 본문)를
+// 지워도 위 세 시험은 하나도 안 빨개진다 — 이 과제가 프로덕션에서는 조용한
+// 아무 일도 안 하는 no-op 이 될 수 있다는 뜻이다. 이 시험이 그 배선 자체를 잰다.
+//
+// ★ 하네스는 env["HOME"]=h.home · env["FD_STATE_DIR"]=h.state 를 고정한다
+// (harness_test.go 의 hs.env 조립부). 그러면:
+//   - 고정 자리(OutboxPath)는 FD_STATE_DIR 이 이겨서 h.state/outbox 다.
+//   - LegacyOutboxDirs 는 CLAUDE_PLUGIN_DATA·XDG_STATE_HOME 이 없으므로(하네스가 안 채움)
+//     home 을 근거로 ~/.local/state/flightdeck/outbox 를 후보에 얹는다(env.go 의
+//     `if strings.TrimSpace(home) != "" { add(...".local","state","flightdeck","outbox") }`).
+//     이 경로는 h.state/outbox 와 다른 자리라 목표와 겹쳐 걸러지지 않는다.
+//
+// 그래서 ~/.local/state/flightdeck/outbox 는 이 하네스 안에서 **진짜** 옛 자리 후보다.
+func TestNewClientWiresLegacyOutboxFromHome(t *testing.T) {
+	h := newHarness(t)
+	legacyHome := filepath.Join(h.home, ".local", "state", "flightdeck", "outbox")
+	seedQueue(t, legacyHome, "home1")
+
+	// ★ cli.Legacy 를 손대지 않는다 — newClient 자신의 배선을 잰다.
+	cli := newClient(ResolveStateDir(envOf(h.env), h.home), envOf(h.env), h.home, quietLogger())
+
+	var found bool
+	for _, ob := range cli.Legacy {
+		if ob.Dir() == legacyHome {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var dirs []string
+		for _, ob := range cli.Legacy {
+			dirs = append(dirs, ob.Dir())
+		}
+		t.Fatalf("newClient 가 %s 를 Legacy 에 안 넣었다 — 실제로 넣은 것: %v", legacyHome, dirs)
+	}
+
+	var sent []string
+	res := cli.flushAll(t.Context(), func(_ *Outbox, e OutboxEntry) error {
+		sent = append(sent, e.Key)
+		return nil
+	})
+	if len(sent) != 1 || sent[0] != "home1" {
+		t.Fatalf("newClient 로 연결된 옛 큐가 안 나갔다: sent=%v", sent)
+	}
+	if res.Sent != 1 {
+		t.Errorf("res.Sent 가 %d 다 — 1 이어야 한다", res.Sent)
+	}
+	if _, err := os.Stat(filepath.Join(legacyHome, pendingName)); !os.IsNotExist(err) {
+		t.Errorf("%s 의 큐가 안 비었다(err=%v)", legacyHome, err)
 	}
 }
