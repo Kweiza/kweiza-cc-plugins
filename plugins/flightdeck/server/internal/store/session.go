@@ -501,6 +501,29 @@ func (s *Store) Signals(ctx context.Context, sessionID string) (map[model.Signal
 	return out, nil
 }
 
+// LastSignal 은 세션의 가장 최근 신호 시각이다(종류 불문 MAX).
+//
+// ★ **생존 창으로 거르지 않는다.** 레인 점유자가 창 밖(무갱신)일 때가 정확히 그 나이를
+// 알아야 하는 순간이다 — 여기서 창 밖 신호를 숨기면 "왜 안 비켜 주나"에 답할 수 없다.
+// 신호가 하나도 없으면 두 번째 반환값이 false 다(0값과 부재를 가른다, Signals 와 같은 이유).
+func (s *Store) LastSignal(ctx context.Context, sessionID string) (time.Time, bool, error) {
+	var at sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(at) FROM signal WHERE session_id = ?`, sessionID).Scan(&at)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("최근 신호 조회 실패(session_id=%q): %w",
+			clip(sessionID, 64), err)
+	}
+	if !at.Valid {
+		return time.Time{}, false, nil
+	}
+	ts, err := parseTime(at.String)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return ts, true, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // footprint
 // ─────────────────────────────────────────────────────────────────────────────
