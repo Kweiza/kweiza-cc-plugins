@@ -470,6 +470,28 @@ func (s *Server) plantBeacon() {
 	}
 }
 
+// beaconMiss 는 이 프로세스가 비콘으로 표류를 못 짚은 사유다. RenderDrift 의 why 로 간다.
+//
+// ★ 훅의 사유는 여기서 알 수 없다 — 훅은 다른 프로세스다. 그래서 훅이 낼 사유를 흉내내지
+// 않고 **이 서버가 실제로 아는 것**만 말한다: 비콘 디렉토리가 있는지, 이 프로세스의 비콘
+// 좌표를 만들 수 있는지(BeaconKey), 그 좌표로 비콘을 읽을 수 있는지(ensureSession 이
+// 이미 쓰는 판정과 같다) — 딱 그 셋이다. 셋 다 통과했다면(비콘을 읽었다면) 이 프로세스
+// 쪽에서는 막힌 데가 없다는 뜻이라 사유를 비운다 — 표류는 **남의** 카드 얘기라 내 비콘이
+// 멀쩡해도 남을 수 있고, 그 경우의 진짜 사유는 이 프로세스가 알 길이 없다.
+func (s *Server) beaconMiss() string {
+	if s.beaconDir == "" {
+		return "이 MCP 프로세스에 비콘 디렉토리가 설정되지 않았다"
+	}
+	k, ok := s.BeaconKey()
+	if !ok {
+		return "이 프로세스에서 비콘 좌표를 만들 수 없다(부모가 claude 가 아니거나 정체가 반쪽이다)"
+	}
+	if _, err := window.Load(s.beaconDir, k); err != nil {
+		return "비콘을 못 읽었다: " + err.Error()
+	}
+	return ""
+}
+
 // ensureSession 은 세션을 한 번만 연다. 같은 3중키면 같은 세션이므로 재호출도 안전하지만,
 // 매번 열면 git 파생이 도구 호출마다 돌아 첫 명령이 느려진다 — 그 느림이 기존 도구의 병목 3위였다.
 func (s *Server) ensureSession(ctx context.Context) (string, error) {
@@ -560,7 +582,15 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	// 꼬리가 아니라 notice 에 싣는 이유는 꼬리가 **모든 도구 응답**에 붙기 때문이다 —
 	// 그러려면 도구 호출마다 보드를 파생해야 하고, 그 비용은 이미 한 번 문제가 됐다
 	// (RecentNotes 주석). 증상이 보이는 자리에서만 말한다.
-	if d := RenderDrift(DriftedTwins(s.id, liveIdentitiesOf(view.Sessions)), s.id.CCSessionID); d != "" {
+	//
+	// why 는 twins 가 있을 때만 구한다 — beaconMiss 가 비콘 파일을 읽으므로, 표류가 없는
+	// (대부분의) board 호출에서까지 그 I/O 를 낼 이유가 없다.
+	twins := DriftedTwins(s.id, liveIdentitiesOf(view.Sessions))
+	why := ""
+	if len(twins) > 0 {
+		why = s.beaconMiss()
+	}
+	if d := RenderDrift(twins, s.id.CCSessionID, why); d != "" {
 		if notice != "" {
 			notice += "\n"
 		}
