@@ -139,6 +139,7 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 	var sess model.Session
 	var created bool
 	var proj model.Project
+	var divergences []Divergence
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		// 시도를 먼저 예약한다 — 롤백돼도 남는다.
 		t.LogEvent("session.open", in.Project, "", map[string]any{
@@ -180,6 +181,26 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		if err != nil {
 			return err
 		}
+
+		// 같은 대화에 다른 machine·project 가 들어왔는지 **관측한다**(divergence.go).
+		//
+		// ★ created 일 때만 본다. 이것이 항목이 요구한 접기다 — 훅은 프롬프트 하나에
+		// 최대 4프로세스로 세션을 여는데(hook.go), 같은 3중키로는 **첫 프로세스만**
+		// 행을 만들고 나머지는 재개라 created=false 다. 그래서 별도 상태 없이
+		// (세션, 들어온 machine) 조합당 정확히 한 번이 된다. 건별로 남기면 원장이
+		// 프롬프트마다 4배로 증폭된다.
+		if created {
+			others, derr := t.DivergentSessions(in.CCSessionID, in.Project, in.MachineID)
+			if derr != nil {
+				// 관측 실패가 세션 등록을 죽이면 안 된다 — 조정이 관측 때문에 멈추면
+				// 이 도구의 존재 이유가 사라진다. 삼키지 않고 사유만 남긴다.
+				d.fail("identity-divergence", derr)
+			} else if ds := JudgeIdentityDivergence(in, others); len(ds) > 0 {
+				divergences = ds
+				t.LogEvent("session.identity_divergence", in.Project, sess.ID,
+					divergencePayload(in, ds))
+			}
+		}
 		if err := t.AddWorkspace(model.Workspace{
 			SessionID: sess.ID, Project: in.Project, Path: in.Worktree, IsPrimary: true,
 		}); err != nil {
@@ -196,6 +217,16 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		s.log.ErrorContext(ctx, "세션 열기 실패",
 			"project", clip(in.Project, 64), "worktree", clip(in.Worktree, 200), "error", err.Error())
 		return res, err
+	}
+
+	// ★ 커밋 뒤에 남긴다. 원장 이벤트는 트랜잭션과 함께 가고(LogEvent 는 커밋 후 흘린다),
+	// 로그는 롤백된 시도까지 말하면 안 되기 때문이다 — "갈렸다"고 적어 놓고 그 행이
+	// 실제로는 안 들어갔으면 다음 사람이 없는 행을 찾는다.
+	if len(divergences) > 0 {
+		s.log.WarnContext(ctx, "같은 대화에 다른 정체가 들어왔다 — 보드에 카드가 여러 장으로 뜬다",
+			"session_id", sess.ID, "cc_session", clip(in.CCSessionID, 64),
+			"project", clip(in.Project, 64), "machine", clip(in.MachineID, 64),
+			"worktree", clip(in.Worktree, 200), "reason", RenderDivergence(divergences))
 	}
 
 	claims, err := s.st.ClaimedItems(ctx, sess.ID)
