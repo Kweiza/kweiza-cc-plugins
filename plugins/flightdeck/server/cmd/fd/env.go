@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kweiza/flightdeck/internal/window"
 )
 
 // 좌표 — 상태 디렉토리 · 머신 정체 · 프로젝트.
@@ -120,6 +122,15 @@ func MachineID(get func(string) (string, bool), home string) (id, source, warn s
 		return id, source, "machine-id 를 못 적어 다음 실행에 다른 값이 된다: " + err.Error()
 	}
 	return id, source, ""
+}
+
+// BeaconDir 는 창 비콘을 둘 디렉토리다.
+//
+// ★ 판단은 window.Dir 하나가 갖는다. 여기 사본을 만들면 훅과 MCP 가 서로 다른 자리를 보게 되고,
+// 그 어긋남은 어느 화면에도 안 뜬다 — client.go 의 newClient 주석이 적어 둔 그대로,
+// 같은 판단이 두 자리에 살면 한쪽만 고칠 때 조용히 어긋난다(이 레포는 그 사고를 세 번 겪었다).
+func BeaconDir(get func(string) (string, bool), home string) (string, string) {
+	return window.Dir(get, home)
 }
 
 // ProjectCoord 는 이 실행이 어느 프로젝트의 어느 워크트리인지다.
