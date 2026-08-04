@@ -61,6 +61,7 @@ type GitReader interface {
 	Ref(ctx context.Context, ref string) (model.RefState, error)
 	Worktrees(ctx context.Context) ([]gitreader.Worktree, error)
 	ChangedPaths(ctx context.Context, base, head string) ([]string, error)
+	MergeBase(ctx context.Context, a, b string) (string, error)
 	UncommittedPaths(ctx context.Context, worktree string) ([]string, error)
 	AheadBehind(ctx context.Context, ref, base string) (ahead, behind int, err error)
 	Ancestry(ctx context.Context, sha, tip string) (judge.AncestryResult, error)

@@ -248,17 +248,17 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 	var g GitReader
 	var wts map[string]string // 워크트리 경로 → 브랜치
 	var heads map[string]string
-	baseSHA := ""
 	if strings.TrimSpace(proj.Path) == "" {
 		d.note("project-path", "프로젝트 경로가 비어 있다 — git 파생을 아예 시도하지 않았다")
 	} else {
 		g = s.git(proj.Path)
 		wts, heads = s.worktreeIndex(ctx, g, d)
+		// 기본 브랜치의 tip 은 신선도·ref_state 용으로만 읽는다. 변경집합의 base 로는 안 쓴다 —
+		// 그 자리는 갈래 지점이다(아래 MergeBase 참조).
 		if r, err := g.Ref(ctx, proj.DefaultBranch); err != nil {
 			d.fail("ref:"+proj.DefaultBranch, err)
 		} else {
 			d.ok()
-			baseSHA = r.SHA
 			s.rememberRef(ctx, proj.ID, r)
 		}
 	}
@@ -276,13 +276,27 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 			}
 			// 변경집합 — 착수 직후 구간은 브랜치 diff 가 정의상 비어 있어 footprint 가 덮는다.
 			if card.BranchKnown && card.View.Branch != "" && card.View.Branch != proj.DefaultBranch {
-				if paths, err := g.ChangedPaths(ctx, proj.DefaultBranch, card.View.Branch); err != nil {
+				// ★ base 는 기본 브랜치의 tip 이 아니라 **갈래 지점**이다.
+				//
+				//   tip 을 넘기면 두 점 diff 가 되어 두 끝점을 비교한다 — main 만 바꾼 파일이
+				//   브랜치의 변경으로 들어온다. 그러면 main 에 커밋이 하나 랜딩할 때마다 그 커밋이
+				//   건드린 파일이 **살아 있는 모든 브랜치**의 발자국에 더해져, 브랜치가 오래 살수록
+				//   오탐이 단조로 는다(실측: 겹침 6건 중 3건이 이 원인). §5 가 겹침을 거르지 않고
+				//   알리므로 그 오탐은 곧바로 화면에 나가고, 거짓 겹침이 늘면 진짜 겹침도 같이 죽는다.
+				//
+				//   갈래 지점을 못 구하면 이 축을 **비운 채** 못 읽었다고 말한다. 두 점으로
+				//   되돌아가지 않는다 — 그것이 없애려는 바로 그 오탐이다. 발자국·미커밋이 덮는다.
+				if forkSHA, err := g.MergeBase(ctx, proj.DefaultBranch, card.View.Branch); err != nil {
+					d.fail("merge-base:"+clip(card.View.Branch, 120), err)
+					fails = append(fails, "갈래 지점을 못 읽었다")
+				} else if paths, err := g.ChangedPaths(ctx, forkSHA, card.View.Branch); err != nil {
 					d.fail("changed-paths:"+clip(card.View.Branch, 120), err)
 					fails = append(fails, "변경 경로를 못 읽었다")
 				} else {
 					d.ok()
 					card.View.Paths = UnionPaths(card.View.Paths, paths)
-					s.rememberChangeSet(ctx, proj.ID, baseSHA, card.View.BranchSHA, paths)
+					// 보관되는 뜻이 정확해진다 — 갈래 기준 diff 는 forkSHA 로부터의 두 점 diff 와 같다.
+					s.rememberChangeSet(ctx, proj.ID, forkSHA, card.View.BranchSHA, paths)
 				}
 				if ahead, _, err := g.AheadBehind(ctx, card.View.Branch, proj.DefaultBranch); err != nil {
 					d.fail("ahead-behind:"+clip(card.View.Branch, 120), err)

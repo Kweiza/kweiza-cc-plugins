@@ -747,3 +747,76 @@ func TestReaderIgnoresInheritedGitEnvironment(t *testing.T) {
 		t.Errorf("HEAD sha = %s, want %s — 부모 환경의 GIT_DIR(%s)을 읽었다", got.SHA, second, otherHead)
 	}
 }
+
+// TestMergeBaseGivesTheForkPointNotEitherTip 는 갈래 지점이 두 tip 중 어느 것도 아님을
+// 단정하고, 그 sha 를 base 로 넘긴 ChangedPaths 가 갈래 기준 diff 와 같아짐을 확인한다.
+//
+// ★ 이 짝이 board 의 계약이다. ChangedPaths 는 두 점으로 남고(TestChangedPathsIsTwoDotDiff),
+// 갈래 기준이 필요한 호출자가 MergeBase 로 base 를 만들어 넘긴다. 그래야 change_set 이
+// 보관하는 `(base_sha, head_sha)` 가 실제로 diff 를 뜬 두 커밋과 일치한다.
+func TestMergeBaseGivesTheForkPointNotEitherTip(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "base.txt", "1\n")
+	fork := commit(t, repo, "기준")
+
+	runGit(t, repo, "checkout", "-q", "-b", "feat")
+	write(t, repo, "feat.txt", "1\n")
+	head := commit(t, repo, "가지 작업")
+
+	runGit(t, repo, "checkout", "-q", "main")
+	write(t, repo, "main-only.txt", "1\n")
+	mainTip := commit(t, repo, "본류 작업")
+
+	r := New(repo)
+	got, err := r.MergeBase(ctxT(t), "main", "feat")
+	if err != nil {
+		t.Fatalf("MergeBase 실패: %v", err)
+	}
+	if got != fork {
+		t.Fatalf("갈래 지점이 %s 다, 기대 %s", got, fork)
+	}
+	if got == mainTip || got == head {
+		t.Fatalf("갈래 지점이 어느 한쪽 tip 과 같다: %s", got)
+	}
+
+	// 그 sha 를 base 로 넘기면 남의 변경이 빠진다 — board 가 쓰는 조합 그대로.
+	paths, err := r.ChangedPaths(ctxT(t), got, "feat")
+	if err != nil {
+		t.Fatalf("ChangedPaths 실패: %v", err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	if !set["feat.txt"] {
+		t.Errorf("가지 쪽 변경이 없다: %q", paths)
+	}
+	if set["main-only.txt"] {
+		t.Errorf("갈래 지점을 base 로 줬는데 main 쪽 변경이 섞였다: %q", paths)
+	}
+}
+
+// TestMergeBaseIsAnErrorWhenHistoriesAreUnrelated 는 공통 조상이 없을 때
+// **빈 문자열을 조용히 돌려주지 않는다**를 단정한다.
+//
+// 빈 base 를 그대로 ChangedPaths 에 넘기면 git 이 전혀 다른 것을 비교하거나
+// 호출자가 두 점으로 물러서게 된다. 둘 다 침묵하는 오탐이다.
+func TestMergeBaseIsAnErrorWhenHistoriesAreUnrelated(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "a.txt", "a\n")
+	commit(t, repo, "본류")
+
+	// 부모 없는 갈래 — 공통 조상이 없다.
+	runGit(t, repo, "checkout", "-q", "--orphan", "alien")
+	runGit(t, repo, "rm", "-rq", "--cached", ".")
+	write(t, repo, "z.txt", "z\n")
+	commit(t, repo, "관계 없는 이력")
+
+	got, err := New(repo).MergeBase(ctxT(t), "main", "alien")
+	if err == nil {
+		t.Fatalf("공통 조상이 없는데 오류가 아니다: %q", got)
+	}
+	if got != "" {
+		t.Fatalf("실패인데 sha 를 냈다: %q", got)
+	}
+}

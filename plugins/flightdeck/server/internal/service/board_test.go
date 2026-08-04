@@ -302,3 +302,93 @@ func TestBoardRecordsFailureWhenOutOfWindowCountFails(t *testing.T) {
 		t.Fatalf("파생 실패가 신선도에 안 나타났다: %+v", view.Freshness)
 	}
 }
+
+// TestBoardChangeSetIsForkPointNotTwoDot 는 **브랜치가 손대지 않은 파일이 그 세션의
+// 경로로 나오지 않는다**를 소비자 좌표계에서 단정한다.
+//
+// ★ 왜 이 시험이 있나. sessionCards 가 `ChangedPaths(main, branch)` 를 부르면 그것은
+// **두 점 diff** 라 두 끝점을 비교한다 — main 만 바꾼 파일도 브랜치의 변경으로 들어온다.
+// 그러면 main 에 커밋이 하나 랜딩할 때마다 그 커밋이 건드린 파일이 **살아 있는 모든
+// 브랜치**의 발자국에 더해진다. 브랜치가 오래 살수록, main 이 바쁠수록 오탐이 는다 —
+// 단조 악화다. 설계 §5 가 겹침을 "거르지 않고 알린다"이므로 그 오탐은 곧바로 화면에
+// 나가고, 거짓 겹침이 늘면 세션들이 겹침 줄 자체를 안 읽게 된다(실측: 겹침 6건 중 3건 오탐).
+func TestBoardChangeSetIsForkPointNotTwoDot(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	// 브랜치가 실제로 만진 파일.
+	writeFile(t, wt, "branch/only.py", "print(1)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "branch touches its own file")
+
+	// main 이 그 뒤로 앞선다. 이 파일을 브랜치는 **한 번도 안 만졌다**.
+	writeFile(t, repo, "main/only.md", "main 만 고쳤다\n")
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "main moves ahead")
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+
+	var card SessionCard
+	for _, c := range view.Sessions {
+		if c.View.Session.ID == sess.Session.ID {
+			card = c
+		}
+	}
+	if !card.BranchKnown || card.View.Branch != "feat" {
+		t.Fatalf("브랜치 파생이 틀렸다: %+v (%s)", card, card.DeriveError)
+	}
+
+	// ① 자기가 만진 것은 남는다.
+	if !contains(card.View.Paths, "branch/only.py") {
+		t.Fatalf("브랜치가 만진 경로가 빠졌다: %v", card.View.Paths)
+	}
+	// ② 남이 만진 것은 안 붙는다. 이것이 이 시험의 전부다.
+	if contains(card.View.Paths, "main/only.md") {
+		t.Fatalf("브랜치가 한 번도 안 만진 파일이 그 세션의 경로로 나왔다: %v\n"+
+			"두 점 diff 는 두 끝점을 비교한다 — 갈래 지점(merge-base)을 base 로 넘겨야 한다", card.View.Paths)
+	}
+}
+
+// TestBoardRemembersChangeSetKeyedByForkPoint 는 보관된 change_set 의 base_sha 가
+// **실제로 diff 를 뜬 그 커밋**인지 단정한다.
+//
+// ★ change_set 은 (base_sha, head_sha) 를 키로 "두 커밋 사이"를 불변 보관한다.
+// 갈래 기준 경로를 담으면서 base_sha 에 main 의 tip 을 적으면 그 행은 거짓이 된다 —
+// 나중에 그 키로 읽는 쪽은 두 점 diff 를 기대하는데 내용은 갈래 기준이기 때문이다.
+// merge-base 를 적으면 뜻이 정확히 보존된다: 갈래 기준 diff 는 merge-base 로부터의
+// 두 점 diff 와 **문자 그대로 같다**. 그래서 base 를 merge-base 로 통일한다.
+func TestBoardRemembersChangeSetKeyedByForkPoint(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	forkSHA := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+
+	writeFile(t, wt, "branch/only.py", "print(1)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "branch touches its own file")
+	headSHA := strings.TrimSpace(runGit(t, wt, "rev-parse", "HEAD"))
+
+	writeFile(t, repo, "main/only.md", "main 만 고쳤다\n")
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "main moves ahead")
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	if _, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID}); err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+
+	cs, err := st.GetChangeSet(ctx(), "p", forkSHA, headSHA)
+	if err != nil {
+		t.Fatalf("갈래 지점을 base 로 한 change_set 이 없다(base=%s head=%s): %v", forkSHA, headSHA, err)
+	}
+	if !contains(cs.Paths, "branch/only.py") {
+		t.Fatalf("보관된 경로가 틀렸다: %v", cs.Paths)
+	}
+	if contains(cs.Paths, "main/only.md") {
+		t.Fatalf("보관된 change_set 에 브랜치가 안 만진 파일이 있다: %v", cs.Paths)
+	}
+}
