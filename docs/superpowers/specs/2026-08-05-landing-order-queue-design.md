@@ -323,7 +323,16 @@ CLI 한 줄기만 앞당기면 탈출구가 성립한다(REST 라우트 하나 +
 |---|---|---|---|
 | MCP 도구 수 | 6 | **7** | `mcpsrv/protocol_test.go:62`(이름·순서 하드코딩, 설명 90자 상한), `mcpsrv/add_coordinate_test.go:65` |
 | 웹 버튼 수 | 4 | **5** | `web/render_test.go:365` POST==2, `:369` reason required==2, `:373` Tier B 비활성 문자열 |
-| DESIGN 테이블 수 | 12(실제 21) | **22** | 없음 — 그래서 표류했다 |
+| DESIGN 테이블 수 | 12(실제 **23**) | **24** | 없음 — 그래서 표류했다 |
+
+★ **테이블 수는 세는 축을 함께 적지 않으면 반드시 다시 표류한다.** 실측(판단 `01KZ7DKQ3QHKH75X4XY0YDPFMC`):
+
+- 사람이 선언한 것 = **23** — `schema.sql` 의 `CREATE TABLE` 21 + `CREATE VIRTUAL TABLE` 1(`judgment_fts`, `schema.sql:264`) + 증분 `002` 의 `idempotency` 1
+- 살아 있는 DB 의 `sqlite_master` = **28** — 위 23 에 FTS5 그림자 넷(`judgment_fts_config`·`_data`·`_docsize`·`_idx`)과 `sqlite_sequence` 가 더해진 값
+
+**그 다섯은 엔진이 만든 것이라 데이터 모델이 아니다.** §3 은 데이터 모델을 말하는 절이므로 선언 수를 적는다.
+`landing_queue` 를 더하면 선언 **24** · `sqlite_master` **29** 다. 두 수가 왜 다른지를 §3 에 함께 적는다 —
+안 적으면 다음 사람이 `sqlite_master` 를 세고 또 어긋났다고 판단한다(실제로 다른 세션이 "28개"로 관측해 넘겨 왔다).
 
 DESIGN 줄: `:58`, `:156`, `:290`, `:303`, `:358`, `:367`.
 
