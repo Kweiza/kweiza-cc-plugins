@@ -151,14 +151,28 @@ func Find(dir, machineID string, ancestors []int, startedOf func(int) (string, e
 // ★ **지우기만 한다.** 남의 파일을 고쳐 쓰지 않으므로 다른 창의 rename 과 안 싸운다.
 // 지우려는 순간 그 창이 살아 있었다면 다음 심기가 다시 만든다 — 손해가 없다.
 //
+// ★★ **판정 대상은 내 머신의 비콘뿐이다.** 홈 하나를 머신 여럿이 공유할 수 있고
+// (Key 에 MachineID 축이 있는 이유가 그것이다 — beacon.go 가 NFS 를 이름으로 적어 뒀다),
+// 그 홈에서는 alive 가 **남의 머신에 대해 답할 자격이 없는** 질문이 된다. 이 머신의
+// 프로세스 표에 남의 pid 가 없는 것은 당연하므로, 거르지 않으면 머신 A 의 훅 한 번이
+// 머신 B 의 비콘을 전부 지운다 — 그러면 B 의 창들은 각자 MCP 가 다시 뜰 때까지
+// **아무 신호 없이** 표류 수리를 잃는다. 지우는 쪽의 손해가 안 지우는 쪽보다 크다.
+//
+// ★ machineID 가 비면 아무것도 안 지운다. 심기가 Key.Valid() 를 요구해 빈 머신 id 로는
+// 애초에 비콘이 안 생기므로 지울 것도 없고, 여기서 "빈 값은 전부 통과"로 접으면
+// 머신 축이 끊긴 배선 하나가 이 디렉토리를 통째로 비운다.
+//
 // 디렉토리가 없는 것은 오류가 아니다. 첫 실행이 그렇다.
-func Prune(dir string, alive func(int) bool) (removed int, err error) {
+func Prune(dir, machineID string, alive func(int) bool) (removed int, err error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("비콘 디렉토리를 못 읽었다(%s): %w", dir, err)
+	}
+	if strings.TrimSpace(machineID) == "" {
+		return 0, nil
 	}
 	for _, e := range ents {
 		name := e.Name()
@@ -172,6 +186,9 @@ func Prune(dir string, alive func(int) bool) (removed int, err error) {
 		b, derr := Decode(raw)
 		if derr != nil {
 			continue // 못 읽는 파일을 지우지 않는다 — 남이 쓰는 중일 수 있다
+		}
+		if b.MachineID != machineID {
+			continue // 남의 머신이다. 이 프로세스는 그 pid 가 살았는지 알 수 없다
 		}
 		if b.ClaudePID > 0 && !alive(b.ClaudePID) {
 			if os.Remove(filepath.Join(dir, name)) == nil {

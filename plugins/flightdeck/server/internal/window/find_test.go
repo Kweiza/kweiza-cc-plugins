@@ -85,7 +85,7 @@ func TestPruneRemovesDeadWindowsOnly(t *testing.T) {
 			t.Fatalf("Plant: %v", err)
 		}
 	}
-	n, err := Prune(dir, func(pid int) bool { return pid == 300 })
+	n, err := Prune(dir, "m1", func(pid int) bool { return pid == 300 })
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -97,8 +97,41 @@ func TestPruneRemovesDeadWindowsOnly(t *testing.T) {
 	}
 }
 
+// ★★ 가지치기는 **내 머신의 비콘만** 판정한다.
+//
+// 홈 하나를 머신 여럿이 공유할 수 있다 — Key 에 MachineID 축이 있는 이유가 정확히
+// 그것이다(beacon.go:20-21 이 NFS 를 이름으로 적어 뒀다). 그 홈에서 머신 A 가 가지치기를
+// 돌면 **A 의 프로세스 표**로 B 의 pid 를 묻게 되고, 겹치지 않는 pid 는 전부 "죽었다"로
+// 읽힌다. 그러면 B 의 모든 창이 비콘을 잃고, 잃었다는 신호도 없이 표류 수리가 꺼진다 —
+// 각 MCP 가 다시 뜰 때까지. alive 는 남의 머신에 대해 **답할 자격이 없는** 질문이다.
+func TestPruneLeavesOtherMachinesAlone(t *testing.T) {
+	dir := t.TempDir()
+	mine := Key{MachineID: "m1", ClaudePID: 301, Started: "1000"}   // 내 머신의 죽은 창
+	theirs := Key{MachineID: "m2", ClaudePID: 302, Started: "1000"} // 남의 머신 — 판정 대상이 아니다
+	for _, k := range []Key{mine, theirs} {
+		if _, err := Plant(dir, k, "/w", "cc", time.Unix(0, 0)); err != nil {
+			t.Fatalf("Plant: %v", err)
+		}
+	}
+
+	// 이 머신의 프로세스 표에는 둘 다 없다 — 남의 머신 pid 를 물으면 당연히 그렇다.
+	n, err := Prune(dir, "m1", func(int) bool { return false })
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("Prune 이 %d개 지웠다, 내 머신의 죽은 창 1개여야 한다", n)
+	}
+	if _, err := os.Stat(filepath.Join(dir, theirs.FileName())); err != nil {
+		t.Fatal("다른 머신의 비콘을 지웠다 — 그 머신의 창 전부가 다음 MCP 재기동까지 표류 수리를 잃는다")
+	}
+	if _, err := os.Stat(filepath.Join(dir, mine.FileName())); err == nil {
+		t.Fatal("내 머신의 죽은 창은 지워야 한다 — 안 그러면 공유 홈에 파일이 무한히 쌓인다")
+	}
+}
+
 func TestPruneOnAMissingDirIsNotAnError(t *testing.T) {
-	if _, err := Prune(filepath.Join(t.TempDir(), "nope"), func(int) bool { return true }); err != nil {
+	if _, err := Prune(filepath.Join(t.TempDir(), "nope"), "m1", func(int) bool { return true }); err != nil {
 		t.Fatalf("없는 디렉토리는 조용히 넘어가야 한다: %v", err)
 	}
 }
