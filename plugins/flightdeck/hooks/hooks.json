@@ -47,6 +47,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop",
+            "timeout": 3
+          }
+        ]
+      }
     ]
   }
 }
