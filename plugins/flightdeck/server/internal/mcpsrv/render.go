@@ -201,6 +201,17 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if len(v.Sessions) == 0 {
 		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
 	}
+	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
+	// 이 줄이 없으면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
+	if v.OutOfWindow > 0 {
+		age := ""
+		if !v.OldestOutside.IsZero() {
+			age = fmt.Sprintf("(가장 오래된 신호 %s 전) ", FormatAge(now.Sub(v.OldestOutside)))
+		}
+		foot = append(foot, fmt.Sprintf(
+			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다. window=8h 로 본다",
+			v.OutOfWindow, age))
+	}
 	if opt.Detail {
 		foot = append(foot, boardDetailFoot(v)...)
 	} else {

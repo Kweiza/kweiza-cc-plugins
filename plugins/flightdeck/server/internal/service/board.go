@@ -54,6 +54,11 @@ type BoardView struct {
 	Blocked   []model.Judgment     `json:"blocked,omitempty"`
 	Asks      []model.Judgment     `json:"asks,omitempty"`
 	Held      []model.ResourceHold `json:"held,omitempty"`
+	// OutOfWindow 는 창 밖이라 카드가 안 나간 세션 수다. **화면이 반드시 말한다** —
+	// 침묵하면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
+	OutOfWindow int `json:"out_of_window,omitempty"`
+	// OldestOutside 는 창 밖 세션 중 가장 오래된 마지막 신호 시각이다.
+	OldestOutside time.Time `json:"oldest_outside,omitempty"`
 	Derived
 }
 
@@ -82,6 +87,21 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	}
 
 	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
+
+	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).
+	if all, aerr := s.st.ListLive(ctx, proj.ID, time.Time{}); aerr != nil {
+		d.fail("out-of-window", aerr) // 못 세면 침묵하지 않고 파생 실패로 남긴다
+	} else {
+		view.OutOfWindow = len(all) - len(cards)
+		cut := s.cut(now, window)
+		for _, v := range all {
+			for _, at := range v.Signals {
+				if at.Before(cut) && (view.OldestOutside.IsZero() || at.Before(view.OldestOutside)) {
+					view.OldestOutside = at
+				}
+			}
+		}
+	}
 
 	if opt.IncludeQueue {
 		items, err := s.st.ListOpen(ctx, project)

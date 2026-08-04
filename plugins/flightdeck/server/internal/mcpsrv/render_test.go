@@ -360,3 +360,25 @@ func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 		t.Fatalf("경로 0건이 겹침 축에 안 잡힌다는 사실이 없다:\n%s", add)
 	}
 }
+
+// TestBoardSaysWhatTheWindowCutOff 는 창 밖으로 잘린 것을 **침묵시키지 않는다.**
+// 창은 표시 구간이지 생존 판정이 아니다(설계 §4).
+func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	got := RenderBoard(service.BoardView{
+		Sessions:      []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Window:        2 * time.Hour,
+		OutOfWindow:   9,
+		OldestOutside: now.Add(-7 * time.Hour),
+	}, BoardRenderOptions{Now: now})
+
+	if !strings.Contains(got, "창 밖 9건") {
+		t.Fatalf("창 밖 건수를 안 말한다:\n%s", got)
+	}
+	if !strings.Contains(got, "window=") {
+		t.Fatalf("어떻게 보는지를 안 말한다:\n%s", got)
+	}
+	if strings.Contains(got, "죽") {
+		t.Fatalf("생존 판정 낱말이 들어갔다 — 설계 §4 위반:\n%s", got)
+	}
+}
