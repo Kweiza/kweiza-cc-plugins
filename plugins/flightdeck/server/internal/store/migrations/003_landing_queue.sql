@@ -30,7 +30,13 @@ CREATE TABLE landing_queue (
   --   ok·finish 만 면제된다 — 정상 종료라 "왜"가 종류 자체에 들어 있다.
   CHECK (left_kind IS NULL
          OR left_kind IN ('ok','finish')
-         OR (left_detail IS NOT NULL AND left_detail <> ''))
+         OR (left_detail IS NOT NULL AND left_detail <> '')),
+
+  -- ★ 종류는 다섯뿐이다. Go 쪽 ValidateLandingLeave 가 1차 방어이고 이것이 최종 방어다 —
+  --   판정을 애플리케이션에만 두면 우회할 코드가 언제든 생긴다(resource.go:78-81 규율).
+  --   job.fail_kind 가 같은 모양으로 값을 열거한다.
+  CHECK (left_kind IS NULL
+         OR left_kind IN ('ok','fail','leave','finish','force'))
 );
 
 -- ★ 한 세션은 살아 있는 줄 행을 하나만 가진다. 재진입이 줄을 두 자리 차지하면 순번이 거짓이 된다.
