@@ -141,6 +141,36 @@ func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {
 	}
 }
 
+// TestRenderPickCarriesQueueSizeInEveryMode 는 네 모드 어느 쪽으로 들어와도
+// 같은 이름의 같은 줄을 본다는 것이다 — 세션이 모드를 보고 어디를 읽을지 고르지 않아도 된다.
+func TestRenderPickCarriesQueueSizeInEveryMode(t *testing.T) {
+	n := 5
+	for _, mode := range []service.PickMode{
+		service.PickRecommended, service.PickClaimed, service.PickResumed, service.PickNone,
+	} {
+		got := RenderPick(service.PickResult{Mode: mode, Reason: "사유다", QueueOpen: &n}, t0)
+		if !strings.Contains(got, "큐 열림 5건") {
+			t.Fatalf("%s 모드 응답에 큐 열림 수가 없다:\n%s", mode, got)
+		}
+	}
+}
+
+// TestRenderPickNeverCallsAnAbsentQueueSizeZero 가 이 설계에서 가장 중요한 시험이다.
+//
+// nil 이 되는 경로는 구버전 서버(SkewBanner 가 안 잡는다) · 필드가 생기기 전의 캐시 ·
+// 조회 실패 셋이다. 그것을 "큐 열림 0건" 으로 찍으면 신선한 온라인 응답이 거짓을 단정하고,
+// none 모드에는 그 모순을 드러낼 항목조차 없어 에이전트가 "큐가 비었다" 로 읽고 세션을 접는다.
+// 스큐 구간에서만 나타나는 실패라 사람이 재현하기 어렵다 — 이 시험이 유일한 방벽이다.
+func TestRenderPickNeverCallsAnAbsentQueueSizeZero(t *testing.T) {
+	got := RenderPick(service.PickResult{Mode: service.PickNone, Reason: "적격 0건이다"}, t0)
+	if strings.Contains(got, "큐 열림 0건") {
+		t.Fatalf("부재를 0건으로 단정했다:\n%s", got)
+	}
+	if !strings.Contains(got, "이 응답에 없다") {
+		t.Fatalf("부재를 침묵으로 접었다 — 안 본 것을 침묵하지 않는다:\n%s", got)
+	}
+}
+
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{

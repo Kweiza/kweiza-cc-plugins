@@ -539,6 +539,17 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	if r.Scope != "" {
 		fmt.Fprintf(&b, "범위: %s\n", r.Scope)
 	}
+	// 큐 규모. board 가 쓰는 이름을 **그대로** 쓴다(같은 술어에 두 번째 이름을 붙이면
+	// 두 수가 갈려도 읽는 쪽이 "다른 지표겠지"로 넘어가 불일치가 조용히 정상으로 등록된다).
+	//
+	// nil 을 침묵으로 접지 않는다. 원인은 셋인데(구버전 서버 · 옛 캐시 · 조회 실패)
+	// nil 하나로는 못 가르므로 **원인 중립 문장**을 쓴다 — 지어낸 원인보다 정확하고,
+	// 이 문장은 SkewBanner 가 못 잡는 스큐 구간의 유일한 신호이기도 하다.
+	if r.QueueOpen != nil {
+		fmt.Fprintf(&b, "큐 열림 %d건\n", *r.QueueOpen)
+	} else {
+		b.WriteString("큐 열림 수가 이 응답에 없다 — 서버 판이 이 축을 안 내거나 세지 못했다\n")
+	}
 
 	if r.Item != nil {
 		it := *r.Item
