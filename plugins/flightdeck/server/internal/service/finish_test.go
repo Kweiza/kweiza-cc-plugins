@@ -278,21 +278,34 @@ func TestFinishWhileHoldingTheLaneLetsTheSessionQueueAgain(t *testing.T) {
 	}
 }
 
-// TestFinishSurvivesAForcedReleaseRacingIt — finish 가 점유 목록을 읽은 뒤 반납을 실제로
-// 시도하기 전에 사람이 강제 회수해도, 판단은 살아남아야 한다.
+// TestFinishSurvivesAForcedReleaseRacingIt — 사람이 강제 회수를 finish 보다 먼저 커밋해도
+// finish 는 판단을 남기고 성공해야 한다.
 //
 // ★ 판단(handoff)은 이 레포가 "원리적으로 파생 불가한 유일한 자산"이라 부르는 값이다.
-// holds 를 트랜잭션 밖에서 읽으면(고치기 전) 그 사이에 사람이 레인을 강제 회수했을 때
-// ④ 의 반납 시도가 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로 롤백시켜 판단이
-// 함께 사라진다.
+// holds 를 트랜잭션 밖에서 읽던 시절에는(고치기 전) 그 사이에 사람이 레인을 강제
+// 회수했을 때 ④ 의 반납 시도가 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로
+// 롤백시켜 판단이 함께 사라졌다.
 //
-// ★ 실물 트랜잭션 둘로 그 창을 연다. "guard" 트랜잭션이 강제 회수를 커밋 직전 상태로
-// 붙잡아 두는 동안 finish 의 ListHeld(트랜잭션 밖 읽기 — WAL 이라 guard 의 쓰기 잠금과
-// 안 부딪힌다)가 아직 살아 있는 점유를 읽고, 그 다음에야 guard 가 커밋한다 — 그러면
-// finish 의 반납 시도는 이미 사라진 점유를 향해 쏘게 된다. guard 가 잠금을 쥐고 회수까지
-// 마친 뒤에야(아직 커밋 전) finish 를 연다 — 그래야 "누가 쓰기 잠금을 먼저 쥐나"의
-// 순서가 뒤집히지 않는다(뒤집히면 finish 가 경합 없이 정상 종료해 이 시험이 아무것도
-// 못 본다).
+// ★ 이 시험이 고친 뒤 실제로 증명하는 것: guard 가 먼저 강제 회수하고 **커밋한다.**
+// finish 는 그동안 guard 의 쓰기 잠금(BEGIN IMMEDIATE)에 막혀 대기하다가, guard 가
+// 놓은 뒤에야 들어가 t.ListHeld 를 **자기 트랜잭션 안에서** 읽는다 — 그 시점엔 이미
+// guard 의 회수가 커밋돼 있으므로 반납할 것이 하나도 없다. finish 는 반납을
+// 시도조차 하지 않고도(아래 lane.release_skipped 원장 단정이 그것을 본다) 판단을
+// 커밋한다.
+//
+// ★ 아래 sleep 이 왜 아직 있는가(실측으로 확인했다) — guardReady 핸드셰이크는
+// "guard 가 잠금을 쥐고 회수를 실행했다"만 결정적으로 보장하지, "finish 의 **바깥**
+// (트랜잭션 밖) 코드가 그 커밋 전에 뭔가를 읽었다"는 보장하지 않는다. 고친 코드
+// 자체의 정확성에는 그 보장이 필요 없다 — t.ListHeld 는 쓰기 잠금에 물려 있어
+// guard 뒤로 오는 순서가 sleep 유무와 무관하게 강제된다(그래서 위 시험은 sleep 을
+// 빼도 늘 통과한다). 문제는 **회귀 검출**이다: "holds 를 트랜잭션 밖에서 다시 읽는"
+// 변이(수정①을 되돌린 것)를 이 시험이 잡으려면 그 바깥 읽기가 guard 의 커밋 **전에**
+// 실행돼 낡은 점유를 봐야 하는데, 그 읽기는 WAL 이라 아무 잠금에도 안 걸려 락으로
+// 순서를 강제할 수단이 없다. 실측: sleep 을 빼고 그 변이를 넣으면 `go test -race
+// -count=50` 에서 50/50 회 전부 못 잡았다(고루틴 예약이 guard 의 커밋보다 항상
+// 늦었다 — race 계측 오버헤드가 그 편향을 더 키운다). sleep 을 되살리면 같은 조건에서
+// 50/50 회 전부 잡는다. 즉 이 sleep 은 "고친 코드가 맞다"를 위한 게 아니라
+// "이 시험이 그 회귀를 실제로 잡는다"를 위한 것이다.
 func TestFinishSurvivesAForcedReleaseRacingIt(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
@@ -338,9 +351,10 @@ func TestFinishSurvivesAForcedReleaseRacingIt(t *testing.T) {
 		finishDone <- finishOutcome{res, err}
 	}()
 
-	// finish 의 ListHeld 는 읽기라 guard 의 쓰기 잠금과 안 부딪힌다 — 로컬 SQLite 라
-	// 이 여유(밀리초 단위)는 넉넉하다. finish 의 Tx() 는 guard 가 잠금을 쥔 동안
-	// BEGIN IMMEDIATE 에서 막혀 기다린다.
+	// finish 의 바깥(트랜잭션 밖) 코드가 guard 의 커밋 전에 뭔가 읽을 시간을 번다 —
+	// 위 함수 주석 참조. 고친 코드의 정확성 자체에는 이 sleep 이 필요 없지만
+	// (쓰기 잠금이 순서를 대신 강제한다), 이게 없으면 "holds 를 트랜잭션 밖에서
+	// 읽는" 회귀를 이 시험이 못 잡는다(실측 근거도 위에 있다).
 	time.Sleep(100 * time.Millisecond)
 	close(pause)
 
@@ -349,10 +363,21 @@ func TestFinishSurvivesAForcedReleaseRacingIt(t *testing.T) {
 	}
 	out := <-finishDone
 
-	// ★ 오늘(고치기 전)은 여기가 빨갛다: ErrNotFound 가 그대로 올라가 판단까지 롤백된다.
 	if out.err != nil {
 		t.Fatalf("경합 중에도 마무리는 성공해야 한다(판단은 원리적으로 파생 불가한 유일한 자산이다): %v",
 			out.err)
+	}
+	// ★ 이 시험이 수정 ①(holds 를 트랜잭션 안에서 읽기)을 실제로 잠그는 자리다.
+	//   finish 의 t.ListHeld 가 guard 커밋 뒤에 도니 반납할 것이 애초에 없다 — 그러면
+	//   ReleaseResource 를 부를 일도, 그 안의 멱등 처리(skip)를 탈 일도 없다. holds 를
+	//   다시 트랜잭션 밖에서 읽게 되돌리면(변이) 밖에서 읽은 낡은 점유 때문에
+	//   ReleaseResource 가 ErrNotFound 를 내고 멱등 분기가 그것을 삼켜 skip 이벤트를
+	//   남긴다 — 그때만 이 카운트가 0 을 벗어난다. 즉 이 단정 없이는 멱등 처리 하나로도
+	//   시험 전체가 초록이 돼, 이 태스크가 존재하는 이유인 "트랜잭션 안에서 읽기"가
+	//   무방비로 남는다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE project='p' AND kind='lane.release_skipped'`); n != 0 {
+		t.Fatalf("트랜잭션 안에서 읽었으면 반납을 시도할 일이 없다 — 건너뛴 반납이 %d건 있다", n)
 	}
 	if n := countRows(t, st,
 		`SELECT count(*) FROM judgment WHERE project='p' AND session_id=?`, me.Session.ID); n != 1 {
