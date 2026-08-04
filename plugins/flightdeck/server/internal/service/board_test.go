@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -200,5 +201,11 @@ func TestBoardRefusesUnknownProject(t *testing.T) {
 	s, _ := newSvc(t)
 	if _, err := s.Board(ctx(), "없는프로젝트", BoardOptions{}); err == nil {
 		t.Fatalf("미등록 프로젝트는 파생 실패가 아니라 설정 오류다 — 접지 말고 올려야 한다")
+	}
+}
+
+func TestDefaultLiveWindowIsTwoHours(t *testing.T) {
+	if DefaultLiveWindow != 2*time.Hour {
+		t.Fatalf("기본 창이 2시간이 아니다: %v", DefaultLiveWindow)
 	}
 }

@@ -164,7 +164,7 @@ func TestPageHasSixSectionsAndSurvivesZeroLiveSessions(t *testing.T) {
 	}
 	// ① 0건이 빈칸이 아니라 문장이다. 창을 함께 말해야 "아무도 없다"와 "창이 좁다"가 갈린다.
 	mustContain(t, html, "살아 있는 세션 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
-	mustContain(t, html, "8시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
+	mustContain(t, html, "2시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
 
 	// ② 섹션 여섯이 전부 있다(그 이상도 만들지 않는다).
 	for _, h := range []string{
