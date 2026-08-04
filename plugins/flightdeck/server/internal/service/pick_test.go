@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -294,5 +295,194 @@ func TestPickSurfacesMissingDependencyInsteadOfCallingItWaiting(t *testing.T) {
 	// 그리고 사유 코드는 "조회하지 않았다" 그대로여야 한다 — 조회 결과를 지어내지 않는다.
 	if _, ok := reasonCodes(res.Rejected)["b-work/"+judge.AfterUnknown]; !ok {
 		t.Fatalf("탈락 사유가 %s 여야 한다: %+v", judge.AfterUnknown, res.Rejected)
+	}
+}
+
+// TestPickCountsTheQueueAfterTheClaimNotBefore 는 이 설계에서 가장 쉽게 틀리는 자리다.
+//
+// 진입부에서 세면 방금 집은 항목이 아직 state='open' 이라 카운트에 들어간다
+// (ClaimItem 이 open→claimed 로 옮긴다). 그러면 pick 응답이 board 보다 정확히 1 크고,
+// 같은 응답의 항목 블록은 [claimed] 라고 찍혀 있다 — 한 화면이 자기를 반박한다.
+func TestPickCountsTheQueueAfterTheClaimNotBefore(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	if got.Mode != PickClaimed {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickClaimed)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다 — nil 은 '이 응답에 없다'는 뜻이고 선점 경로에는 있어야 한다")
+	}
+	if *got.QueueOpen != 2 {
+		t.Fatalf("큐 열림 %d건 (기대 2) — 방금 집은 a 를 아직 열림으로 세고 있다", *got.QueueOpen)
+	}
+}
+
+// TestPickResumeReportsTheSameQueueSizeAsTheClaim 은 재개가 **재출력**임을 단정한다.
+//
+// pick.go 는 재개 경로가 "아무것도 쓰지 않는다"고 못박아 뒀다. 재출력이 원본과 다른 수를
+// 내면 그건 재출력이 아니고, 이 경로에 오는 세션은 정의상 앞 응답의 기억이 없어서
+// 그 차이를 "큐가 하나 줄었다"로 읽는다 — 아무도 아무것도 안 끝냈는데.
+func TestPickResumeReportsTheSameQueueSizeAsTheClaim(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	first, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	again, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "a"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if again.Mode != PickResumed {
+		t.Fatalf("mode = %s, 기대 %s", again.Mode, PickResumed)
+	}
+	if first.QueueOpen == nil || again.QueueOpen == nil {
+		t.Fatalf("큐 열림 수가 안 실렸다: 선점 %v, 재개 %v", first.QueueOpen, again.QueueOpen)
+	}
+	if *first.QueueOpen != *again.QueueOpen {
+		t.Fatalf("선점 %d건 → 재개 %d건 — 그 사이에 add 도 finish 도 없었다",
+			*first.QueueOpen, *again.QueueOpen)
+	}
+}
+
+// TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine 은
+// 추천 응답의 두 줄이 **같은 관측**에서 나왔음을 단정한다.
+//
+// 진입부에서 따로 세면 그 사이에 sessionCards(이 서버에서 가장 비싼 함수)가 끼어들어
+// 인접한 두 줄이 다른 수를 찍을 수 있다. candidates() 가 쥔 값을 그대로 쓰면 구조적으로 못 갈린다.
+func TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	for _, id := range []string{"a", "b", "c"} {
+		addItem(t, s, "p", id, nil, nil)
+	}
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if got.Mode != PickRecommended {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickRecommended)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다")
+	}
+	if *got.QueueOpen != 3 {
+		t.Fatalf("큐 열림 %d건 (기대 3) — 추천은 선점하지 않으므로 셋 다 열림이다", *got.QueueOpen)
+	}
+	if !strings.Contains(got.Scope, "열린 항목 3건") {
+		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
+	}
+}
+
+// TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine 은 none 모드도
+// QueueOpen 을 낸다는 것과, 그 수가 자기 사유 안의 수와 갈리지 않는다는 것을 단정한다.
+//
+// none 모드는 다른 모드보다 갈림이 더 위험하다 — Reason 자체가 Scope 문장을 그대로
+// 이어붙이므로(pick.go:329-330) QueueOpen 이 어긋나면 **한 응답 안에서 서로 다른 두 숫자가
+// 나란히 찍힌다.** recommended 모드는 그 옆에 실제 항목이라도 있어 사람이 위화감을 느낄
+// 여지가 있지만, none 모드에는 보여줄 항목 자체가 없어 그 모순을 알아챌 다른 단서가 없다.
+func TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	// 서로가 서로의 선행이 되는 순환 — 영영 안 풀린다(TestPickRecordsEvalAndEveryRejectionWhenNothingIsEligible
+	// 이 쓴 것과 같은 수법: 선행이 안 끝나 대기 상태로 남기되, 둘 다 열린 채로 둔다).
+	addItem(t, s, "p", "a", nil, []model.After{{Item: "b"}})
+	addItem(t, s, "p", "b", nil, []model.After{{Item: "a"}})
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if got.Mode != PickNone {
+		t.Fatalf("mode = %s, 기대 %s", got.Mode, PickNone)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다 — none 모드도 예외가 아니다")
+	}
+	if *got.QueueOpen != 2 {
+		t.Fatalf("큐 열림 %d건 (기대 2) — 순환 대기 중인 둘 다 열림이다", *got.QueueOpen)
+	}
+	want := fmt.Sprintf("열린 항목 %d건", *got.QueueOpen)
+	if !strings.Contains(got.Reason, want) {
+		t.Fatalf("사유 문자열과 큐 수가 갈렸다: %q vs %d건", got.Reason, *got.QueueOpen)
+	}
+	if !strings.Contains(got.Scope, want) {
+		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
+	}
+}
+
+// pick 은 세 모드 전부에서 경로 실재 판정을 낸다.
+// none(적격 0건)에는 항목이 없으므로 안 낸다 — 관측할 대상이 없다.
+func TestPickCarriesPathCheckInEveryModeThatHasAnItem(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "proj", repo, repo, "cc-1", "")
+	writeFile(t, repo, "internal/x/y.go", "package x\n")
+	addItem(t, s, "proj", "t-here", []string{"internal/x/y.go"}, nil)
+
+	// ① 추천
+	rec, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if rec.PathCheck == nil {
+		t.Fatal("추천에 경로 실재 판정이 없다")
+	}
+	if rec.PathCheck.Kind != judge.KindOK {
+		t.Fatalf("Kind 가 %q 다 — ok 여야 한다: %s", rec.PathCheck.Kind, rec.PathCheck.Summary)
+	}
+
+	// ② 선점
+	cl, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID, ItemID: "t-here"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	if cl.Mode != PickClaimed || cl.PathCheck == nil {
+		t.Fatalf("선점에 경로 실재 판정이 없다(mode=%s)", cl.Mode)
+	}
+
+	// ③ 재개 — 같은 세션이 다시 부른다
+	re, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID, ItemID: "t-here"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if re.Mode != PickResumed || re.PathCheck == nil {
+		t.Fatalf("재개에 경로 실재 판정이 없다(mode=%s)", re.Mode)
+	}
+}
+
+// 적격 0건에는 항목이 없다 → 판정도 없다. nil 이어야 한다.
+func TestPickNoneHasNoPathCheck(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "proj", repo, repo, "cc-1", "")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if res.Mode != PickNone {
+		t.Fatalf("mode 가 %q 다 — none 이어야 한다(큐가 비었다)", res.Mode)
+	}
+	if res.PathCheck != nil {
+		t.Fatalf("항목이 없는데 경로 실재 판정이 실렸다: %+v", res.PathCheck)
 	}
 }
