@@ -91,7 +91,12 @@ var tools = []Tool{
 		Description: "판단을 남긴다. 파생 불가한 유일한 자산이다.",
 		InputSchema: obj(map[string]any{
 			"kind": enumStr("판단 종류",
-				"handoff", "decision", "blocked", "ask", "now", "rejected", "not-done", "verified", "draft"),
+				// ★ 'now' 가 여기 없다. 저장은 되지만 보드가 안 읽어서(service/board.go 는
+				// ask·blocked 만 읽는다) 쓴 세션에게만 보이고 남에게는 안 보인다 —
+				// 쓸 수 있는데 안 보이는 것은 거짓 초록이다(설계 §11).
+				// model.JudgmentNow 상수와 검증 목록은 남는다: 레거시 임포터가 생산하고
+				// DB 에 이미 행이 있어, 지우면 그 행을 못 읽게 된다.
+				"handoff", "decision", "blocked", "ask", "rejected", "not-done", "verified", "draft"),
 			"body":       str("본문. 비면 거절한다"),
 			"title":      str("한 줄 제목"),
 			"item_id":    str("이 판단이 걸리는 큐 항목 id"),
