@@ -88,6 +88,32 @@ func TestCheckItemPathsSaysNowhereWhenNoProjectHasThem(t *testing.T) {
 	}
 }
 
+// D1: 리뷰어가 DB 를 닫고 재현한 실물 결함 — 프로젝트 목록 조회가 실패하면
+// 남의 프로젝트를 하나도 못 봤는데 nowhere(등록된 어느 프로젝트에도 없다)로 확정됐다.
+// 소비자 좌표계(checkItemPaths)에서 그 붕괴가 사라졌는지 여기서 다시 본다 —
+// judge 표 시험(TestClassifyItemPaths)은 이미 순수 함수 층에서 잡지만, service 층이
+// 실제로 실패를 nil Elsewhere 로 옮기는지는 여기서만 확인된다.
+func TestCheckItemPathsDoesNotSayNowhereWhenProjectListFails(t *testing.T) {
+	s, st := newSvc(t)
+	pa, _ := twoProjects(t, s)
+
+	// 실물 실패를 만든다: DB 연결을 닫는다(리뷰어가 재현한 방식과 같다).
+	if err := st.DB().Close(); err != nil {
+		t.Fatalf("DB 닫기 실패: %v", err)
+	}
+
+	v := s.checkItemPaths(ctx(), pa, []string{"internal/service/service.go"})
+	if v.Kind == judge.KindNowhere {
+		t.Fatalf("프로젝트 목록을 못 읽었는데 nowhere 로 확정했다: %s", v.Summary)
+	}
+	if v.Kind != judge.KindUnknown {
+		t.Fatalf("Kind 가 %q 다 — unknown 이어야 한다(목록을 못 읽었다): %s", v.Kind, v.Summary)
+	}
+	if strings.Contains(v.Summary, "어느 프로젝트에도 없다") {
+		t.Fatalf("목록을 못 읽었는데 '어느 프로젝트에도 없다'를 단정했다: %s", v.Summary)
+	}
+}
+
 // ★ 이 시험이 이 태스크의 핵심이다.
 // 루트를 따로 재지 않으면 죽은 프로젝트의 경로가 전부 ErrNotExist 로 와서
 // "없다"로 접히고, 그 항목이 nowhere 나 misregistered 로 **고발당한다**.

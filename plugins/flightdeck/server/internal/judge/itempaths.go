@@ -83,7 +83,8 @@ func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict {
 		return v
 	}
 
-	var present, absent, unknown int
+	var present, absent int
+	var unknownPaths []string
 	for _, p := range in.Paths {
 		switch in.Here[p] {
 		case PathPresent:
@@ -91,9 +92,10 @@ func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict {
 		case PathAbsent:
 			absent++
 		default:
-			unknown++
+			unknownPaths = append(unknownPaths, p)
 		}
 	}
+	unknown := len(unknownPaths)
 
 	switch {
 	case present > 0:
@@ -105,9 +107,13 @@ func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict {
 	case unknown > 0:
 		// ★ 여기가 이 함수에서 가장 중요한 분기다. 남은 것이 전부 Absent 여도
 		//   못 읽은 것이 하나라도 있으면 오등록이라 말하지 않는다.
+		//
+		// ★ 어느 경로를 못 읽었는지 문장에 낸다. 원인이 셋(루트 통째 없음 · ".." 로 루트
+		//   밖 · 권한 거부) 다 여기로 모이는데, 경로 이름이 없으면 세 경우가 바이트 단위로
+		//   같은 문장이 되어 운영자가 무엇이 진짜 고장인지 못 가린다(D2).
 		v.Kind = KindUnknown
-		v.Summary = fmt.Sprintf("%d개 중 %d개를 못 읽었다 — '없다'가 아니다. 이 축은 판정하지 않았다.",
-			len(in.Paths), unknown)
+		v.Summary = fmt.Sprintf("%d개 중 %d개를 못 읽었다 — '없다'가 아니다: %s. 이 축은 판정하지 않았다.",
+			len(in.Paths), unknown, strings.Join(clipList(unknownPaths, 3), ", "))
 	default:
 		v = classifyAllAbsent(in, v, absent)
 	}
@@ -117,7 +123,21 @@ func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict {
 }
 
 // classifyAllAbsent 는 "이 프로젝트에서 전부 없다"가 관측된 뒤의 세 갈래다.
+//
+// ★ in.Elsewhere == nil 은 네 번째 상태다. service 쪽 계약은 "목록 조회 실패 → nil,
+// 성공(다른 프로젝트가 0개여도) → map{}"이다(internal/service/itempaths.go). 이 구분을
+// 무시하고 nil 맵을 그냥 순회하면 hits 는 항상 0건이 되어 KindNowhere 로 빠진다 —
+// 남의 프로젝트를 하나도 관측하지 않고 "등록된 어느 프로젝트에도 없다"를 단정하는
+// 붕괴다(D1: SQLite 가 한 번 튀면 경로가 멀쩡한 항목이 "경로가 틀렸다"로 진단된다).
 func classifyAllAbsent(in ItemPathInput, v ItemPathVerdict, absent int) ItemPathVerdict {
+	if in.Elsewhere == nil {
+		v.Kind = KindUnknown
+		v.Summary = fmt.Sprintf(
+			"%d개 전부 이 프로젝트(%s)에 없다 — 하지만 다른 프로젝트를 하나도 못 봤다. 이 축은 판정하지 않았다.",
+			absent, in.Project)
+		return v
+	}
+
 	hits := make([]string, 0, len(in.Elsewhere))
 	for proj, m := range in.Elsewhere {
 		for _, pres := range m {
