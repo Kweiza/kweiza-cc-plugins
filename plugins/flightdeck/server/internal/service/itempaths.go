@@ -50,9 +50,14 @@ func (s *Service) checkItemPaths(ctx context.Context, proj model.Project, paths 
 	others, err := s.st.ListProjects(ctx)
 	if err != nil {
 		// 목록을 못 읽으면 "다른 데 있다/없다"를 말할 수 없다. 그 사실을 숨기지 않는다.
+		//
+		// ★ in.Unreadable 에 넣지 않는다. Unreadable 은 **프로젝트 id 목록**이고 REST 로
+		// 그대로 나간다(judge.ItemPathVerdict.Unreadable). 목록 조회 실패는 id 가 아니라
+		// **상태**다 — in.Elsewhere 를 nil 로 둔 채 놔두면 judge.ClassifyItemPaths 가
+		// 그 nil 을 읽고 이미 KindUnknown 을 낸다(classifyAllAbsent). id 자리에 유사 id
+		// 문자열을 채우면 그 문자열이 REST 의 unreadable 배열을 오염시킨다.
 		s.log.WarnContext(ctx, "프로젝트 목록 조회 실패 — 경로 실재 축의 지목을 못 한다",
 			"project", proj.ID, "error", err.Error())
-		in.Unreadable = append(in.Unreadable, "(프로젝트 목록을 못 읽었다)")
 		v := judge.ClassifyItemPaths(in)
 		return &v
 	}

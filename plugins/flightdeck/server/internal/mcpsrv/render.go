@@ -651,7 +651,7 @@ func indent(s, pad string) string {
 // 그것이 곧 오등록 단정이고, 그 단정이 실물 큐에서 5건 헛발화하던 규칙이다.
 func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
 	if v == nil {
-		return "경로 실재: 이 응답은 그 축을 읽지 않았다(낡은 캐시일 수 있다).\n"
+		return "경로 실재: 이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
 	}
 	s := "경로 실재: " + v.Summary + "\n"
 	if v.Kind == judge.KindMisregistered && v.Suggest != "" {
