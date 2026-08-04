@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -269,5 +270,46 @@ func TestBeatDropsBadCoordinatePathsButKeepsSignal(t *testing.T) {
 	}
 	if _, ok := sig[model.SignalTool]; !ok {
 		t.Fatalf("tool 신호가 안 남았다 — 나쁜 경로 하나가 신호 전체를 죽였다: %v", sig)
+	}
+
+	// ★ 이름이 약속한 셋 중 나머지 둘 — "좋은 경로가 실제로 발자국으로 남았는가"와
+	// "원장에 버린 건수가 기록됐는가" — 도 함께 본다. 신호만 보면 필터가 전부 버려도
+	// 이 시험은 초록이었다.
+	fps, err := st.FootprintPaths(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("발자국 조회 실패: %v", err)
+	}
+	if len(fps) != 1 || fps[0] != "tools/x.sh" {
+		t.Fatalf("좋은 경로가 발자국으로 안 남았다: %v", fps)
+	}
+
+	// 원장 — session.beat payload 에 rejected 건수와 kept 건수가 남았는지.
+	// 선례: internal/service/prescribe_test.go:36 의 ListSessionEvents 사용을 그대로 따른다.
+	evs, err := st.ListSessionEvents(ctx(), sess.Session.ID, "session.beat", time.Time{})
+	if err != nil {
+		t.Fatalf("이벤트 조회 실패: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("session.beat 이벤트가 %d건이다, want 1건: %+v", len(evs), evs)
+	}
+	payload := evs[0].Payload
+	if !strings.Contains(payload, `"rejected":2`) {
+		t.Fatalf("원장에 버린 건수(2)가 안 남았다: %s", payload)
+	}
+	if !strings.Contains(payload, `"count":1`) {
+		t.Fatalf("원장에 통과 건수(1)가 안 남았다: %s", payload)
+	}
+	// ★ 버린 경로 자체도 남아야 한다(스펙 §4.2 정정 — 살아 있는 유일한 표면인 Beat 에서
+	// 버린 경로가 어디에도 안 남는 문제). 사유 전체는 안 실어도 되지만 경로는 실어야 한다.
+	// payload 는 JSON 이라 백슬래시가 이스케이프된다(`\` → `\\`) — 원본 경로가 아니라
+	// JSON 인코딩된 형태로 단정한다.
+	if !strings.Contains(payload, `dropped_paths`) {
+		t.Fatalf("원장에 dropped_paths 필드가 없다: %s", payload)
+	}
+	if !strings.Contains(payload, `C:\\other\\y.go`) {
+		t.Fatalf("원장에 버린 경로가 안 남았다: %s", payload)
+	}
+	if !strings.Contains(payload, `z\\w.go`) {
+		t.Fatalf("원장에 버린 경로 둘째 건이 안 남았다: %s", payload)
 	}
 }
