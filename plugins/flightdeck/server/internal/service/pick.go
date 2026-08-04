@@ -59,6 +59,18 @@ type PickResult struct {
 	//  2. 오프라인 캐시에는 스키마 버전축이 없다 — 이 필드가 생기기 전에 굳은 next 응답이
 	//     그대로 재생된다. nil 이면 "이 응답은 그 축을 안 낸다"로 정확히 읽힌다.
 	QueueOpen *int `json:"queue_open,omitempty"`
+
+	// PathCheck 는 이 항목이 선언한 경로가 이 프로젝트에 실재하는가다.
+	//
+	// ★ **포인터다.** nil 은 "이 응답은 그 축을 안 읽었다"를 뜻하고, 그 상태가 실제로 난다:
+	// 오프라인 `fd next` 는 디스크 캐시의 옛 바이트를 그대로 다시 내는데, 이 필드가
+	// 생기기 전에 저장된 캐시에는 키가 없어 역직렬화 후 nil 이 온다.
+	// 값 타입이면 그 상황이 Kind:"" 라는 여섯 갈래 어디에도 없는 유령 상태가 되고,
+	// 낡은 캐시가 관측한 적 없는 사실을 단정하게 된다.
+	//
+	// 적격 0건(PickNone)에도 nil 이다 — 항목이 없으면 관측할 대상이 없다.
+	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
+
 	Derived
 }
 
@@ -216,6 +228,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	res := PickResult{Item: &item, Branch: item.ID, Scope: "지정된 항목 1건"}
 	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
+	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
@@ -338,6 +351,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	res.Mode, res.Item, res.Branch = PickRecommended, &item, item.ID
 	res.Overlaps = picked.Overlaps
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
+	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")

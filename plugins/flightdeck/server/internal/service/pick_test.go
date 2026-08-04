@@ -428,3 +428,61 @@ func TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.T) {
 		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
 	}
 }
+
+// pick 은 세 모드 전부에서 경로 실재 판정을 낸다.
+// none(적격 0건)에는 항목이 없으므로 안 낸다 — 관측할 대상이 없다.
+func TestPickCarriesPathCheckInEveryModeThatHasAnItem(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "proj", repo, repo, "cc-1", "")
+	writeFile(t, repo, "internal/x/y.go", "package x\n")
+	addItem(t, s, "proj", "t-here", []string{"internal/x/y.go"}, nil)
+
+	// ① 추천
+	rec, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if rec.PathCheck == nil {
+		t.Fatal("추천에 경로 실재 판정이 없다")
+	}
+	if rec.PathCheck.Kind != judge.KindOK {
+		t.Fatalf("Kind 가 %q 다 — ok 여야 한다: %s", rec.PathCheck.Kind, rec.PathCheck.Summary)
+	}
+
+	// ② 선점
+	cl, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID, ItemID: "t-here"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	if cl.Mode != PickClaimed || cl.PathCheck == nil {
+		t.Fatalf("선점에 경로 실재 판정이 없다(mode=%s)", cl.Mode)
+	}
+
+	// ③ 재개 — 같은 세션이 다시 부른다
+	re, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID, ItemID: "t-here"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if re.Mode != PickResumed || re.PathCheck == nil {
+		t.Fatalf("재개에 경로 실재 판정이 없다(mode=%s)", re.Mode)
+	}
+}
+
+// 적격 0건에는 항목이 없다 → 판정도 없다. nil 이어야 한다.
+func TestPickNoneHasNoPathCheck(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "proj", repo, repo, "cc-1", "")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "proj", SessionID: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	if res.Mode != PickNone {
+		t.Fatalf("mode 가 %q 다 — none 이어야 한다(큐가 비었다)", res.Mode)
+	}
+	if res.PathCheck != nil {
+		t.Fatalf("항목이 없는데 경로 실재 판정이 실렸다: %+v", res.PathCheck)
+	}
+}
