@@ -127,7 +127,7 @@ func newClient(sd StateDir, get func(string) (string, bool), home string, log *s
 		Token:    token,
 		HTTP:     &http.Client{Timeout: timeout},
 		Cache:    newCache(sd),
-		Outbox:   newOutbox(sd),
+		Outbox:   newOutbox(get, home),
 		Log:      log,
 		Now:      func() time.Time { return time.Now().UTC() },
 	}

@@ -81,7 +81,7 @@ func TestDegradedFullPathL0ToL1AndBack(t *testing.T) {
 	}
 
 	sd := ResolveStateDir(envOf(h.env), "")
-	ob := newOutbox(sd)
+	ob := newOutbox(envOf(h.env), h.home)
 
 	// ── 대조 전제 ①: 서버가 정말 이 항목을 갖고 있다 ──
 	// 없으면 아래의 선점 거절이 "오프라인이라 거절"이 아니라 "없는 항목이라 실패"가 된다.
@@ -228,9 +228,11 @@ func TestOutboxReplayIsExactlyOnceAcrossProcessDeathAndRestart(t *testing.T) {
 		}
 	}
 
-	sd := ResolveStateDir(envOf(h.env), "")
-	ob := newOutbox(sd)
-	outboxPath := filepath.Join(sd.sub("outbox"), "pending.jsonl")
+	// ★ 아웃박스 자리를 sd.sub("outbox") 로 구하지 않는다 — 그 결합이 이 항목이 없앤 것이다.
+	//   하네스가 FD_STATE_DIR 를 고정해 우연히 같은 경로가 나오더라도, 시험이 단정하는
+	//   좌표계는 **소비자가 실제로 쓰는 자리**여야 한다.
+	ob := newOutbox(envOf(h.env), h.home)
+	outboxPath := filepath.Join(ob.Dir(), pendingName)
 
 	// ── 대조 전제 ①: 정말 3건이 쌓였다 ──
 	pend, err := ob.List()
@@ -369,14 +371,19 @@ func TestOfflineStateLandsUnderPluginDataNotPluginRoot(t *testing.T) {
 		t.Fatalf("캐시가 %s 아래 생기지 않았다(err=%v, %d개)", cacheDir, err, len(ents))
 	}
 
-	// ── L1 쓰기: 아웃박스도 그 아래 ──
+	// ── L1 쓰기: 아웃박스는 **고정 자리**로 간다(plugin-data 아래가 아니다) ──
 	h.down()
 	if code, out := h.runEnv(env, "", "note", "--kind", "decision", "--body", "경로 축 시험"); code != 0 {
 		t.Fatalf("오프라인 note 실패(%d): %s", code, out)
 	}
-	pending := filepath.Join(data, "flightdeck", "outbox", "pending.jsonl")
+	outDir, _ := OutboxPath(envOf(env), homeDir(envOf(env)))
+	pending := filepath.Join(outDir, pendingName)
 	if _, err := os.Stat(pending); err != nil {
 		t.Fatalf("아웃박스가 %s 에 없다 — 판단이 어디에 쌓였는지 모른다: %v", pending, err)
+	}
+	// ★ 갈렸는지를 직접 본다. 같은 자리로 가면 이 시험은 축이 갈린 것을 못 본다.
+	if strings.HasPrefix(filepath.Clean(outDir), filepath.Clean(filepath.Join(data, "flightdeck"))) {
+		t.Errorf("아웃박스가 아직 상태 디렉토리 아래다(%s) — 채널마다 갈린다", outDir)
 	}
 
 	// ── 본 판정: PLUGIN_ROOT 아래에는 **아무것도** 안 생겨야 한다 ──
@@ -420,7 +427,7 @@ func TestSessionStartUnderL1ReportsPendingJudgmentsAndStaysFailOpen(t *testing.T
 		}
 	}
 	// ── 대조 전제: 정말 2건이 쌓였다 ──
-	pend, err := newOutbox(ResolveStateDir(envOf(h.env), "")).List()
+	pend, err := newOutbox(envOf(h.env), h.home).List()
 	if err != nil || len(pend) != 2 {
 		t.Fatalf("전제가 깨졌다 — 아웃박스가 %d건이다(err=%v)", len(pend), err)
 	}
@@ -453,7 +460,7 @@ func TestSessionStartUnderL1ReportsPendingJudgmentsAndStaysFailOpen(t *testing.T
 		}
 	}
 	// 훅은 재생을 시도만 하고 실패한다 — 판단이 사라지면 안 된다.
-	if left, err := newOutbox(ResolveStateDir(envOf(h.env), "")).List(); err != nil || len(left) != 2 {
+	if left, err := newOutbox(envOf(h.env), h.home).List(); err != nil || len(left) != 2 {
 		t.Fatalf("훅을 돌린 뒤 아웃박스가 %d건이다 — 미도달인데 판단이 사라졌다(err=%v)", len(left), err)
 	}
 }
