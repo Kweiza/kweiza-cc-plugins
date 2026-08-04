@@ -50,107 +50,127 @@
 
 DESIGN §13 은 "추측을 사실로 적지 않는다"고 못박았다. `Stop` 훅은 이 레포가 한 번도 안 쓴 훅이고, **stdout 이 다음 턴 컨텍스트로 주입되는지 이 머신에서 잰 적이 없다.** 재기 전에는 Task 7 을 쓸 수 없다.
 
+**★ 이 태스크는 플러그인을 안 통한다.** 설치된 flightdeck 는 GitHub 마켓플레이스
+(`kweiza/kweiza-cc-plugins`)에서 오므로 레포의 `hooks/hooks.json` 을 고쳐도 도는 세션에는
+안 붙는다 — 릴리스를 태워야 붙는다. 그런데 **재려는 것은 플러그인이 아니라 플랫폼 동작**
+(Stop 훅 stdout 이 주입되나)이라 그 릴리스는 순수한 낭비다.
+그래서 프로젝트 `.claude/settings.json` 에 임시 훅을 걸어 잰다.
+
+**★ 이 태스크만 주 작업트리(`/home/aaron/cdo-dev/kweiza-cc-plugins`)에서 돈다.**
+프로젝트 설정은 **도는 세션의 프로젝트 디렉토리**에서 읽히기 때문이다. Task 2 부터는 워크트리다.
+
 **Files:**
-- Modify: `cmd/fd/hook.go:119-127` (`runHook` 의 switch)
-- Modify: `hooks/hooks.json`
+- Create: `.claude/settings.json` (임시 — Step 7 에서 지운다)
+- Create: `.claude/stop-probe.sh` (임시 — Step 7 에서 지운다)
 - Modify: `plugins/flightdeck/DESIGN.md` §13
 
 **Interfaces:**
 - Consumes: 없음
 - Produces: DESIGN §13 에 기록된 사실 셋. Task 7 이 어느 채널로 배달할지가 여기서 정해진다.
 
-- [ ] **Step 1: 탐침 분기를 넣는다**
+- [ ] **Step 1: 탐침 스크립트를 쓴다**
 
-`cmd/fd/hook.go` 의 `runHook` switch 에 `stop` 을 더하고, 아래 함수를 같은 파일에 넣는다.
+`.claude/stop-probe.sh`:
 
-```go
-// hookStopProbe 는 **실측 전용**이다. Task 1 이 끝나면 hookStop 으로 대체된다.
-//
-// 재는 것 셋: stdin 페이로드에 session_id 가 오나 · stdout 이 다음 턴에 주입되나 ·
-// stop_hook_active 가 실물로 오나. DESIGN §13 이 요구하는 것은 "이 머신에서 직접 잰 것"이다.
-func (a *App) hookStopProbe(p HookPayload, raw []byte, out io.Writer) {
-	path := filepath.Join(a.sd.Path, "stop-probe.json")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		a.log.Error("stop 탐침 기록 실패", "path", path, "error", err.Error())
-	}
-	a.log.Info("stop 탐침", "session_id", p.SessionID, "cwd", p.CWD, "bytes", len(raw))
-	emitContext(out, "Stop", "FD-STOP-PROBE: 이 줄이 다음 턴 컨텍스트에 보이면 주입이 된다.")
-}
+```sh
+#!/bin/sh
+# Stop 훅 실측 탐침 — **임시다.** 계획 Task 1 Step 7 이 이 파일을 지운다.
+#
+# 재는 것 셋:
+#   ① stdin 페이로드에 session_id 가 오나 · stop_hook_active 가 오나
+#   ② stdout 이 다음 턴 컨텍스트에 주입되나
+#   ③ 주입된다면 JSON hookSpecificOutput 이 해석되나, 아니면 평문으로 실리나
+#
+# ③ 을 한 판에 가르려고 JSON 을 낸다. 다음 턴에 보이는 것으로 갈린다:
+#   FD-PROBE-CTX 만 보인다      → JSON 이 해석됐다. additionalContext 가 채널이다
+#   중괄호째 JSON 이 보인다      → 평문 stdout 이 주입됐다. JSON 은 해석 안 된다
+#   아무것도 안 보인다          → 주입 자체가 없다. Task 7 은 UserPromptSubmit 으로 간다
+set -u
+dir="$(dirname "$0")"
+cat > "$dir/stop-probe-stdin.json"
+printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"FD-PROBE-CTX"}}'
 ```
 
-`runHook` 의 switch 에 더한다 (`raw` 는 이미 그 함수 안에 있다):
+실행 권한을 준다: `chmod +x .claude/stop-probe.sh`
 
-```go
-	case "stop":
-		a.hookStopProbe(p, raw, out)
-```
+- [ ] **Step 2: 훅을 건다**
 
-그리고 같은 함수의 `default:` 오류 문구에 `stop` 을 더한다:
-
-```go
-		a.log.Error("모르는 훅 이름", "mode", clip(event, 40),
-			"error", "session-start|user-prompt|post-tool|pre-compact|stop 중 하나여야 한다")
-```
-
-- [ ] **Step 2: 훅을 등록한다**
-
-`hooks/hooks.json` 의 `hooks` 객체에 더한다. **`async` 를 안 쓴다** — 주입 여부를 재는 것이 목적인데 async 면 그 축이 흐려진다.
+`.claude/settings.json`:
 
 ```json
+{
+  "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop",
-            "timeout": 3
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/stop-probe.sh\"",
+            "timeout": 5
           }
         ]
       }
     ]
+  }
+}
 ```
 
-- [ ] **Step 3: 빌드가 되는지 본다**
+- [ ] **Step 3: 스크립트가 혼자서도 도는지 본다**
 
-Run: `go build ./...`
-Expected: 오류 없음
+Run: `echo '{"session_id":"x"}' | .claude/stop-probe.sh && cat .claude/stop-probe-stdin.json`
+Expected: `{"hookSpecificOutput":…"FD-PROBE-CTX"}` 가 출력되고 stdin 파일에 `{"session_id":"x"}` 가 있다
 
-- [ ] **Step 4: 사람에게 실측을 요청한다**
+- [ ] **Step 4: 여기서 멈추고 컨트롤러에게 넘긴다**
 
-이 단계는 자동화할 수 없다. 사용자에게 이렇게 요청한다:
+**구현자는 여기까지다.** 남은 것은 사람이 세션을 다시 띄워야 하는 일이라 서브에이전트가 못 한다.
+보고서에 이렇게 적고 DONE 으로 반환한다: "탐침 준비 완료. 사람이 세션을 재시작한 뒤
+`FD-PROBE-CTX` 가 보이는지 판정해야 한다."
 
-> `/reload-plugins` 를 실행한 뒤 아무 프롬프트나 한 번 보내 주십시오. 그 다음 턴에
-> `FD-STOP-PROBE:` 로 시작하는 줄이 컨텍스트에 보이는지 알려 주십시오.
+- [ ] **Step 5: (컨트롤러) 사람에게 실측을 요청한다**
 
-- [ ] **Step 5: 세 축을 읽는다**
+> 프로젝트 `settings.json` 에 훅을 새로 걸었습니다. 이 세션은 시작할 때 읽은 설정으로
+> 도니까 **Claude Code 를 한 번 재시작**해 주십시오. 그 뒤 아무 프롬프트나 하나 보내고,
+> 그 다음 턴에 `FD-PROBE-CTX` 또는 `hookSpecificOutput` 이라는 글자가 컨텍스트에
+> 보이는지 알려 주십시오. 안 보이면 "안 보인다"가 그대로 답입니다.
+
+- [ ] **Step 6: (컨트롤러) 세 축을 읽고 판정한다**
 
 ```bash
-cat "$(fd doctor 2>/dev/null | grep -i 'state' | head -1 | awk '{print $NF}')/stop-probe.json" 2>/dev/null \
-  || find "$HOME/.local/state" "$HOME/.flightdeck" -name stop-probe.json 2>/dev/null -exec cat {} \;
+cat .claude/stop-probe-stdin.json
 ```
 
-읽는 것: `session_id` 키가 있나 · `stop_hook_active` 키가 있나 · 그 값이 무엇인가.
+읽는 것: `session_id` 키가 있나 · `stop_hook_active` 키가 있나 · `cwd` 가 있나.
 
-- [ ] **Step 6: DESIGN §13 에 사실로 적는다**
+| 다음 턴에 보인 것 | 판정 | Task 7 의 배달 채널 |
+|---|---|---|
+| `FD-PROBE-CTX` 만 | JSON 이 해석된다 | `Stop` 훅 stdout, `hookSpecificOutput.additionalContext` 형식 |
+| JSON 문자열째 | 평문이 주입된다 | `Stop` 훅 stdout, 평문 |
+| 아무것도 | 주입이 없다 | `UserPromptSubmit`. `Stop` 은 발화 기록만 하고 문구는 다음 프롬프트에 나간다 |
+| (stdin 파일이 아예 없다) | 훅이 안 불렸다 | 위와 같다. 그리고 그 사실도 §13 에 적는다 |
 
-`plugins/flightdeck/DESIGN.md` 의 `### 확인됨` 또는 `### 아직 아님` 에 축 셋을 결과대로 적는다. **추측을 적지 않는다** — 안 재진 축은 "아직 아님"에 남긴다.
+- [ ] **Step 7: DESIGN §13 에 사실로 적고 탐침을 지운다**
 
-- [ ] **Step 7: 결정 게이트**
+`plugins/flightdeck/DESIGN.md` 의 `### 확인됨` 또는 `### 아직 아님` 에 축 셋을 결과대로 적는다.
+**추측을 적지 않는다** — 안 재진 축은 "아직 아님"에 남긴다. 확인됨에 적을 때는 이 레포의
+관례대로 실측 날짜와 Claude Code 판을 함께 적는다.
 
-| 실측 결과 | Task 7 의 배달 채널 |
-|---|---|
-| 주입된다 | `Stop` 훅 stdout |
-| 주입 안 된다 | `UserPromptSubmit`(`hookUserPrompt`)에 합류. `Stop` 훅은 **발화 기록만** 하고 문구는 다음 프롬프트에 나간다 |
-| `session_id` 가 안 온다 | `a.ccSessionID(p.SessionID)` 가 환경변수 폴백을 이미 갖고 있다(`hook.go:263`). 그것도 비면 조용히 반환 |
+그리고 탐침을 지운다:
+
+```bash
+rm -rf .claude
+```
+
+**탐침을 남기지 않는 이유**: `.claude/settings.json` 이 남으면 이 레포를 여는 모든 세션에
+탐침 훅이 걸리고, 그러면 다음 사람이 "이게 뭔가"를 조사하는 비용을 문다.
+실측의 산출물은 스크립트가 아니라 **DESIGN §13 의 한 줄**이다.
 
 - [ ] **Step 8: 커밋**
 
 ```bash
-git add plugins/flightdeck/server/cmd/fd/hook.go plugins/flightdeck/hooks/hooks.json plugins/flightdeck/DESIGN.md
-git commit -m "measure(flightdeck): probe what the Stop hook carries and whether it injects"
+git add plugins/flightdeck/DESIGN.md
+git commit -m "measure(flightdeck): find out what the Stop hook carries and whether it injects"
 ```
 
----
 
 ### Task 2: `judge.Prescribe` — 판정 순수 함수
 
