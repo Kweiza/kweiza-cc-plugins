@@ -201,6 +201,32 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		haveBeacon = false
 	}
 
+	// ★ 비콘의 session_id 가 비었으면 **옛 cc 로 카드를 되찾는다.**
+	//
+	// 그 자리를 적는 것은 훅뿐이고(아래 SaveIdentity), 훅은 비콘을 찾은 뒤에만 적는다.
+	// 그래서 심기가 첫 SessionStart 보다 늦으면 그 자리는 빈 채로 남는다 — 그리고 늦는 것은
+	// 가정이 아니다(설계 개정 ②: `fd mcp` 가 부모 claude 보다 ≈6.6시간 늦게 뜬 실측이 있다).
+	// 그 상태의 /clear 는 rekey 대상을 몰라 건너뛰고 카드가 두 장이 되는데, 그때 고아가 되는
+	// 것이 하필 **첫 구간의 선점과 판단을 든 카드**다.
+	//
+	// OpenSession 은 3중키 upsert 라 옛 cc 로 부르면 그 카드 A 를 **그대로** 돌려준다
+	// (새로 만들지 않는다). 못 찾는 경우에도 손해가 없다 — 아래 rekey 가 그 카드를 새 cc 로
+	// 옮기고, 이어지는 OpenSession(cc) 이 같은 카드로 떨어진다.
+	//
+	// ★ 자리는 여기여야 한다 — **아래 OpenSession 보다 앞이다.** 이 되찾기까지가 "rekey 먼저"
+	// 한 덩이다. 뒤로 밀면 새 cc 의 카드 B 가 먼저 생겨 rekey 가 3중키 UNIQUE 에 걸린다.
+	if haveBeacon && beacon.SessionID == "" && beacon.CCSessionID != "" && beacon.CCSessionID != cc {
+		old, _, oerr := a.OpenSession(ctx, beacon.CCSessionID, "")
+		switch {
+		case oerr != nil:
+			// 못 찾아도 오류가 아니다 — 비콘을 못 찾은 것과 같은 급이라 폴백한다(오늘 거동).
+			a.log.Warn("비콘의 옛 cc 로 카드를 못 찾았다 — 이번 전환은 합치지 못한다",
+				"error", oerr.Error(), "cc", clip(beacon.CCSessionID, 40))
+		case old.Session.ID != "":
+			beacon.SessionID = old.Session.ID
+		}
+	}
+
 	if haveBeacon && beacon.SessionID != "" && beacon.CCSessionID != cc {
 		if _, rerr := a.Rekey(ctx, beacon.SessionID, cc); rerr != nil {
 			// ★ 삼키고 알린다. 409(이미 남이 쓰는 cc)는 미도달이 아니라 *APIError 로 오므로
@@ -208,8 +234,13 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 			// 여기서 오류를 위로 올리면 훅이 세션을 막는다(이 파일 머리말).
 			a.log.Warn("세션 rekey 실패", "error", rerr.Error(),
 				"session", clip(beacon.SessionID, 40), "cc", clip(cc, 40))
-			in.Notice = strings.TrimSpace(in.Notice +
-				" cc 가 갈렸는데 카드를 못 합쳤다: " + clip(rerr.Error(), 200))
+			// ★ 화면에는 **서버가 닿을 때만** 싣는다(일곱 줄 아래 OpenSession 실패와 같은 규율).
+			// 서버가 죽었으면 rekey 는 정의상 매번 실패하고, 그 사실은 배너가 이미 말하고 있다 —
+			// 여기서 또 얹으면 /clear 마다 같은 말이 배너 위에 한 줄씩 쌓인다.
+			if reachable {
+				in.Notice = strings.TrimSpace(in.Notice +
+					" cc 가 갈렸는데 카드를 못 합쳤다: " + clip(rerr.Error(), 200))
+			}
 		} else {
 			a.moveSessionCache(beacon.CCSessionID, cc)
 		}
