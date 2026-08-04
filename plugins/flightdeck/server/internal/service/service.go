@@ -380,3 +380,19 @@ func RelPath(root, p string) string {
 	// 계약이 주석에만 있으면 다음 사람이 깬다.
 	return filepath.ToSlash(rel)
 }
+
+// RejectedPath 는 좌표계 관문이 버린 경로다. judge 타입의 **별칭**이다(복제가 아니다).
+//
+// ★ 별칭인 이유는 계층이다. internal/api 는 internal/judge 를 임포트하지 않는다 —
+// HTTP 계층은 자기 판정만 자기 패키지에 두고 도메인 판정은 이 패키지를 거쳐 부른다
+// (RelPath·UnionPaths 가 같은 자리에 있는 이유이기도 하다).
+// 새 타입을 만들면 같은 값이 두 이름을 갖게 되므로 별칭으로 둔다.
+type RejectedPath = judge.RejectedPath
+
+// FilterFootprintPaths 는 좌표계 관문을 발자국 목록에 적용한다. 순수 함수다.
+//
+// 판정 자체는 judge 에 있다 — 여기서 흉내 내지 않는다. 이 함수의 존재 이유는
+// 계층뿐이다(위 RejectedPath 주석).
+func FilterFootprintPaths(paths []string) (kept []string, rejected []RejectedPath) {
+	return judge.FilterPathCoordinate(paths)
+}

@@ -244,3 +244,30 @@ func TestJudgeOpenSessionKeepsExistingAxes(t *testing.T) {
 		t.Errorf("정상 POSIX 경로를 거절했다: %s", v.Reason)
 	}
 }
+
+// Beat 는 훅이 부른다. 좌표계가 틀린 경로가 섞여 와도 신호 자체는 살아야 한다 —
+// 여기서 오류를 내면 세션이 보드에서 사라지고 그 인과를 아무도 못 짚는다.
+// 좋은 경로는 그대로 들어가고, 나쁜 것만 조용히가 아니라 **원장에 건수를 남기고** 빠진다.
+func TestBeatDropsBadCoordinatePathsButKeepsSignal(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-beat-coord", "좌표계")
+
+	good := filepath.Join(repo, "tools", "x.sh")
+	if err := s.Beat(ctx(), sess.Session.ID, model.SignalTool, []string{
+		good,
+		`C:\other\y.go`,
+		`z\w.go`,
+	}); err != nil {
+		t.Fatalf("좌표계가 틀린 경로 때문에 신호가 죽었다: %v", err)
+	}
+
+	// 신호는 살아 있다.
+	sig, err := st.Signals(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("신호 조회 실패: %v", err)
+	}
+	if _, ok := sig[model.SignalTool]; !ok {
+		t.Fatalf("tool 신호가 안 남았다 — 나쁜 경로 하나가 신호 전체를 죽였다: %v", sig)
+	}
+}

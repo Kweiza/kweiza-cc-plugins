@@ -312,18 +312,21 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 			Reason: fmt.Sprintf("신호 종류 %q 가 열거에 없다(prompt|tool|mcp|commit|push)", clip(string(kind), 32))}
 	}
 	now := s.now()
+	// ★ 좌표계가 다른 경로는 버린다 — 여기서 거절하면 훅이 죽고 세션 생존 신호가 끊긴다.
+	// 그것이 침묵보다 나쁘다. 대신 버린 건수를 event 원장에 남긴다(응답은 훅이 삼킨다).
+	kept, rejected := judge.FilterPathCoordinate(paths)
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		sess, err := t.GetSession(sessionID)
 		if err != nil {
 			return err
 		}
 		t.LogEvent("session.beat", sess.Project, sessionID, map[string]any{
-			"kind": string(kind), "count": len(paths),
+			"kind": string(kind), "count": len(kept), "rejected": len(rejected),
 		})
 		if err := t.Beat(sessionID, kind, now); err != nil {
 			return err
 		}
-		for _, p := range paths {
+		for _, p := range kept {
 			rel := RelPath(sess.Worktree, p)
 			if rel == "" {
 				continue
@@ -335,6 +338,12 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 		}
 		return nil
 	})
+	// 사유는 로그로 낸다 — 원장에는 건수만 남고, 무엇이 왜 버려졌는지는 여기서만 볼 수 있다.
+	if len(rejected) > 0 {
+		s.log.WarnContext(ctx, "발자국 경로를 좌표계 관문이 버렸다",
+			"session_id", clip(sessionID, 64), "dropped", len(rejected),
+			"first_reason", rejected[0].Reason)
+	}
 	if err != nil {
 		s.logFail(ctx, "session.beat", "", sessionID, err)
 		s.log.ErrorContext(ctx, "신호 기록 실패",
