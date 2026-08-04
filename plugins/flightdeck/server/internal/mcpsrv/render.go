@@ -532,7 +532,20 @@ func RenderNote(r service.NoteResult) string {
 // RenderAdd 는 항목 등록 확인이다. 순수 함수다.
 func RenderAdd(it model.Item) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "add · %s 를 큐에 넣었다 [%s]\n", it.ID, it.State)
+	// ★ **어느 프로젝트에 들어갔는지를 여기서 말한다.**
+	//
+	// 오등록은 대부분 MCP 로 add 하다 난다 — 프로젝트 좌표를 세션의 cwd 가 정하므로
+	// 워크트리에서 띄운 세션은 자기가 어디에 넣는지 모른 채 넣는다. 그런데 앞선 판의 이 문구는
+	// 좌표를 한 글자도 안 냈고, 그래서 **틀린 순간에 화면에 아무 신호가 없었다.**
+	//
+	// 그 결과가 실물로 있다: 항목 10건이 남의 프로젝트에 등록돼 그 프로젝트에는 존재하지도
+	// 않는 경로를 가리켰고, 그중 하나(fd-item-move)는 폐기됐는데 **id 가 전역 유일이라
+	// 회수되지 않아 그 이름이 영구히 죽었다.**
+	//
+	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 여섯으로
+	// 눌러 잡는다 — 컨텍스트 예산), 대신 §6 이 정한 방식이 이것이다:
+	// **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
+	fmt.Fprintf(&b, "add · %s 를 **프로젝트 %s** 의 큐에 넣었다 [%s]\n", it.ID, it.Project, it.State)
 	fmt.Fprintf(&b, "제목: %s\n", it.Title)
 	if len(it.Paths) > 0 {
 		fmt.Fprintf(&b, "경로 %d: %s\n", len(it.Paths), strings.Join(it.Paths, ", "))
@@ -543,6 +556,8 @@ func RenderAdd(it model.Item) string {
 		fmt.Fprintf(&b, "선행 %d: %s\n", len(it.After), formatAfter(it.After))
 	}
 	fmt.Fprintf(&b, "이 id 가 그대로 브랜치 이름이 된다: %s\n", it.ID)
+	fmt.Fprintf(&b, "프로젝트가 %s 가 아니어야 한다면 지금 되돌려라: `fd move %s --project <맞는 것>`\n",
+		it.Project, it.ID)
 	return b.String()
 }
 
