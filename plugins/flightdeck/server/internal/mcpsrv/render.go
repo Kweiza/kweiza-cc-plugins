@@ -191,8 +191,9 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 			len(v.Sessions), FormatAge(v.Window)),
 	)
 
-	blocks := make([]string, 0, len(v.Sessions))
-	for _, c := range v.Sessions {
+	ranked := rankCards(v, opt.Self, now)
+	blocks := make([]string, 0, len(ranked))
+	for _, c := range ranked {
 		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
@@ -259,6 +260,66 @@ func joinAll(head, blocks, foot []string, tail string) string {
 		parts = append(parts, tail)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// rankCards 는 예산이 자를 순서를 정한다. 자르는 것은 이 순서의 **뒤부터**다.
+//
+//	① 나 ② 사건(ask·blocked)이 붙은 카드 ③ 나와 경로가 겹치는 카드 ④ 나머지 — 신호 최신순
+//
+// ★ 앞선 판은 목록 위치 순으로 잘랐다. 그래서 열린 ask 가 붙은 카드가 조용한 카드보다
+// 먼저 접힐 수 있었고, 사건을 카드에 붙여도 예산이 그것을 먼저 버렸다.
+func rankCards(v service.BoardView, self string, now time.Time) []service.SessionCard {
+	hasNote := map[string]bool{}
+	for _, j := range v.Asks {
+		hasNote[j.SessionID] = true
+	}
+	for _, j := range v.Blocked {
+		hasNote[j.SessionID] = true
+	}
+
+	var selfPaths []string
+	for _, c := range v.Sessions {
+		if c.View.Session.ID == self || c.IsSelf {
+			selfPaths = c.View.Paths
+		}
+	}
+
+	rank := func(c service.SessionCard) int {
+		switch {
+		case c.IsSelf || c.View.Session.ID == self:
+			return 0
+		case hasNote[c.View.Session.ID]:
+			return 1
+		case len(selfPaths) > 0 && judge.PathsOverlap(selfPaths, c.View.Paths):
+			return 2
+		default:
+			return 3
+		}
+	}
+
+	out := append([]service.SessionCard(nil), v.Sessions...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := rank(out[i]), rank(out[j])
+		if ri != rj {
+			return ri < rj
+		}
+		// 같은 등급이면 최근 신호가 앞이다. 신호가 아예 없으면 뒤로.
+		return lastSignal(out[i], now).After(lastSignal(out[j], now))
+	})
+	return out
+}
+
+// lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.
+// **합치지 않는다** — 여기서 최댓값을 쓰는 것은 정렬 키일 뿐이고,
+// 카드 본문은 종류별로 따로 낸다(설계 §4).
+func lastSignal(c service.SessionCard, now time.Time) time.Time {
+	var out time.Time
+	for _, at := range c.View.Signals {
+		if at.After(out) {
+			out = at
+		}
+	}
+	return out
 }
 
 // boardCard 는 세션 하나의 블록이다.
