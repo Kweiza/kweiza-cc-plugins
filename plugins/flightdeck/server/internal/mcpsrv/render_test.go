@@ -443,3 +443,78 @@ func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 		t.Fatalf("생존 판정 낱말이 들어갔다 — 설계 §4 위반:\n%s", got)
 	}
 }
+
+// pickWith 는 경로 실재 판정 하나를 실은 pick 결과를 만든다.
+func pickWith(v *judge.ItemPathVerdict, paths []string) service.PickResult {
+	item := model.Item{
+		Project: "proj", ID: "t-path", Title: "제목", Body: "본문",
+		Paths: paths, State: model.ItemOpen, CreatedAt: t0,
+	}
+	return service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다", Scope: "지정된 항목 1건",
+		Item: &item, Branch: item.ID, PathCheck: v,
+	}
+}
+
+func TestRenderPickNamesMisregistrationAndTheWayBack(t *testing.T) {
+	got := RenderPick(pickWith(&judge.ItemPathVerdict{
+		Kind: judge.KindMisregistered, Suggest: "kweiza-cc-plugins",
+		Summary: "1개 전부 이 프로젝트(context-platform)에 없다 — kweiza-cc-plugins 에는 있다. 오등록일 수 있다.",
+	}, []string{"plugins/x.go"}), t0)
+
+	for _, want := range []string{
+		"경로 실재:",
+		"오등록일 수 있다",
+		"fd move t-path --project kweiza-cc-plugins",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 없다:\n%s", want, got)
+		}
+	}
+}
+
+// ★ V1(유일 지목 조건이 없는 규칙)의 헛발화 5건이 여기서 죽는다.
+// 여럿이 지목될 때 되돌리는 명령을 내면 그것이 곧 오등록 단정이다.
+func TestRenderPickDoesNotPrescribeMoveWhenAmbiguous(t *testing.T) {
+	got := RenderPick(pickWith(&judge.ItemPathVerdict{
+		Kind: judge.KindAmbiguous, Candidates: []string{"a", "b", "c"},
+		Summary: "1개 전부 이 프로젝트에 없다. 등록된 다른 3개 프로젝트(a, b, c)에도 같은 이름이 있어 어느 하나를 지목하지 못한다 — 근거로 쓰지 않는다.",
+	}, []string{"docs/"}), t0)
+
+	if !strings.Contains(got, "지목하지 못한다") {
+		t.Fatalf("모호하다는 사실이 없다:\n%s", got)
+	}
+	if strings.Contains(got, "fd move") {
+		t.Fatalf("여럿이 지목됐는데 되돌리는 명령을 냈다 — 그것이 곧 오등록 단정이다:\n%s", got)
+	}
+}
+
+func TestRenderPickStatesThePathAxisEvenWhenClean(t *testing.T) {
+	got := RenderPick(pickWith(&judge.ItemPathVerdict{
+		Kind: judge.KindOK, Summary: "2개 중 2개가 이 프로젝트(proj)에 있다.",
+	}, []string{"a.go", "b.go"}), t0)
+
+	if !strings.Contains(got, "경로 실재:") {
+		t.Fatalf("이상이 없어도 경로 축 줄은 있어야 한다 — 침묵하면 '이상 없다'와 '안 봤다'가 같은 화면이 된다:\n%s", got)
+	}
+}
+
+// nil 은 침묵이 아니다. 낡은 캐시가 "이상 없다"처럼 보이면 안 된다.
+func TestRenderPickSaysTheAxisWasNotReadWhenVerdictIsNil(t *testing.T) {
+	got := RenderPick(pickWith(nil, []string{"a.go"}), t0)
+
+	if !strings.Contains(got, "읽지 않았다") {
+		t.Fatalf("판정이 nil 인데 그 사실을 말하지 않는다:\n%s", got)
+	}
+}
+
+// 적격 0건에는 항목이 없으므로 이 줄도 없다.
+func TestRenderPickOmitsPathAxisWhenThereIsNoItem(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickNone, Reason: "적격 항목이 0건이다", Scope: "후보 = 열린 항목 0건",
+	}, t0)
+
+	if strings.Contains(got, "경로 실재:") {
+		t.Fatalf("항목이 없는데 경로 축 줄이 나왔다:\n%s", got)
+	}
+}
