@@ -95,6 +95,11 @@ func newOutbox(sd StateDir) *Outbox {
 
 // Append 는 쓰기 하나를 쌓는다. **같은 키가 이미 있으면 쌓지 않는다** —
 // 훅은 실패하면 재시도되므로, 그대로 두면 한 판단이 여러 줄이 된다.
+//
+// ★ 그 중복 검사는 **호출이 겹치지 않는다는 전제 위에 있다**(Client 타입 주석의 셋 중 둘째).
+// List→검사→O_APPEND 사이에 잠금이 없어서, 둘이 동시에 들어오면 서로를 못 보고 둘 다 통과한다 —
+// 없애려던 "한 판단이 여러 줄"이 바로 그 자리에서 돌아온다.
+// 전제를 깨는 커밋은 internal/mcpsrv 의 TestServeNeverOverlapsBackend 에서 빨강을 본다.
 func (o *Outbox) Append(e OutboxEntry) error {
 	cur, err := o.List()
 	if err != nil {
