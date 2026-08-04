@@ -74,6 +74,15 @@ func newHarnessAuth(t *testing.T, token string) *harness {
 		"FD_PROJECT":             hs.project,
 		"FD_LOG":                 "error",
 		"CLAUDE_CODE_SESSION_ID": "cc-session-uuid-1",
+		// ★ HOME 을 **기본 env 에서** 고정한다. FD_STATE_DIR 만으로는 부족하다 —
+		// 옛 채널 자리 재생이 ~/.local/state/flightdeck/outbox 를 후보로 삼아 거기 있는
+		// 판단을 **보내고 큐를 비우므로**, HOME 이 안 잡히면 homeDir 이 os.UserHomeDir()
+		// (프로세스 환경, 시험이 못 바꾼다)로 떨어져 개발자의 진짜 판단을 보낸다.
+		// unpinnedEnv 는 이 값을 그대로 물려받고 FD_STATE_DIR 만 뺀다.
+		"HOME": hs.home,
+	}
+	if err := os.MkdirAll(hs.home, 0o755); err != nil {
+		t.Fatalf("가짜 홈을 못 만들었다(%s): %v", hs.home, err)
 	}
 	return hs
 }

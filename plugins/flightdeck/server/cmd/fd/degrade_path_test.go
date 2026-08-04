@@ -347,15 +347,13 @@ func TestOfflineStateLandsUnderPluginDataNotPluginRoot(t *testing.T) {
 		t.Fatalf("PLUGIN_ROOT 흉내를 못 만들었다: %v", err)
 	}
 
-	env := map[string]string{}
-	for k, v := range h.env {
-		env[k] = v
-	}
-	// ★ 대조 전제 ①: FD_STATE_DIR 를 **떼야** 이 시험이 무엇을 본다.
-	//   남겨 두면 그것이 최우선이라 CLAUDE_PLUGIN_DATA 축은 한 번도 안 걸린다.
-	delete(env, "FD_STATE_DIR")
-	env["CLAUDE_PLUGIN_DATA"] = data
-	env["CLAUDE_PLUGIN_ROOT"] = root
+	// ★ 손으로 env 를 만들지 않는다 — runEnv 주석이 경고하는 그대로, 손으로 만들면
+	// HOME 을 잊고 시험이 진짜 홈을 건드린다(실측 2026-08-05).
+	// unpinnedEnv 가 FD_STATE_DIR 를 빼고 가짜 홈을 함께 주는 정식 갈래다.
+	env := h.unpinnedEnv(map[string]string{
+		"CLAUDE_PLUGIN_DATA": data,
+		"CLAUDE_PLUGIN_ROOT": root,
+	})
 	if sd := ResolveStateDir(envOf(env), ""); sd.Path != filepath.Join(data, "flightdeck") {
 		t.Fatalf("전제가 깨졌다 — 이 환경의 상태 디렉토리가 %q 다(%q 를 기대했다, 사유 %q)",
 			sd.Path, filepath.Join(data, "flightdeck"), sd.Source)
