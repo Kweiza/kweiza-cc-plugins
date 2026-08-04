@@ -86,10 +86,20 @@ func TestFailedUpgradeNamesTheBackup(t *testing.T) {
 		t.Fatalf("전제가 깨졌다 — 이미 백업이 %d개 있다", len(before))
 	}
 
-	// 증분 하나를 망가뜨린다(커밋된 기준선 위의 변이다 — defer 로 원복한다).
+	// 커밋된 기준선 위의 변이다 — defer 로 원복한다.
+	// ★ 한 단만 두면 UpgradeSteps 가 적용 전에 거절해 시험이 보려던 경로에 안 들어간다.
+	//   BaseSchemaVersion+1 부터 SchemaVersion 까지 전 구간을 채우되 마지막 단을 깨뜨린다.
 	saved := migrations
-	migrations = []Migration{{To: 2, Name: "일부러 깨뜨린 증분", SQL: `SELECT 이건 SQL 이 아니다;`}}
 	defer func() { migrations = saved }()
+	var stub []Migration
+	for v := BaseSchemaVersion + 1; v <= SchemaVersion; v++ {
+		m := Migration{To: v, Name: "일부러 깨뜨린 증분", SQL: `SELECT 1;`}
+		if v == SchemaVersion {
+			m.SQL = `THIS IS NOT SQL;`
+		}
+		stub = append(stub, m)
+	}
+	migrations = stub
 
 	_, err = OpenWithLogger(path, testLogger())
 	if err == nil {
