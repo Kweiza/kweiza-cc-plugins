@@ -313,15 +313,35 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 	}
 	now := s.now()
 	// ★ 좌표계가 다른 경로는 버린다 — 여기서 거절하면 훅이 죽고 세션 생존 신호가 끊긴다.
-	// 그것이 침묵보다 나쁘다. 대신 버린 건수를 event 원장에 남긴다(응답은 훅이 삼킨다).
-	kept, rejected := judge.FilterPathCoordinate(paths)
+	// 그것이 침묵보다 나쁘다. 대신 버린 건수와 경로 일부를 event 원장에 남긴다
+	// (응답은 훅이 삼킨다 — 원장이 이 표면에서 유일하게 남는 관측 자리다).
+	//
+	// ★ judge.FilterPathCoordinate 를 직접 부르지 않고 FilterFootprintPaths 를 거친다 —
+	// 같은 패키지 안에서 같은 연산에 이름이 둘 생기는 것을 막는다(service.go 의
+	// FilterFootprintPaths 주석: "존재 이유는 계층뿐이다").
+	kept, rejected := FilterFootprintPaths(paths)
+	// ★ session.beat 의 payload 에 원본 경로 전부를 실으면 무한히 커질 수 있으므로
+	// 앞 5개만 자르고, 잘렸다는 사실이 드러나도록 총 건수(rejected)를 payload 에 함께 둔다.
+	// 사유 전체까지 실을 필요는 없다 — 경로가 무엇이었는지가 핵심이고, 왜는 로그(아래)가 낸다.
+	const droppedPathsLimit = 5
+	droppedPaths := make([]string, 0, len(rejected))
+	for i, r := range rejected {
+		if i >= droppedPathsLimit {
+			break
+		}
+		droppedPaths = append(droppedPaths, clip(r.Path, 200))
+	}
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		sess, err := t.GetSession(sessionID)
 		if err != nil {
 			return err
 		}
+		// ★ count 의 의미가 이 항목에서 조용히 바뀌었다 — 전에는 len(paths)(제출 전부),
+		// 지금은 len(kept)(관문을 통과한 것). 기존 원장 질의가 두 정의를 걸치게 된다.
+		// count + rejected 로 예전 값(len(paths))을 복원할 수 있다.
 		t.LogEvent("session.beat", sess.Project, sessionID, map[string]any{
 			"kind": string(kind), "count": len(kept), "rejected": len(rejected),
+			"dropped_paths": droppedPaths,
 		})
 		if err := t.Beat(sessionID, kind, now); err != nil {
 			return err
@@ -338,18 +358,22 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 		}
 		return nil
 	})
-	// 사유는 로그로 낸다 — 원장에는 건수만 남고, 무엇이 왜 버려졌는지는 여기서만 볼 수 있다.
+	if err != nil {
+		s.logFail(ctx, "session.beat", "", sessionID, err)
+		s.log.ErrorContext(ctx, "신호 기록 실패",
+			"session_id", clip(sessionID, 64), "kind", string(kind), "error", err.Error())
+		return err
+	}
+	// ★ 이 블록은 err == nil 분기 **안**에 있다(전에는 Tx 결과 확인보다 앞이었다) —
+	// 트랜잭션이 롤백되면 아무것도 실제로는 안 버려진(기록되지 않은) 것인데, 그 앞에서
+	// "버렸다"고 찍으면 사실과 다른 경보가 된다. 사유는 로그로 낸다 — 원장에는
+	// 건수와 경로 일부만 남고, 무엇이 왜 버려졌는지 전문은 여기서만 볼 수 있다.
 	if len(rejected) > 0 {
 		s.log.WarnContext(ctx, "발자국 경로를 좌표계 관문이 버렸다",
 			"session_id", clip(sessionID, 64), "dropped", len(rejected),
 			"first_reason", rejected[0].Reason)
 	}
-	if err != nil {
-		s.logFail(ctx, "session.beat", "", sessionID, err)
-		s.log.ErrorContext(ctx, "신호 기록 실패",
-			"session_id", clip(sessionID, 64), "kind", string(kind), "error", err.Error())
-	}
-	return err
+	return nil
 }
 
 // SetState 는 세션 상태를 바꾼다.

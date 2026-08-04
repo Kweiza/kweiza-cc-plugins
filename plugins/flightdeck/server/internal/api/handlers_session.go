@@ -261,8 +261,11 @@ func (s *server) handleFootprints(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// ★ rejected 도 함께 낸다 — session.beat 이 이미 event 원장에 rejected 를 내므로,
+	// 이 SSE 표면만 안 내면 같은 발자국 축을 보는 두 표면(원장 vs 대시보드)이 다르게
+	// 보고한다. 대시보드는 이 publish 를 먹는다.
 	s.publish(r, "session.footprint", sess.Project, req.SessionID, map[string]any{
-		"origin": string(origin), "count": len(rels),
+		"origin": string(origin), "count": len(rels), "rejected": len(rejected),
 	})
 	res := map[string]any{
 		"session_id": req.SessionID, "origin": string(origin),
