@@ -18,11 +18,19 @@ import (
 // 나머지 축은 전부 실물 git 이 답한다(가짜가 실물을 대신하지 않는다).
 type flakyReader struct {
 	GitReader
-	failChanged bool
-	failAhead   bool
+	failChanged   bool
+	failAhead     bool
+	failMergeBase bool
 }
 
 var errInjected = errors.New("주입된 실패: 변경 경로를 못 읽는다")
+
+func (f flakyReader) MergeBase(ctx context.Context, a, b string) (string, error) {
+	if f.failMergeBase {
+		return "", errInjected
+	}
+	return f.GitReader.MergeBase(ctx, a, b)
+}
 
 func (f flakyReader) ChangedPaths(ctx context.Context, base, head string) ([]string, error) {
 	if f.failChanged {
@@ -121,5 +129,61 @@ func TestPickStillClaimsWhenGitIsGone(t *testing.T) {
 	}
 	if _, ok := reasonCodes(res2.Rejected)["batch7/"+judge.RejectClaimed]; !ok {
 		t.Fatalf("git 이 없다고 탈락 사유까지 사라졌다: %+v", res2.Rejected)
+	}
+}
+
+// TestBoardEmptiesChangeSetAxisWhenForkPointIsUnreadable 는 갈래 지점을 못 읽었을 때
+// **두 점 diff 로 되돌아가지 않는다**를 단정한다.
+//
+// ★ 이 시험이 지키는 것은 성능도 정확도도 아니라 **되돌아가지 않음**이다.
+// merge-base 가 실패했을 때 `ChangedPaths(기본브랜치, 브랜치)` 로 물러서면 화면에는
+// 경로가 그대로 차 있어 아무도 눈치채지 못한 채 오탐이 부활한다 — 침묵하는 회귀다.
+// 그래서 못 구했으면 그 축을 비우고 못 읽었다고 말한다. 발자국·미커밋이 덮는다.
+func TestBoardEmptiesChangeSetAxisWhenForkPointIsUnreadable(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	writeFile(t, wt, "branch/only.py", "print(1)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "branch touches its own file")
+
+	// main 이 앞선다. 두 점으로 물러서면 이 파일이 브랜치 경로에 나타난다.
+	writeFile(t, repo, "main/only.md", "main 만 고쳤다\n")
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "main moves ahead")
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	broken := New(st, nil, WithGitFactory(func(repoPath string) GitReader {
+		return flakyReader{GitReader: gitreader.New(repoPath), failMergeBase: true}
+	}))
+	view, err := broken.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("갈래 지점을 못 읽었다고 보드가 죽으면 안 된다: %v", err)
+	}
+	card := view.Sessions[0]
+
+	// ① 두 점으로 물러서지 않았다 — 남의 파일도, 자기 커밋도 이 축으로는 안 온다.
+	for _, p := range []string{"main/only.md", "branch/only.py"} {
+		if contains(card.View.Paths, p) {
+			t.Fatalf("갈래 지점을 못 읽었는데 변경집합 축이 채워졌다(%q): %v\n"+
+				"두 점 diff 로 되돌아가면 오탐이 침묵 속에 부활한다", p, card.View.Paths)
+		}
+	}
+	// ② 그리고 침묵하지 않는다.
+	if !strings.Contains(card.DeriveError, "갈래 지점") {
+		t.Fatalf("어느 축이 반쪽인지가 카드에 없다: %q", card.DeriveError)
+	}
+	var found bool
+	for _, f := range view.Failures {
+		if strings.HasPrefix(f.Axis, "merge-base:") && strings.Contains(f.Detail, "주입된 실패") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("실패 사유 전문이 안 실렸다: %+v", view.Failures)
+	}
+	if view.Freshness.Source != "git" || !view.Freshness.Stale {
+		t.Fatalf("부분 실패의 신선도가 %+v 다", view.Freshness)
 	}
 }

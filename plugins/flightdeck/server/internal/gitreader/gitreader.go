@@ -270,6 +270,39 @@ func (r *Reader) ChangedPaths(ctx context.Context, base, head string) ([]string,
 	return parseNameOnlyZ(out), nil
 }
 
+// MergeBase 는 두 ref 의 갈래 지점 커밋이다(`git merge-base a b`).
+//
+// ★ 왜 ChangedPaths 를 세 점(`a...b`)으로 바꾸지 않고 이것을 따로 두나.
+// 세 점 diff 는 갈래 지점을 git 안에서 구해 주므로 프로세스가 한 번 덜 든다(실측: 세 점 4ms,
+// merge-base 3ms + 두 점 4ms = 7ms). 그런데 그러면 **갈래 지점 sha 가 손에 안 남는다.**
+// change_set 은 `(base_sha, head_sha)` 를 키로 "두 커밋 사이"를 불변 보관하므로, 갈래 기준
+// 경로를 담으면서 base 에 기본 브랜치의 tip 을 적으면 그 행이 거짓이 된다 — 그 키로 읽는 쪽은
+// 두 점을 기대하는데 내용은 갈래 기준이다. 갈래 지점을 실체화해 base 로 적으면 뜻이 정확히
+// 보존된다: **갈래 기준 diff 는 merge-base 로부터의 두 점 diff 와 문자 그대로 같다.**
+// 그 3ms 가 sha 를 사는 값이다.
+//
+// 공통 조상이 없으면(관계 없는 이력) 오류다. 호출자가 두 점으로 되돌아가면 안 된다 —
+// 그것이 이 메서드가 없애려는 바로 그 오탐이다. 못 구했으면 그 축을 비우고 못 읽었다고 말해라.
+func (r *Reader) MergeBase(ctx context.Context, a, b string) (string, error) {
+	if err := validateRev("a", a); err != nil {
+		return "", err
+	}
+	if err := validateRev("b", b); err != nil {
+		return "", err
+	}
+	out, err := r.run(ctx, "", "merge-base", a, b, "--")
+	if err != nil {
+		r.log.ErrorContext(ctx, "갈래 지점 관측 실패", "a", a, "b", b, "error", err.Error())
+		return "", fmt.Errorf("갈래 지점 관측 실패(%s, %s): %w", a, b, err)
+	}
+	sha := strings.TrimSpace(string(out))
+	if err := checkSHA(sha); err != nil {
+		r.log.ErrorContext(ctx, "갈래 지점 출력 해석 실패", "a", a, "b", b, "error", err.Error())
+		return "", fmt.Errorf("갈래 지점(%s, %s): %w", a, b, err)
+	}
+	return sha, nil
+}
+
 // Ancestry 는 sha 가 tip 의 조상인지 판정한다. **값이 셋이다**(judge.AncestryResult).
 //
 // git 은 0(조상)·1(아님)·128(그런 ref 없음)을 내는데, 128 을 1 로 접으면
