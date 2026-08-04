@@ -1480,7 +1480,18 @@ func RenderPrescriptions(shown []PrescriptionLine, folded int) string {
 // 그리고 에이전트가 다음 턴을 시작하기 전이라 사람을 안 기다린다.
 //
 // ★ fail-open 이다. 서버가 죽어도 조용히 반환한다 — 훅이 세션을 막으면 안 된다.
+//
+// ★★ **stop_hook_active 면 아무것도 안 낸다. 이 가드가 없으면 무한 루프다.**
+// 2026-08-04 실측(Claude Code 2.1.221): Stop 훅의 additionalContext 는 붙기만 하는 것이
+// 아니라 **모델을 다시 부른다**. 그 턴이 끝나면 Stop 이 또 불리고, 또 주입한다.
+// 무가드 판을 실제로 돌려 루프를 냈고 사람이 인터럽트로 끊었다.
+// 그리고 이 가드는 임시방편이 아니라 옳은 의미론이다 — 처방은 **사람이 몰던 턴의 끝**에
+// 한 번 뜨는 것이지, 자기가 만든 턴의 끝에 다시 뜨는 것이 아니다.
 func (a *App) hookStop(ctx context.Context, p HookPayload, out io.Writer) {
+	if p.StopHookActive {
+		// 내가 만든 턴이다. 여기서 또 내면 그 턴이 또 턴을 만든다.
+		return
+	}
 	if strings.TrimSpace(p.CWD) != "" {
 		a.proj = resolveProject(a.env, p.CWD)
 	}
@@ -1518,7 +1529,19 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, out io.Writer) {
 
 `PrescriptionLine` 의 JSON 태그가 서버 응답과 맞아야 한다. `judge.Prescription` 에 태그가 없으므로 서버가 `{"Key":…,"Text":…}` 를 낸다 — **`judge.Prescription` 에 `json:"key"`·`json:"reason"`·`json:"text"` 태그를 더하고**, `PrescriptionLine` 에도 같은 태그를 단다. 이 불일치를 시험이 잡도록 Step 5 의 통합 시험을 둔다.
 
-**Task 1 이 "주입 안 된다"로 판정됐으면:** `emitContext(out, "Stop", text)` 대신 `a.log.Info(...)` 로 발화만 하고, `hookUserPrompt` 의 미확인 주입 블록에 같은 문구를 합류시킨다. 어느 경로를 썼는지는 Step 7 에서 `fd doctor` 가 낸다.
+**`HookPayload` 에 필드를 더한다.** 실측한 Stop 페이로드에 있는 것 중 이 훅이 쓰는 것은 하나다:
+
+```go
+	StopHookActive bool `json:"stop_hook_active"`
+```
+
+**~~Task 1 이 "주입 안 된다"로 판정됐으면~~ — 그 갈래는 닫혔다.** 실측 결과 주입은 **된다**
+(2026-08-04, Claude Code 2.1.221). 채널은 `Stop` 훅 stdout 의
+`hookSpecificOutput.additionalContext` 이고, 받는 쪽에는 `<system-reminder>` 로 들어온다.
+그러니 `UserPromptSubmit` 폴백은 안 만든다 — 안 쓰는 경로를 만들면 썩는다.
+
+**대신 실측이 새 제약을 하나 만들었다**: 주입이 모델을 다시 부르므로
+`stop_hook_active` 가드가 **필수**다. Step 5 의 시험이 그 가드를 지킨다.
 
 - [ ] **Step 5: 통합 시험 — 응답 모양이 맞는지**
 
@@ -1549,7 +1572,28 @@ func TestHookStopFailsOpen(t *testing.T) {
 		t.Fatalf("서버가 없는데 뭔가 냈다: %q", out)
 	}
 }
+
+// ★ 이 시험이 이 파일에서 가장 중요하다.
+//
+// stop_hook_active 면 아무것도 안 낸다. 안 그러면 주입이 모델을 다시 부르고,
+// 그 턴이 끝나면 Stop 이 또 불리고, 또 주입한다 — 무한 루프다.
+// 2026-08-04 에 무가드 판으로 실제로 재현했고 사람이 인터럽트로 끊었다.
+func TestHookStopIsSilentOnReentry(t *testing.T) {
+	srv := fakeServer(t, map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0}`,
+	})
+	defer srv.Close()
+
+	out := runHookForTest(t, srv.URL, "stop",
+		`{"session_id":"cc-1","cwd":".","stop_hook_active":true}`)
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("재진입인데 뭔가 냈다 — 이게 무한 루프의 씨앗이다: %q", out)
+	}
+}
 ```
+
+**Step 5 의 빨간불 확인은 이 시험으로 한다**: `hookStop` 의 `if p.StopHookActive { return }` 를
+잠깐 지우고 `TestHookStopIsSilentOnReentry` 가 빨간불인지 본다. 확인 후 되돌린다.
 
 - [ ] **Step 6: 초록을 본다**
 
