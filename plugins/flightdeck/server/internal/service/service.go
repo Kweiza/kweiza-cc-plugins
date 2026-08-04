@@ -375,5 +375,8 @@ func RelPath(root, p string) string {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return q // 저장소 밖이다
 	}
-	return rel
+	// ★ 출력은 슬래시 좌표계다. Linux 에서 이 호출은 무연산이지만, 계약을 주석이 아니라
+	// 코드에 둔다 — 겹침 축 전체가 "모든 경로는 슬래시"라는 이 계약 위에 서 있고,
+	// 계약이 주석에만 있으면 다음 사람이 깬다.
+	return filepath.ToSlash(rel)
 }
