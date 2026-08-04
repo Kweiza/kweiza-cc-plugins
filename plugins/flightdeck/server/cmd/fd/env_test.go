@@ -201,7 +201,6 @@ func TestLegacyOutboxDirsCoversOnlyWhatThisChannelCanCompute(t *testing.T) {
 		filepath.Join("/plugin/data", "flightdeck", "outbox"),
 		filepath.Join("/xdg/state", "flightdeck", "outbox"),
 		filepath.Join(home, ".local", "state", "flightdeck", "outbox"),
-		filepath.Join(os.TempDir(), "flightdeck", "outbox"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("옛 자리 목록이\n  %v\n여야 하는데\n  %v\n다", want, got)
@@ -209,6 +208,32 @@ func TestLegacyOutboxDirsCoversOnlyWhatThisChannelCanCompute(t *testing.T) {
 	for _, d := range got {
 		if strings.Contains(d, "*") {
 			t.Errorf("glob 패턴이 목록에 들어갔다(%q) — §13 은 그 경로를 저장하지 말라고 했다", d)
+		}
+	}
+}
+
+// 옛 자리 목록은 임시 디렉토리를 **절대** 후보로 얹지 않는다.
+//
+// ★ 이 축은 "채널이 계산할 수 있는가"가 아니라 "누가 그 파일을 쓸 수 있는가"다.
+// 과제 5부터 이 목록의 각 자리는 fd 가 **읽어서 사용자의 토큰으로 서버에 POST 하는**
+// 자리가 된다. `/tmp` 는 부모가 world-writable 이라, 이 머신의 다른 로컬 사용자가
+// `<tmp>/flightdeck/outbox/pending.jsonl` 을 0644 로 심어 두면 fd 가 그 줄을 읽어
+// 사용자 이름으로 그대로 전송한다. 판단은 추가 전용이라(트리거가 UPDATE·DELETE 를
+// 막는다) 그렇게 들어간 줄은 **회수할 방법이 없다**. 나머지 네 후보(CLAUDE_PLUGIN_DATA·
+// XDG_STATE_HOME·~/.local/state·~/.flightdeck)는 $HOME 아래거나 사용자 자신의
+// 프로세스만 세팅하는 환경변수에서 오므로 이 주입이 안 통한다 — tmp 만 다르다.
+func TestLegacyOutboxDirsNeverScansTempDir(t *testing.T) {
+	got := LegacyOutboxDirs(envOf(map[string]string{
+		"CLAUDE_PLUGIN_DATA": "/plugin/data",
+		"XDG_STATE_HOME":     "/xdg/state",
+	}), "/h", filepath.Join("/h", ".flightdeck", "outbox"))
+
+	tmp := filepath.Clean(os.TempDir())
+	for _, d := range got {
+		if filepath.Clean(d) == filepath.Join(tmp, "flightdeck", "outbox") ||
+			strings.HasPrefix(filepath.Clean(d), tmp+string(filepath.Separator)) {
+			t.Fatalf("옛 자리 목록에 임시 디렉토리 아래 %q 가 들어 있다 — "+
+				"world-writable 부모 아래라 남이 심은 줄을 그대로 전송할 위험이 있다: %v", d, got)
 		}
 	}
 }
