@@ -1903,7 +1903,15 @@ git commit -m "fix(flightdeck): stop telling people to restart, and say where th
 **Files:**
 - Modify: `plugins/flightdeck/server/cmd/fd/env.go`
 - Modify: `plugins/flightdeck/server/cmd/fd/app.go`
+- Modify: `plugins/flightdeck/server/cmd/fd/mcp.go` — **`mcpsrv.New` 호출에 `WithBeaconDir` 을 넘긴다**
 - Test: `plugins/flightdeck/server/cmd/fd/beacon_wiring_test.go`
+
+> ⚠ **이 태스크에 `mcp.go` 가 있는 이유** (T8 리뷰가 잡은 계획의 구멍이다).
+> T8 은 "`WithBeaconDir` 이 없으면 심지 않는다"로 만들었다 — 시험이 개발자의 진짜 홈에 파일을 쓰지 않게 하는 장치다.
+> 그런데 `cmd/fd/mcp.go` 의 `mcpsrv.New` 호출에 그 옵션을 안 넘기면 **프로덕션에서 영영 안 심긴다.**
+> 시험은 전부 초록인 채로 기능이 죽어 있고, 그 침묵은 어느 화면에도 안 뜬다 —
+> 직전 판단이 `environ` 재읽기 처방을 기각하며 경고한 바로 그 형태다.
+> **인수 조건:** `mcp.go` 가 `WithBeaconDir(BeaconDir(a.env, home))` 를 넘기고, 그것을 단정하는 시험이 있다.
 
 **Interfaces:**
 - Consumes: Task 2 의 `window.Dir`, Task 7 의 라우트.
