@@ -166,6 +166,134 @@ func TestClearKeepsOneCardAndItsClaim(t *testing.T) {
 	}
 }
 
+// ★★ **MCP 가 늦게 심으면 첫 /clear 가 고아를 만든다.**
+//
+// 비콘의 session_id 를 적는 것은 훅뿐이고(window.SaveIdentity), 그 훅은 비콘을 **찾은 뒤에만**
+// 적는다. 그래서 심기가 첫 SessionStart 보다 늦으면 그 자리는 빈 채로 남는다. 늦는 것은
+// 가정이 아니다 — 설계 개정 ②의 실측이 `fd mcp` 가 부모 claude 보다 2,374,680틱(≈6.6시간)
+// 늦게 뜬 것을 재고 있다(플러그인 갱신 등으로 MCP 만 다시 뜬다).
+//
+// 그 상태에서 /clear 가 오면 rekey 가 **대상 카드를 몰라** 건너뛰고 카드가 두 장이 된다.
+// 둘째 전환부터는 스스로 낫지만, 그때 고아가 되는 카드가 하필 **첫 구간의 선점과 판단을
+// 든 카드**다. 비콘은 옛 cc 를 알고 있고, 3중키 upsert 는 그 cc 로 부르면 카드 A 를
+// 그대로 돌려준다 — 대상을 못 찾을 이유가 없다.
+func TestALatePlantStillMergesTheFirstClear(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	app := newApp(envOf(h.env), quietLogger(), cwd, strings.NewReader(""))
+	wt := app.proj.Worktree
+	if app.beaconDir == "" || wt == "" {
+		t.Fatal("대조 전제가 깨졌다 — 비콘 디렉토리나 워크트리가 비었다")
+	}
+
+	// ① 첫 SessionStart. **비콘이 아직 없다** — MCP 가 안 떴다.
+	if code, out := h.run(sessionStartPayload("cc-old", cwd), "hook", "session-start"); code != 0 {
+		t.Fatalf("첫 SessionStart 훅 종료코드 %d: %s", code, out)
+	}
+	cards := cardsFor(t, h, app.machine, wt)
+	if len(cards) != 1 {
+		t.Fatalf("첫 훅 뒤 카드가 %d장이다 — 전제가 안 섰다: %+v", len(cards), cards)
+	}
+	cardA := cards[0]
+
+	// ② 이제서야 MCP 가 뜨고 심는다. 심기는 병합이라 정체 두 필드는 자기 env cc 만 채운다 —
+	//    session_id 는 훅의 자리이고 그 훅은 이미 지나갔다.
+	pid := os.Getpid()
+	started, err := window.StartedOf(pid)
+	if err != nil {
+		t.Fatalf("이 프로세스의 시작 시각을 못 읽었다: %v", err)
+	}
+	key := window.Key{MachineID: app.machine, ClaudePID: pid, Started: started}
+	if _, err := window.Plant(app.beaconDir, key, wt, "cc-old", time.Now()); err != nil {
+		t.Fatalf("비콘 심기 실패: %v", err)
+	}
+	b, err := window.Load(app.beaconDir, key)
+	if err != nil {
+		t.Fatalf("비콘을 못 읽었다: %v", err)
+	}
+	if b.SessionID != "" || b.CCSessionID != "cc-old" {
+		t.Fatalf("대조 전제가 깨졌다 — 늦은 심기의 비콘이 cc=%q session=%q 다. "+
+			"session_id 는 비고 cc 는 옛 값이어야 이 시험이 무언가를 지킨다", b.CCSessionID, b.SessionID)
+	}
+
+	// ③ /clear.
+	if code, out := h.run(sessionStartPayload("cc-new", cwd), "hook", "session-start"); code != 0 {
+		t.Fatalf("둘째 SessionStart 훅 종료코드 %d: %s", code, out)
+	}
+
+	// ④ 카드는 한 장이고, 그것이 카드 A 다.
+	cards = cardsFor(t, h, app.machine, wt)
+	if len(cards) != 1 {
+		ids := make([]string, 0, len(cards))
+		for _, c := range cards {
+			ids = append(ids, c.ID+"/"+c.CCSessionID)
+		}
+		t.Fatalf("늦게 심긴 비콘으로 /clear 를 넘겼는데 카드가 %d장이다(%s) — "+
+			"훅이 빈 session_id 를 보고 rekey 를 통째로 건너뛰었다는 신호다",
+			len(cards), strings.Join(ids, " "))
+	}
+	if cards[0].ID != cardA.ID || cards[0].CCSessionID != "cc-new" {
+		t.Fatalf("남은 카드가 %s/%s 다 — %s/cc-new 여야 한다. 첫 구간의 선점과 판단이 든 카드가 그것이다",
+			cards[0].ID, cards[0].CCSessionID, cardA.ID)
+	}
+	_ = ctx
+
+	// ⑤ 다음 전환의 재료도 갖췄다 — 비콘이 이제 카드 id 를 든다.
+	if b, err = window.Load(app.beaconDir, key); err != nil {
+		t.Fatalf("둘째 훅 뒤 비콘을 못 읽었다: %v", err)
+	}
+	if b.CCSessionID != "cc-new" || b.SessionID != cardA.ID {
+		t.Fatalf("비콘이 cc=%q session=%q 다 — cc-new/%s 를 기대했다", b.CCSessionID, b.SessionID, cardA.ID)
+	}
+}
+
+// ★ 서버가 죽어 있으면 rekey 실패를 화면에 **또** 얹지 않는다.
+//
+// 미도달이면 rekey 는 정의상 매번 실패하고, 그 사실은 배너가 이미 말하고 있다.
+// 일곱 줄 아래 OpenSession 실패가 `reachable` 로 가려지는 것이 같은 이유이고,
+// 그 규율에서 이 줄만 빠져 있었다 — 그러면 서버가 내려간 동안 /clear 마다 배너 위에
+// 같은 말이 한 줄씩 쌓인다.
+func TestRekeyFailureIsQuietWhileTheServerIsDown(t *testing.T) {
+	h := newHarness(t)
+	cwd := t.TempDir()
+
+	app := newApp(envOf(h.env), quietLogger(), cwd, strings.NewReader(""))
+	wt := app.proj.Worktree
+	pid := os.Getpid()
+	started, err := window.StartedOf(pid)
+	if err != nil {
+		t.Fatalf("이 프로세스의 시작 시각을 못 읽었다: %v", err)
+	}
+	key := window.Key{MachineID: app.machine, ClaudePID: pid, Started: started}
+	if _, err := window.Plant(app.beaconDir, key, wt, "cc-old", time.Now()); err != nil {
+		t.Fatalf("비콘 심기 실패: %v", err)
+	}
+	if code, out := h.run(sessionStartPayload("cc-old", cwd), "hook", "session-start"); code != 0 {
+		t.Fatalf("첫 SessionStart 훅 종료코드 %d: %s", code, out)
+	}
+	// 대조 전제: 비콘이 카드 id 를 들고 있어야 아래에서 rekey 가 **실제로 시도된다.**
+	b, err := window.Load(app.beaconDir, key)
+	if err != nil || b.SessionID == "" {
+		t.Fatalf("전제가 깨졌다 — 비콘에 카드 id 가 없다(err=%v, beacon=%+v)", err, b)
+	}
+
+	h.down()
+
+	code, out := h.run(sessionStartPayload("cc-new", cwd), "hook", "session-start")
+	if code != 0 {
+		t.Fatalf("서버가 죽었는데 훅이 종료코드 %d 를 냈다: %s", code, out)
+	}
+	// 대조: 침묵을 "아무것도 안 냈다"로 얻지 않았다 — 배너는 그대로 온다.
+	if !strings.Contains(out, "미도달") {
+		t.Fatalf("전제가 깨졌다 — 미도달 배너가 화면에 없다:\n%s", out)
+	}
+	if strings.Contains(out, "못 합쳤다") {
+		t.Errorf("서버가 죽었는데 rekey 실패를 배너 위에 또 얹는다:\n%s", out)
+	}
+}
+
 // 비콘이 없으면 오늘 거동 그대로 카드가 두 장이다.
 //
 // ★ 이 시험이 지키는 것은 **새 실패 모드가 없다**는 것이다. 비콘을 못 찾는 것은 오류가
