@@ -240,6 +240,93 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	}
 }
 
+// TestBoardCardCarriesItsOwnAsk 는 사건이 그것을 남긴 세션의 카드에 붙는다는 것을 단정한다.
+// 전역 꼬리만으로는 누가 남겼는지가 안 이어진다.
+func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	v := service.BoardView{
+		Sessions: []service.SessionCard{
+			{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
+			{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
+		},
+		Asks: []model.Judgment{
+			{ID: "j1", SessionID: "01AAA", At: now.Add(-12 * time.Minute),
+				Title: "mcpbackend.go 를 잡는다"},
+		},
+	}
+	got := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
+
+	lines := strings.Split(got, "\n")
+	var aaaIdx, askIdx, bbbIdx int = -1, -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.Contains(l, "01AAA"):
+			aaaIdx = i
+		case strings.Contains(l, "mcpbackend.go 를 잡는다"):
+			if askIdx < 0 {
+				askIdx = i
+			}
+		case strings.Contains(l, "01BBB"):
+			bbbIdx = i
+		}
+	}
+	if askIdx < 0 {
+		t.Fatalf("사건이 어디에도 없다:\n%s", got)
+	}
+	if !(aaaIdx < askIdx && askIdx < bbbIdx) {
+		t.Fatalf("사건이 01AAA 카드 안에 없다 (aaa=%d ask=%d bbb=%d):\n%s", aaaIdx, askIdx, bbbIdx, got)
+	}
+	if !strings.Contains(lines[askIdx], "12분") {
+		t.Fatalf("사건의 나이가 없다: %q", lines[askIdx])
+	}
+}
+
+// TestFoldKeepsEventCardsOverSilentOnes 는 예산이 자를 때 **사건이 붙은 카드가 조용한 카드보다
+// 먼저 남는다**는 것을 단정한다. 이것이 없으면 사건을 카드에 붙여도 예산이 그걸 먼저 버린다.
+func TestFoldKeepsEventCardsOverSilentOnes(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	var sessions []service.SessionCard
+	for i := 0; i < 20; i++ {
+		sessions = append(sessions, service.SessionCard{
+			View: model.SessionView{
+				Session: model.Session{ID: fmt.Sprintf("01S%02d", i)},
+				Paths:   []string{"some/long/path/that/costs/tokens.go"},
+			},
+		})
+	}
+	v := service.BoardView{
+		Sessions: sessions,
+		Asks: []model.Judgment{
+			{ID: "j1", SessionID: "01S19", At: now, Title: "마지막 세션이 남긴 요청"},
+		},
+	}
+	got := RenderBoard(v, BoardRenderOptions{Now: now, Budget: 300})
+
+	if !strings.Contains(got, "01S19") {
+		t.Fatalf("사건이 붙은 카드가 접혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "접었다") {
+		t.Fatalf("예산 300 인데 아무것도 안 접혔다:\n%s", got)
+	}
+}
+
+// TestFoldAlwaysKeepsSelfFirst: 나는 언제나 첫 카드다.
+func TestFoldAlwaysKeepsSelfFirst(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	var sessions []service.SessionCard
+	for i := 0; i < 20; i++ {
+		sessions = append(sessions, service.SessionCard{
+			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}},
+			IsSelf: i == 19,
+		})
+	}
+	got := RenderBoard(service.BoardView{Sessions: sessions},
+		BoardRenderOptions{Now: now, Self: "01S19", Budget: 300})
+	if !strings.Contains(got, "01S19") {
+		t.Fatalf("내 카드가 접혔다:\n%s", got)
+	}
+}
+
 func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 	fin := RenderFinish(service.FinishResult{
 		Item:      model.Item{ID: "t5-iam", State: model.ItemDone},
@@ -271,5 +358,42 @@ func TestRenderFinishAndNoteAndAdd(t *testing.T) {
 	}
 	if !strings.Contains(add, "경로 0") {
 		t.Fatalf("경로 0건이 겹침 축에 안 잡힌다는 사실이 없다:\n%s", add)
+	}
+}
+
+// TestBoardSaysWhatTheWindowCutOff 는 창 밖으로 잘린 것을 **침묵시키지 않는다.**
+// 창은 표시 구간이지 생존 판정이 아니다(설계 §4).
+//
+// ★ 창 값은 3시간으로 고른다 — 지금 기본값(2h, service.DefaultLiveWindow)도
+// 옛 하드코딩 값(8h, 0113b35 이전 기본값)도 아닌 제3의 값이라, 문구가 하드코딩된
+// 숫자를 그대로 찍으면 **반드시** 어긋난다. v.Window 를 실제로 안 읽으면 이 시험이 잡는다.
+func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	window := 3 * time.Hour
+	got := RenderBoard(service.BoardView{
+		Sessions:      []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Window:        window,
+		OutOfWindow:   9,
+		OldestOutside: now.Add(-7 * time.Hour),
+	}, BoardRenderOptions{Now: now})
+
+	if !strings.Contains(got, "창 밖 9건") {
+		t.Fatalf("창 밖 건수를 안 말한다:\n%s", got)
+	}
+	// ★ 어떻게 보는지는 v.Window 에서 파생돼야 한다 — 하드코딩된 숫자가 아니라.
+	if !strings.Contains(got, FormatAge(window)) {
+		t.Fatalf("창 밖 문구가 실제 창(%s)을 안 말한다 — 하드코딩된 값을 찍고 있을 수 있다:\n%s",
+			FormatAge(window), got)
+	}
+	if strings.Contains(got, "8h") || strings.Contains(got, "8시간") {
+		t.Fatalf("창 밖 문구에 옛 하드코딩 값(8h, 0113b35 이전 기본값)이 남아 있다:\n%s", got)
+	}
+	// ★ MCP board 도구는 window 인자를 받지 않는다(tools.go) — 없는 손잡이를
+	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 6개로 눌러 잡는다).
+	if strings.Contains(got, "window=") {
+		t.Fatalf("존재하지 않는 window 인자를 돌리라고 한다:\n%s", got)
+	}
+	if strings.Contains(got, "죽") {
+		t.Fatalf("생존 판정 낱말이 들어갔다 — 설계 §4 위반:\n%s", got)
 	}
 }

@@ -263,3 +263,21 @@ func (s *server) handleFootprints(w http.ResponseWriter, r *http.Request) {
 		"count": len(rels), "paths": rels,
 	})
 }
+
+// handlePrescriptions 는 이 세션이 지금 받아야 할 처방을 내고 발화를 기록한다.
+//
+// ★ POST 인 이유는 **부작용이 있어서**다 — 낸 것이 event 에 남는다.
+// GET 으로 두면 프록시·재시도가 조용히 처방을 소모한다.
+//
+// ★ 본문 인자가 없다. 필요한 것은 전부 세션 id 로부터 파생된다 —
+// 파생 가능한 사실에는 쓰기 파라미터를 만들지 않는다(설계 §1 원칙 ①).
+func (s *server) handlePrescriptions(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	infoFrom(r.Context()).setSession(id)
+	res, err := s.svc.Prescriptions(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, res)
+}

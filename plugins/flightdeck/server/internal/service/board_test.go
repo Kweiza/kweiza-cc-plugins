@@ -1,12 +1,19 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
+
+// stamp 는 t 시각을 store 가 쓰는 표기로 옮긴다. 시험이 신호·개시 시각을 직접
+// 되돌릴 때 쓴다(store.fmtTime 과 같은 자리수 — 그쪽은 비공개다).
+func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000Z") }
 
 // newRepoWithWorktree 는 저장소 하나와 브랜치 하나짜리 워크트리를 만든다.
 // 워크트리는 저장소 **밖**에 둔다 — 안에 두면 주 워크트리의 status 에 미추적으로 떠서
@@ -200,5 +207,98 @@ func TestBoardRefusesUnknownProject(t *testing.T) {
 	s, _ := newSvc(t)
 	if _, err := s.Board(ctx(), "없는프로젝트", BoardOptions{}); err == nil {
 		t.Fatalf("미등록 프로젝트는 파생 실패가 아니라 설정 오류다 — 접지 말고 올려야 한다")
+	}
+}
+
+func TestDefaultLiveWindowIsTwoHours(t *testing.T) {
+	if DefaultLiveWindow != 2*time.Hour {
+		t.Fatalf("기본 창이 2시간이 아니다: %v", DefaultLiveWindow)
+	}
+}
+
+// TestBoardOldestOutsideOnlyCountsHiddenSessions 는 화면에 **보이는** 세션의 옛 신호가
+// OldestOutside 를 오염시키지 않는다는 것을 단정한다.
+//
+// 세션 하나가 최근 prompt 신호로 창 안에 있으면서 동시에 훨씬 오래된 commit 신호를
+// 가질 수 있다(신호는 종류별 최신 시각 하나씩만 남으므로 이 조합이 실물에서 난다).
+// OldestOutside 는 **숨은 세션**(그 세션의 신호 중 어느 것도 창 안에 없는 세션)의
+// "마지막으로 언제 봤나"(그 세션 신호의 최댓값) 중 최솟값이어야 한다 — 보이는 세션의
+// 신호 하나하나를 훑어 그중 창 밖인 것을 집으면 안 된다.
+func TestBoardOldestOutsideOnlyCountsHiddenSessions(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	now := time.Now().UTC()
+
+	// 보이는 세션 — 최근 prompt 로 창 안에 있다. 그런데 6시간 전 commit 신호도 있다.
+	visible := openSession(t, s, "p", repo, repo, "cc-visible", "보이는")
+	if err := s.Beat(ctx(), visible.Session.ID, model.SignalPrompt, nil); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx(),
+		`INSERT INTO signal(session_id, kind, at) VALUES (?, 'commit', ?)`,
+		visible.Session.ID, stamp(now.Add(-6*time.Hour))); err != nil {
+		t.Fatalf("옛 신호 심기 실패: %v", err)
+	}
+
+	// 숨은 세션 — 개시 시각도 신호도 전부 창(2시간) 밖인 3시간 전이다.
+	hidden := openSession(t, s, "p", repo, repo, "cc-hidden", "숨은")
+	hiddenAt := stamp(now.Add(-3 * time.Hour))
+	if _, err := st.DB().ExecContext(ctx(),
+		`UPDATE session SET opened_at = ? WHERE id = ?`, hiddenAt, hidden.Session.ID); err != nil {
+		t.Fatalf("세션 개시 시각 되돌리기 실패: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx(),
+		`UPDATE signal SET at = ? WHERE session_id = ?`, hiddenAt, hidden.Session.ID); err != nil {
+		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
+	}
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if view.OutOfWindow != 1 {
+		t.Fatalf("창 밖 건수 = %d, 기대 1 (숨은 세션 하나)", view.OutOfWindow)
+	}
+	if view.OldestOutside.IsZero() {
+		t.Fatalf("창 밖 가장 오래된 신호가 비었다")
+	}
+	want := now.Add(-3 * time.Hour)
+	if d := view.OldestOutside.Sub(want); d < -2*time.Second || d > 2*time.Second {
+		t.Fatalf("OldestOutside = %v, 기대 약 %v(숨은 세션 것) — 보이는 세션의 옛 신호가 섞였다",
+			view.OldestOutside, want)
+	}
+}
+
+// TestBoardRecordsFailureWhenOutOfWindowCountFails 는 창 밖 건수 질의가 실패해도
+// 조회 자체는 죽지 않고, 실패가 축 이름으로 남는다는 것을 단정한다.
+//
+// 이 질의는 카드용 질의와 같은 표·같은 함수를 쓰므로 실물 DB 로는 이 질의 하나만 골라
+// 실패시킬 수 없다 — GitReader 주입과 같은 이유로 여기서도 후크를 주입한다.
+func TestBoardRecordsFailureWhenOutOfWindowCountFails(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "트랙2")
+
+	boom := errors.New("out-of-window 질의 실패(시험)")
+	s.outOfWindowLister = func(_ context.Context, _ string, _ time.Time) ([]model.SessionView, error) {
+		return nil, boom
+	}
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("파생 실패가 조회 자체를 죽이면 안 된다: %v", err)
+	}
+	var axes []string
+	for _, f := range view.Failures {
+		axes = append(axes, f.Axis)
+	}
+	if !contains(axes, "out-of-window") {
+		t.Fatalf("out-of-window 실패가 축 이름으로 안 나왔다: %v", axes)
+	}
+	if view.OutOfWindow != 0 {
+		t.Fatalf("실패했는데 창 밖 건수가 채워졌다: %d", view.OutOfWindow)
+	}
+	if !view.Freshness.Stale {
+		t.Fatalf("파생 실패가 신선도에 안 나타났다: %+v", view.Freshness)
 	}
 }

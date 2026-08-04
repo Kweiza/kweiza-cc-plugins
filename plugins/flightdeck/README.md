@@ -45,6 +45,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `UserPromptSubmit` 훅 | `prompt` 신호 + 미확인 알림 |
 | `PostToolUse`(Edit\|Write) 훅 | `tool` 신호 + **미커밋 발자국** — 경로 겹침 축의 유일한 원천 |
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
+| `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
 | MCP 도구 6개 | `board` `pick` `note` `add` `finish` `alloc` |
 | 스킬 3개 | `fd-pickup` · `fd-handoff` · `fd-setup` |
 
