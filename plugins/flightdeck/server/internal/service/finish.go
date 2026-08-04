@@ -325,6 +325,10 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 	s.log.InfoContext(ctx, "판단 저장",
 		"project", in.Project, "session_id", in.SessionID, "mode", string(in.Kind),
 		"count", len(recipients), "bytes", len(in.Body))
+
+	// 처방을 받고 판단을 남겼다 — 열린 처방을 닫는다. 실패해도 판단은 이미 저장됐다.
+	s.ackPrescriptions(ctx, in.Project, in.SessionID)
+
 	return NoteResult{Judgment: j, Recipients: recipients}, nil
 }
 
