@@ -323,6 +323,11 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 // 그때는 `fd migrate [--to N]` / `fd migrate --rollback` 으로 적용을 기동에서 분리한다.
 // 그 전까지 ③의 자리는 RollbackHint 가 **문구로** 메운다 — 명령이 없다면 적어도
 // 절차가 실패한 그 자리에 있어야 한다.
+//
+// ★ **그 조건은 이제 시험이 지킨다** — TestBundledMigrationsAreAdditive(migrate_guard_test.go).
+// 만료 조건이 문서와 주석에만 있으면 아무도 그 순간을 안 본다. 파괴적 증분이 들어오는 날
+// 이 판단은 근거를 잃는데, 그 사실이 어디에도 안 뜨면 **만료된 판단 위에서 계속 돌게 된다** —
+// 이 절이 없애려던 위험("설계대로 돼 있다고 믿는 것")이 정확히 그 모양이다.
 
 // RollbackHint 는 마이그레이션이 깨졌을 때 되돌리는 절차를 낸다. 순수 함수다.
 //
