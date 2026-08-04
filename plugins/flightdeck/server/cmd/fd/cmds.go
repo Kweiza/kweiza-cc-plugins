@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
@@ -422,10 +423,23 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	fmt.Fprintf(out, "  머신 %s (%s)\n", a.machine, a.machineSrc)
 	fmt.Fprintf(out, "  프로젝트 %s · 주 저장소 %s · 워크트리 %s\n", a.proj.ID, a.proj.Path, a.proj.Worktree)
 	fmt.Fprintf(out, "  좌표 판정: %s\n", a.proj.Detail)
+	// ★ 아웃박스는 **상태 디렉토리마다 따로 쌓인다**(채널마다 다르다 — 훅·MCP 는
+	// CLAUDE_PLUGIN_DATA, 사용자 셸은 XDG_STATE_HOME|~/.local/state). 그래서 이 줄이
+	// 세는 것은 "이 머신의 대기"가 아니라 **이 채널의 대기**다. 자리를 함께 찍지 않으면
+	// 같은 머신에서 채널을 바꿔 물었을 때 숫자가 달라지는 이유를 알 길이 없다.
 	if pend, err := a.cli.Outbox.List(); err != nil {
 		fmt.Fprintf(out, "  ! 아웃박스를 못 읽었다: %v\n", err)
 	} else {
-		fmt.Fprintf(out, "  아웃박스 대기 %d건\n", len(pend))
+		fmt.Fprintf(out, "  아웃박스 대기 %d건 (이 채널의 자리: %s)\n", len(pend), a.sd.Path)
+	}
+	// 격리된 판단은 **버려진 것이 아니라 옮겨진 것**이다. 안 찍으면 조용히 사라진 것과 같다.
+	if rej, err := a.cli.Outbox.Rejected(); err != nil {
+		fmt.Fprintf(out, "  ! 격리 파일을 못 읽었다: %v\n", err)
+	} else if len(rej) > 0 {
+		fmt.Fprintf(out, "  ! 격리된 판단 %d건 — 영구 거절이라 큐에서 뺐다(버리지 않았다)\n", len(rej))
+		for _, r := range rej {
+			fmt.Fprintf(out, "      %s · %s\n", r.At.Format(time.RFC3339), clip(r.Reason, 200))
+		}
 	}
 	if a.notice != "" {
 		fmt.Fprintf(out, "  ! %s\n", a.notice)
