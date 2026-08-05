@@ -285,19 +285,30 @@ func TestBoardNotesUnattributedCards(t *testing.T) {
 //
 //	Board() 안의 `view.AckReach = &AckReach{...}` 한 줄을 지워도(조회는 여전히 돌지만
 //	결과를 버려도) 이 패키지의 스위트가 초록이다 — 실측 확인됨.
+//
+// ★ 셋(emitted·reachable·acked)을 **서로 다른 값**으로 둔다(3/2/1). 1/1/1 이던 앞선
+// 픽스처는 `AckReach{}` 리터럴의 필드가 뒤바뀌어도(예: `Emitted: re, Reachable: em`)
+// 세 값이 우연히 같아 안 잡혔다 — 검토가 뮤테이션으로 확인한 결함이다.
 func TestBoardWiresAckReach(t *testing.T) {
 	s, st := newSvc(t)
 	repo := newRepo(t)
-	sess := openSession(t, s, "p", repo, repo, "cc-1", "")
+	// 셋이 발화한다 · 그중 둘(s1·s2)이 판단을 가진다 · 하나(s1)만 ack 됐다.
+	s1 := openSession(t, s, "p", repo, filepath.Join(repo, "a"), "cc-1", "")
+	s2 := openSession(t, s, "p", repo, filepath.Join(repo, "b"), "cc-2", "")
+	s3 := openSession(t, s, "p", repo, filepath.Join(repo, "c"), "cc-3", "")
 
-	st.LogEvent(ctx(), "prescribe", "p", sess.Session.ID, map[string]any{"key": "k"})
-	if _, err := st.AddJudgment(ctx(), model.Judgment{
-		Project: "p", SessionID: sess.Session.ID, Kind: model.JudgmentDecision,
-		Title: "t", Body: "b",
-	}); err != nil {
-		t.Fatalf("AddJudgment: %v", err)
+	for _, sess := range []SessionResult{s1, s2, s3} {
+		st.LogEvent(ctx(), "prescribe", "p", sess.Session.ID, map[string]any{"key": "k"})
 	}
-	st.LogEvent(ctx(), "prescribe_ack", "p", sess.Session.ID, map[string]any{"keys": []string{"k"}})
+	for _, sess := range []SessionResult{s1, s2} {
+		if _, err := st.AddJudgment(ctx(), model.Judgment{
+			Project: "p", SessionID: sess.Session.ID, Kind: model.JudgmentDecision,
+			Title: "t", Body: "b",
+		}); err != nil {
+			t.Fatalf("AddJudgment(%s): %v", sess.Session.ID, err)
+		}
+	}
+	st.LogEvent(ctx(), "prescribe_ack", "p", s1.Session.ID, map[string]any{"keys": []string{"k"}})
 
 	view, err := s.Board(ctx(), "p", BoardOptions{})
 	if err != nil {
@@ -306,8 +317,8 @@ func TestBoardWiresAckReach(t *testing.T) {
 	if view.AckReach == nil {
 		t.Fatal("Board 가 AckReach 를 배선하지 않았다 — view.AckReach 가 nil 이다")
 	}
-	if view.AckReach.Emitted != 1 || view.AckReach.Reachable != 1 || view.AckReach.Acked != 1 {
-		t.Errorf("view.AckReach = %+v, want {Emitted:1 Reachable:1 Acked:1}", *view.AckReach)
+	if view.AckReach.Emitted != 3 || view.AckReach.Reachable != 2 || view.AckReach.Acked != 1 {
+		t.Errorf("view.AckReach = %+v, want {Emitted:3 Reachable:2 Acked:1}", *view.AckReach)
 	}
 }
 
