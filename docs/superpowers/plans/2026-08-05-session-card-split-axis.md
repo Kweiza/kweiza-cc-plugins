@@ -784,6 +784,39 @@ func TestFoldConversationsLiftsIsSelf(t *testing.T) {
 	}
 }
 
+// Worktrees 는 카드 수가 아니라 **서로 다른 워크트리 수**다.
+// 브리프의 다른 케이스는 카드 2장·워크트리 2개라 둘이 우연히 같아, 이 시험이
+// 없으면 `Worktrees = len(Cards)` 로 바꿔도 스위트가 초록이다(검토가 뮤테이션으로 확인).
+func TestFoldCountsDistinctWorktreesNotCards(t *testing.T) {
+	got := FoldConversations([]SessionCard{
+		card("s1", "cc-a", "/repo", false, "a.go"),
+		card("s2", "cc-a", "/repo", false, "b.go"), // 같은 워크트리의 다른 창
+		card("s3", "cc-a", "/repo/sub", false, "c.go"),
+	})
+	if len(got) != 1 {
+		t.Fatalf("묶음 %d개, 원하는 것 1개", len(got))
+	}
+	if len(got[0].Cards) != 3 {
+		t.Fatalf("카드 %d장, 원하는 것 3장", len(got[0].Cards))
+	}
+	if got[0].Worktrees != 2 {
+		t.Fatalf("워크트리 %d개, 원하는 것 2개 — 카드 수(3)와 달라야 한다", got[0].Worktrees)
+	}
+}
+
+// 묶음의 Paths 를 만져도 입력이 안 바뀐다 — 얕은 복사면 여기서 원본이 오염된다.
+// 이 계약이 없으면 Task 4 의 렌더가 표시용으로 한 번 정렬하는 것만으로
+// BoardView.Sessions 가 조용히 바뀐다(검토가 실측으로 재현했다).
+func TestFoldDeepCopiesPaths(t *testing.T) {
+	in := []SessionCard{card("s1", "cc-a", "/repo", false, "c.go", "a.go", "b.go")}
+	got := FoldConversations(in)
+	sort.Strings(got[0].Cards[0].View.Paths)
+	if want := []string{"c.go", "a.go", "b.go"}; !reflect.DeepEqual(in[0].View.Paths, want) {
+		t.Fatalf("묶음의 Paths 를 정렬했더니 입력이 %v 로 바뀌었다. 원하는 것 %v — "+
+			"Sessions 를 안 바꾼다는 계약이 이 층위에서 뚫려 있다", in[0].View.Paths, want)
+	}
+}
+
 // 대조 단정 — Sessions 를 안 건드리는 것이 이 설계의 계약이다.
 // dashboard.json 소비자(이 항목의 재측정 명령을 포함)가 그것에 기대고 있다.
 func TestFoldDoesNotMutateCards(t *testing.T) {
@@ -863,11 +896,18 @@ func FoldConversations(cards []SessionCard) []Conversation {
 	for i := range out {
 		seenWT := map[string]bool{}
 		seenPath := map[string]bool{}
-		for _, c := range out[i].Cards {
+		for j, c := range out[i].Cards {
 			seenWT[c.View.Session.Worktree] = true
 			for _, p := range c.View.Paths {
 				seenPath[p] = true
 			}
+			// ★ Paths 를 **깊게 복사**한다. SessionCard 를 값으로 담으면 슬라이스는
+			//   원본과 같은 배열을 공유하고, 그러면 소비자가 표시용으로 한 번
+			//   정렬하는 것만으로 BoardView.Sessions 가 조용히 오염된다(실측 재현됨).
+			//   "Sessions 를 안 바꾼다"가 이 과제의 최우선 제약인데, 얕은 복사는 그
+			//   방벽을 이 층위에서 이미 뚫어 놓는다. 규칙으로 막지 않고 구조로 막는다 —
+			//   이 저장소가 "검사가 아니라 부재로 강제한다"를 쓰는 것과 같은 판정이다.
+			out[i].Cards[j].View.Paths = append([]string(nil), c.View.Paths...)
 		}
 		out[i].Worktrees = len(seenWT)
 		out[i].PathCount = len(seenPath)
@@ -890,6 +930,53 @@ func FoldConversations(cards []SessionCard) []Conversation {
 	view.Conversations = FoldConversations(cards)
 ```
 
+**그리고 이 한 줄을 잠그는 배선 시험을 반드시 둔다.** 순수 함수만 시험하면 이 줄을
+지워도 전 패키지가 초록이다(검토가 뮤테이션으로 확인했다 — 12개 패키지 전부 통과했다).
+스펙 §6 이 적은 원칙("시험이 구조체를 직접 조립하면 정말 배선됐나를 원리적으로 못 본다")이
+바로 이 자리다.
+
+`board_conversation_test.go` 에 더한다. 하네스는 `helper_test.go:31` 의 `newSvc(t)` 이고,
+`board_test.go` 가 `s.Board(ctx(), "p", BoardOptions{…})` 를 부르는 방식을 그대로 따른다.
+
+```go
+// ★ 이 시험은 **운영 진입점(Board)을 그대로 탄다.** FoldConversations 를 직접 부르는
+//   시험만 있으면 Board 안의 배선 한 줄을 지워도 스위트가 초록이다.
+func TestBoardFillsConversations(t *testing.T) {
+	s, _ := newSvc(t)
+	sess := // board_test.go 가 세션을 여는 방식을 그대로 쓴다
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if len(view.Sessions) == 0 {
+		t.Fatal("세션 카드가 없다 — 이 시험이 아무것도 안 재고 있다")
+	}
+	if len(view.Conversations) == 0 {
+		t.Fatal("Conversations 가 비었다 — Board 가 FoldConversations 를 안 부른다")
+	}
+	// 카드 전부가 묶음 어딘가에 정확히 한 번 들어가야 한다.
+	seen := map[string]int{}
+	for _, cv := range view.Conversations {
+		for _, k := range cv.Cards {
+			seen[k.View.Session.ID]++
+		}
+	}
+	if len(seen) != len(view.Sessions) {
+		t.Fatalf("묶음에 담긴 카드 %d장, Sessions %d장 — 접기가 카드를 잃거나 더했다",
+			len(seen), len(view.Sessions))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("카드 %s 가 묶음에 %d번 나온다", id, n)
+		}
+	}
+}
+```
+
+`sess` 를 얻는 정확한 방법은 `board_test.go` 의 기존 시험을 보고 맞춘다(그 파일이
+`newSvc` 로 서비스를 세우고 세션을 여는 절차를 이미 갖고 있다). **`board_test.go` 자체는
+수정하지 마라** — 새 파일에만 쓴다.
+
 - [ ] **Step 4: 초록을 확인한다**
 
 ```bash
@@ -898,13 +985,20 @@ cd plugins/flightdeck/server && go test ./internal/service/ -run TestFold -v
 
 기대: PASS 넷 전부.
 
-- [ ] **Step 5: 되돌려 빨강을 확인한다**
+- [ ] **Step 5: 되돌려 빨강을 확인한다 — 다섯**
 
-`FoldConversations` 가 카드마다 묶음 하나를 내도록(접기 없이) 바꾸고 돌린다.
-기대: `TestFoldConversations` 와 `TestFoldConversationsLiftsIsSelf` 가 FAIL. 되돌린다.
+빨강이 안 나오면 그 시험이 아무것도 안 잡는 것이다. **시험을 고쳐라(구현을 고치지 마라).**
 
-빈 cc 도 접도록(`idx[cc] = …` 를 무조건 실행) 바꾸고 돌린다.
-기대: `TestFoldConversationsNeverFoldsEmptyCC` 가 FAIL. 되돌린다.
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | `FoldConversations` 가 카드마다 묶음 하나를 내게(접기 제거) | `TestFoldConversations` · `TestFoldConversationsLiftsIsSelf` |
+| 2 | 빈 cc 도 접게(`idx[cc] = ...` 를 무조건 실행) | `TestFoldConversationsNeverFoldsEmptyCC` |
+| 3 | `Worktrees = len(seenWT)` → `len(out[i].Cards)` | `TestFoldCountsDistinctWorktreesNotCards` |
+| 4 | `Paths` 깊은 복사 한 줄 제거 | `TestFoldDeepCopiesPaths` |
+| 5 | **`Board` 안의 `view.Conversations = ...` 한 줄 제거** | `TestBoardFillsConversations` |
+
+**5번이 이 과제의 핵심 방어다.** 검토가 확인했다 — 그 줄을 지워도 이전 판에서는
+전 패키지 12개가 초록이었다.
 
 - [ ] **Step 6: 커밋**
 
