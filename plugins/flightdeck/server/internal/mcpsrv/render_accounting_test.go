@@ -153,28 +153,37 @@ func TestRenderBundleEmptyStatesItsScope(t *testing.T) {
 	}
 }
 
-// TestRenderBundleAbsenceDoesNotNameFalseCauses 는 finding 5 의 나머지 절반이다.
+// TestRenderBundleAbsenceMeansOnlyUnread 는 finding 5 의 나머지 절반이다.
 //
-// 부재 문장이 원인을 **둘만**(낡은 캐시 · 구서버) 대고 있었다. 그런데
-// `pick(item_id: …)` 는 현행 서버에서도 이 값을 낸다(pickExplicit 이 묶음 축을 안
-// 채운다). 즉 신선한 온라인 응답이 셋 중 하나도 맞지 않는 원인을 지목받고, 그것을
-// 읽은 세션은 있지도 않은 서버 스큐를 고치러 간다 — 원인을 지어내는 것은 침묵보다 나쁘다.
-func TestRenderBundleAbsenceDoesNotNameFalseCauses(t *testing.T) {
+// nil 의 뜻을 **하나로** 지킨다. 서비스의 세 갈래(추천 · item_id 선점/재개 · 묶음)가
+// 전부 non-nil 을 내므로, nil 이 남는 길은 구서버와 옛 캐시 둘뿐이다 — 그러니
+// 부재 문장이 그 둘을 대는 것이 이제 참이다. 한때 이 문장은 현행 서버의 신선한
+// 응답에도 붙었고, 그때는 두 원인이 **다 거짓**이었다.
+//
+// 그리고 이 갈래는 겹침 범위를 **단정하지 않는다**: 축을 안 읽은 응답이라 어떤 경로
+// 집합을 봤는지도 알 수 없다. 모르는 것을 "선두 경로만 봤다"로 메우면 부재를 값으로
+// 접는 같은 실패를 한 칸 옆에서 반복하는 것이 된다.
+func TestRenderBundleAbsenceMeansOnlyUnread(t *testing.T) {
 	got := RenderPick(service.PickResult{
 		Mode: service.PickClaimed, Reason: "사유",
 		Item: &model.Item{ID: "solo", State: model.ItemClaimed, CreatedAt: t0},
+		// Bundle 은 nil — 구서버나 옛 캐시가 낸 응답의 모양이다.
 	}, t0)
 
 	if !strings.Contains(got, "묶음: 이 응답은 그 축을 읽지 않았다") {
 		t.Fatalf("축 부재를 아예 안 말한다:\n%s", got)
 	}
-	// 실제로 이 값이 나오는 갈래가 원인 목록에 있어야 한다.
-	if !strings.Contains(got, "item_id 하나를 지정한 호출이라 이웃을 안 찾았거나") {
-		t.Fatalf("현행 서버에서 실제로 나는 원인이 목록에 없다 — 세션이 헛짚는다:\n%s", got)
+	// 현행 서버의 단독 선점은 더 이상 이 갈래를 안 지난다 — 그러니 그것을 원인으로
+	// 대면 안 된다(그 문구가 남아 있으면 pickExplicit 의 고침이 되돌려진 것이다).
+	if strings.Contains(got, "item_id 하나를 지정한 호출이라 이웃을 안 찾았거나") {
+		t.Fatalf("현행 서버가 안 내는 갈래를 원인으로 댄다:\n%s", got)
 	}
-	// 그리고 겹침이 무엇을 본 값인지도 말해야 한다(이 갈래엔 겹침 범위 줄이 안 붙는다).
-	if !strings.Contains(got, "이 항목의 경로만") {
-		t.Fatalf("겹침이 무엇을 본 값인지 침묵한다 — 꼬리의 '겹침 없음'이 세션 전체로 읽힌다:\n%s", got)
+	// 축을 안 읽었으면 겹침 범위도 단정하면 안 된다.
+	if strings.Contains(got, "겹침 판정 범위:") {
+		t.Fatalf("축을 안 읽은 응답이 겹침 범위를 단정한다:\n%s", got)
+	}
+	if !strings.Contains(got, "어떤 경로 집합을 보고 나온 값인지도 이 응답만으로는 알 수 없다") {
+		t.Fatalf("겹침이 무엇을 본 값인지 모른다는 사실을 침묵한다:\n%s", got)
 	}
 }
 

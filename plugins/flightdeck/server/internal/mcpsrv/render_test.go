@@ -322,16 +322,33 @@ func TestRenderPickStatesOverlapScopeCoversTheWholeBundle(t *testing.T) {
 		t.Fatalf("브랜치가 묶음 선두라는 사실이 없다:\n%s", got)
 	}
 
+	// ★ 대조의 모양이 리뷰 라운드 2 finding 5 로 바뀌었다.
+	//
+	// 예전 대조는 Bundle 을 nil 로 두고 "겹침 판정 범위:" 가 **안 나와야 한다"**고
+	// 했다. 그런데 nil 은 이 브랜치의 계약상 "이 응답은 그 축을 안 읽었다" 하나만
+	// 뜻해야 하고, 현행 서버의 단독 선점은 축을 **읽는다**(pickExplicit 이 구성원
+	// 0건짜리 BundleInfo 를 낸다). 즉 옛 대조는 실재하지 않는 응답 모양에 대고
+	// 단정하고 있었고, 그 대가로 진짜 단독 응답이 겹침 범위를 침묵했다 —
+	// 꼬리의 "겹침: 없음"이 이 세션 전체에 대한 판정으로 읽히는 자리다.
+	//
+	// 그래서 대조를 **실재하는 모양**(구성원 0건, non-nil)으로 바꾸고, 지키려던
+	// 것은 그대로 지킨다: 묶음 전용 문구가 단독 pick 에 새면 안 된다.
 	solo := service.PickResult{
 		Mode: service.PickClaimed, Reason: "선점했다",
 		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0}, Branch: "lead",
+		Bundle: &service.BundleInfo{Reason: "이웃을 찾지 않았다", Scope: "이웃 후보를 아예 안 봤다"},
 	}
 	soloGot := RenderPick(solo, t0)
-	if strings.Contains(soloGot, "겹침 판정 범위:") {
-		t.Fatalf("묶음이 없는데 묶음 겹침 범위 문장이 나왔다:\n%s", soloGot)
+	// 묶음 전용 문구는 여전히 새면 안 된다 — 그것이 이 대조의 원래 목적이다.
+	if strings.Contains(soloGot, "묶음 2건의 경로") || strings.Contains(soloGot, "묶음 1건의 경로") {
+		t.Fatalf("구성원이 없는데 묶음 단위 겹침 문구가 나왔다:\n%s", soloGot)
 	}
 	if strings.Contains(soloGot, "묶음 선두의 id 다") {
-		t.Fatalf("묶음이 없는데 묶음 브랜치 설명이 나왔다:\n%s", soloGot)
+		t.Fatalf("구성원이 없는데 묶음 브랜치 설명이 나왔다:\n%s", soloGot)
+	}
+	// 그러나 **침묵하지도 않는다**: 겹침이 무엇을 본 값인지는 말해야 한다.
+	if !strings.Contains(soloGot, "겹침 판정 범위: 항목 lead 의 경로만 봤다") {
+		t.Fatalf("단독 응답이 겹침 범위를 침묵한다 — 꼬리의 '겹침 없음'이 세션 전체로 읽힌다:\n%s", soloGot)
 	}
 }
 

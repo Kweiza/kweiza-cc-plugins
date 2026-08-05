@@ -271,6 +271,67 @@ func TestPickBundleMixedResumeAndClaimNamesBothCounts(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// finding 5 — item_id 경로도 묶음 축을 읽는다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPickExplicitCarriesBundleAxis 는 nil 의 뜻을 **하나로** 지킨다.
+//
+// 이 브랜치가 세운 계약: nil = 이 응답은 그 축을 안 읽었다(구서버 · 옛 캐시),
+// 구성원 0건 = 읽었고 함께 낼 것이 없었다. 이 경로가 nil 을 내면 화면은
+// "낡은 캐시이거나 서버가 이 축을 모르는 판이다"를 찍는데, 이것은 현행 서버의
+// **신선한 온라인 응답**이다 — 두 원인 다 거짓이고, 그걸 읽은 세션은 있지도 않은
+// 서버 스큐를 고치러 간다. pick 다섯 갈래 중 셋이 이 자리를 지난다.
+func TestPickExplicitCarriesBundleAxis(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "e1", []string{"services/a.go"}, nil)
+
+	claim, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "e1"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	if claim.Bundle == nil {
+		t.Fatal("item_id 로 집었는데 묶음 축이 nil 이다 — 화면이 '서버가 이 축을 모른다'를 찍는다")
+	}
+	if len(claim.Bundle.Members) != 0 {
+		t.Fatalf("이웃을 찾지도 않았는데 구성원이 있다: %+v", claim.Bundle.Members)
+	}
+	// 구성원 0건이 "이웃이 없다"로 읽히면 안 된다 — 안 찾은 것이다.
+	if !strings.Contains(claim.Bundle.Scope, "안 봤다") {
+		t.Fatalf("구성원 0건의 뜻을 범위가 말하지 않는다: %q", claim.Bundle.Scope)
+	}
+
+	// 재개 갈래도 같은 축을 낸다 — 여기만 nil 이면 재개 응답에서 결함이 되살아난다.
+	resume, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "e1"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if resume.Mode != PickResumed {
+		t.Fatalf("전제가 깨졌다 — mode 가 %q 다", resume.Mode)
+	}
+	if resume.Bundle == nil {
+		t.Fatal("재개 응답의 묶음 축이 nil 이다")
+	}
+
+	// 그리고 묶음 선두로 들어와도 pickBundle 이 자기 BundleInfo 로 덮어써야 한다 —
+	// 여기 값이 새어 나가면 진짜 묶음이 "이웃을 안 찾았다"고 말하게 된다.
+	addItem(t, s, "p", "e2", []string{"services/b.go"}, nil)
+	addItem(t, s, "p", "e3", []string{"services/c.go"}, nil)
+	b, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: me.Session.ID, ItemIDs: []string{"e2", "e3"}})
+	if err != nil {
+		t.Fatalf("묶음 선점 실패: %v", err)
+	}
+	if b.Bundle == nil || len(b.Bundle.Members) != 1 {
+		t.Fatalf("묶음 응답의 구성원이 1건이 아니다: %+v", b.Bundle)
+	}
+	if strings.Contains(b.Bundle.Scope, "안 봤다") {
+		t.Fatalf("단독 경로의 범위 문장이 묶음 응답에 샜다: %q", b.Bundle.Scope)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // finding 1 — 응답이 무엇을 설명했는지는 순수 함수가 센다
 // ─────────────────────────────────────────────────────────────────────────────
 

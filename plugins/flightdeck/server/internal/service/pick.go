@@ -309,21 +309,31 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	}
 
 	res := PickResult{Item: &item, Branch: item.ID, Scope: "지정된 항목 1건"}
-	// ★ **이 경로는 Bundle 을 nil 로 둔다 — 그리고 그것이 오늘 열려 있는 결함이다.**
+	// ★ 묶음 축을 **이 경로에서도 낸다.** 이것이 이 브랜치가 세운 포인터 계약이다:
 	//
-	// 리뷰 라운드 2 finding 5: 렌더는 nil 을 "이 응답은 그 축을 읽지 않았다"로 찍는데,
-	// pick 다섯 갈래 중 셋(item_id 지정 선점 · 재개 · 묶음 선두)이 이 자리를 지나므로
-	// **현행 서버의 신선한 응답**에 그 문장이 붙는다. 옳은 고침은 여기서 BundleInfo 를
-	// 채워 "이웃을 안 찾았다"를 값으로 말하는 것이다.
+	//	nil        = 이 응답은 그 축을 **안 읽었다** (구서버 · 이 필드 이전에 굳은 캐시)
+	//	구성원 0건  = 읽었고, 이 응답이 함께 낸 항목이 없다(단독이다)
 	//
-	// 안 고친 이유는 판정이 아니라 **관문**이다: internal/api 의
-	// TestClaimSingleUnchangedWhenItemIDsEmpty 가 "item_ids 없이 부르면 응답 JSON 에
-	// bundle 키가 **없어야 한다**"를 못박고 있고(b8f860c — 이 라운드보다 앞선 커밋),
-	// 이 라운드의 제약이 기존 시험 수정을 금한다. 둘 중 하나를 사람이 골라야 한다.
+	// 안 채우면 무엇이 깨지나: 렌더가 nil 을 "낡은 캐시이거나 서버가 이 축을 모르는
+	// 판이다"로 찍는다. 그런데 pick 다섯 갈래 중 **셋**(item_id 지정 선점 · 재개 ·
+	// 묶음 선두)이 이 자리를 지나므로, 현행 서버의 **신선한 온라인 응답**에 그 문장이
+	// 붙는다 — 두 원인 다 거짓이고, 그걸 읽은 세션은 있지도 않은 서버 스큐를 고치러
+	// 간다. 이건 이 저장소가 다른 모든 자리에서 금지하는 "관측 안 함을 값으로 접는"
+	// 실패 그 자체다(QueueOpen·PathCheck 이 포인터인 이유와 같다).
 	//
-	// 그동안 침묵하지는 않는다 — renderBundle 의 부재 문장이 이 갈래를 **원인으로
-	// 이름 붙여** 낸다(거짓 원인만 대던 것을 고쳤다). 그것이 이 finding 이 명시한
-	// 최소선이다. 값으로 말하는 것보다 약하다: 소비자가 코드로 분기할 축은 여전히 없다.
+	// 구성원 0건이 "묶을 게 없다"로 읽히지 않도록 Scope 에 **왜 0건인지**를 적는다.
+	// 두 갈래의 0건이 말하는 사실이 다르기 때문이다:
+	//	추천 경로   — 이웃을 찾았고 직접 이어진 것이 없었다
+	//	이 경로     — 이웃을 애초에 안 찾았다(방사형 판정을 안 돌린다)
+	// 같은 값(빈 목록)으로 접히면 세션은 이 항목에 형제가 없다고 잘못 결론짓는다.
+	//
+	// pickBundle 은 선두로 이 함수를 태운 뒤 자기 BundleInfo 로 덮어쓴다 — 여기 값은
+	// item_id 단독 호출(선점·재개)에서만 살아남는다.
+	res.Bundle = &BundleInfo{
+		Reason: "item_id 하나를 지정한 호출이라 이웃을 찾지 않았다",
+		Scope: "이웃 후보를 아예 안 봤다 — 방사형 판정(judge.EligibleBundle)은 추천 경로에서만 돈다. " +
+			"함께 집으려면 item_ids 에 선두부터 순서대로 줘라",
+	}
 	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
