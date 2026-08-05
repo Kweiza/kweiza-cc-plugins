@@ -36,6 +36,12 @@ type HookPayload struct {
 	ToolInput      map[string]any `json:"tool_input"`
 	Trigger        string         `json:"trigger"`
 	CustomInstr    string         `json:"custom_instructions"`
+	// Reason 은 SessionEnd 가 **끝나는 이유**로 주는 값이다. 시작하는 것의 이름이 아니다.
+	// ★ clear 와 resume 말고는 아무도 안 쏜다 — 설치본 2.1.221·2.1.222 를 뜯어 확인했다
+	// (executeSessionEndHooks 호출부가 그 둘뿐이고, logout·prompt_input_exit·other·
+	// bypass_permissions_disabled 는 zod 열거값에만 있다). 그래서 이 훅으로는 프로세스
+	// 종료를 못 잡는다. 그 한계는 DESIGN.md 가 말한다.
+	Reason string `json:"reason"`
 	// StopHookActive 는 지금 이 호출 자체가 **Stop 훅의 주입이 만든 턴**의 끝에서
 	// 왔다는 뜻이다. hookStop 이 이것을 확인 없이 넘기면 무한 루프다(hookStop 주석 참고).
 	StopHookActive bool `json:"stop_hook_active"`
@@ -132,9 +138,11 @@ func (a *App) runHook(ctx context.Context, event string, stdin io.Reader, out io
 		a.hookPreCompact(ctx, p)
 	case "stop":
 		a.hookStop(ctx, p, perr, out)
+	case "session-end":
+		a.hookSessionEnd(ctx, p)
 	default:
 		a.log.Error("모르는 훅 이름", "mode", clip(event, 40),
-			"error", "session-start|user-prompt|post-tool|pre-compact|stop 중 하나여야 한다")
+			"error", "session-start|user-prompt|post-tool|pre-compact|stop|session-end 중 하나여야 한다")
 	}
 	return 0 // ★ 이 함수의 반환값은 항상 0 이다. 훅이 세션을 막으면 안 된다
 }
@@ -523,6 +531,51 @@ func (a *App) beatFromHook(ctx context.Context, p HookPayload, kind model.Signal
 		a.log.Warn("신호 기록 실패", "mode", string(kind), "error", werr.Error())
 	}
 	return res.Session.ID
+}
+
+// hookSessionEnd 는 /clear 로 떠나는 대화의 카드를 닫는다.
+//
+// ★ reason 은 **끝나는 이유**이지 시작하는 것의 이름이 아니다. 설치본 2.1.221·2.1.222 실측:
+// executeSessionEndHooks 를 부르는 자리는 `o3t("clear", …)`(clearConversation)와
+// `o3t("resume", …)`(돌고 있는 REPL 의 대화 갈아타기) 둘뿐이고, 프로세스 종료를 알리는 훅
+// 이벤트는 31종 어디에도 없다. **그래서 이 훅으로 창을 닫고 나간 세션은 못 잡는다.**
+//
+// ★ **clear 만 본다.** hooks.json 의 matcher 가 이미 거르지만 여기서 한 번 더 본다 —
+// matcher 가 바뀌거나 플랫폼이 다른 사유를 쏘기 시작한 날, 이 갈래가 없으면 살아 있는
+// 세션이 조용히 닫힌다. resume 은 **/fork 도 같은 사유로 오므로** 일부러 뺐다.
+//
+// ★ 이것이 안전한 것은 store 의 "열면 살아난다"(Tx.OpenSession)가 있기 때문이다.
+// clear 직후 SessionStart 가 같은 카드를 rekey 로 이어받고 그 OpenSession 이 되살린다.
+// 그 안전핀 없이 여기만 넣으면 살아서 일하는 세션이 보드에서 사라진다.
+func (a *App) hookSessionEnd(ctx context.Context, p HookPayload) {
+	if p.Reason != "clear" {
+		a.log.Debug("session-end: clear 가 아니라 아무것도 안 한다", "reason", clip(p.Reason, 40))
+		return
+	}
+	if strings.TrimSpace(p.CWD) != "" {
+		a.proj = resolveProject(a.env, p.CWD)
+	}
+	cc := a.ccSessionID(p.SessionID)
+	if cc == "" {
+		a.log.Warn("session-end: 세션 id 를 못 읽어 카드를 못 닫았다")
+		return
+	}
+	res, _, err := a.OpenSession(ctx, cc, "")
+	if err != nil {
+		a.log.Warn("session-end: 세션 좌표를 못 얻었다", "error", err.Error())
+		return
+	}
+	// ★ 선점을 든 카드는 안 닫는다. rekey 가 거절되면 그 선점이 통째로 안 보이게 되고,
+	// 그러면 항목을 아무도 못 집는데 누가 잡았는지도 안 보인다.
+	if len(res.Claims) > 0 {
+		a.log.Info("session-end: 선점이 남아 있어 카드를 안 닫는다",
+			"session_id", clip(res.Session.ID, 64), "claims", len(res.Claims))
+		return
+	}
+	if _, cerr := a.CloseSession(ctx, res.Session.ID, "/clear"); cerr != nil {
+		a.log.Warn("session-end: 카드를 못 닫았다",
+			"session_id", clip(res.Session.ID, 64), "error", cerr.Error())
+	}
 }
 
 var _ = service.APIVersion // 훅도 같은 계약 버전을 쓴다
