@@ -26,8 +26,9 @@
 |---|---|---|
 | `internal/store/probe.go` | DB 를 **읽기만** 해서 `MigrationPlan` 을 낸다. 적용하지 않는다 | 1 |
 | `internal/store/probe_test.go` | 상태별 DB 로 계획을 단언 | 1 |
-| `cmd/fd/selfwatch.go` | `ExeID` · `Replaced` · `Decide` 순수 함수 (유닉스) | 2, 4 |
-| `cmd/fd/selfwatch_other.go` | 비유닉스 no-op | 2 |
+| `cmd/fd/selfwatch.go` | **태그 없음** — `ExeID` · `Same` · `Action` · `Decide` · 감시기 본체 | 2, 4 |
+| `cmd/fd/selfwatch_unix.go` | `//go:build unix` — `exeIDOfPath` · `selfWatchSupported` · `execSelf` | 2, 4 |
+| `cmd/fd/selfwatch_other.go` | `//go:build !unix` — 같은 셋을 오류로 | 2, 4 |
 | `cmd/fd/selfwatch_test.go` | 순수 함수 표 구동 + 루프 시험(스텁 주입) | 2, 4 |
 | `cmd/fd/selfcheck.go` | `fd selfcheck --db` 서브명령 | 3 |
 | `cmd/fd/selfcheck_test.go` | 종료코드 갈래 | 3 |
@@ -509,8 +510,10 @@ func selfWatchSupported() bool { return false }
 
 ```
 go test ./cmd/fd/ -run 'TestDecide|TestSame' -v
+GOOS=windows GOARCH=amd64 go vet ./cmd/fd/
+GOOS=darwin  GOARCH=arm64 go vet ./cmd/fd/
 GOOS=windows GOARCH=amd64 go build ./...
-GOOS=darwin GOARCH=arm64 go build ./...
+GOOS=darwin  GOARCH=arm64 go build ./...
 ```
 
 기대: 7건 PASS. 교차 빌드 둘 다 통과(비유닉스 갈래가 컴파일된다).
@@ -1140,30 +1143,45 @@ func execSelf(exe string, argv, env []string) error {
 import 에 `"context"`, `"log/slog"`, `"os/exec"`, `"strings"`, `"sync"`, `"syscall"`, `"time"`,
 `"github.com/kweiza/flightdeck/internal/buildinfo"` 를 더한다.
 
-`selfwatch_other.go` 에는 no-op 을 더한다:
+**감시기 본체는 중립 파일에 한 벌만 둔다 — 비유닉스에 복제하지 마라.**
+
+> **계획 정정 (Task 2 리뷰가 드러낸 것).** 원래 이 자리는 `selfwatch_other.go` 에
+> `selfUpdateStatus`·`selfWatcher`·`newSelfWatcher`·`Status`·`Run` 을 **복제**하라고 적혀 있었다.
+> 그것이 Task 2 에서 실제로 깨진 결함과 **같은 모양**이다 — 구조체를 빌드 태그로 복제하면
+> 필드 집합이 갈리고, 태그 없는 시험 파일이 그 순간 다른 플랫폼에서만 컴파일에 실패한다.
+> `GOOS=windows go vet` 이 그것을 잡았고 `go build` 는 못 잡았다(`_test.go` 를 건너뛴다).
+>
+> 그래서 구조를 바꾼다. `selfWatcher` 의 필드와 `step`·`Run`·`Status`·`verifyWithSelfcheck`·
+> `containerVerdict` 는 **전부 플랫폼 중립**이다. 진짜로 갈려야 하는 것은 `execSelf` 하나뿐이다.
+
+위 코드(`selfUpdateStatus` · `selfWatcher` · `newSelfWatcher` · `Status` · `setStatus` ·
+`Run` · `step` · `verifyWithSelfcheck` · `firstLine` · `containerVerdict` · 두 상수)를
+**태그 없는 `cmd/fd/selfwatch.go`** 에 넣는다. `execSelf` 만 빼서 태그별로 가른다:
+
+`cmd/fd/selfwatch_unix.go` (`//go:build unix`) 에 더한다:
 
 ```go
-type selfUpdateStatus struct {
-	Watching bool
-	Reason   string
-	LastAt   time.Time
-	From, To string
-	Outcome  string
-	Detail   string
+// execSelf 는 진짜 syscall.Exec 다. 성공하면 **돌아오지 않는다.**
+func execSelf(exe string, argv, env []string) error {
+	return syscall.Exec(exe, argv, env)
 }
-
-type selfWatcher struct{ reason string }
-
-func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
-	return &selfWatcher{reason: errSelfWatchUnsupported.Error()}
-}
-func (w *selfWatcher) Status() selfUpdateStatus {
-	return selfUpdateStatus{Watching: false, Reason: w.reason}
-}
-func (w *selfWatcher) Run(ctx context.Context, drain func()) {}
 ```
 
-import 에 `"context"`, `"log/slog"`, `"time"` 을 더한다.
+`cmd/fd/selfwatch_other.go` (`//go:build !unix`) 에 더한다:
+
+```go
+// ★ 비유닉스에는 syscall.Exec 이 없다. **빈 성공을 돌려주면 안 된다** —
+// 호출부가 드레인까지 마친 뒤 "재기동했다"로 읽고 서버는 내려간 채로 남는다.
+func execSelf(exe string, argv, env []string) error {
+	return fmt.Errorf("%w (exe=%q)", errSelfWatchUnsupported, exe)
+}
+```
+
+비유닉스에서 `newSelfWatcher` 는 `selfWatchSupported()` 가 거짓이라 **감시기를 안 켜고**
+사유만 들고 돌아온다(위 구현 그대로). 그래서 no-op 을 따로 만들 필요가 없다.
+
+`selfwatch.go` 의 import 에 `"context"`, `"log/slog"`, `"os/exec"`, `"strings"`, `"sync"`, `"time"`,
+`"github.com/kweiza/flightdeck/internal/buildinfo"` 를 더한다. **`"syscall"` 은 `selfwatch_unix.go` 에만** 들어간다.
 
 `cmd/fd/serve.go` 의 `runServe` 를 고친다. `ctx, stop := signal.NotifyContext(...)` **다음**에:
 
@@ -1211,8 +1229,10 @@ import 에 `"context"`, `"log/slog"`, `"time"` 을 더한다.
 ```
 go test ./cmd/fd/ -run TestWatcher -v
 go test ./... 
+GOOS=windows GOARCH=amd64 go vet ./cmd/fd/
+GOOS=darwin  GOARCH=arm64 go vet ./cmd/fd/
 GOOS=windows GOARCH=amd64 go build ./...
-GOOS=darwin GOARCH=arm64 go build ./...
+GOOS=darwin  GOARCH=arm64 go build ./...
 ```
 
 기대: `TestWatcher*` 4건 PASS, 전체 스위트 초록, 교차 빌드 통과.
@@ -1566,6 +1586,7 @@ func selfUpdateLines(h healthzResponse) []string {
 go test ./cmd/fd/ -run TestRenderHealth -v
 go vet ./... && gofmt -l ./cmd ./internal
 go test -race ./...
+GOOS=windows GOARCH=amd64 go vet ./cmd/fd/ && GOOS=darwin GOARCH=arm64 go vet ./cmd/fd/
 GOOS=windows GOARCH=amd64 go build ./... && GOOS=darwin GOARCH=arm64 go build ./...
 ```
 
