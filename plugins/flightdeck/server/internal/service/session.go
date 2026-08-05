@@ -213,10 +213,6 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		}); err != nil {
 			return err
 		}
-		// 세션이 열렸다는 것 자체가 신호다. 훅이 한 번도 안 불려도 "언제 열렸나"는 남는다.
-		if err := t.Beat(sess.ID, model.SignalMCP, now); err != nil {
-			return err
-		}
 		return nil
 	})
 	if err != nil {
@@ -444,7 +440,6 @@ func (s *Service) SetState(ctx context.Context, sessionID string, st model.Sessi
 	if err := store.ValidateSessionState(st, why); err != nil {
 		return &RefusedError{What: "session state", Reason: err.Error()}
 	}
-	now := s.now()
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		sess, err := t.GetSession(sessionID)
 		if err != nil {
@@ -454,10 +449,6 @@ func (s *Service) SetState(ctx context.Context, sessionID string, st model.Sessi
 			"state": string(st), "reason": clip(why, 200),
 		})
 		if err := t.SetSessionState(sessionID, st, why); err != nil {
-			return err
-		}
-		// 상태를 바꾸는 것도 살아 있다는 사실이다.
-		if err := t.Beat(sessionID, model.SignalMCP, now); err != nil {
 			return err
 		}
 		return nil
