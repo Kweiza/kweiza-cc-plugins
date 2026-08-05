@@ -149,6 +149,16 @@ const coordinateGuidance = "이 서버는 POSIX 좌표계(슬래시)만 받는�
 //
 // ".." 성분도 통과시킨다. 그것은 실재하는 문제이지만 좌표계 축이 아니다 —
 // 상대경로 정책 전반을 함께 정해야 하므로 분리했다(스펙 §6).
+//
+// ★ **포함 축("이 경로가 프로젝트 안인가")도 여기 없다.** 그것은 순수 문자열 판정이
+// 아니다 — 기준 트리(세션 카드의 워크트리)를 알아야 하는데 이 함수는 그것을 안 받는다.
+// 그 판정은 service.RelPathWithin 이 하고, 발자국 관문이 그것을 쓴다(service.Beat).
+//
+// 이 구분이 이름으로 없어서 실제 사고가 났다. FilterPathCoordinate 를 지나온 경로는
+// "걸러졌다"고 읽혔지만 걸러진 것은 문자 집합뿐이었고, `/tmp/…/scratchpad/repo/x.go`
+// 는 흠 없는 POSIX 절대경로라 통과해 남의 저장소 사본이 발자국에 들어왔다.
+// 위 ".." 분리와 **같은 종류의 분리**이므로 같은 자리에 이름을 남긴다 — 안 남기면
+// 다음 사람도 이 함수를 포함 관문으로 읽는다.
 func JudgePathCoordinate(p string) CoordinateVerdict {
 	q := strings.TrimSpace(p)
 	switch {
