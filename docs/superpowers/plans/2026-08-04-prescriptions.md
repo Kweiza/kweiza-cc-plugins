@@ -1924,6 +1924,15 @@ Expected: FAIL 둘 다
 
 `internal/service/service.go:44`:
 
+> **개정 (2026-08-06 · 항목 `fd-item-premise-signal-table-has-no-history`).** 아래 주석 문안의
+> 셋째 ★ 절("signal 표로 … 간격 분포를 재면")은 **재료를 잘못 지목했다.** `signal` 표는 PK 가
+> `(session_id, kind)` 라 종류별 한 행이고 갱신되므로 간격이라는 값이 존재하지 않는다. 재료는
+> `event(kind='session.beat')` 뿐이다.
+>
+> **실제로 랜딩된 것은 이 문안이 아니다.** `internal/service/service.go` 의 현재 주석은 `event` 로
+> 실측한 결과판이고(침묵 W 뒤 복귀율과, 원래 근거였던 "화면이 줄어든다"가 **반증됐다**는 기록을
+> 함께 싣는다), 방법은 `DESIGN.md` §10 「1차 실측」에 있다. 아래는 그때의 계획 문안으로 남긴다.
+
 ```go
 	// DefaultLiveWindow 는 Board 가 "이 안에 신호가 있었나"로 자르는 기본 구간이다.
 	//
@@ -2137,6 +2146,20 @@ Task 1 Step 6 에서 적은 것을 정리한다. 안 잰 축은 "아직 아님"�
 - [ ] **Step 5: 후속 항목을 큐에 등록한다**
 
 MCP `add` 로 두 건을 만든다. **이 계획이 남긴 근거 없는 상수 둘이 여기서 닫힌다.**
+
+> **개정 (2026-08-06 · 항목 `fd-item-premise-signal-table-has-no-history`).** 아래 `add` 호출은
+> 그대로 실행됐고, **틀린 재료 지목이 큐 항목 본문이 되어 다음 사람에게 전달됐다.** 이 자리가 이
+> 사고의 발원지다 — `fd-live-window-baseline` 을 집은 세션이 지시대로 `signal` 표를 재려다
+> "못 잰다"에 부딪혔고, 그 사고 보고서가 항목 `fd-item-premise-signal-table-has-no-history` 다.
+>
+> 옳은 문안은 이렇다: title 은 "보드 생존 창의 근거를 `event`(session.beat) 원장으로 만든다",
+> body 의 "`signal` 표로" 는 "`event` 표(kind='session.beat', 추가 전용·스로틀 없음)로" 다.
+> `signal` 은 PK 가 `(session_id, kind)` 라 종류별 한 행이고 갱신되므로 간격이라는 값이 없다.
+>
+> **항목 본문 자체는 고칠 수 없다** — 이 저장소에 항목 본문을 갱신하는 표면이 존재하지 않는다
+> (`store/item.go` 의 쓰기는 Add·Delete·SetState·Claim·Finish·Move 뿐이고, REST·MCP·CLI 어디에도
+> 본문 수정 경로가 없다). 그래서 정정은 여기와 `DESIGN.md` §3·§4, 그리고 관문
+> `store/signal_is_not_history_test.go` 로 나갔다. 아래는 기록으로 남긴다.
 
 ```
 add(id="fd-live-window-baseline",
