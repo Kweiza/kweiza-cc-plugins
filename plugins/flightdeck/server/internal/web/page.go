@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -226,7 +227,10 @@ type SearchPanel struct {
 
 // Page 는 렌더 한 장의 전부다.
 type Page struct {
-	Now        string
+	Now string
+	// RenderedAt 은 이 장을 그린 시각(unix)이다. 쓰기 폼의 멱등 키가 여기서 나온다 —
+	// WriteKey 를 보라.
+	RenderedAt int64
 	Title      string
 	Projects   []model.Project
 	Project    model.Project
@@ -249,6 +253,18 @@ type Page struct {
 	Search     SearchPanel
 }
 
+// WriteKey 는 쓰기 폼 하나의 멱등 키다. 템플릿이 폼 action 의 쿼리에 싣고,
+// api 의 withScreenWrite 가 그것을 Idempotency-Key 헤더로 올린다.
+//
+// **쓰기 종류마다 다른 값이어야 한다.** 한 장이 키 하나를 공유하면 회수를 누른 뒤
+// 폐기를 누를 때 같은 키가 되어, 두 번째가 첫 번째의 재시도로 접힌다.
+//
+// 렌더 시각을 쓰는 이유: 더블클릭은 같은 장이라 같은 키 → 접힌다.
+// 새로고침하면 새 장이라 새 키 → 다시 눌린다. 멱등이 원래 원하는 의미 그대로다.
+func (p Page) WriteKey(kind string) string {
+	return "web:" + kind + ":" + strconv.FormatInt(p.RenderedAt, 10)
+}
+
 // buildPage 는 화면 한 장을 조립한다.
 //
 // ★ 한 축이 실패해도 나머지는 낸다. 조정 화면이 파생 실패로 통째로 사라지면
@@ -257,11 +273,12 @@ type Page struct {
 func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 	now := h.now()
 	p := Page{
-		Now:     now.Format("2006-01-02 15:04:05 MST"),
-		Title:   "flightdeck",
-		Refresh: h.refresh,
-		SSEPath: h.ssePath,
-		Notice:  req.notice,
+		Now:        now.Format("2006-01-02 15:04:05 MST"),
+		RenderedAt: now.Unix(),
+		Title:      "flightdeck",
+		Refresh:    h.refresh,
+		SSEPath:    h.ssePath,
+		Notice:     req.notice,
 	}
 
 	st := h.svc.Store()

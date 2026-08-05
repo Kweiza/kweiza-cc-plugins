@@ -135,7 +135,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   </div>
 
   {{/* 쓰기 ① — 선점 회수. 사유 필수. 회수 행위 자체가 판단(decision)으로 원장에 남는다 */}}
-  <form class="write" method="post" action="actions/reclaim">
+  <form class="write" method="post" action="actions/reclaim?key={{.WriteKey "reclaim"}}">
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>회수할 선점
       <select name="item" required {{if not .Live.Targets}}disabled{{end}}>
@@ -217,7 +217,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{else}}{{if not .Queue.StatsErr}}<p class="empty">탈락 줄이 0건이다 — 판정은 돌았고 아무도 탈락하지 않았다.</p>{{end}}{{end}}
 
   {{/* 쓰기 ② — 항목 폐기. 사유 필수. close_reason 과 판단 양쪽에 남는다 */}}
-  <form class="write" method="post" action="actions/drop">
+  <form class="write" method="post" action="actions/drop?key={{.WriteKey "drop"}}">
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>폐기할 항목
       <select name="item" required {{if not .Queue.Targets}}disabled{{end}}>
