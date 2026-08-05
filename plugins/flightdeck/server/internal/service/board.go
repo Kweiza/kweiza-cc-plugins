@@ -396,7 +396,24 @@ func liveFor(cards []SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// ★ 대화 id 를 함께 넘긴다. 카드 id 만으로는 형제 카드(같은 대화, 다른 카드)를
+			// 남으로 보고 **자기 자신과 겹친다**고 알린다. prescribe 쪽이 먼저 같은 사고를
+			// 겪고 같은 한 줄로 고쳤다(service/prescribe.go 의 Others 조립부).
+			CCSessionID: c.View.Session.CCSessionID,
 		})
 	}
 	return out
+}
+
+// selfCCOf 는 카드 목록에서 **내 카드의 대화 id** 를 찾는다.
+//
+// 못 찾으면 빈 문자열이고, 그러면 형제 판정이 안 돈다 — 겹침이 더 나오는 쪽이다.
+// 반대로 접었다가는 관측이 깨진 순간 진짜 겹침이 조용히 사라진다.
+func selfCCOf(cards []SessionCard, self string) string {
+	for _, c := range cards {
+		if c.View.Session.ID == self {
+			return c.View.Session.CCSessionID
+		}
+	}
+	return ""
 }
