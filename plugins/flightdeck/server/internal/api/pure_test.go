@@ -426,6 +426,9 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 	}
 }
 
+// ★ 문자열 포함만 보면 태그 오타(예: outcome → outcomeX)가 안 잡힌다 — 그 오타가 나도
+// 값은 여전히 응답 어딘가에 있으므로 strings.Contains(raw, "refused") 는 그대로 통과한다.
+// 그래서 **키:값 쌍**으로 단언한다. `"outcome":"refused"` 는 태그가 정확히 outcome 일 때만 나온다.
 func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
 	at := time.Date(2026, 8, 5, 0, 31, 2, 0, time.UTC)
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
@@ -438,14 +441,24 @@ func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
 	}
-	for _, want := range []string{"self_update", "refused", "1d044b2"} {
+	for _, want := range []string{
+		`"self_update":`,
+		`"watching":true`,
+		`"outcome":"refused"`,
+		`"from":"07e5df4"`,
+		`"to":"1d044b2"`,
+		`"detail":`,
+		`"last_at":`,
+	} {
 		if !strings.Contains(string(raw), want) {
-			t.Fatalf("%q 가 응답에 없다: %s", want, raw)
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
 		}
 	}
 }
 
 // ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
+// json.Marshal 을 거쳐 **실제 바이트**로 확인한다 — 구조체 필드만 보면 태그 오타를
+// 원리적으로 못 잡는다(Go 필드 값은 태그와 무관하게 그대로 있으므로).
 func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
 		false, true, buildinfo.Coord{}, SelfUpdateStatus{
@@ -456,6 +469,36 @@ func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
 	}
 	if strings.TrimSpace(body.SelfUpdate.Reason) == "" {
 		t.Fatal("왜 안 보는지가 비었다")
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{`"watching":false`, `"reason":`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ 시도가 없었으면 last_at 은 응답에서 아예 **빠져야** 한다(omitempty). 제로 시각을
+// null 로 찍으면 "시도가 있었는데 시각을 모른다"로 읽힐 수 있다 — 부재와 null 은 다른 말이다.
+// serve.go 의 LastAt.IsZero() 변환(time.Time 제로값 → nil *time.Time)이 이 축의 유일한
+// 방어이고, 그 변환이 깨지면(예: 항상 &at 를 채우면) 이 시험이 잡는다.
+func TestHealthzOmitsLastAtWhenNoAttemptEver(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, // 감시 중이지만 아직 교체를 한 번도 안 봤다 — LastAt 이 nil
+		})
+	if body.SelfUpdate.LastAt != nil {
+		t.Fatalf("시도가 없었는데 LastAt 이 채워졌다: %v", body.SelfUpdate.LastAt)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(raw), `"last_at"`) {
+		t.Fatalf("last_at 이 omitempty 로 안 빠졌다: %s", raw)
 	}
 }
 
