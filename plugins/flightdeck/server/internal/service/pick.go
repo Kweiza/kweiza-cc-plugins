@@ -35,7 +35,8 @@ const (
 type PickInput struct {
 	Project   string
 	SessionID string
-	ItemID    string // 비면 추천, 있으면 선점
+	ItemID    string   // 비면 추천, 있으면 단독 선점
+	ItemIDs   []string // 묶음 선점. **첫째가 선두**이고 그 id 가 브랜치가 된다
 }
 
 // PickResult 는 pick 한 번의 결과다.
@@ -103,15 +104,23 @@ type BundleMember struct {
 	Notes     []model.Judgment       `json:"notes,omitempty"` // 집었을 때만 전문
 	// Claimed 는 이 구성원이 실제로 선점됐는가다.
 	//
-	// ★ 지금(추천 경로)은 이 응답을 만드는 코드 경로가 하나뿐이라 값이 항상 false
-	// 이고, "false=안 집음"과 "false=이 경로가 이 축을 아예 안 봄"이 갈릴 자리가
-	// 없다 — 그래서 지금은 bool 로 둔다(PathCheck·Bundle 처럼 포인터로 만들 이유가
-	// 아직 없다). 태스크 8이 묶음 채택(claim) 경로를 들여 "채택 시도했지만 실패"
-	// 같은 세 번째 상태가 생기면, 그 순간 이 필드도 포인터로 승격해야 한다 —
-	// 미리 승격하지 않는 이유는 존재하지 않는 세 번째 상태를 미리 코드로 못 박으면
-	// 그 모양이 그대로 굳어 실제 세 번째 상태와 안 맞을 위험이 더 크기 때문이다.
+	// ★ 태스크 8이 예고했던 세 번째 상태("채택 시도했지만 실패")가 실제로 생겼다
+	// (pickBundle). 그런데도 **포인터로 승격하지 않기로 했다** — bool 을 유지하되
+	// Claimed 와 Rejection 을 **항상 쌍으로 읽게** 계약을 건다:
+	//
+	//	Claimed=true              → 집었다. Rejection 은 nil 이다.
+	//	Claimed=false, Rejection≠nil → 집으려 시도했고 실패했다. 사유가 여기 있다.
+	//	Claimed=false, Rejection=nil → 이 응답을 만든 경로가 채택 축을 아예 안 봤다
+	//	                                (추천 경로 — 아직 안 집은 것이라 시도 자체가 없다).
+	//
+	// 세 상태를 가르는 것은 Claimed 혼자가 아니라 **이 두 필드의 쌍**이다. 그래서
+	// bool 로도 충분하다 — Bundle·PathCheck·QueueOpen 처럼 "한 필드가 곧 그 축을
+	// 읽었는지 여부까지 말해야 하는" 자리가 아니라, 이웃 필드(Rejection)가 이미
+	// 그 역할을 나눠 맡는 자리다. 지키는 쪽의 의무는 하나: **집기를 시도했는데
+	// 실패한 모든 갈래는 반드시 Rejection 을 채운다**(pickBundle 의 rejectionOf 가
+	// 그 의무를 진다) — 하나라도 빠뜨리면 그 실패가 "안 봤다"로 오독된다.
 	Claimed   bool             `json:"claimed"`
-	Rejection *model.Rejection `json:"rejection,omitempty"` // 못 집었으면 사유
+	Rejection *model.Rejection `json:"rejection,omitempty"` // 못 집었으면 사유(코드+상세). Claimed=false 인데 이게 nil 이면 "이 축을 안 봤다"는 뜻이다
 }
 
 // ValidateItemID 는 항목 id 가 브랜치 이름·디렉토리 이름으로 쓰여도 안전한지 본다. 순수 함수다.
@@ -203,6 +212,13 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 	if strings.TrimSpace(in.SessionID) == "" {
 		return PickResult{}, &RefusedError{What: "pick", Reason: "session_id 가 비었다"}
 	}
+	// item_ids 가 왔는데(길이 > 0) 다듬고 나면 쓸 게 하나도 없으면(전부 공백·중복)
+	// 그 요청은 "추천해 달라"가 아니라 잘못 채운 묶음 요청이다. 조용히 추천 경로로
+	// 미끄러지면 세션은 묶음을 넣은 줄 알고 기다리는데 서버는 다른 질문에 답한다.
+	if len(in.ItemIDs) > 0 && len(dedupeIDs(in.ItemIDs)) == 0 {
+		return PickResult{}, &RefusedError{What: "pick",
+			Reason: "item_ids 에 쓸 수 있는 항목 id 가 없다"}
+	}
 	proj, err := s.st.GetProject(ctx, in.Project)
 	if err != nil {
 		return PickResult{}, err
@@ -215,9 +231,12 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 	selfCC := selfCCOf(cards, in.SessionID)
 
 	var res PickResult
-	if strings.TrimSpace(in.ItemID) != "" {
+	switch {
+	case len(in.ItemIDs) > 0:
+		res, err = s.pickBundle(ctx, proj, in, live, selfCC, d, now)
+	case strings.TrimSpace(in.ItemID) != "":
 		res, err = s.pickExplicit(ctx, proj, in, live, selfCC, d, now)
-	} else {
+	default:
 		res, err = s.pickRecommend(ctx, proj, in, live, selfCC, d, now)
 	}
 	if err != nil {
@@ -344,6 +363,124 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	s.log.InfoContext(ctx, "선점",
 		"project", proj.ID, "session_id", in.SessionID, "item", item.ID, "overlaps", len(res.Overlaps))
 	return res, nil
+}
+
+// pickBundle 은 세션이 지정한 묶음을 선점한다.
+//
+// 지키는 것 둘:
+//
+//  1. **선두는 원자다.** 못 집으면 아무것도 안 쓰고 거절한다 — 브랜치가 정의되지
+//     않으므로 "묶음을 집었다"고 말할 수 없다(선두의 id 가 곧 브랜치 이름이다).
+//  2. **구성원은 각각 별도 트랜잭션이다.** 하나를 남이 채 갔다는 이유로 이미 성립한
+//     선두 선점을 되돌리면 세션이 아무것도 못 얻고, 동시 세션이 스물 넘는 환경에서
+//     그 재시도는 잦다. 대신 **침묵하지 않는다** — 못 집은 사유를 그대로 싣는다
+//     (BundleMember.Claimed 옆의 계약 참고).
+//
+// 선두·구성원 전부 pickExplicit 을 그대로 태운다 — 흉내 내면 조회와 삽입 사이에
+// 남이 잡는 창이 생긴다(judge.JudgeClaim 이 그 창을 막는 유일한 자리다).
+func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInput,
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
+
+	ids := dedupeIDs(in.ItemIDs) // 순서 보존 중복 제거 — 둘째 사본이 재개 경로를 타 사유를 흐리지 않게
+	lead, rest := ids[0], ids[1:]
+
+	// ① 선두 — 기존 단독 경로를 그대로 탄다. 실패하면 여기서 즉시 반환한다:
+	// 트랜잭션을 하나도 안 열었으니 되돌릴 것도 없다(원자성이 공짜로 나온다).
+	res, err := s.pickExplicit(ctx, proj,
+		PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: lead}, live, selfCC, d, now)
+	if err != nil {
+		return PickResult{}, err
+	}
+
+	res.Scope = fmt.Sprintf("지정된 묶음 %d건(선두 %s)", len(ids), lead)
+	res.Bundle = &BundleInfo{
+		Reason: fmt.Sprintf("세션이 지정한 묶음이다 — 선두 %s 가 브랜치가 된다", lead),
+		Scope:  "판정 없이 지정된 그대로 집었다",
+	}
+
+	// ② 구성원 — 되는 대로 집는다. pickExplicit 호출 하나하나가 자기 트랜잭션이라
+	// 하나의 실패가 앞서 성립한 선두·다른 구성원의 선점에 영향을 못 준다.
+	allPaths := append([]string(nil), res.Item.Paths...)
+	for _, id := range rest {
+		m := BundleMember{Link: judge.Link{Item: id, Detail: "세션이 함께 지정했다"}}
+		sub, serr := s.pickExplicit(ctx, proj,
+			PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: id}, live, selfCC, d, now)
+		if serr != nil {
+			m.Rejection = rejectionOf(id, serr)
+			s.log.WarnContext(ctx, "묶음 구성원 선점 실패 — 나머지를 진행한다",
+				"project", proj.ID, "session_id", in.SessionID, "item", clip(id, 64),
+				"error", serr.Error())
+			res.Bundle.Members = append(res.Bundle.Members, m)
+			continue
+		}
+		// 집었으면 판단 전문을 함께 낸다 — 추천(미집음)과 다른 점이 이것이다.
+		// sub.Notes 는 pickExplicit 이 linkedJudgments 로 이미 채워 왔다.
+		m.Item, m.Claimed = *sub.Item, true
+		m.Notes, m.PathCheck = sub.Notes, sub.PathCheck
+		allPaths = append(allPaths, sub.Item.Paths...)
+		res.Bundle.Members = append(res.Bundle.Members, m)
+	}
+
+	// ③ 겹침은 묶음 전체 경로의 합집합으로 다시 본다 — "남과 부딪히는가"는 항목
+	// 단위가 아니라 묶음 단위 질문이다(이 세션이 그 경로들을 한 브랜치에서 함께
+	// 건드리기 때문이다). 선두만 보고 넘기면 뒤늦게 집은 구성원의 겹침이 안 보인다.
+	res.Overlaps = judge.OverlapsWithLive(allPaths, live, in.SessionID, selfCC)
+
+	// ★ 파생 신선도도 묶음 전체를 반영해 다시 낸다. 선두 단독 호출 시점의 스냅샷을
+	// 그대로 두면 구성원 처리 중에 d 에 쌓인 실패(예: 안전하지 않은 id 라 워크트리
+	// 명령을 못 낸 구성원)가 응답에서 사라진다 — d 는 이 함수 전체가 공유하는
+	// 누산기라 이 재계산은 부작용이 없다(d.result 는 순수 조회다).
+	res.Derived = d.result(now)
+
+	claimed := 1 // 선두는 이미 집었다
+	for _, m := range res.Bundle.Members {
+		if m.Claimed {
+			claimed++
+		}
+	}
+	res.Reason = fmt.Sprintf("선두 %s 를 선점했다. 묶음 %d건 중 %d건을 집었다", lead, len(ids), claimed)
+	return res, nil
+}
+
+// dedupeIDs 는 순서를 지키며 공백과 중복을 걷어낸다. 순수 함수다.
+//
+// 같은 id 를 두 번 넣으면 둘째 사본이 pickExplicit 의 재개 경로("이미 내 선점")를
+// 타 사유가 흐려진다 — 실제로 못 집은 게 아닌데 구성원 목록에 재개 사유가 섞인다.
+func dedupeIDs(ids []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// rejectionOf 는 구성원 선점 실패를 탈락 사유 한 줄로 바꾼다. 순수 함수다.
+//
+// ★ 실물 오류 타입은 store.ClaimHeldError(남이 쥐고 있다)·store.ClaimRefusedError
+// (없음·끝남·폐기 — 점유자 축과 무관한 사유)다. store.ConflictError 는 다른
+// 도메인(스키마 제약 위반)의 타입이라 여기 안 온다 — GetItem·ClaimItem 어느 쪽도
+// 그 타입을 내지 않는다.
+//
+// 사유 코드를 사람 말로 풀지 않는다 — 기계가 세는 값은 그대로 보인다. Detail 에는
+// 항상 원문을 남긴다 — 매칭되는 타입이 없어 code 가 fallback 이어도 Detail 만으로
+// 왜인지는 알 수 있게 한다.
+func rejectionOf(id string, err error) *model.Rejection {
+	code := "claim-failed"
+	var held *store.ClaimHeldError
+	var refused *store.ClaimRefusedError
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		code = "not-found"
+	case errors.As(err, &held):
+		code = judge.RejectClaimed // 남이 이미 선점했다 — Eligible 축과 같은 코드를 쓴다
+	case errors.As(err, &refused):
+		code = judge.RejectClosed // 항목이 이미 끝났거나 폐기됐다
+	}
+	return &model.Rejection{Item: id, Reason: code, Detail: clip(err.Error(), 200)}
 }
 
 // siblingIndex 는 후보들에 걸린 판단 링크를 모아 judge 가 쓸 색인으로 만든다.
