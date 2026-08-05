@@ -121,12 +121,29 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	svc := service.New(st, log)
 	token := envOr(env, "FD_TOKEN", "")
 	webH := web.New(svc, web.WithLogger(log))
+	// ★ watcher 를 buildHandler 보다 먼저 만든다 — api.Options.SelfUpdate 콜백이
+	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
+	watcher := newSelfWatcher(log, path)
 	handler := buildHandler(svc, webH, api.Options{
 		Token:         token,
 		RatePerMinute: *rate,
 		Log:           log,
+		SelfUpdate: func() api.SelfUpdateStatus {
+			st := watcher.Status()
+			out := api.SelfUpdateStatus{
+				Watching: st.Watching, Reason: st.Reason,
+				From: st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
+			}
+			// ★ LastAt 변환: cmd/fd 는 time.Time(제로값 = 시도 없음), api 는 *time.Time
+			// (nil = 시도 없음). IsZero() 로 가른다 — 값 그대로 &st.LastAt 을 넘기면
+			// "시도 없음"도 유효한 시각처럼 실린다.
+			if !st.LastAt.IsZero() {
+				at := st.LastAt
+				out.LastAt = &at
+			}
+			return out
+		},
 	})
-	watcher := newSelfWatcher(log, path)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

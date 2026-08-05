@@ -50,6 +50,25 @@ type HealthzBody struct {
 	// 좌표 누출이 아니다 — sha 는 이 저장소를 읽을 수 있는 사람에게만 의미가 있고,
 	// db_path 처럼 서버의 파일 배치를 알리지 않는다.
 	Build buildinfo.Coord `json:"build"`
+	// SelfUpdate 는 이 서버가 자기 판을 따라가고 있는가다.
+	SelfUpdate SelfUpdateStatus `json:"self_update"`
+}
+
+// SelfUpdateStatus 는 서버의 자동 갱신 축이다.
+//
+// ★ **Watching 이 먼저다.** 감시기가 안 떴는데 나머지가 비어 있으면
+// "아직 갱신이 없었다"로 읽힌다 — 그것은 "안 보고 있다"와 전혀 다르다.
+// buildinfo.Coord 의 Known 이 같은 규율이다.
+//
+// **성공은 여기 안 남는다.** 성공하면 프로세스가 갈아치워져 새 프로세스는 그 사실을 모른다.
+type SelfUpdateStatus struct {
+	Watching bool       `json:"watching"`
+	Reason   string     `json:"reason,omitempty"`
+	LastAt   *time.Time `json:"last_at,omitempty"`
+	From     string     `json:"from,omitempty"`
+	To       string     `json:"to,omitempty"`
+	Outcome  string     `json:"outcome,omitempty"` // refused | failed
+	Detail   string     `json:"detail,omitempty"`
 }
 
 // AuthNotice 는 지금 설정을 사람이 읽을 한 줄로 만든다. 순수 함수다.
@@ -72,9 +91,11 @@ func AuthNotice(tokenSet, loopbackOpen bool) string {
 // ★ build 를 **인자로 받는다.** service.Health 에 필드를 더하지 않는 이유가 둘이다 —
 // 빌드 좌표는 DB·디스크 상태가 아니라 프로세스의 성질이고, 인자로 받으면 이 함수가
 // tokenSet·loopbackOpen 과 같은 모양으로 순수하게 남아 시험이 값을 직접 준다.
-func HealthzOf(h service.Health, tokenSet, loopbackOpen bool, build buildinfo.Coord) HealthzBody {
+// su 도 같은 이유로 인자다 — 핸들러가 body 에 따로 얹으면 순수 함수가 불완전한 body 를
+// 만들고 그 시험은 통과한다. 실제 응답과 갈리는 그 모양을 이 저장소가 반복해서 문제 삼았다.
+func HealthzOf(h service.Health, tokenSet, loopbackOpen bool, build buildinfo.Coord, su SelfUpdateStatus) HealthzBody {
 	b := HealthzBody{
-		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build,
+		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build, SelfUpdate: su,
 		DiskFreePct: h.DiskFreePct, DiskKnown: h.DiskKnown, At: h.At,
 		Auth: AuthStatus{
 			TokenSet: tokenSet, LoopbackOpen: loopbackOpen,
@@ -96,7 +117,15 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// buildinfo.Self 는 파일이 아니라 **이 프로세스**를 읽는다. 실측에서 설치 파일은 이미
 	// 최신으로 교체돼 있는데 프로세스는 지워진 아이노드의 옛 코드를 돌고 있었다 —
 	// 파일을 재는 진단은 그 상황에서 "최신"이라 답한다.
-	body := HealthzOf(h, s.opt.Token != "", !s.opt.RequireTokenOnLoopback, buildinfo.Self())
+	//
+	// s.opt.SelfUpdate 가 nil 인 것은 정상 갈래다(시험 조립·다른 진입점이 안 줄 수 있다).
+	// 그때 빈 구조체를 내면 "아직 갱신이 없었다"로 읽히는데 그것은 "배선이 안 됐다"와
+	// 전혀 다르다 — 그래서 사유를 채운 값으로 대신한다.
+	su := SelfUpdateStatus{Watching: false, Reason: "이 서버는 자동 갱신 축을 배선하지 않았다"}
+	if s.opt.SelfUpdate != nil {
+		su = s.opt.SelfUpdate()
+	}
+	body := HealthzOf(h, s.opt.Token != "", !s.opt.RequireTokenOnLoopback, buildinfo.Self(), su)
 	status := http.StatusOK
 	if !body.OK {
 		status = http.StatusServiceUnavailable
