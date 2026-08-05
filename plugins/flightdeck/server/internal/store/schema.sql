@@ -88,6 +88,14 @@ CREATE TABLE session_workspace (
 
 -- 생존 '사실'이지 판정이 아니다. 넷을 나란히 두고 합치지 않는다 —
 -- 하나만 보면 "에이전트가 긴 도구를 돌리는 중"과 "사람이 읽기만 하는 중" 둘 중 하나를 반드시 오판한다.
+--
+-- ★ PK 가 (session_id, kind) 라 종류별 한 행이고 갱신된다 — 이 표는 **현재값이지 이력이 아니다.**
+--   답할 수 있는 것은 "이 세션의 이 종류 최신 신호 시각" 하나뿐이다.
+--   횟수·간격·분포·과거 시점은 여기 존재하지 않는다. 그 재료는 event(kind='session.beat') 뿐이다
+--   — 추가 전용이 트리거로 강제되고 Service.Beat 호출마다 1행이라 스로틀이 없다.
+--   이것을 모르고 "signal 표로 간격 분포를 재라"고 적은 큐 항목이 실제로 나왔다 — 못 잰다.
+--   사람이 읽는 자리는 DESIGN §3 정의줄과 §4 신호 표이고, 기계가 지키는 자리는
+--   store/signal_is_not_history_test.go 다. 이 주석은 표를 고치러 온 사람을 위한 세 번째 사본이다.
 CREATE TABLE signal (
   session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
   kind       TEXT NOT NULL CHECK (kind IN ('prompt','tool','mcp','commit','push')),
