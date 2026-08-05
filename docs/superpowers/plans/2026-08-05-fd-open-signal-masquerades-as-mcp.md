@@ -243,6 +243,7 @@ EOF
 - Modify: `internal/service/session.go:447` (`SetState` 의 `now` 선언)
 - Modify: `internal/service/session.go:459-462` (`SetState` 의 Beat)
 - Modify: `internal/service/board_test.go` (Task 1 이 남겨 둔 죽은 `UPDATE` 제거)
+- Modify: `internal/service/landing_test.go` (이 삭제가 폐기하는 주석 한 구절)
 
 **Interfaces:**
 - Consumes: `Store.Signals(ctx, sessionID) (map[model.SignalKind]time.Time, error)` · `Service.SetState(ctx, sessionID string, st model.SessionState, why string) error` — 둘 다 이미 있다.
@@ -344,7 +345,25 @@ Expected: PASS.
 
 그리고 `INSERT` 위 주석에서 미래형으로 적힌 문장을 현재형으로 고친다 — `열기가 신호를 안 찍게 되면 위 UPDATE 는 0행이 되고` → `열기가 신호를 안 찍으므로`, 그리고 `위 UPDATE 는 0행이 되고` 절을 지운다.
 
-- [ ] **Step 7: 전 패키지 관문을 통과하는지 본다**
+- [ ] **Step 7: 이 삭제가 폐기하는 주석 한 구절을 고친다**
+
+`internal/service/landing_test.go` 의 `TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead` 안, `countRows` 사전 조건 검사 **바로 위**에 이 주석이 있다:
+
+```go
+	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(세션 열기가 Beat 한다)
+	// "없음"이 나오면 그것은 거짓이다.
+```
+
+`(세션 열기가 Beat 한다)` 는 방금 Step 3 이 지운 코드를 가리킨다. 그 사전 조건이 지금도 성립하는 이유는 Task 1 이 `twoSessions` 에 넣은 명시적 `Beat` 다. 괄호 안만 바꾼다:
+
+```go
+	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(twoSessions 가 Beat 한다)
+	// "없음"이 나오면 그것은 거짓이다.
+```
+
+이 파일에서 이 한 구절 말고는 아무것도 안 건드린다. Task 1 이 만든 `twoSessions` 의 Beat 루프도 그대로 둔다.
+
+- [ ] **Step 8: 전 패키지 관문을 통과하는지 본다**
 
 Run: `go vet ./... && go test ./... -count=1`
 Expected: vet 무출력, 전 패키지 `ok`.
@@ -359,10 +378,11 @@ Expected: vet 무출력, 전 패키지 `ok`.
 | `internal/service/board_test.go:263` | Task 1 |
 | `internal/web/lane_panel_test.go:117` | Task 2 |
 
-- [ ] **Step 8: 커밋**
+- [ ] **Step 9: 커밋**
 
 ```bash
-git add internal/service/session.go internal/service/session_test.go internal/service/board_test.go
+git add internal/service/session.go internal/service/session_test.go \
+        internal/service/board_test.go internal/service/landing_test.go
 git commit -m "$(cat <<'EOF'
 fix(flightdeck): 열림과 상태 전이가 mcp 를 안 찍는다 — 화면이 "도구를 불렀다"고 하던 거짓말을 끝낸다
 
