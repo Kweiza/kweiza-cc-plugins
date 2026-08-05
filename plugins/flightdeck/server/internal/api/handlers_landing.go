@@ -143,8 +143,14 @@ func (s *server) handleReleaseLaneRow(w http.ResponseWriter, r *http.Request) {
 	// 회수당한 세션을 액세스 로그의 좌표로 삼는다 — 요청 본문에는 그 세션이 없고,
 	// "누구의 레인이 끊겼나"가 이 한 줄에서 답해져야 한다.
 	infoFrom(r.Context()).setSession(res.SessionID)
+	// ★ 키 둘을 형제 이벤트와 같은 어휘로 맞춘다.
+	//
+	//	"state" 는 형제(lane.land)에서 **문자열**(줄 상태)이라 거기에 불리언을 실으면
+	//	같은 키가 두 가지 타입을 뜻하고, str("state") 로 읽는 이 레포의 관용적 소비자는
+	//	조용히 빈 문자열을 받는다. → "held_release"
+	//	"mode" 는 형제에서 acquire|report|leave 다. 사람 이름의 자리가 아니다. → "actor"
 	s.publish(r, "lane.release", req.Project, res.SessionID, map[string]any{
-		"row": res.RowID, "state": res.HeldRelease, "mode": clip(req.Actor, 64),
+		"row": res.RowID, "held_release": res.HeldRelease, "actor": clip(req.Actor, 64),
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
 }
