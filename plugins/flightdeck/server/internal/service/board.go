@@ -92,11 +92,18 @@ func FoldConversations(cards []SessionCard) []Conversation {
 	for i := range out {
 		seenWT := map[string]bool{}
 		seenPath := map[string]bool{}
-		for _, c := range out[i].Cards {
+		for j, c := range out[i].Cards {
 			seenWT[c.View.Session.Worktree] = true
 			for _, p := range c.View.Paths {
 				seenPath[p] = true
 			}
+			// ★ Paths 를 **깊게 복사**한다. SessionCard 를 값으로 담으면 슬라이스는
+			//   원본과 같은 배열을 공유하고, 그러면 소비자가 표시용으로 한 번
+			//   정렬하는 것만으로 BoardView.Sessions 가 조용히 오염된다(실측 재현됨).
+			//   "Sessions 를 안 바꾼다"가 이 과제의 최우선 제약인데, 얕은 복사는 그
+			//   방벽을 이 층위에서 이미 뚫어 놓는다. 규칙으로 막지 않고 구조로 막는다 —
+			//   이 저장소가 "검사가 아니라 부재로 강제한다"를 쓰는 것과 같은 판정이다.
+			out[i].Cards[j].View.Paths = append([]string(nil), c.View.Paths...)
 		}
 		out[i].Worktrees = len(seenWT)
 		out[i].PathCount = len(seenPath)
