@@ -425,8 +425,16 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 | `UserPromptSubmit` | — | `fd beat --kind prompt` (2초 타임아웃) + 미확인 알림 주입 |
 | `PostToolUse` | `Edit\|Write` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
 | `PreCompact` | — | `async` `fd note --draft` — 압축으로 판단이 날아가는 것만 막는다 |
-| `Stop` | — | `fd hook stop` → 처방(발화 4조건, 전이 1회) 주입. **fail-open, 3초** |
+| `Stop` | — | `fd hook stop` → 처방(발화 5조건, 전이 1회) 주입. **fail-open, 3초** |
 | `SessionEnd` | `clear` | `async` `fd hook session-end` → 떠나는 대화의 카드를 닫는다. **선점이 있으면 안 닫는다** |
+
+**`Stop` 의 "발화 5조건"은 `judge.Prescribe` 가 부르는 생성기 다섯이다** —
+`lane-turn` · `overlap` · `outside` · `unclaimed` · `silent`(`judge/prescribe.go` 의 상수 다섯).
+넷에서 다섯이 된 것은 랜딩 레인의 **차례 통지**(`lane-turn`)가 들어오면서다.
+★ **이 수를 잠그는 시험은 없다.** 도구 수(`mcpsrv/protocol_test.go` 의 `TestToolTableIsSeven`)나
+테이블 수(`store/schema_table_count_test.go` 의 `TestDeclaredTablesMatchDesign`)와 달리,
+여섯째 조건을 더하는 사람에게 빨간불이 날 자리가 한 군데도 없다 — 그래서 이 숫자는
+넷에서 다섯으로 갈 때 그랬듯 다음에도 조용히 표류할 수 있다.
 
 **`SessionEnd` 로 세션 종료를 감지하지 않는다 — 못 한다.** 설치본 **2.1.221·2.1.222 바이너리 실측**:
 `executeSessionEndHooks` 를 부르는 자리는 번들 전체에 `o3t("clear", …)`(`clearConversation`)와
@@ -445,7 +453,7 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 **부트스트랩 훅과 배너 훅을 분리한다.** 컨테이너 기동 훅이 실패해도 배너 훅이 `/healthz` 를 쳐 그 사실을 알린다.
 부트스트랩이 자기 실패를 스스로 알리는 순환을 만들지 않는다.
 
-### 웹 UI — 읽기 전용 HTML 한 장, 섹션 6개, 버튼 4개
+### 웹 UI — 읽기 전용 HTML 한 장, 섹션 6개, 쓰기 버튼 5개(살아 있는 것은 셋)
 
 1. **지금 — 잡혀 있는 작업.** **선점을 든 카드만** 낸다. 카드 머리줄이 선점 항목 id 이고,
    배지 하나가 활동 신호(`prompt`·`tool`·`commit`) 유무를 말한다. 그 아래에 신호 넷 ·
@@ -483,6 +491,11 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 버튼은 다섯뿐이고 **살아 있는 것은 셋**이다: 선점 회수(사유 필수) · 항목 폐기(사유 필수) ·
 **랜딩 줄 행 회수(사유 필수)** · 레인 정지/재개(Tier B) · 잡 우회 기록(Tier B).
 **그 외 쓰기는 없다** — 파생물에 손을 대는 순간 대시보드가 다시 손 기재 저장소가 되고 그 락이 부활한다.
+**이 다섯/셋을 잠그는 것은 `web/render_test.go` 의 `TestWriteFormsAreAtMostFourAndAllRequireReason`**
+이다: `<form` **≤ 4**(쓰기 셋 + 프로젝트 고르기 GET 하나) · `method="post"` **== 3** ·
+`name="reason" required` **== 3**, 그리고 Tier B 비활성 버튼 둘의 문구를 이름으로 확인한다.
+그래서 이 절의 수는 표류하면 그 시험이 먼저 빨개진다 — 위 heading 이 "버튼 4개"로 남아 있던 것은
+그 락이 세는 축(`dashboard.gohtml` 의 폼·버튼)과 문서를 잇는 자리가 없었기 때문이다.
 
 **줄 행 회수만 Tier B 에서 Tier A 로 넘어왔다.** 이 서버가 실제로 랜딩 줄을 갖고 있고, 그 줄에
 **자동 만료가 없기 때문**이다 — 물린 줄을 푸는 길이 사람뿐이라 화면과 CLI(`fd lane release`)가
