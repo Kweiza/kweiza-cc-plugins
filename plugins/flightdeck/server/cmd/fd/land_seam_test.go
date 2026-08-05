@@ -189,6 +189,47 @@ func TestLandRefusesLeavingWithoutAReason(t *testing.T) {
 	}
 }
 
+// `fd land --ok` 도 **실제로 왕복시킨다.**
+//
+// ★ 앞선 판에서 이 갈래는 시험 밖에 있었다. `--ok` 를 언급하는 시험 둘이 **보내기 전에**
+// 끝났기 때문이다(하나는 --leave 와 함께 줘서 종료코드 2 로 거절, 하나는 `--ok=false` 라
+// acquire 로 접힘). 왕복은 --fail 과 --leave 만 했다.
+//
+// 그래서 cmds.go 의 ok 갈래에 model.LandingLeftFail 을 붙여넣어도 **전 시험이 초록이었다.**
+// 그 변이의 결과는 조용하지 않고 영구적이다: landing_queue 는 추가 전용에 가까운 이력이라
+// `fd land --ok` 한 번이 원장에 `left_kind='fail'` 을 박고, 다음 사람은 그 프로젝트가
+// 검증 실패로 접힌 랜딩투성이인 줄 안다. 이 태스크의 산출물이 이음매 시험인데
+// **가장 흔한 호출**이 그 밖에 있는 것 자체가 산출물의 구멍이었다.
+func TestLandReportOKReachesTheLedgerAsOK(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.runAs("cc-lane-ok", "land"); code != 0 {
+		t.Fatalf("전제가 깨졌다 — 레인을 못 잡았다(%d):\n%s", code, out)
+	}
+	row := laneLive(t, h)[0]
+
+	code, out := h.runAs("cc-lane-ok", "land", "--ok")
+	if code != 0 {
+		t.Fatalf("--ok 보고가 %d 로 끝났다:\n%s", code, out)
+	}
+	mustContain(t, "--ok stdout", out, "반납했다")
+
+	kind, detail := laneRowByID(t, h, row.ID)
+	if kind != string(model.LandingLeftOK) {
+		t.Fatalf("--ok 로 보고했는데 줄 행이 %q 로 닫혔다 — 이 이력은 되돌릴 수 없다", kind)
+	}
+	// ★ ok 는 사유가 **면제**다(store.ValidateLandingLeave). CLI 가 빈 자리를 채우려고
+	//   무언가를 지어내면 그 문장이 원장에 남는다 — 지어낸 사실이 없어야 한다.
+	if detail != "" {
+		t.Fatalf("--ok 인데 사유 %q 가 붙었다 — 아무도 쓰지 않은 문장이다", detail)
+	}
+	if holder, held := laneHolder(t, h); held {
+		t.Fatalf("--ok 로 보고했는데 점유가 %q 로 남아 있다", holder)
+	}
+	if n := len(laneLive(t, h)); n != 0 {
+		t.Fatalf("--ok 로 보고했는데 줄에 %d행이 남았다", n)
+	}
+}
+
 // 둘 이상을 함께 주면 도구가 조용히 하나를 고르지 않는다. `--ok=false` 도 반납이 아니다.
 //
 // ★ 뒤엣것이 이 시험의 핵심이다: 불리언을 **준 것만** 보면 `--ok=false` 라는 표기가
@@ -286,6 +327,48 @@ func TestLaneReleaseIsTheOnlyWayOutOfAStuckLane(t *testing.T) {
 	// 대조: 이제 남이 설 수 있다. 회수가 "화면만 지웠다"가 아니어야 한다.
 	if code, out := h.runAs("cc-lane-next", "land"); code != 0 {
 		t.Fatalf("회수 뒤에도 레인을 못 잡는다(%d):\n%s", code, out)
+	}
+}
+
+// `--actor` **없이** 회수해도 누가 했는지가 판단에 남는다.
+//
+// ★ 이 갈래가 하필 **거짓 문장이 실제로 나오는 갈래**다. actor 가 빈 채로 서버에 닿으면
+// service 는 "행위자: 대시보드(사람). 세션이 아니라 사람이 누른 것이므로 …" 라고 적는다 —
+// 셸에서 부른 회수인데 원장에는 대시보드가 눌렀다고 **영구히** 남는다.
+// 명시 갈래(--actor)만 왕복시키면 "플래그 없음 → USER@host → wire actor → 판단 본문"이라는
+// 합성이 한 번도 증명되지 않고, 그 조용한 축은 순수 함수 시험으로는 원리적으로 안 보인다.
+func TestLaneReleaseWithoutActorFlagStillRecordsWhoDidIt(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.runAs("cc-lane-noactor", "land"); code != 0 {
+		t.Fatalf("전제가 깨졌다 — 레인을 못 잡았다(%d):\n%s", code, out)
+	}
+	stuck := laneLive(t, h)[0]
+	before := len(h.judgments(model.JudgmentDecision))
+
+	// 죽은 세션의 레인을 사람이 끊는 상황 그대로: 세션 좌표는 없고 셸 좌표만 있다.
+	e := map[string]string{}
+	for k, v := range h.env {
+		e[k] = v
+	}
+	delete(e, "CLAUDE_CODE_SESSION_ID")
+	e["USER"] = "당번유저"
+
+	code, out := h.runEnv(e, "", "lane", "release",
+		"--row", itoa(stuck.ID), "--reason", "신호가 4시간째 없다")
+	if code != 0 {
+		t.Fatalf("--actor 없는 회수가 %d 로 끝났다:\n%s", code, out)
+	}
+	js := h.judgments(model.JudgmentDecision)
+	if len(js) != before+1 {
+		t.Fatalf("판단이 %d건 늘었다 — 1건이어야 한다", len(js)-before)
+	}
+	body := js[len(js)-1].Body
+	if !strings.Contains(body, "행위자: 당번유저@") {
+		t.Fatalf("셸 좌표가 판단에 안 남았다 — laneActor 폴백이 서버까지 안 간다:\n%s", body)
+	}
+	// ★ 진짜 단정: 거짓 문장이 **안** 들어갔다.
+	if strings.Contains(body, "대시보드(사람)") {
+		t.Fatalf("셸에서 부른 회수가 원장에 '대시보드가 눌렀다'로 남았다:\n%s", body)
 	}
 }
 
