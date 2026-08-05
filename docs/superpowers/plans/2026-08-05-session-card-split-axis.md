@@ -1764,9 +1764,22 @@ cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -v
 
 - [ ] **Step 5: 되돌려 빨강을 확인한다**
 
-`splitBanner` 가 항상 빈 문자열을 내게 바꾸고 돌린다. 기대: `TestRenderBoardShowsSplitBanner` FAIL. 되돌린다.
+빨강이 안 나오면 그 시험이 아무것도 안 잡는 것이다. **시험을 고쳐라(구현을 고치지 마라).**
 
-`conversationCard` 의 `if detail` 을 `if true` 로 바꾸고 돌린다. 기대: `TestConversationCardFoldsByDefaultAndExpandsInDetail` FAIL. 되돌린다.
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | `splitBanner` 가 항상 빈 문자열 | `TestRenderBoardShowsSplitBanner` |
+| 2 | `splitBanner` 가 갈림 0건에도 문자열을 내게 | `TestRenderBoardSilentWhenNoSplit` |
+| 3 | **`splitBanner` 가 `len(ccs)` 대신 `len(reports)` 를 세게** | `TestSplitBannerCountsConversationsNotReports` |
+| 4 | 머리줄의 대화 수와 카드 수를 맞바꾸기 | `TestRenderBoardHeadCountsConversations` |
+| 5 | `conversationCard` 의 `if detail` → `if true` | `TestConversationCardFoldsByDefaultAndExpandsInDetail` |
+| 6 | `conversationCard` 의 `if len(c.Cards) == 1` 갈래 제거 | (무엇이 잡는지 보고서에 적어라) |
+| 7 | **`rankConversations` 의 `case c.IsSelf: return 0` 제거** | `TestRankConversationsHonorsIsSelfWithoutMatchingID` |
+| 8 | **`lastSignalOfConversation` 이 항상 제로값을 내게** | `TestRankConversationsOrdersByLatestSignal` |
+| 9 | **`Sessions`·`Conversations` 불일치 경고 한 덩이 제거** | `TestRenderBoardSaysWhenConversationsAreMissing` |
+
+**3·7·8·9 가 이번 수정의 핵심이다.** 검토가 뮤테이션으로 확인했다 — 3·7·8 은 이전 판에서
+**초록으로 살아남았고**(어떤 시험도 그 로직을 안 갈랐다), 9는 모순 출력이 실측 재현됐다.
 
 - [ ] **Step 6: 커밋**
 
