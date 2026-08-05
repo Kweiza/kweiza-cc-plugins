@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -110,7 +111,9 @@ func TestJudgmentLinksForItemsIsProjectScoped(t *testing.T) {
 	}
 }
 
-// 빈 입력에 질의를 쏘지 않는다. IN () 는 SQLite 구문 오류다.
+// 빈 입력에 질의를 쏘지 않는다 — 결과가 뻔히 빈 맵일 왕복을 생략한다.
+// (엔진이 IN () 을 어떻게 다루는지는 이 가드의 이유가 아니다: 실측하니
+// modernc.org/sqlite 는 `x IN ()` 을 오류 없이 "항상 거짓"으로 받아들인다.)
 func TestJudgmentLinksForItemsEmptyInput(t *testing.T) {
 	s := newStore(t)
 	got, err := s.JudgmentLinksForItems(context.Background(), "P", nil)
@@ -119,5 +122,85 @@ func TestJudgmentLinksForItemsEmptyInput(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("빈 입력에 결과가 있다: %v", got)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JudgmentsForItem — linkedJudgments 를 통째로 대신하는 자리라 두 계약을 직접 시험한다.
+// (project 경계·정렬은 JudgmentLinksForItems 쪽만 시험돼 있었고, 이 함수는 간접 시험
+// TestPickReturnsResumeContextForOwnClaim 하나뿐이었다 — 프로젝트 하나·판단 하나짜리라
+// 프로젝트 누수도 정렬 역전도 볼 수 없다.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 다른 프로젝트의 판단이 새면 안 된다 — 새면 한 프로젝트의 판단이 다른 프로젝트의
+// pick 응답 안에 그대로 렌더된다.
+func TestJudgmentsForItemIsProjectScoped(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "P")
+	seed(t, s, "Q")
+	mustItem(t, s, "P", "same-id")
+	mustItem(t, s, "Q", "same-id")
+	linkJudgment(t, s, "Q", model.JudgmentAsk, "same-id")
+
+	got, err := s.JudgmentsForItem(ctx, "P", "same-id")
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("다른 프로젝트의 판단이 샜다: %+v", got)
+	}
+}
+
+// 최신 먼저, 동점이면 id 역순이어야 한다 — 세션이 재개 직후 읽는 맥락의 순서라,
+// 뒤집히면 "지금 뭐가 최신인지"가 조용히 반대로 읽힌다.
+func TestJudgmentsForItemOrdersNewestFirstThenIDDescending(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "P")
+	mustItem(t, s, "P", "x")
+
+	tOld := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	tMid := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	tNew := time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC)
+
+	addAt := func(at time.Time, body string) string {
+		j, err := s.AddJudgment(ctx, model.Judgment{
+			Project: "P", Kind: model.JudgmentAsk, Body: body, At: at,
+			Links: []model.JudgmentLink{{TargetKind: "item", TargetID: "x"}},
+		})
+		if err != nil {
+			t.Fatalf("판단 저장 실패(%s): %v", body, err)
+		}
+		return j.ID
+	}
+
+	idOld := addAt(tOld, "old")
+	idMidA := addAt(tMid, "mid-a") // 동점 그룹의 앞 — 먼저 발급된 id
+	idMidB := addAt(tMid, "mid-b") // 동점 그룹의 뒤 — id 가 더 크다(NewID 는 삽입 순으로 단조 증가)
+	idNew := addAt(tNew, "new")
+
+	// 전제 확인: id 가 삽입 순으로 커지지 않으면 아래 기대 순서 자체가 근거를 잃는다.
+	if !(idMidA < idMidB) {
+		t.Fatalf("전제가 깨졌다: 동점 판단의 id 가 삽입 순서로 증가하지 않는다(%s, %s)", idMidA, idMidB)
+	}
+
+	got, err := s.JudgmentsForItem(ctx, "P", "x")
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	wantIDs := []string{idNew, idMidB, idMidA, idOld}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("판단 %d건, 기대 %d건: %+v", len(got), len(wantIDs), got)
+	}
+	for i, id := range wantIDs {
+		if got[i].ID != id {
+			gotIDs := make([]string, len(got))
+			for j, jg := range got {
+				gotIDs[j] = jg.ID
+			}
+			t.Fatalf("순서가 다르다: i=%d got=%s want=%s (전체 got=%v want=%v)",
+				i, got[i].ID, id, gotIDs, wantIDs)
+		}
 	}
 }
