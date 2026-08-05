@@ -51,8 +51,18 @@ const PrescribeMax = 3
 // 발화 뒤 판단이 실제로 남은 것도 6건 중 1건이다. 설계 §10 은 "떨어지면 조건을 줄인다"고
 // 했지만, 이 경우 임계를 올려도 고쳐지지 않는다 — 발화가 이미 세션당 1건 미만이라
 // 더 줄이면 처방이 사라질 뿐 확인율은 안 오른다. **낮은 확인율의 원인이 임계가 아니다.**
-// 같은 기간 처방 55건 중 overlap 이 31건(56%)이고 그 확인율이 **0/31** 이다 —
-// 무시가 학습되는 자리는 이쪽이다. 그 축은 큐 항목 fd-prescribe-overlap-ack-zero 다.
+// ★ **정정(2026-08-05).** 위 문단은 원래 "확인율의 병목은 overlap 이고 거기서 무시가
+// 학습된다"고 적었다. **틀렸다.** overlap 확인율 0/31 을 재보니 무시가 아니라 **구조**였다:
+//
+//	카드 133장 — 발자국만 있고 판단 0인 카드 51장 · 판단만 있고 발자국 0인 카드 46장 · 둘 다 6장
+//	overlap 을 맞은 카드 7장은 전부 발자국 1~62개에 판단 0. 그중 셋은 형제 카드가 판단 12~31개를 가졌다
+//
+// 발자국은 훅이 쓰고 판단은 MCP 가 쓴다. 한 대화의 정체가 카드 둘로 갈리면 처방은
+// **발자국 카드**에서 뜨고 ack 은 **판단 카드**에 꽂힌다 — 그래서 overlap 확인율은
+// 행동이 아니라 **원리적으로** 0이다. 문구를 고쳐도 임계를 올려도 안 움직인다.
+//
+// 즉 확인율은 지금 "세션이 처방을 따르나"가 아니라 "카드가 안 갈렸나"를 재고 있다.
+// 갈림의 원인은 07e5df4·4de4b21 이 고쳤으므로 이 수치는 그 뒤로 다시 재야 뜻이 생긴다.
 //
 // ★ 그리고 **`tool` 신호 횟수는 쓸 수 없다.** signal 표의 PK 가 (session_id, kind) 라
 // 종류별 한 행이고 갱신된다 — 횟수라는 값이 존재하지 않는다(schema.sql:91-96).
@@ -87,7 +97,12 @@ type PrescribeInput struct {
 	TurnPaths []string
 	// Others 는 살아 있는 세션 목록이다. 자기 자신이 섞여 있어도 이 함수가 뺀다 —
 	// 호출자가 빼는 것에 의존하면 그 축이 시험 밖에 있게 된다.
+	//
+	// ★ "자기 자신"은 **카드 id 가 아니라 대화**다. 정체가 3중키라 한 대화가 카드 여러 장이
+	// 될 수 있고, 카드 id 만 빼면 나머지 형제 카드가 남의 세션처럼 보인다(sameConversation).
 	Others []LiveSession
+	// SelfCC 는 이 세션이 속한 대화의 cc id 다. 형제 카드를 가려내는 데만 쓴다.
+	SelfCC string
 	// LastJudgment 는 이 세션의 마지막 판단 시각이다.
 	// **판단이 하나도 없으면 호출자가 세션 시작 시각을 넣는다** — 제로값이면 기준이 없어 안 뜬다.
 	LastJudgment time.Time
@@ -142,7 +157,7 @@ func overlapPrescriptions(in PrescribeInput) []Prescription {
 
 	var out []Prescription
 	for _, o := range others {
-		if o.ID == in.SessionID {
+		if o.ID == in.SessionID || sameConversation(in.SelfCC, o.CCSessionID) {
 			continue
 		}
 		pairs := OverlapPairs(in.TurnPaths, o.Paths)
@@ -166,6 +181,20 @@ func overlapPrescriptions(in PrescribeInput) []Prescription {
 		})
 	}
 	return out
+}
+
+// sameConversation 은 두 카드가 **같은 대화**인지다. 순수 함수다.
+//
+// ★ cc 동등만 본다. 접두 일치도 워크트리 조상 관계도 쓰지 않는다 —
+// DESIGN §3 이 일부러 없앤 축이고, 되살리면 서로 다른 두 대화가 한 트리 안에서
+// 일할 때(이 제품의 정상 흐름이다: `.flightdeck/worktrees/<브랜치>`) 진짜 겹침이 통째로 꺼진다.
+// 실측으로 확인했다: 그런 상하위 쌍 17건은 **전부 다른 대화**였고 병합 때 실제로 충돌한다.
+//
+// ★ 빈 값끼리는 같지 않다. "못 읽었다"를 "같다"로 접으면 관측이 깨진 순간
+// 겹침 축이 조용히 전부 꺼진다 — 이 레포가 반복해서 겪은 실패 모양이다.
+func sameConversation(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return a != "" && a == b
 }
 
 // ② 선점한 항목의 선언 경로 밖 — 경로마다 1회.
@@ -239,12 +268,40 @@ func coveredByClosed(in PrescribeInput) bool {
 	if len(declared) == 0 {
 		return false
 	}
+	// ★ **비교 불가능한 좌표의 경로는 근거로 쓰지 않는다.**
+	//
+	// 관측 경로는 RelPath(카드의 워크트리, p) 가 만드는데, 카드의 워크트리 밖 경로는
+	// 절대경로 그대로 남는다(service.RelPath). 선언 경로는 언제나 저장소 상대다.
+	// pathRelated 는 성분을 **앞에서부터** 맞추므로 그 둘은 원리적으로 절대 안 맞는다 —
+	// 즉 절대경로가 하나라도 섞이면 이 가드가 통째로 무력해진다.
+	// 실측(2026-08-05): observed 발자국 406개 중 108개(27%)가 절대경로다.
+	//
+	// 그것을 "안 덮였다"로 세면 **가장 성실하게 마무리한 세션이 잔소리를 듣는다** —
+	// 이 함수가 막으라고 있는 바로 그 결과다. "못 읽었다"는 "없다"가 아니라는
+	// 같은 규율이 경로 실재 축(judge/itempaths.go 의 PathUnknown)에도 있다.
+	//
+	// 다만 비교 가능한 것이 **하나도 없으면** 덮였다고 말하지 않는다. 근거가 0인 것을
+	// 통과로 접으면 이번엔 반대로 처방이 통째로 꺼진다.
+	comparable := 0
 	for _, p := range in.TurnPaths {
+		if !comparablePath(p) {
+			continue
+		}
+		comparable++
 		if !PathsOverlap([]string{p}, declared) {
 			return false
 		}
 	}
-	return true
+	return comparable > 0
+}
+
+// comparablePath 는 그 경로가 선언 경로와 **같은 좌표계**에 있는지다. 순수 함수다.
+//
+// 선언 경로는 저장소 상대다. 절대경로는 카드의 워크트리 밖이라는 뜻이고(RelPath 가 그때만
+// 원본을 남긴다), 그 좌표는 이 판정이 읽을 수 있는 것이 아니다.
+func comparablePath(p string) bool {
+	p = strings.TrimSpace(p)
+	return p != "" && !strings.HasPrefix(p, "/")
 }
 
 // ④ 오래 일했는데 판단이 0건.
