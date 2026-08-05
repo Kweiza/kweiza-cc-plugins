@@ -84,7 +84,23 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 		sort.Strings(wts)
 
 		// 가장 짧은 것부터 보며, 자기 아래로 들어간 것을 모은다.
+		//
+		// ★ wts 는 사전순 정렬돼 있고, 경로 접두는 언제나 사전순으로 더 작다 —
+		//   그래서 조상은 항상 자기 자손보다 먼저 온다. 이 성질에 기대어 "이미 낸
+		//   조상의 아래면 건너뛴다"로 **최상위 조상 하나만** 낸다.
+		//   사슬(/a → /a/b → /a/b/c)은 /a 하나가 셋 다 덮으므로 보고도 하나여야 한다.
+		var chosen []string
 		for _, anc := range wts {
+			nested := false
+			for _, c := range chosen {
+				if isDescendant(c, anc) {
+					nested = true
+					break
+				}
+			}
+			if nested {
+				continue
+			}
 			var desc []string
 			for _, d := range wts {
 				if d != anc && isDescendant(anc, d) {
@@ -94,6 +110,7 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 			if len(desc) == 0 {
 				continue
 			}
+			chosen = append(chosen, anc)
 			ids := append([]string{}, byWT[anc]...)
 			for _, d := range desc {
 				ids = append(ids, byWT[d]...)
@@ -104,10 +121,27 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 				CCSessionID: k.cc, MachineID: k.machine,
 				Ancestor: anc, Descendants: desc, SessionIDs: ids,
 			})
-			break // 대화 하나에 보고 하나. 가장 짧은 조상이 대표한다
+			// ★ 여기서 break 하지 않는다. 한 대화가 **서로 무관한** 갈림 쌍을 둘 이상
+			//   가질 수 있고(/a→/a/b 와 /x→/x/y), 대표 하나만 내면 나머지가 조용히
+			//   사라진다. 실측에서 한 대화가 워크트리 16개에 걸쳐 있었다 — 실제로 나는 모양이다.
+			//
+			//   대신 **배너는 len(reports) 가 아니라 서로 다른 cc 수를 센다**(splitBanner).
+			//   보고는 갈림 그룹 단위이고 배너가 세는 것은 대화 단위라, 둘을 같은 수로
+			//   접으면 대화 하나가 여러 개로 부풀어 보인다.
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CCSessionID < out[j].CCSessionID })
+	// ★ 정렬 키가 셋이어야 결정적이다. cc 하나만 쓰면 같은 cc 가 서로 다른 머신
+	//   둘에서 보고를 만들 때 두 보고의 상대 순서가 맵 순회에 따라 흔들린다 —
+	//   그리고 "같은 cc 가 여러 머신에 걸친다"는 이 축이 감지하려는 모양 중 하나다.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CCSessionID != out[j].CCSessionID {
+			return out[i].CCSessionID < out[j].CCSessionID
+		}
+		if out[i].MachineID != out[j].MachineID {
+			return out[i].MachineID < out[j].MachineID
+		}
+		return out[i].Ancestor < out[j].Ancestor
+	})
 	return out
 }
 

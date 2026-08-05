@@ -68,6 +68,17 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 			want: 0,
 			why:  "/repo 는 /repo-backup 의 조상이 아니다 — 문자열 접두로 보면 오답이 난다",
 		},
+		{
+			name: "한 대화 안의 무관한 갈림 쌍을 둘 다 보고한다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/a", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/a/b", CCSessionID: cc},
+				{SessionID: "s3", MachineID: m, Worktree: "/x", CCSessionID: cc},
+				{SessionID: "s4", MachineID: m, Worktree: "/x/y", CCSessionID: cc},
+			},
+			want: 2,
+			why:  "대표 하나만 내면 /x↔/x/y 가 조용히 사라진다 — 실측에서 한 대화가 워크트리 16개에 걸쳤다",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -103,6 +114,44 @@ func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 	}
 	if r.CCSessionID != "cc" {
 		t.Errorf("cc %q, 원하는 것 %q", r.CCSessionID, "cc")
+	}
+}
+
+// 사슬은 최상위 하나가 덮는다 — 중첩 보고를 내면 같은 카드가 두 번 세어진다.
+func TestDetectUnnormalizedSplitReportsOnlyTopmostInAChain(t *testing.T) {
+	got := DetectUnnormalizedSplit([]SplitCard{
+		{SessionID: "s1", MachineID: "m", Worktree: "/a", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "m", Worktree: "/a/b", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "m", Worktree: "/a/b/c", CCSessionID: "cc"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("보고 %d건, 원하는 것 1건 — 사슬은 최상위 하나가 덮는다: %+v", len(got), got)
+	}
+	if got[0].Ancestor != "/a" || len(got[0].Descendants) != 2 {
+		t.Fatalf("조상 %q · 자손 %v — 원하는 것 /a 와 자손 2개", got[0].Ancestor, got[0].Descendants)
+	}
+}
+
+// 정렬이 결정적인가 — 같은 cc 가 머신 둘에서 보고를 만들 때가 유일한 흔들림 자리다.
+// 맵 순회 순서가 결과로 새면 같은 입력이 매번 다른 문서를 낸다.
+func TestDetectUnnormalizedSplitIsDeterministic(t *testing.T) {
+	in := []SplitCard{
+		{SessionID: "s1", MachineID: "machine-1", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "machine-1", Worktree: "/repo/sub", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "machine-2", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s4", MachineID: "machine-2", Worktree: "/repo/sub", CCSessionID: "cc"},
+	}
+	want := DetectUnnormalizedSplit(in)
+	if len(want) != 2 {
+		t.Fatalf("보고 %d건, 원하는 것 2건: %+v", len(want), want)
+	}
+	for i := 0; i < 200; i++ {
+		got := DetectUnnormalizedSplit(in)
+		for j := range got {
+			if got[j].MachineID != want[j].MachineID || got[j].Ancestor != want[j].Ancestor {
+				t.Fatalf("%d회차에서 순서가 흔들렸다: %+v vs %+v", i, got, want)
+			}
+		}
 	}
 }
 
