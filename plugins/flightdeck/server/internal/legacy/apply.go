@@ -68,6 +68,15 @@ func Apply(ctx context.Context, st *store.Store, p ImportPlan, projectPath strin
 		}
 
 		// ── 큐 항목 (핸드오프 링크가 항목 id 를 가리키므로 항목이 먼저다)
+		//
+		// ★ `tx.AddItem` 은 `service.AddItem` 이 아니다 — 그쪽의 경로 좌표계 관문
+		// (judgeItemPathsCoordinate)을 안 거친다. 그것이 이 자리의 **의도**다:
+		// item.paths 로 가는 세 문(add · finish followup · 이관) 중 이관의 관문은
+		// PlanImport 에 있고(plan.go, "bad_path_coordinate"), 통과한 경로만 계획에
+		// 담겨 여기 온다. 여기서 다시 판정하면 판정이 실행 본문에 흩어져 시험이
+		// 그 사본을 단정하게 된다 — 이 함수가 "판정하지 않는다"고 못박은 이유다.
+		//
+		// 즉 여기 관문이 없는 것은 누락이 아니다. 관문을 옮기려면 계획 쪽에서 옮겨라.
 		for _, pi := range p.Items {
 			if err := tx.AddItem(pi.Item); err != nil {
 				return fmt.Errorf("큐 항목 저장 실패(%s): %w", clip(pi.Item.ID, 64), err)

@@ -373,24 +373,48 @@ func UnionPaths(sets ...[]string) []string {
 // 훅이 주는 발자국 경로는 절대경로이고 git 이 주는 변경 경로는 저장소 상대다.
 // 둘을 같은 좌표계로 옮기지 않으면 겹침 축이 조용히 죽는다.
 func RelPath(root, p string) string {
+	rel, _ := RelPathWithin(root, p)
+	return rel
+}
+
+// RelPathWithin 은 RelPath 와 **같은 계산**을 하되 포함 축의 판정을 함께 나른다.
+//
+// within=false 는 "절대경로인데 root 트리 밖"이라는 뜻이다. 그때 rel 은 원본
+// 절대경로다 — 옮길 좌표가 없으므로 지어내지 않는다(RelPath 의 계약 그대로).
+//
+// ★ 이 함수가 따로 있는 이유가 요점이다. RelPath 는 반환값이 하나뿐이라
+// "안이라서 상대화했다" · "밖이라 원본을 뒀다" · "절대경로가 아니라 그대로 뒀다"
+// 셋이 같은 모양으로 나온다. 판정은 **이미 하고 있었는데 결과가 뭉개졌다** —
+// 그래서 호출부가 포함 축을 물어볼 방법이 없었고, 그 침묵이 카드의 워크트리 밖
+// 경로(서브에이전트가 뜬 `/tmp/…/scratchpad` 사본 등)를 발자국으로 들여보냈다.
+// 실측(2026-08-05): observed 발자국 406개 중 108개(27%)가 절대경로였다.
+//
+// ★ 판정 불가를 "밖"으로 접지 않는다. root 가 비었거나(세션의 워크트리를 못 읽었다)
+// 볼륨이 달라 filepath.Rel 이 실패하면 within=true 로 둔다. 못 읽음을 값으로 접으면
+// 워크트리를 못 읽은 세션의 발자국이 통째로 사라지고, 그 침묵은 오염보다 나쁘다
+// (훅이 전부 fail-open 인 것과 같은 규율 — cmd/fd/ignore.go 의 그 주석을 보라).
+//
+// ★ 문자열 접두로 자르지 않는 이유는 RelPath 주석에 있다. 성분 단위 계산이라
+// root="/a/b" 일 때 "/a/bc/d" 는 밖으로 판정된다.
+func RelPathWithin(root, p string) (rel string, within bool) {
 	if strings.TrimSpace(p) == "" {
-		return ""
+		return "", true
 	}
 	q := filepath.Clean(p)
 	if root == "" || !filepath.IsAbs(q) {
-		return q
+		return q, true
 	}
-	rel, err := filepath.Rel(filepath.Clean(root), q)
+	r, err := filepath.Rel(filepath.Clean(root), q)
 	if err != nil {
-		return q // 볼륨이 다르면 상대화가 불가능하다. 원본을 그대로 둔다
+		return q, true // 볼륨이 다르면 상대화도 포함 판정도 불가능하다
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return q // 저장소 밖이다
+	if r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return q, false // 저장소 밖이다 — 포함 축이 판정하는 유일한 자리 — 포함 축이 판정하는 유일한 자리
 	}
 	// ★ 출력은 슬래시 좌표계다. Linux 에서 이 호출은 무연산이지만, 계약을 주석이 아니라
 	// 코드에 둔다 — 겹침 축 전체가 "모든 경로는 슬래시"라는 이 계약 위에 서 있고,
 	// 계약이 주석에만 있으면 다음 사람이 깬다.
-	return filepath.ToSlash(rel)
+	return filepath.ToSlash(r), true
 }
 
 // RejectedPath 는 좌표계 관문이 버린 경로다. judge 타입의 **별칭**이다(복제가 아니다).
