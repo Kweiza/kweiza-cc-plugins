@@ -233,11 +233,38 @@ type BoardView struct {
 `internal/service/prescribe.go` 의 `ackPrescriptions` · `ackedKeys`. 분모를 "발화 전부"에서
 **"note 를 부를 수 있었던 카드"**(판단을 하나라도 가진 카드)로 가른다.
 
-구체적으로: `prescribe_ack` 이벤트를 남길 때 payload 에 그 카드가 판단을 가진 카드였는지를
-함께 적는다. 그러면 설계 §10 의 재측정 질의가 `event` 표만으로 분모를 가를 수 있다 —
-지금은 발화 수만 세고 있어서 갈림과 무시가 같은 수로 보인다. 3.1 의 탐지는 여기에
-**직접 실리지 않는다**(다른 표면이다). 둘의 관계는 문서로만 잇는다: 배너가 갈림을 말하고,
-지표가 그 갈림이 확인율에 얼마나 섞였는지를 말한다.
+**payload 를 바꾸지 않는다.** 처음에 `prescribe_ack` payload 에 적는 안을 적었으나 틀렸다 —
+판단이 0인 카드는 애초에 ack 이벤트를 안 남기므로, 분모에서 빼야 할 바로 그 카드들이
+payload 에 영영 안 나타난다. 지금 원장만으로 세는 것이 맞다.
+
+```sql
+SELECT (SELECT count(DISTINCT e.session_id) FROM event e
+        WHERE e.kind='prescribe' AND e.project=?)                        AS emitted,
+       (SELECT count(DISTINCT e.session_id) FROM event e
+        WHERE e.kind='prescribe' AND e.project=?
+          AND EXISTS (SELECT 1 FROM judgment j
+                      WHERE j.session_id = e.session_id))                AS reachable,
+       (SELECT count(DISTINCT e.session_id) FROM event e
+        WHERE e.kind='prescribe_ack' AND e.project=?)                    AS acked;
+```
+
+이 질의를 실물 DB 에 돌린 결과(2026-08-05 04:0x UTC):
+
+```
+발화 카드 26 · 그중 판단 가진 카드 4 · ack 한 카드 4
+지금 분모(26)로 본 확인율 15%  →  고친 분모(4)로는 100%
+```
+
+**ack 이 닿을 수 있었던 카드는 전부 ack 했다.** 항목의 논지가 그대로 확인됐다 — 15%는
+규율이 아니라 카드 갈림을 재고 있었다.
+
+표면은 `boardDetailFoot`(= `detail=true` 일 때만)이다. 기본 보드의 예산을 안 먹고,
+그러면서 **생산 소비자가 있다** — 아무도 안 읽는 계측을 만들지 않는다는 이 저장소의
+규율(`TestLandingQueueHasAProductionReader`)에 맞춘다. `/metrics` 는 프로세스 수명
+카운터 모형이라 DB 질의를 얹는 자리가 아니다.
+
+3.1 의 탐지는 여기에 직접 실리지 않는다(다른 표면이다). 둘의 관계는 문서로만 잇는다 —
+배너가 갈림을 말하고, 이 수가 그 갈림이 확인율에 얼마나 섞였는지를 말한다.
 
 DESIGN §10 에 이 갈라내기를 적는다. §3 헤더의 표 수는 건드리지 않는다
 (`fd-design-table-count-confirm` 몫).
