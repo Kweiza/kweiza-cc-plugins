@@ -458,22 +458,45 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 	return strings.Join(lines, "\n")
 }
 
+// cardNoteLimit 은 카드 하나가 싣는 사건 줄 수다.
+//
+// ★ 이것이 **카드 바닥의 비용**을 정한다. boardCardFloor 는 예산을 이기고 카드를 남기는데,
+// 그 카드 한 장의 크기에 상한이 없으면 바닥이 예산을 얼마나 넘길지도 상한이 없다.
+// 실측(2026-08-05, 살아 있는 세션 33건): 남은 카드 3장에 사건 줄이 8개 붙어 예산을
+// 531토큰 넘겼고, 그 줄들이 초과분의 대부분이었다.
+//
+// 이 축은 세션이 오래 살수록 자란다(한 세션이 ask 를 계속 남긴다). 즉 꼬리·배너와
+// 같은 O(N) 이고, 같은 이유로 상한이 필요하다. 최신순으로 앞의 몇 개만 낸다 —
+// 오래된 요청보다 방금 온 요청이 지금 조율에 필요한 것이다.
+const cardNoteLimit = 2
+
 // noteLines 는 이 카드가 실을 사건 줄이다.
 //
 // ★ 전역 꼬리를 없애지 않는다. 카드가 접히면 사건도 접히므로 꼬리가 그 안전망이다.
+// 상한에 걸려 안 보인 것도 마찬가지다 — 수를 말하고, 전부는 detail 과 꼬리가 맡는다.
 func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) []string {
 	var out []string
+	dropped := 0
 	add := func(kind string, js []model.Judgment) {
+		shown := 0
 		for _, j := range js {
 			if j.SessionID != sessionID {
 				continue
 			}
+			if shown >= cardNoteLimit {
+				dropped++
+				continue
+			}
+			shown++
 			out = append(out, fmt.Sprintf("   [%s %s] %s",
 				kind, FormatAge(now.Sub(j.At)), clip(firstLine(j.Title, j.Body), 100)))
 		}
 	}
 	add("ask", asks)
 	add("blocked", blocked)
+	if dropped > 0 {
+		out = append(out, fmt.Sprintf("   … 이 세션의 사건 %d건 더 — detail=true 로 전부 본다", dropped))
+	}
 	return out
 }
 

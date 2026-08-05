@@ -367,6 +367,45 @@ func TestRenderBoardKeepsCardFloorWhenFixedPartIsHuge(t *testing.T) {
 	}
 }
 
+// TestCardCapsItsOwnNoteLines 는 **카드 바닥의 비용**에 상한이 있는지 본다.
+//
+// boardCardFloor 는 예산을 이기고 카드를 남긴다. 그 카드 한 장의 크기에 상한이 없으면
+// 바닥이 예산을 얼마나 넘길지도 상한이 없다 — 실측(2026-08-05): 남은 카드 3장에
+// 사건 줄이 8개 붙어 예산을 531토큰 넘겼고 그 줄들이 초과분의 대부분이었다.
+func TestCardCapsItsOwnNoteLines(t *testing.T) {
+	const n = 6
+	var asks []model.Judgment
+	for i := 0; i < n; i++ {
+		asks = append(asks, model.Judgment{
+			Kind: model.JudgmentAsk, SessionID: "01SESSION0000", At: t0.Add(-time.Duration(i) * time.Minute),
+			Title: fmt.Sprintf("요청 %d — 만질 자리 전부를 낸다", i)})
+	}
+	got := noteLines("01SESSION0000", asks, nil, t0)
+
+	shown := 0
+	for _, l := range got {
+		if strings.Contains(l, "[ask ") {
+			shown++
+		}
+	}
+	if shown > cardNoteLimit {
+		t.Fatalf("사건 줄이 %d개다 — 상한 %d\n%v", shown, cardNoteLimit, got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), fmt.Sprintf("%d건 더", n-cardNoteLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%v", got)
+	}
+
+	// 대조 — 상한 이하면 전부 나오고 "더" 줄이 안 붙는다.
+	few := noteLines("01SESSION0000", asks[:1], nil, t0)
+	if len(few) != 1 {
+		t.Fatalf("사건 1건인데 줄이 %d개다:\n%v", len(few), few)
+	}
+	// 남의 사건은 애초에 안 센다 — 상한이 그 판정을 바꾸면 안 된다.
+	if other := noteLines("01OTHER", asks, nil, t0); len(other) != 0 {
+		t.Fatalf("남의 사건이 내 카드에 실렸다:\n%v", other)
+	}
+}
+
 // TestRenderTailCapsOverlapLines 는 꼬리의 **바깥 차원**에 상한이 있는지 본다.
 //
 // 안쪽 차원(겹침 한 건 안의 경로쌍)은 원래 4개로 잘렸는데 겹침 **건수**는 안 잘렸다.
