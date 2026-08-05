@@ -44,16 +44,79 @@ type SessionCard struct {
 	IsSelf      bool              `json:"is_self"`
 }
 
+// Conversation 은 같은 대화(cc)의 카드 묶음이다.
+//
+// ★ 원장을 안 건드린다 — **표시 계층만**이다. 카드는 여전히 3중키로만 같고, 이 묶음은
+// 보드가 "지금 몇 개가 동시에 돌고 있나"에 참말을 하기 위한 파생일 뿐이다.
+type Conversation struct {
+	CCSessionID string        `json:"cc_session_id,omitempty"`
+	Cards       []SessionCard `json:"cards"`
+	IsSelf      bool          `json:"is_self"`
+	// PathCount 는 합집합 **건수**다. 목록은 만들지 않는다 — 합쳐서 내면
+	// "이 대화가 만지는 자리"가 실제보다 넓어 보이고, 그러면 겹침 축을 읽는
+	// 사람이 없는 다툼을 본다.
+	PathCount int `json:"path_count"`
+	Worktrees int `json:"worktrees"`
+}
+
+// FoldConversations 는 카드를 대화 단위로 접는다. 순수 함수다.
+//
+// ★ 접는 기준은 judge.SameConversation(cc 동등)이다 — 겹침·처방이 이미 쓰는 그 판정의
+// 세 번째 소비자가 되는 것이지 새 판정이 아니다. 빈 cc 는 접지 않는다(카드 1장짜리
+// 묶음이 된다) — 그 규칙이 judge.LiveSession.CCSessionID 주석에 못박혀 있다.
+//
+// ★ 입력을 변형하지 않는다. BoardView.Sessions 는 그대로 나가야 한다 —
+// dashboard.json 계약이 깨지면 그것으로 실측하는 스크립트가 전부 깨진다.
+func FoldConversations(cards []SessionCard) []Conversation {
+	out := make([]Conversation, 0, len(cards))
+	idx := map[string]int{} // cc → out 의 자리. 빈 cc 는 안 담는다
+
+	for _, c := range cards {
+		cc := c.View.Session.CCSessionID
+		if i, ok := idx[cc]; ok {
+			out[i].Cards = append(out[i].Cards, c)
+			out[i].IsSelf = out[i].IsSelf || c.IsSelf
+			continue
+		}
+		out = append(out, Conversation{CCSessionID: cc, Cards: []SessionCard{c}, IsSelf: c.IsSelf})
+		// ★ 색인에 담을지를 judge 가 정한다. SameConversation(cc, cc) 는 cc 가 비면
+		//   false 라서, 빈 cc 는 색인에 안 들어가고 따라서 **다음 빈 cc 카드와 절대
+		//   안 묶인다.** "빈 값끼리는 같지 않다"는 판정을 여기서 다시 쓰지 않고
+		//   그 함수 하나에 남겨 두기 위한 형태다 — cc != "" 로 적으면 같은 판정이
+		//   두 자리에 살고, 한쪽만 고치는 순간 조용히 어긋난다.
+		if judge.SameConversation(cc, cc) {
+			idx[cc] = len(out) - 1
+		}
+	}
+
+	for i := range out {
+		seenWT := map[string]bool{}
+		seenPath := map[string]bool{}
+		for _, c := range out[i].Cards {
+			seenWT[c.View.Session.Worktree] = true
+			for _, p := range c.View.Paths {
+				seenPath[p] = true
+			}
+		}
+		out[i].Worktrees = len(seenWT)
+		out[i].PathCount = len(seenPath)
+	}
+	return out
+}
+
 // BoardView 는 보드 한 장이다.
 type BoardView struct {
-	Project   model.Project        `json:"project"`
-	At        time.Time            `json:"at"`
-	Window    time.Duration        `json:"window"`
-	Sessions  []SessionCard        `json:"sessions"`
-	OpenItems []model.Item         `json:"open_items,omitempty"`
-	Blocked   []model.Judgment     `json:"blocked,omitempty"`
-	Asks      []model.Judgment     `json:"asks,omitempty"`
-	Held      []model.ResourceHold `json:"held,omitempty"`
+	Project  model.Project `json:"project"`
+	At       time.Time     `json:"at"`
+	Window   time.Duration `json:"window"`
+	Sessions []SessionCard `json:"sessions"`
+	// Conversations 는 Sessions 를 대화 단위로 접은 것이다. Sessions 는 그대로 둔다 —
+	// 소비자가 셋(MCP 보드·dashboard.json·웹)이고 각자 속도로 옮긴다.
+	Conversations []Conversation       `json:"conversations,omitempty"`
+	OpenItems     []model.Item         `json:"open_items,omitempty"`
+	Blocked       []model.Judgment     `json:"blocked,omitempty"`
+	Asks          []model.Judgment     `json:"asks,omitempty"`
+	Held          []model.ResourceHold `json:"held,omitempty"`
 	// Lane 은 랜딩 줄이다. **nil 과 빈 값을 구분한다** — nil 은 이 조회가 레인을 안 읽었다는
 	// 뜻이고, Entries 가 빈 슬라이스인 것은 질의는 돌았는데 아무도 안 섰다는 뜻이다(LaneView 주석).
 	Lane *LaneView `json:"lane,omitempty"`
@@ -90,6 +153,7 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	}
 
 	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
+	view.Conversations = FoldConversations(cards)
 
 	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).
 	listAll := s.outOfWindowLister
