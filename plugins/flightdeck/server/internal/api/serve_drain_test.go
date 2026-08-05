@@ -241,6 +241,77 @@ func TestSSEStreamDoesNotHoldShutdown(t *testing.T) {
 	}
 }
 
+// TestGraceExceededCutsAndSaysSo 는 **2단 절단 갈래**를 실제로 지난다.
+//
+// ★ 이 시험이 없으면 위 두 시험의 `graceExceeded` **부재 단언이 조용히 항진명제가 된다** —
+// 프로덕션 문구가 바뀌면 그 줄은 영영 안 나타나고 둘 다 초록으로 남는다. 여기서 그 문구를
+// **양쪽에서 못 박는다**: 이쪽은 있어야 하고 저쪽은 없어야 한다.
+//
+// 유예를 실제로 소진하므로 ShutdownGrace 만큼 걸린다. 그것이 이 시험의 값이다 —
+// 한 번도 안 돌아 본 갈래를 남기지 않는다.
+func TestGraceExceededCutsAndSaysSo(t *testing.T) {
+	e := newEnv(t, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	cutSeen := make(chan error, 1)
+
+	mux := e.srv.routes()
+	mux.HandleFunc("GET /zz-stuck", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		// ★ 요청 컨텍스트를 **안 본다.** 유예 안에는 안 끊기는 것이 계약이므로, 여기서
+		// ctx 를 보면 이 시험이 1단을 재는 것이 되어 버린다. 2단이 실제로 끊는지를 재려면
+		// 유예를 넘겨서 끊긴 뒤에 확인해야 한다.
+		<-release
+		cutSeen <- r.Context().Err()
+	})
+	e.srv.mux = mux
+	h := surface{Handler: e.srv.chain(mux), srv: e.srv}
+
+	serveCtx, drain := context.WithCancel(context.Background())
+	ret := make(chan error, 1)
+	go func() { ret <- Serve(serveCtx, "127.0.0.1:0", h, e.srv.log) }()
+	addr := serveAddrFromLog(t, e.logs)
+
+	go func() {
+		resp, err := http.Get("http://" + addr + "/zz-stuck")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("핸들러에 안 들어왔다")
+	}
+
+	drain()
+
+	select {
+	case err := <-ret:
+		if err != nil {
+			t.Fatalf("Serve 가 오류로 끝났다: %v", err)
+		}
+	case <-time.After(ShutdownGrace + 10*time.Second):
+		t.Fatal("Serve 가 안 돌아왔다 — 2단 절단이 아예 안 돈다")
+	}
+
+	if !hasLogMsg(t, e.logs, graceExceeded) {
+		t.Fatalf("유예를 넘겼는데 그 사실을 안 말했다 — %q 가 로그에 없다", graceExceeded)
+	}
+
+	// **2단이 정말 끊었는가.** 로그만 보면 "말은 했는데 안 끊었다"와 구분이 안 된다.
+	close(release)
+	select {
+	case err := <-cutSeen:
+		if err == nil {
+			t.Fatal("유예 초과를 말해 놓고 인플라이트 컨텍스트를 안 끊었다")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("핸들러가 안 돌아왔다")
+	}
+}
+
 // TestServeShutdownLogsDrainMs 는 관측 이음매가 실제로 남는지 본다.
 //
 // 성공한 자기 갱신은 exec 로 프로세스가 갈아치워져 원장에 한 행도 안 남는다.
