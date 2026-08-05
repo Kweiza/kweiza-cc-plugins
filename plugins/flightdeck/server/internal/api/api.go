@@ -52,6 +52,12 @@ type Options struct {
 	// Clock 은 시계다. nil 이면 time.Now().UTC.
 	Clock func() time.Time
 
+	// SelfUpdate 는 자동 갱신 축의 현재 상태를 낸다. nil 이면 "배선 안 됨"으로 답한다.
+	//
+	// ★ 콜백인 이유: 이 값은 **계속 변한다.** 조립 시점의 스냅숏을 박으면
+	// /healthz 가 영원히 기동 직후 상태를 낸다.
+	SelfUpdate func() SelfUpdateStatus
+
 	// Fallback 은 REST 라우트에 안 걸린 요청을 받을 핸들러다(보통 대시보드).
 	// nil 이면 JSON 404 를 낸다.
 	//

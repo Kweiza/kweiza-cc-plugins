@@ -111,6 +111,9 @@ func RenderHealth(h healthzResponse, reachable bool, url string) string {
 	// ★ 서버가 도는 판. **부재도 찍는다** — 이 축을 안 내는 서버라는 사실 자체가
 	// "판이 이 축을 알리기 전만큼 낡았다"는 신호이고, 침묵하면 그 신호가 사라진다.
 	fmt.Fprintf(&b, "\n    서버 판 %s", buildinfo.Short(h.Build))
+	for _, line := range selfUpdateLines(h) {
+		fmt.Fprintf(&b, "\n    %s", line)
+	}
 	fmt.Fprintf(&b, "\n    인증: 토큰 설정 %v · 루프백 개방 %v", h.Auth.TokenSet, h.Auth.LoopbackOpen)
 	if h.Auth.Notice != "" {
 		fmt.Fprintf(&b, "\n    %s", clip(h.Auth.Notice, 300))
@@ -152,6 +155,65 @@ func RenderPrescriptions(shown []PrescriptionLine, folded int) string {
 		fmt.Fprintf(&b, "  … %d건을 접었다. 접힌 것도 이미 발화된 것이라 다시 안 뜬다\n", folded)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// selfUpdateLines 는 자동 갱신 축을 사람이 읽을 줄로 옮긴다. 순수 함수다.
+//
+// ★ **안 보고 있다는 사실을 침묵으로 두지 않는다.** 컨테이너·비유닉스·감시기 기동 실패는
+// 전부 "이 서버는 자기를 안 따라간다"이고, 그 상태에서 아무 줄도 안 내면
+// 읽는 쪽은 따라오고 있다고 믿는다(설계 §13).
+func selfUpdateLines(h healthzResponse) []string {
+	su := h.SelfUpdate
+	if !su.Watching {
+		reason := strings.TrimSpace(su.Reason)
+		if reason == "" {
+			reason = "사유를 안 냈다 — 이 축을 알리기 전 판일 수 있다"
+		}
+		return []string{"자동 갱신  **안 본다** — " + clip(reason, 300)}
+	}
+	var lines []string
+	// ★ **막힌 것을 "보는 중"으로 찍지 않는다.** 감시기는 켜져 있는데 실행 파일을 못 재는
+	// 상태(삭제·권한·마운트 소실)는 영원히 이어질 수 있고, 그때 "보는 중 — 아직 교체를
+	// 못 봤다"는 정반대의 안심을 준다. 서버는 옛 코드로 계속 산다.
+	if s := strings.TrimSpace(su.Stalled); s != "" {
+		lines = append(lines, "자동 갱신  **막혔다** — "+clip(s, 300))
+	}
+	if su.Outcome == "" {
+		if len(lines) == 0 {
+			lines = append(lines, "자동 갱신  보는 중 — 아직 교체를 못 봤다")
+		}
+		return lines
+	}
+	// ★ "failed" 는 **/healthz 로는 못 온다** — 그 값은 drain() 뒤에만 쓰이고, 그때
+	// 리스너는 이미 닫혔으며 프로세스는 곧 비0으로 죽는다(serve.go 가 그것을 읽는다).
+	// 그래도 갈래를 남기는 것은 구조상 방어다: 이 함수는 순수 함수라 값이 어디서 오든
+	// 이름을 말할 수 있어야 하고, 없으면 다음 사람이 "왜 이 값엔 시험이 없나"를 뒤진다.
+	label := map[string]string{"refused": "**거절**", "failed": "**실패**"}[su.Outcome]
+	if label == "" {
+		label = clip(su.Outcome, 40)
+	}
+	head := "자동 갱신  " + label
+	if strings.TrimSpace(su.LastAt) != "" {
+		head += " (" + clip(su.LastAt, 40) + ")"
+	}
+	lines = append(lines, head)
+	// ★ 화살표를 매달아 두지 않는다. 거절 경로 중 To 가 빈 채로 오는 것이 알려진 한계라
+	// (Task 4 지연 항목), From·To 중 하나만 비어도 "07e5df4 → " 처럼 끝을 침묵으로
+	// 남기면 부재가 안 보인다 — 빈 쪽을 "(미상)"으로 채워 그 자리를 말로 남긴다.
+	if su.From != "" || su.To != "" {
+		from, to := su.From, su.To
+		if from == "" {
+			from = "(미상)"
+		}
+		if to == "" {
+			to = "(미상)"
+		}
+		lines = append(lines, "  "+clip(from, 80)+" → "+clip(to, 80))
+	}
+	if strings.TrimSpace(su.Detail) != "" {
+		lines = append(lines, "  "+clip(su.Detail, 400))
+	}
+	return lines
 }
 
 func firstLine(title, body string) string {
