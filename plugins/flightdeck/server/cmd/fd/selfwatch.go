@@ -268,6 +268,23 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 		return ActRefuse
 	}
 
+	// ★ verify 중 종료 요청이 왔으면 물러난다. 안 보면 "멈추라는 요청 뒤에 되살아난다" —
+	// drain() 의 <-served 가 이미 다른 경로(운영자 SIGTERM)로 풀려 있어 안 막히기 때문이다.
+	// 창은 이 검사와 drain() 사이 몇 줄이다 — 없애지는 못해도 verify 시간(≤selfVerifyTimeout)
+	// 전체에서 몇 줄로 좁힌다.
+	if ctx.Err() != nil {
+		w.log.Info("검증 중 종료 요청이 와 재기동을 접는다", "exe", clip(w.exePath, 200))
+		return ActNothing
+	}
+
+	// ★ TOCTOU. stat(248행)과 여기 사이(≤selfVerifyTimeout) 파일이 또 바뀌었으면 방금
+	// 검증한 것은 지금 파일이 아니다 — 드레인 없이 물러난다. 다음 회차가 새 판을 본다.
+	again, againErr := w.stat(w.exePath)
+	if againErr != nil || !again.Same(now) {
+		w.log.Warn("검증 중 실행 파일이 또 바뀌었다 — 이번 판은 건너뛴다", "exe", clip(w.exePath, 200))
+		return ActRefuse
+	}
+
 	w.log.Info("검증 통과 — 드레인 후 재기동한다",
 		"from", clip(from, 120), "to", clip(buildLine, 120))
 	drain()
