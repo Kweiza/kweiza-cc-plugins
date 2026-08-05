@@ -66,9 +66,37 @@ func TestRenderLandWaitingWithoutHolder(t *testing.T) {
 
 func TestRenderLandReclaimedCarriesReason(t *testing.T) {
 	got := RenderLand(service.LandResult{State: "reclaimed", RowID: 7, Reason: "10분 넘게 신호가 없었다"}, t0)
-	for _, want := range []string{"회수됐다", "10분 넘게 신호가 없었다"} {
+	for _, want := range []string{"네 것이 아니다", "10분 넘게 신호가 없었다"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reclaimed 응답에 %q 가 없다:\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderLandReclaimedHeaderNeverContradictsTheReason — reclaimed 는 "내가 점유자가
+// 아니다" **전부**를 접는 낱말이라 도달 갈래가 셋이다(service.laneNotMine). 머리글이
+// "회수됐다"를 단정하면 그중 둘("레인을 쥔 적이 없다" · "줄에 선 기록이 없다")에서
+// 한 문장 안의 앞뒤가 정면 충돌한다 — 사용자에게 나가는 거짓 문장이다.
+//
+// 세 갈래의 실제 사유 문자열(service/landing.go 의 laneLeftReason·laneNotMine 이 만든다)을
+// 그대로 넣고, 머리글이 사유와 싸우지 않는지를 본다.
+func TestRenderLandReclaimedHeaderNeverContradictsTheReason(t *testing.T) {
+	reasons := []string{
+		"4시간째 무응답이라 사람이 회수한다",                          // 진짜 회수됨(left_detail)
+		"레인을 쥔 적이 없다 — 줄 행은 아직 살아 있으니 land 로 차례를 확인해라", // 대기 중
+		"이 프로젝트 줄에 선 기록이 없다 — 먼저 land 로 줄을 서라",         // 줄에 선 적 없음
+	}
+	for _, reason := range reasons {
+		got := RenderLand(service.LandResult{State: "reclaimed", RowID: 3, Reason: reason}, t0)
+		if !strings.Contains(got, reason) {
+			t.Errorf("사유가 응답에서 사라졌다(%q):\n%s", reason, got)
+		}
+		// 머리글이 "회수됐다"를 단정하면 아래 둘에서 거짓이 된다. 사유 자체가 회수를
+		// 말하는 것은 참이므로, 사유를 **뺀** 나머지에 그 낱말이 있는지를 본다.
+		head := strings.Replace(got, reason, "", 1)
+		if strings.Contains(head, "회수") {
+			t.Errorf("사유가 %q 인데 머리글이 회수를 단정한다 — 한 문장 안에서 앞뒤가 충돌한다:\n%s",
+				reason, got)
 		}
 	}
 }
