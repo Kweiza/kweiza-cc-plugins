@@ -672,12 +672,31 @@ func firstLine(title, body string) string {
 func RenderPick(r service.PickResult, now time.Time) string {
 	var b strings.Builder
 
-	// 묶음 구성원 수(선두 포함)를 헤더 줄에 반영한다. Bundle 이 nil 이면 이 응답이
-	// 그 축을 안 읽은 것이므로 n=1(단독 문구)로 둔다 — renderBundle 이 그 부재를
-	// 따로 말하고, 여기서 흉내 내지 않는다.
-	n := 1
+	// 묶음 수를 **둘** 센다. 하나로 뭉개면 응답이 안 한 일을 셈에 넣는다.
+	//
+	//	n     = 이 응답이 다루는 묶음 크기(선두 + 구성원 전부). 요청·제안된 규모다.
+	//	heldN = 이 응답이 실제로 쥔 수(선두 + Claimed 인 구성원). **관측된 규모**다.
+	//	unclaimed = 구성원 중 안 집힌 것들의 id — 아래에서 이름으로 부른다.
+	//
+	// ★ 예전에는 겹침 범위 줄과 브랜치 줄이 둘 다 len(Members)+1 을 썼다. 그런데
+	// service.pickBundle 은 **집은 구성원의 경로만** 합쳐서 겹침을 판정한다. 3건 중
+	// 1건만 집힌 응답이 "묶음 3건의 경로를 전부 합쳐서 봤다"고 말하면, 겹침 0건을
+	// 본 세션은 못 집은 2건의 경로까지 안전하다고 결론짓는다 — 겹침 축은 정확히
+	// 그 결론을 막으려고 있는 축이다. 커버리지 과장은 침묵보다 나쁘다.
+	//
+	// Bundle 이 nil 이면 이 응답이 그 축을 안 읽은 것이므로 둘 다 1(단독 문구)로 둔다 —
+	// renderBundle 이 그 부재를 따로 말하고, 여기서 흉내 내지 않는다.
+	n, heldN := 1, 1
+	var unclaimed []string
 	if r.Bundle != nil {
 		n = len(r.Bundle.Members) + 1
+		for _, m := range r.Bundle.Members {
+			if m.Claimed {
+				heldN++
+			} else {
+				unclaimed = append(unclaimed, m.Item.ID)
+			}
+		}
 	}
 	switch r.Mode {
 	case service.PickRecommended:
@@ -688,18 +707,20 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		}
 	case service.PickClaimed:
 		if n > 1 {
-			claimed := 1 // 선두는 이미 집었다
-			for _, m := range r.Bundle.Members {
-				if m.Claimed {
-					claimed++
-				}
-			}
-			fmt.Fprintf(&b, "pick · 선점했다 — 묶음 %d건 중 %d건\n", n, claimed)
+			fmt.Fprintf(&b, "pick · 선점했다 — 묶음 %d건 중 %d건\n", n, heldN)
 		} else {
 			b.WriteString("pick · 선점했다\n")
 		}
 	case service.PickResumed:
-		b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
+		// ★ 재개 갈래도 묶음 수를 말한다. 예전에는 이 줄만 묶음을 통째로 빠뜨려서,
+		// 묶음 재개 응답의 머리줄이 단독 재개와 글자 하나 다르지 않았다 — 세션은
+		// 자기가 몇 건을 쥔 채 이 브랜치로 돌아왔는지를 머리줄에서 못 읽었다.
+		if n > 1 {
+			fmt.Fprintf(&b, "pick · 재개 — 선두는 이미 내 선점이다(선점 시각은 그대로 둔다). "+
+				"묶음 %d건 중 %d건을 쥐고 있다\n", n, heldN)
+		} else {
+			b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
+		}
 	default:
 		b.WriteString("pick · 적격 0건\n")
 	}
@@ -737,12 +758,32 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	// 묶음 절. renderBundle 이 세 갈래(부재·단독·구성원 목록)를 전부 말한다 —
 	// 이 위치는 항목 블록 뒤·브랜치 줄 앞이다.
 	b.WriteString(renderBundle(r.Bundle))
-	if r.Bundle != nil && len(r.Bundle.Members) > 0 {
-		// 겹침이 묶음 전체 경로의 합집합으로 계산됐다는 사실을 여기서 말한다.
-		// 이 줄이 없으면 꼬리의 "겹침:" 줄이 선두 경로만 본 결과로 읽힌다 —
-		// RenderTail 은 모든 도구가 쓰고 묶음을 모르므로 이 자리가 유일한 발화처다.
-		fmt.Fprintf(&b, "겹침 판정 범위: 묶음 %d건의 경로를 전부 합쳐서 봤다 — "+
-			"남과 부딪히는지는 묶음 단위 질문이다.\n", len(r.Bundle.Members)+1)
+	// 꼬리의 "겹침:" 줄이 **어떤 경로 집합**을 보고 나온 값인지 말한다. RenderTail 은
+	// 모든 도구가 쓰고 묶음을 모르므로 이 자리가 유일한 발화처다.
+	//
+	// ★ 규칙은 한 줄이다: 합쳐진 경로 = 선두 + Claimed 인 구성원. 이 규칙은 세 경로
+	// 전부에서 참이다 — pickExplicit(구성원 0건이라 선두뿐) · pickRecommend(아직
+	// 아무것도 안 집었으므로 best.Lead.Overlaps, 즉 선두뿐) · pickBundle(집은 것만
+	// allPaths 에 합친다). 그래서 응답만 보고 정확히 복원할 수 있고, 서비스에 새
+	// 필드를 만들 필요가 없다.
+	//
+	// Bundle 이 nil 일 때는 아무 말도 안 한다 — 그 응답은 묶음 축 자체를 안 읽었고
+	// (구버전 서버·옛 캐시) 범위를 단정할 근거가 없다. 그 부재는 renderBundle 이 말한다.
+	if r.Bundle != nil && r.Item != nil {
+		if heldN > 1 {
+			fmt.Fprintf(&b, "겹침 판정 범위: 묶음 %d건의 경로를 전부 합쳐서 봤다 — "+
+				"남과 부딪히는지는 묶음 단위 질문이다.\n", heldN)
+		} else {
+			fmt.Fprintf(&b, "겹침 판정 범위: 항목 %s 의 경로만 봤다 — "+
+				"이 응답이 합친 경로는 그것뿐이다.\n", r.Item.ID)
+		}
+		if len(unclaimed) > 0 {
+			// 안 집은 구성원을 **이름으로** 부른다. 수만 말하면 어느 것의 경로가
+			// 판정 밖인지 못 가리고, 세션은 겹침 0건을 묶음 전체에 적용해 버린다.
+			fmt.Fprintf(&b, "  안 집은 구성원 %d건(%s)의 경로는 이 판정에 **안 들어갔다** — "+
+				"그 항목들에 대해서는 겹침을 관측하지 않았다.\n",
+				len(unclaimed), strings.Join(unclaimed, ", "))
+		}
 	}
 
 	if r.Claim != nil {
@@ -756,8 +797,20 @@ func RenderPick(r service.PickResult, now time.Time) string {
 			// 브랜치는 선두 하나뿐이다 — 구성원은 같은 워크트리에 얹혀 갈 뿐 각자
 			// 브랜치를 갖지 않는다. 이 사실을 안 말하면 "브랜치가 구성원마다
 			// 따로 있나"로 읽힐 여지가 남는다.
-			fmt.Fprintf(&b, "  묶음 선두의 id 다. %d건을 이 워크트리에서 함께 한다.\n",
-				len(r.Bundle.Members)+1)
+			//
+			// ★ 여기서 세는 것은 **쥔 수(heldN)** 다. 요청 크기를 쓰면 "3건을 이
+			// 워크트리에서 함께 한다"가 나오는데, 그중 2건은 남이 쥐고 있어 이 세션이
+			// 손댈 수 없다 — 그대로 믿은 세션은 남의 항목을 자기 브랜치에서 고친다.
+			switch {
+			case heldN > 1:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. %d건을 이 워크트리에서 함께 한다.\n", heldN)
+			case r.Mode == service.PickRecommended:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. 구성원 %d건은 아직 선점 전이라 "+
+					"지금 확정된 것은 선두 1건뿐이다.\n", len(r.Bundle.Members))
+			default:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. 구성원 %d건은 이 응답이 못 집었다 — "+
+					"이 워크트리에서 함께 하는 것은 선두 1건뿐이다.\n", len(r.Bundle.Members))
+			}
 		}
 		if len(r.Setup) > 0 {
 			b.WriteString("워크트리 준비:\n")
@@ -798,6 +851,31 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	return b.String()
 }
 
+// RenderBundleUnaccounted 는 **요청했는데 응답이 설명하지 않은 id** 를 낸다. 순수 함수다.
+//
+// ★ 이 문장이 없으면 무엇이 깨지나. item_ids 를 모르는 구서버는 그 필드를 조용히
+// 버리고 경로의 선두 하나만 집은 뒤 200 을 낸다 — api_version 이 양쪽 다 "1" 이라
+// SkewBanner 도 안 뜬다. 그러면 `pick(item_ids:[a,b,c])` 가 정상 응답처럼 보이는데
+// b·c 는 아무도 안 쥔 상태다. 선점이 존재하는 이유가 바로 그 상황을 막는 것이므로,
+// 이건 화면 문제가 아니라 **선점 계약이 깨진 것**이고 반드시 이름을 부른다.
+//
+// 원인을 지어내지 않는다 — 구서버일 수도, 프록시가 필드를 떨어뜨렸을 수도, 응답이
+// 중간에서 갈렸을 수도 있다. 확실한 것 하나만 말한다: 이 id 들을 이 세션이 쥐었다는
+// 근거가 응답 어디에도 없다.
+func RenderBundleUnaccounted(missing []string) string {
+	if len(missing) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "★ 요청한 항목 %d건을 이 응답이 설명하지 않는다: %s\n",
+		len(missing), strings.Join(missing, ", "))
+	b.WriteString("  이 세션이 그것들을 쥐었다는 근거가 응답 어디에도 없다 — " +
+		"선점됐다고 가정하고 손대면 남과 같은 파일을 동시에 고치게 된다.\n")
+	b.WriteString("  서버가 item_ids 를 모르는 판일 수 있다(구서버 + 신 클라이언트). " +
+		"`fd status` 로 서버 판을 보고, 필요하면 하나씩 item_id 로 다시 집어라.\n")
+	return b.String()
+}
+
 // 묶음 구성원 표식 — 셋이고, 서로 다르다.
 //
 // ★ internal/service/pick.go 의 BundleMember.Claimed 주석이 세 상태를 못박는다:
@@ -818,13 +896,36 @@ const (
 // renderPathCheck 이 같은 이유로 이상이 없어도 한 줄을 찍는다.
 func renderBundle(bi *service.BundleInfo) string {
 	if bi == nil {
-		return "\n묶음: 이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
+		// ★ 원인을 **둘만** 대던 문장이었다(낡은 캐시 · 구서버). 그 둘 다 현행 서버의
+		// 신선한 응답에는 해당이 없는데, `pick(item_id: …)` 는 오늘도 이 자리를 지난다 —
+		// pickExplicit 이 묶음 축을 안 채우기 때문이다(그 함수의 주석 참고).
+		// 즉 이 문장을 읽은 세션은 셋 중 하나도 맞지 않는 원인을 지목받고, 있지도 않은
+		// 서버 스큐를 고치러 간다. 원인을 지어내는 것은 침묵보다 나쁘다.
+		//
+		// 그래서 **실제로 이 값이 나오는 갈래 전부**를 나열하고 어느 것인지는 단정하지
+		// 않는다. 그리고 이 부재가 겹침 판정 범위에 무엇을 뜻하는지도 한 줄로 말한다 —
+		// 이 갈래에는 "겹침 판정 범위" 줄이 안 붙으므로 여기가 유일한 발화처다.
+		return "\n묶음: 이 응답은 그 축을 읽지 않았다 — 원인은 셋이고 응답만으로는 못 가른다: " +
+			"item_id 하나를 지정한 호출이라 이웃을 안 찾았거나 · 낡은 캐시이거나 · " +
+			"서버가 이 축을 모르는 판이다.\n" +
+			"  그래서 아래 겹침은 **이 항목의 경로만** 본 값이다 — 이 세션이 따로 쥔 다른 항목은 안 합쳤다.\n"
 	}
 	var b strings.Builder
 	if len(bi.Members) == 0 {
-		b.WriteString("\n묶음: 함께 갈 항목이 없다 — 단독이다.\n")
+		// ★ "함께 갈 항목이 없다"고 단정하지 않는다. 구성원 0건이 나오는 갈래가 둘인데
+		// 두 갈래가 말하는 사실이 다르기 때문이다:
+		//   추천 경로  — 이웃을 **찾아봤고** 직접 이어진 것이 없었다.
+		//   item_id 경로 — 이웃을 **애초에 안 찾았다**(방사형 판정을 안 돌린다).
+		// 두 번째에 대고 "함께 갈 항목이 없다"고 하면 관측한 적 없는 사실을 단정하게
+		// 되고, 그걸 읽은 세션은 이 항목에 형제가 없다고 결론짓는다. 어느 쪽인지는
+		// Scope 가 말한다 — 그래서 여기서 Scope 를 **반드시** 찍는다(예전에는 구성원이
+		// 있을 때만 찍어서, 정작 0건일 때 그 사실이 침묵으로 사라졌다).
+		b.WriteString("\n묶음: 구성원이 없다 — 단독이다.\n")
 		if bi.Reason != "" {
 			fmt.Fprintf(&b, "  %s\n", bi.Reason)
+		}
+		if bi.Scope != "" {
+			fmt.Fprintf(&b, "  묶음 범위: %s\n", bi.Scope)
 		}
 		return b.String()
 	}
@@ -1021,6 +1122,26 @@ func RenderFinish(r service.FinishResult) string {
 	}
 	if len(r.Released) > 0 {
 		fmt.Fprintf(&b, "자원 반납: %s\n", strings.Join(r.Released, ", "))
+	}
+	// ★ 아직 쥔 항목을 **이름으로 부른다.** finish 는 항목 하나만 닫는데(항목마다
+	// 자기 판단이 필요하다) pick 은 묶음을 집는다 — 그 비대칭 때문에 묶음 3건을 집은
+	// 세션은 finish 한 번 뒤에도 2건을 쥔 채로 남는다. 지금까지 그 사실을 말하는
+	// 표면이 하나도 없었고, schema.sql 에는 만료가 없고 세션이 닫혀도 선점이 안
+	// 풀리므로 그 2건은 **사람이 강제로 풀 때까지 아무도 못 집는다.**
+	// 여기서 침묵하면 그 상태가 만들어지는 것을 아무도 모른 채 지나간다.
+	switch {
+	case r.StillHeld == nil:
+		// nil 은 "0건"이 아니다 — 조회가 실패했거나 서버 판이 이 축을 안 낸다.
+		b.WriteString("이 세션이 아직 쥔 다른 항목이 있는지는 이 응답이 못 읽었다 — " +
+			"`fd status` 로 확인해라(있는데 안 닫으면 아무도 그것을 못 집는다).\n")
+	case len(*r.StillHeld) == 0:
+		b.WriteString("이 세션이 쥔 항목은 이제 0건이다 — 남은 선점이 없다.\n")
+	default:
+		fmt.Fprintf(&b, "★ 이 세션이 **아직 쥐고 있는** 항목 %d건: %s\n",
+			len(*r.StillHeld), strings.Join(*r.StillHeld, ", "))
+		b.WriteString("  finish 는 항목 하나만 닫는다 — 항목마다 자기 판단이 필요하기 때문이다. " +
+			"위 항목들은 여전히 이 세션의 선점이라 **남이 못 집는다.** " +
+			"각각 finish 로 닫거나, 안 할 거면 그 판단을 남기고 닫아라.\n")
 	}
 	// 문장이 조건부인 이유: 중복 id 후속은 트랜잭션 밖으로 빠졌다(finish.go 의 ② 주석).
 	// 넷이 한 트랜잭션이라고 그대로 적으면 그 응답에서만 거짓이 된다.
