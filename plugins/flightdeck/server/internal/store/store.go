@@ -38,9 +38,12 @@ var migration002 string
 //go:embed migrations/003_landing_queue.sql
 var migration003 string
 
+//go:embed migrations/004_pick_bundle.sql
+var migrationPickBundle string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -64,6 +67,7 @@ type Migration struct {
 var migrations = []Migration{
 	{To: 2, Name: "멱등 기록을 DB 로", SQL: migration002},
 	{To: 3, Name: "랜딩 순서 큐", SQL: migration003},
+	{To: 4, Name: "pick_eval 이 묶음을 담는다", SQL: migrationPickBundle},
 }
 
 // timeLayout 은 저장용 시각 표기다.

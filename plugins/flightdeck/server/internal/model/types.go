@@ -209,8 +209,11 @@ type PickEval struct {
 	Project   string
 	SessionID string
 	At        time.Time
-	Picked    string // 빈 문자열이면 적격 0건
-	Rejected  []Rejection
+	Picked    string // 묶음 **선두**의 항목 id. 빈 문자열이면 적격 0건
+	// PickedWith 는 선두를 뺀 나머지다. 비면 단독이었다는 뜻이고,
+	// 저장에서 NULL 이 된다 — 빈 배열로 쓰지 않는다.
+	PickedWith []string
+	Rejected   []Rejection
 }
 
 type Rejection struct {
