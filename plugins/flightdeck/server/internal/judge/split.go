@@ -24,111 +24,88 @@ type SplitCard struct {
 	CCSessionID string
 }
 
-// SplitReport 는 한 대화의 카드가 상하위 경로로 갈렸다는 **보고**다.
+// SplitReport 는 한 대화가 **같은 트리**에 대해 서로 다른 worktree 값을 기록했다는 보고다.
 type SplitReport struct {
 	CCSessionID string
 	MachineID   string
-	Ancestor    string   // 조상 쪽 워크트리(가장 짧은 것)
-	Descendants []string // 그 아래로 잡힌 워크트리들. 정렬된다
+	Root        string   // git 이 아는 워크트리 루트
+	Recorded    []string // 그 트리에 대해 기록된 서로 다른 값들. 정렬된다. 언제나 2개 이상
 	SessionIDs  []string // 이 보고에 걸린 카드 전부. 정렬된다
 }
 
 // DetectUnnormalizedSplit 은 워크트리 정규화가 안 돈 흔적을 찾는다. 순수 함수다.
 //
-// ★★ 이 함수는 이 저장소에서 **경로 접두 관계를 쓰는 유일한 자리**다. DESIGN §3 이
-// 일부러 없앤 축이므로 울타리를 여기 못박는다:
+// 판정은 하나다 — **같은 (머신, cc, 소유 트리)인데 기록된 worktree 값이 둘 이상.**
+// 정규화가 도는 클라이언트는 언제나 그 트리의 git 루트를 적으므로(cmd/fd/env.go
+// resolveProject 의 --show-toplevel) 값이 여럿이면 최소 하나는 정규화 없이 열린 것이다.
 //
+// ★★ 왜 조상-자손 경로 쌍으로 판정하지 않는가. 앞선 판이 그렇게 했다가 실측에서
+// **거짓 양성 56%** 를 냈다(2026-08-05, 조상-자손 쌍 100건 중 56건). 이 저장소의 링크
+// 워크트리는 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 **자손 경로**에 살고,
+// 그것은 정규화가 완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는
+// 못 가르고, git 이 아는 루트 목록이 있어야 갈린다.
+//
+// ★ 울타리:
 //   - 이것은 정체 판정도 겹침 판정도 **아니다. 보고다.** 어느 소비자도 이 결과로 두
 //     카드를 같은 세션이라고 보지 않는다. 카드는 여전히 3중키로만 같다.
 //   - **CCSessionID 가 같을 때만 본다.** 앞선 세션이 상하위 17건을 가짜 겹침으로 셌다가
 //     "전부 다른 대화였다"로 정정한 사고가 있다. 그 17건은 cc 가 달라 여기 안 걸린다.
-//   - **형제 트리는 안 건드린다.** `.flightdeck/worktrees/A` 와 `/B` 는 서로 다른 git
-//     워크트리이고 같은 repo-상대 경로를 만지면 병합 때 실제로 충돌한다 — 진짜 겹침이다.
-//   - **빈 cc 끼리는 같다고 보지 않는다.** 못 읽음을 값으로 접으면 관측이 깨진 순간
-//     이 축이 통째로 거짓 초록을 낸다.
-//
-// 정규화(`cmd/fd/env.go` resolveProject, 커밋 4de4b21)가 도는 클라이언트는 이 모양을
-// **만들 수 없다** — 그래서 보고 하나가 곧 "그 카드를 연 클라이언트가 낡았다"의 증거다.
-func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
-	// (머신, cc) 로 묶는다. 빈 cc 는 아예 안 담는다.
-	type key struct{ machine, cc string }
-	groups := map[key][]SplitCard{}
+//   - **형제 트리는 안 건드린다.** 소유 루트가 다르면 아예 다른 묶음이 된다.
+//   - **빈 cc 끼리는 같다고 보지 않는다.**
+//   - **worktreeRoots 가 비면 아무것도 보고하지 않는다.** 못 읽었다는 사실은 호출부가
+//     파생 실패로 남긴다 — 여기서 추측으로 보고하면 위의 56%가 그대로 돌아온다.
+func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport {
+	roots := make([]string, 0, len(worktreeRoots))
+	for _, r := range worktreeRoots {
+		if r = strings.TrimSpace(r); r != "" {
+			roots = append(roots, filepath.Clean(r))
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+
+	type key struct{ machine, cc, root string }
+	groups := map[key]map[string][]string{} // (머신,cc,트리) → worktree 값 → 세션 id 들
 	for _, c := range cards {
 		cc := strings.TrimSpace(c.CCSessionID)
 		m := strings.TrimSpace(c.MachineID)
-		if cc == "" || m == "" {
+		wt := strings.TrimSpace(c.Worktree)
+		if cc == "" || m == "" || wt == "" {
 			continue
 		}
-		groups[key{m, cc}] = append(groups[key{m, cc}], c)
+		wt = filepath.Clean(wt)
+		if wt == "." {
+			continue
+		}
+		root := owningRoot(wt, roots)
+		if root == "" {
+			continue // git 이 모르는 트리다 — "접혔어야 한다"를 판정할 근거가 없다
+		}
+		k := key{m, cc, root}
+		if groups[k] == nil {
+			groups[k] = map[string][]string{}
+		}
+		groups[k][wt] = append(groups[k][wt], c.SessionID)
 	}
 
 	var out []SplitReport
-	for k, g := range groups {
-		// 워크트리를 정규화해 중복을 없앤다. 한 워크트리에 카드가 여럿이면 그것은
-		// 이 축이 아니다(같은 트리의 다른 창 — 영영 안 합쳐지는 것이 옳다).
-		byWT := map[string][]string{}
-		for _, c := range g {
-			wt := filepath.Clean(strings.TrimSpace(c.Worktree))
-			if wt == "" || wt == "." {
-				continue
-			}
-			byWT[wt] = append(byWT[wt], c.SessionID)
-		}
+	for k, byWT := range groups {
 		if len(byWT) < 2 {
-			continue
+			continue // 한 트리에 값 하나 — 정규화가 돈 모양이다
 		}
-		wts := make([]string, 0, len(byWT))
-		for wt := range byWT {
-			wts = append(wts, wt)
+		rec := make([]string, 0, len(byWT))
+		var ids []string
+		for wt, sids := range byWT {
+			rec = append(rec, wt)
+			ids = append(ids, sids...)
 		}
-		sort.Strings(wts)
-
-		// 가장 짧은 것부터 보며, 자기 아래로 들어간 것을 모은다.
-		//
-		// ★ wts 는 사전순 정렬돼 있고, 경로 접두는 언제나 사전순으로 더 작다 —
-		//   그래서 조상은 항상 자기 자손보다 먼저 온다. 이 성질에 기대어 "이미 낸
-		//   조상의 아래면 건너뛴다"로 **최상위 조상 하나만** 낸다.
-		//   사슬(/a → /a/b → /a/b/c)은 /a 하나가 셋 다 덮으므로 보고도 하나여야 한다.
-		var chosen []string
-		for _, anc := range wts {
-			nested := false
-			for _, c := range chosen {
-				if isDescendant(c, anc) {
-					nested = true
-					break
-				}
-			}
-			if nested {
-				continue
-			}
-			var desc []string
-			for _, d := range wts {
-				if d != anc && isDescendant(anc, d) {
-					desc = append(desc, d)
-				}
-			}
-			if len(desc) == 0 {
-				continue
-			}
-			chosen = append(chosen, anc)
-			ids := append([]string{}, byWT[anc]...)
-			for _, d := range desc {
-				ids = append(ids, byWT[d]...)
-			}
-			sort.Strings(desc)
-			sort.Strings(ids)
-			out = append(out, SplitReport{
-				CCSessionID: k.cc, MachineID: k.machine,
-				Ancestor: anc, Descendants: desc, SessionIDs: ids,
-			})
-			// ★ 여기서 break 하지 않는다. 한 대화가 **서로 무관한** 갈림 쌍을 둘 이상
-			//   가질 수 있고(/a→/a/b 와 /x→/x/y), 대표 하나만 내면 나머지가 조용히
-			//   사라진다. 실측에서 한 대화가 워크트리 16개에 걸쳐 있었다 — 실제로 나는 모양이다.
-			//
-			//   대신 **배너는 len(reports) 가 아니라 서로 다른 cc 수를 센다**(splitBanner).
-			//   보고는 갈림 그룹 단위이고 배너가 세는 것은 대화 단위라, 둘을 같은 수로
-			//   접으면 대화 하나가 여러 개로 부풀어 보인다.
-		}
+		sort.Strings(rec)
+		sort.Strings(ids)
+		out = append(out, SplitReport{
+			CCSessionID: k.cc, MachineID: k.machine,
+			Root: k.root, Recorded: rec, SessionIDs: ids,
+		})
 	}
 	// ★ 정렬 키가 셋이어야 결정적이다. cc 하나만 쓰면 같은 cc 가 서로 다른 머신
 	//   둘에서 보고를 만들 때 두 보고의 상대 순서가 맵 순회에 따라 흔들린다 —
@@ -140,9 +117,25 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 		if out[i].MachineID != out[j].MachineID {
 			return out[i].MachineID < out[j].MachineID
 		}
-		return out[i].Ancestor < out[j].Ancestor
+		return out[i].Root < out[j].Root
 	})
 	return out
+}
+
+// owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
+//
+// ★ 가장 긴 것을 골라야 한다. 가장 짧은 것을 고르면 `<repo>/.flightdeck/worktrees/X` 가
+// 통째로 저장소 루트에 흡수되고, 그 순간 거짓 양성 56%가 돌아온다.
+func owningRoot(p string, roots []string) string {
+	best := ""
+	for _, r := range roots {
+		if p == r || isDescendant(r, p) {
+			if len(r) > len(best) {
+				best = r
+			}
+		}
+	}
+	return best
 }
 
 // isDescendant 는 child 가 parent **아래**인지다. 순수 함수다.
