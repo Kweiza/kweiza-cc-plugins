@@ -1260,6 +1260,71 @@ func TestBoardNotesUnattributedCards(t *testing.T) {
 
 `d.note` 의 정확한 시그니처는 같은 파일의 기존 호출부(`d.note("project-path", …)`)를 따른다.
 
+## 배선·렌더 시험의 픽스처는 **셋이 서로 다른 값**이어야 한다
+
+검토가 뮤테이션으로 잡았다. 이전 판은 이랬다:
+
+- `TestBoardWiresAckReach` 픽스처가 `Emitted=Reachable=Acked=1` 이라, `AckReach{...}` 리터럴에서
+  **필드를 뒤바꿔도 값이 안 변해** 안 잡혔다.
+- 렌더 시험이 `"26"`·`"4"` 가 문자열 **어딘가에** 있는지만 봐서, `printf` 인자 순서를 바꿔
+  발화·도달가능 숫자가 뒤바뀐 채 화면에 나가도 안 잡혔다.
+
+그래서 둘 다 고친다.
+
+**배선 시험** — 세션 셋을 세워 `emitted=3 · reachable=2 · acked=1` 을 만든다(셋이 서로 다르다).
+
+```go
+// ★ 셋이 서로 다른 값이어야 한다. 전부 1이면 AckReach{} 리터럴에서 필드를
+//   뒤바꿔도 값이 안 변해 이 시험이 아무것도 안 잡는다(검토가 뮤테이션으로 확인).
+func TestBoardWiresAckReach(t *testing.T) {
+	// 세션 셋이 prescribe 를 남기고, 그중 둘이 판단을 가지고, 하나가 ack 한다.
+	// → emitted 3 · reachable 2 · acked 1
+	...
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if view.AckReach == nil {
+		t.Fatal("AckReach 가 nil 이다 — Board 가 배선을 안 했다")
+	}
+	if view.AckReach.Emitted != 3 || view.AckReach.Reachable != 2 || view.AckReach.Acked != 1 {
+		t.Fatalf("AckReach %+v, 원하는 것 {Emitted:3 Reachable:2 Acked:1} — "+
+			"셋이 서로 다른 값이라 필드가 섞이면 여기서 잡힌다", *view.AckReach)
+	}
+}
+```
+
+**렌더 시험** — 세 수가 **한 줄 안에서 정해진 순서로** 나오는지 본다.
+
+```go
+// ★ 부분문자열 존재만 보면 printf 인자 순서를 바꿔도 안 잡힌다(검토가 확인).
+//   문장 전체를 통째로 대조해 자리를 고정한다.
+func TestRenderBoardDetailShowsAckReach(t *testing.T) {
+	now := time.Now()
+	v := service.BoardView{
+		Project: model.Project{ID: "p"}, At: now, Window: 2 * time.Hour,
+		AckReach: &service.AckReach{Emitted: 26, Reachable: 4, Acked: 3},
+	}
+	out := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
+	const want = "발화 카드 26 · 그중 ack 이 닿을 수 있는 카드 4 · 실제 ack 3"
+	if !strings.Contains(out, want) {
+		t.Fatalf("확인율 줄이 %q 를 그대로 안 낸다 — 숫자 자리가 섞였을 수 있다:\n%s", want, out)
+	}
+	// 대조 ① — 기본 보드(detail 아님)에는 안 나온다.
+	if brief := RenderBoard(v, BoardRenderOptions{Now: now}); strings.Contains(brief, "발화 카드") {
+		t.Fatalf("기본 보드에 확인율이 떴다 — detail 전용이다:\n%s", brief)
+	}
+	// 대조 ② — 발화가 0이면 아예 안 나온다(0건짜리 줄은 배경이 된다).
+	v.AckReach = &service.AckReach{}
+	if zero := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true}); strings.Contains(zero, "발화 카드") {
+		t.Fatalf("발화 0건인데 확인율 줄이 떴다:\n%s", zero)
+	}
+}
+```
+
+`want` 문자열은 **구현의 `fmt.Sprintf` 문구와 정확히 일치해야 한다.** 구현을 먼저 확정하고
+그 문구를 그대로 옮겨라 — 다르면 시험이 못 찾는다.
+
 - [ ] **Step 4: 초록을 확인한다**
 
 ```bash
@@ -1872,6 +1937,65 @@ func TestAckReachSplitsDenominatorByJudgmentPresence(t *testing.T) {
 `model.JudgmentDecision` 의 정확한 상수명은 `internal/model/types.go` 에서 확인한다
 (`model.JudgmentBlocked`·`model.JudgmentAsk` 가 `service/board.go` 에서 쓰이는 것과 같은 꼴이다).
 
+**그리고 `DISTINCT` 셋을 잠그는 시험을 반드시 둔다.**
+
+검토가 실물 DB 로 확인했다 — `DISTINCT` 를 빼면 이 원장에서 **emitted 31 → 125(4배)**,
+reachable 7 → 29, acked 7 → 10 이 되고 확인율이 100%에서 34%로 뒤집힌다. `prescribe` 를
+**19번** 남긴 세션이 지금 이 DB 에 실재한다. 그런데 셋을 다 지워도 전 스위트가 초록이었다 —
+위 픽스처가 세션당 이벤트를 하나씩만 남겨서 생긴 사각지대다.
+
+**이 과제의 존재 이유가 "분모를 정확히 세는 것"이다.** 그 장치를 무시험으로 두면 안 된다.
+
+```go
+// 한 세션이 같은 이벤트를 여러 번 남겨도 **카드 한 장**으로 센다.
+// DISTINCT 가 없으면 이벤트 수가 곧 카드 수가 되어 분모가 통째로 부풀고,
+// 실측에서 그 왜곡이 4배였다(emitted 31 → 125).
+func TestAckReachCountsCardsNotEvents(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "")
+	if err != nil {
+		t.Fatalf("OpenSession wt1: %v", err)
+	}
+	s2, _, err := s.OpenSession(ctx, "p", "m", "/wt2", "cc-2", "")
+	if err != nil {
+		t.Fatalf("OpenSession wt2: %v", err)
+	}
+
+	// s1 은 같은 이벤트를 **두 번씩** 남긴다 — 실물에서 흔한 모양이다.
+	s.LogEvent(ctx, "prescribe", "p", s1.ID, map[string]any{"key": "k1"})
+	s.LogEvent(ctx, "prescribe", "p", s1.ID, map[string]any{"key": "k2"})
+	s.LogEvent(ctx, "prescribe_ack", "p", s1.ID, map[string]any{"keys": []string{"k1"}})
+	s.LogEvent(ctx, "prescribe_ack", "p", s1.ID, map[string]any{"keys": []string{"k2"}})
+	// s2 는 한 번만. 판단은 없다.
+	s.LogEvent(ctx, "prescribe", "p", s2.ID, map[string]any{"key": "k"})
+
+	if _, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "p", SessionID: s1.ID, Kind: model.JudgmentDecision, Title: "t", Body: "b",
+	}); err != nil {
+		t.Fatalf("AddJudgment: %v", err)
+	}
+
+	emitted, reachable, acked, err := s.AckReach(ctx, "p")
+	if err != nil {
+		t.Fatalf("AckReach: %v", err)
+	}
+	// 이벤트는 5건이지만 카드는 2장이다.
+	if emitted != 2 {
+		t.Errorf("발화 카드 %d, 원하는 것 2 — 이벤트 수(3)를 센 것이 아닌지 보라", emitted)
+	}
+	if reachable != 1 {
+		t.Errorf("판단 가진 카드 %d, 원하는 것 1 — s1 의 prescribe 가 둘이라 2가 나오면 DISTINCT 가 빠진 것이다", reachable)
+	}
+	if acked != 1 {
+		t.Errorf("ack 한 카드 %d, 원하는 것 1 — ack 이벤트가 둘이라 2가 나오면 DISTINCT 가 빠진 것이다", acked)
+	}
+}
+```
+
+이 시험 하나가 `DISTINCT` 셋을 **각각** 잠근다 — 부질의마다 중복 이벤트가 있는 세션이 걸린다.
+
 - [ ] **Step 2: 실패를 확인한다**
 
 ```bash
@@ -2000,8 +2124,26 @@ cd plugins/flightdeck/server && go test ./internal/store/ -run TestAckReach -v &
 
 - [ ] **Step 5: 되돌려 빨강을 확인한다**
 
-`AckReach` 의 두 번째 부질의에서 `EXISTS (…)` 절을 지우고 돌린다.
-기대: `reachable != 1` 과 `emitted == reachable` 둘 다 FAIL. 되돌린다.
+빨강이 안 나오면 그 시험이 아무것도 안 잡는 것이다. **시험을 고쳐라(구현을 고치지 마라).**
+
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | 둘째 부질의의 `EXISTS (…)` 절 제거 | `TestAckReachSplitsDenominatorByJudgmentPresence` |
+| 2 | **emitted 부질의의 `DISTINCT` 제거** | `TestAckReachCountsCardsNotEvents` |
+| 3 | **reachable 부질의의 `DISTINCT` 제거** | 〃 |
+| 4 | **acked 부질의의 `DISTINCT` 제거** | 〃 |
+| 5 | `kind='prescribe_ack'` → `'prescribe'` | `TestAckReachSplitsDenominatorByJudgmentPresence` |
+| 6 | `row.Scan` 의 인자 순서 뒤바꾸기 | 〃 |
+| 7 | `Board()` 안의 `view.AckReach = …` 제거 | `TestBoardWiresAckReach` |
+| 8 | **`AckReach{}` 리터럴의 필드 뒤바꾸기**(`Emitted:re, Reachable:em`) | `TestBoardWiresAckReach` |
+| 9 | `d.fail("ack-reach", …)` 를 삼키게 | `TestBoardNotesWhenAckReachFails` |
+| 10 | `boardDetailFoot` 의 확인율 한 줄 제거 | `TestRenderBoardDetailShowsAckReach` |
+| 11 | `boardDetailFoot` 의 `r.Emitted > 0` 가드 제거 | 〃(대조 ②) |
+| 12 | **`printf` 인자 순서 뒤바꾸기**(`r.Reachable, r.Emitted, r.Acked`) | 〃 |
+
+**2·3·4·8·12 가 이번 수정의 핵심이다.** 검토가 뮤테이션으로 확인했다 — 다섯 다 이전 판에서
+**초록으로 살아남았다.** 특히 `DISTINCT` 셋은 실물 DB 에서 분모를 4배로 부풀리는 회귀이고,
+`prescribe` 를 19번 남긴 세션이 지금 그 DB 에 실재한다.
 
 - [ ] **Step 6: 커밋**
 
