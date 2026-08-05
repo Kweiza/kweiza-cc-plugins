@@ -1,11 +1,14 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
+	"github.com/kweiza/flightdeck/internal/gitreader"
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
@@ -194,5 +197,79 @@ func TestBoardFillsSplits(t *testing.T) {
 	}
 	if len(view.Splits) == 0 {
 		t.Fatal("Splits 가 비었다 — Board 가 DetectUnnormalizedSplit 을 안 부르거나 루트를 안 넘긴다")
+	}
+}
+
+// hasFailure 는 파생 실패 목록에 그 축이 있는지다.
+func hasFailure(v BoardView, axis string) bool {
+	for _, f := range v.Failures {
+		if f.Axis == axis {
+			return true
+		}
+	}
+	return false
+}
+
+// worktreesFailReader 는 축 하나(Worktrees)만 실패하는 리더다. degrade_test.go 의
+// flakyReader 와 같은 기법(GitReader 를 embed 하고 필요한 메서드만 오버라이드)을
+// 쓰되, 그 파일이 안 덮는 축(워크트리 목록 자체)을 덮는다. degrade_test.go 는
+// 읽기만 하고 고치지 않는다.
+type worktreesFailReader struct {
+	GitReader
+}
+
+var errWorktreesUnreadable = errors.New("주입된 실패: 워크트리 목록을 못 읽는다")
+
+func (w worktreesFailReader) Worktrees(ctx context.Context) ([]gitreader.Worktree, error) {
+	return nil, errWorktreesUnreadable
+}
+
+// ★ "침묵하지 않는다"가 이 과제의 핵심 설계다. 루트를 못 읽었다는 사실이 화면에
+//
+//	안 남으면 "갈림 없음"과 "판정을 못 했다"가 같아진다 — 이 저장소가 반복해서
+//	겪은 실패 모양이다.
+func TestBoardNotesWhenWorktreeRootsAreUnreadable(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	// 프로젝트를 등록만 한다(경로가 있어야 git 리더가 만들어진다) — 세션은
+	// 카드 축(3b, "어느 트리에도 못 붙인 카드")과 완전히 갈라 두기 위해 있어도
+	// 창 밖으로 밀어 낸다. 두 축이 같은 시험에서 함께 걸리면 각각을 따로
+	// 지웠을 때 어느 쪽이 잡았는지 구분이 안 된다.
+	openSession(t, s, "p", repo, repo, "cc-1", "트랙2")
+
+	broken := New(st, nil, WithGitFactory(func(repoPath string) GitReader {
+		return worktreesFailReader{GitReader: gitreader.New(repoPath)}
+	}))
+
+	// 창을 1나노초로 좁혀 세션 카드를 0장으로 만든다(board_test.go 의
+	// TestBoardCarriesSignalsWithoutJudgingLiveness 가 이미 쓰는 패턴).
+	view, err := broken.Board(ctx(), "p", BoardOptions{Window: 1})
+	if err != nil {
+		t.Fatalf("Board: %v", err) // 파생이 실패해도 보드는 응답을 낸다
+	}
+	if len(view.Sessions) != 0 {
+		t.Fatalf("이 시험은 카드 0장을 전제한다 — 아니면 3b 축과 안 갈린다: %d건", len(view.Sessions))
+	}
+	if !hasFailure(view, "split-detect") {
+		t.Fatalf("루트를 못 읽었는데 split-detect 축이 Failures 에 없다 — "+
+			"화면이 '갈림 없음'과 '판정 못 함'을 구분하지 못한다\nFailures: %+v", view.Failures)
+	}
+}
+
+// ★ 어느 트리에도 못 붙인 카드가 있으면 그 수를 낸다.
+func TestBoardNotesUnattributedCards(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	// 등록된 저장소 **밖** 경로로 세션을 연다 — 어느 워크트리 루트에도 안 붙는다.
+	// (실물 원장에도 /home/aaron·/home/aaron/infra 같은 카드가 실제로 있다)
+	outside := filepath.Join(filepath.Dir(repo), "definitely-outside-any-repo")
+	openSession(t, s, "p", repo, outside, "cc-1", "트랙2")
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if !hasFailure(view, "split-detect") {
+		t.Fatalf("트리에 못 붙인 카드가 있는데 split-detect 축이 없다\nFailures: %+v", view.Failures)
 	}
 }
