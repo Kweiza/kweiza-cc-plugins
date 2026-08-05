@@ -114,7 +114,12 @@ func RenderHealth(h healthzResponse, reachable bool, url string) string {
 	for _, line := range selfUpdateLines(h) {
 		fmt.Fprintf(&b, "\n    %s", line)
 	}
-	fmt.Fprintf(&b, "\n    인증: 토큰 설정 %v · 루프백 개방 %v", h.Auth.TokenSet, h.Auth.LoopbackOpen)
+	// ★ 설정과 관측을 **따로** 찍는다. 한 값으로 접으면 "면제를 껐다"(의도한 상태)와
+	// "면제는 켰는데 아무도 못 받는다"(배선 결함)가 화면에서 같아지는데, 처방이 정반대다.
+	// 앞선 판은 `루프백 개방` 한 값만 냈고 그 값이 설정이었다 — 컨테이너 배포에서
+	// 그 줄이 참인 설정을 말하며 거짓인 결론을 읽게 했다.
+	fmt.Fprintf(&b, "\n    인증: 토큰 설정 %v · 루프백 면제 설정 %v · 루프백 도달 %v",
+		h.Auth.TokenSet, h.Auth.LoopbackConfigured, h.Auth.LoopbackOpen)
 	if h.Auth.Notice != "" {
 		fmt.Fprintf(&b, "\n    %s", clip(h.Auth.Notice, 300))
 	}
