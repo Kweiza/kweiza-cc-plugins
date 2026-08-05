@@ -1012,10 +1012,24 @@ func RenderFinish(r service.FinishResult) string {
 	} else {
 		b.WriteString("후속 0건 — 이번에 나온 후속이 정말 없다면 그대로 두고, 있다면 지금 add 로 넣어라.\n")
 	}
+	// ★ 건너뛴 후속은 **반드시 낸다.** 안 내면 세션이 "후속 N건 등록"만 보고 떠나는데,
+	// 그 id 의 항목은 남이 만든 다른 것이다 — 흡수가 조용한 거짓이 된다.
+	if len(r.SkippedFollowups) > 0 {
+		fmt.Fprintf(&b, "후속 %d건은 **안 넣었다** — 같은 id 가 이미 있다: %s\n",
+			len(r.SkippedFollowups), strings.Join(r.SkippedFollowups, ", "))
+		b.WriteString("  그 id 의 항목은 남이 만든 것일 수 있다. 내용이 다르면 다른 id 로 add 해라.\n")
+	}
 	if len(r.Released) > 0 {
 		fmt.Fprintf(&b, "자원 반납: %s\n", strings.Join(r.Released, ", "))
 	}
-	b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
+	// 문장이 조건부인 이유: 중복 id 후속은 트랜잭션 밖으로 빠졌다(finish.go 의 ② 주석).
+	// 넷이 한 트랜잭션이라고 그대로 적으면 그 응답에서만 거짓이 된다.
+	if len(r.SkippedFollowups) > 0 {
+		b.WriteString("판단 저장·종료·자원 반납은 한 트랜잭션이었다 — " +
+			"위 후속만 빠졌고, 그것이 판단을 지킨 값이다.\n")
+	} else {
+		b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
+	}
 	return b.String()
 }
 

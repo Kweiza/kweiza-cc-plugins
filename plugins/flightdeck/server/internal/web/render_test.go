@@ -43,8 +43,26 @@ type fixture struct {
 
 const testProject = "cp"
 
-func newFixture(t *testing.T) *fixture {
+// fixtureOpt 는 하네스의 축을 바꾼다. 지금 있는 축은 시계 하나다.
+type fixtureOpt func(*fixtureConfig)
+
+type fixtureConfig struct{ clock func() time.Time }
+
+// withClock 은 **서비스와 화면 양쪽에 같은 시계**를 준다.
+//
+// 한쪽만 주면 경과가 두 좌표계에서 계산돼 시험이 무엇을 재는지 알 수 없게 된다.
+// 경과를 숫자로 단정하려면 시계가 서야 한다 — 안 그러면 전부 "방금"이라
+// 대기 경과·획득 경과·신호 나이가 **같은 값을 세 번 찍어도** 시험이 초록이다.
+func withClock(f func() time.Time) fixtureOpt {
+	return func(c *fixtureConfig) { c.clock = f }
+}
+
+func newFixture(t *testing.T, opts ...fixtureOpt) *fixture {
 	t.Helper()
+	var cfg fixtureConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
 	if err != nil {
@@ -52,10 +70,16 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	svc := service.New(st, log)
+	var svcOpts []service.Option
+	webOpts := []Option{WithLogger(log), WithRefresh(7)}
+	if cfg.clock != nil {
+		svcOpts = append(svcOpts, service.WithClock(cfg.clock))
+		webOpts = append(webOpts, WithClock(cfg.clock))
+	}
+	svc := service.New(st, log, svcOpts...)
 	return &fixture{
 		t: t, st: st, svc: svc,
-		h: New(svc, WithLogger(log), WithRefresh(7)),
+		h: New(svc, webOpts...),
 	}
 }
 
@@ -357,17 +381,26 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 
 	_, html := f.get("")
 
-	// 폼은 넷을 넘지 않는다(설계 §6: 버튼 넷 + 그 외 쓰기 없음).
+	// 폼은 넷이다: Tier A 쓰기 셋 + 프로젝트 고르기 GET 하나.
+	// Tier B 버튼 둘은 폼이 아니라 비활성 <button> 이라 여기 안 센다.
+	//
+	// ★ 이 상한이 지키는 것은 **개수가 아니라 성질**이다 — 파생물에 손대는 폼이
+	// 하나라도 늘면 대시보드가 다시 손 기재 저장소가 되고, 그것이 이 제품이
+	// 없애려던 병목 1위다. 여유를 안 둔다: 늘리려면 이 줄을 고치면서
+	// "그 폼이 무엇을 쓰는가"에 먼저 답하게 만드는 것이 이 락의 목적이다.
 	if n := strings.Count(html, "<form"); n > 4 {
 		t.Fatalf("폼 %d개 — 넷을 넘었다. 파생물에 손대는 폼이 늘면 대시보드가 다시 손 기재 저장소가 된다", n)
 	}
-	// 그중 쓰기(POST)는 Tier A 의 둘뿐이다.
-	if n := strings.Count(html, `method="post"`); n != 2 {
-		t.Fatalf("POST 폼 %d개, 기대 2개(선점 회수·항목 폐기). 나머지 둘은 Tier B 라 비활성 버튼이다", n)
+	// 그중 쓰기(POST)는 Tier A 의 셋이다: 선점 회수 · 항목 폐기 · 랜딩 줄 행 회수.
+	// 줄 행 회수가 Tier A 인 이유는 **이 서버가 실제로 그 일을 하기 때문**이다 —
+	// 레인에 자동 만료가 없어서 사람이 푸는 이 길이 유일한 탈출구다.
+	if n := strings.Count(html, `method="post"`); n != 3 {
+		t.Fatalf("POST 폼 %d개, 기대 3개(선점 회수·항목 폐기·랜딩 줄 행 회수). "+
+			"남은 하나(잡 우회 기록)는 Tier B 라 비활성 버튼이다", n)
 	}
-	// 그리고 둘 다 사유가 필수다.
-	if n := strings.Count(html, `name="reason" required`); n != 2 {
-		t.Fatalf("사유 필수 입력 %d개, 기대 2개 — 사유 없는 회수·폐기는 되짚을 수 없다", n)
+	// 그리고 셋 다 사유가 필수다.
+	if n := strings.Count(html, `name="reason" required`); n != 3 {
+		t.Fatalf("사유 필수 입력 %d개, 기대 3개 — 사유 없는 회수·폐기는 되짚을 수 없다", n)
 	}
 	// Tier B 버튼은 지우지 않고 비활성으로 남긴다("없다"와 "안 본다"를 가른다).
 	mustContain(t, html, "레인 정지/재개(사유 필수) · Tier B", "Tier B 버튼 자리가 사라졌다")
