@@ -259,6 +259,156 @@ func TestRenderPickShowsUnclaimedMemberReason(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 리뷰 라운드 1 — findings 1·2·3·4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRenderPickBundleMemberMarksDistinguishThreeStates 는 finding 1·2 를 잠근다.
+//
+// Claimed 필드 하나로 표식을 가르면(!Claimed) "아직 안 시도함"(추천 후보, Rejection=nil)과
+// "시도했지만 실패함"(Rejection!=nil)이 같은 표식이 된다. 리뷰어가 실측한 시나리오:
+// 4건 추천에서 넷 다 ✗ 로 찍히면 에이전트가 "셋이 탈락했다"로 읽고 판정이 방금
+// 지어 준 묶음을 버린 채 혼자 다시 집는다. 세 표식을 각자 다른 구성원 id 옆에
+// 정확히 박아서, 어느 둘을 맞바꿔도 최소 하나는 어긋나게 만든다(finding 2 의
+// "완전히 뒤집을 수 있는 술어" 문제 — 표식 둘만으로는 스왑이 시험을 안 건드렸다).
+func TestRenderPickBundleMemberMarksDistinguishThreeStates(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+		Bundle: &service.BundleInfo{
+			Members: []service.BundleMember{
+				{Item: model.Item{ID: "claimed-mem", Title: "집음", State: model.ItemClaimed, CreatedAt: t0},
+					Claimed: true},
+				{Item: model.Item{ID: "rejected-mem", Title: "거절됨", CreatedAt: t0},
+					Rejection: &model.Rejection{Item: "rejected-mem", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"}},
+				{Item: model.Item{ID: "proposed-mem", Title: "제안됨", State: model.ItemOpen, CreatedAt: t0},
+					Link: judge.Link{Item: "proposed-mem",
+						Axes: []judge.BundleAxis{judge.AxisSibling}, Detail: "판단 J2"}},
+			},
+		},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{
+		"\n  + claimed-mem — 집음",
+		"\n  ✗ rejected-mem — 거절됨",
+		"\n  ○ proposed-mem — 제안됨",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다(세 표식이 구분되지 않는다):\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderPickStatesOverlapScopeCoversTheWholeBundle 은 finding 3 의 절반을 잠근다.
+//
+// 브리프가 이 줄에 준 근거는 "이 줄이 없으면 꼬리의 겹침: 줄이 선두 경로만 본
+// 결과로 읽힌다"다 — 침묵 방지용 줄인데 리뷰어가 통째로 지워도 스위트가 초록이었다.
+// 대조도 함께 못박는다: 묶음이 없으면 두 문구 다 안 나와야 한다(묶음 전용 문구가
+// 단독 pick 에 남으면 그 자체가 새로운 오독이다).
+func TestRenderPickStatesOverlapScopeCoversTheWholeBundle(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item:   &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Branch: "lead",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item: model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0}, Claimed: true,
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "겹침 판정 범위: 묶음 2건의 경로를 전부 합쳐서 봤다") {
+		t.Fatalf("묶음 겹침 범위 문장이 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "묶음 선두의 id 다. 2건을 이 워크트리에서 함께 한다.") {
+		t.Fatalf("브랜치가 묶음 선두라는 사실이 없다:\n%s", got)
+	}
+
+	solo := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0}, Branch: "lead",
+	}
+	soloGot := RenderPick(solo, t0)
+	if strings.Contains(soloGot, "겹침 판정 범위:") {
+		t.Fatalf("묶음이 없는데 묶음 겹침 범위 문장이 나왔다:\n%s", soloGot)
+	}
+	if strings.Contains(soloGot, "묶음 선두의 id 다") {
+		t.Fatalf("묶음이 없는데 묶음 브랜치 설명이 나왔다:\n%s", soloGot)
+	}
+}
+
+// TestRenderPickHeaderNamesBundleSize 는 finding 3 의 나머지 절반이다 — 머리줄이
+// 묶음 크기를 반영한다는 것을 **머리줄 자체**에서 못박는다. Reason 문구가
+// 비슷한 말("묶음 N건 중 M건을 집었다")을 이미 담고 있어서, 머리줄 분기가
+// 통째로 사라져도 그 문구 하나로 다른 시험이 계속 초록일 수 있었다
+// (실측: 리뷰어가 머리줄 분기를 지워도 스위트가 안 빨개졌다). HasPrefix 로
+// 정확히 첫 줄을 겨눈다.
+func TestRenderPickHeaderNamesBundleSize(t *testing.T) {
+	rec := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "사유",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{
+			{Item: model.Item{ID: "a"}}, {Item: model.Item{ID: "b"}},
+		}},
+	}, t0)
+	if !strings.HasPrefix(rec, "pick · 추천 묶음 3건 — **아직 선점하지 않았다**\n") {
+		t.Fatalf("추천 머리줄이 묶음 크기를 안 말한다:\n%s", rec)
+	}
+
+	claimed := RenderPick(service.PickResult{
+		Mode: service.PickClaimed, Reason: "사유",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{
+			{Item: model.Item{ID: "a"}, Claimed: true},
+			{Item: model.Item{ID: "b"}, Rejection: &model.Rejection{Item: "b", Reason: judge.RejectClaimed}},
+		}},
+	}, t0)
+	if !strings.HasPrefix(claimed, "pick · 선점했다 — 묶음 3건 중 2건\n") {
+		t.Fatalf("선점 머리줄이 묶음 크기·집은 수를 안 말한다:\n%s", claimed)
+	}
+}
+
+// TestRenderPickBundleSectionHeaderAndMemberNotes 는 finding 3 의 나머지 둘을 잠근다:
+// 구성원 절 머리줄("묶음 구성원 N건")과, 집은 구성원에 실리는 연결된 판단 전문.
+// 둘 다 브리프가 명시한 출력인데 어느 시험도 짚지 않고 있었다.
+func TestRenderPickBundleSectionHeaderAndMemberNotes(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "사유",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:    model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0},
+			Claimed: true,
+			Notes:   []model.Judgment{{Kind: model.JudgmentDecision, At: t0, Title: "설계 노트", Body: "본문이다"}},
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "묶음 구성원 1건 (선두는 위의 항목이다):") {
+		t.Fatalf("구성원 절 머리줄이 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "연결된 판단 1건 (전문):") ||
+		!strings.Contains(got, "설계 노트") || !strings.Contains(got, "본문이다") {
+		t.Fatalf("구성원에 연결된 판단 전문이 없다:\n%s", got)
+	}
+}
+
+// TestRenderPickShowsBundleEvidenceEvenWithoutAxes 는 finding 4 를 잠근다.
+//
+// pickBundle(item_ids 로 지정한 묶음 전체 경로)이 만드는 Link 는 Axes 가 없다 —
+// 판정 없이 세션이 그대로 지정했기 때문이다(pick.go:427, Link{Detail: "세션이 함께
+// 지정했다"}). len(Axes)>0 으로만 게이트를 걸면 **item_ids 로 집는 경로 전체**의
+// 구성원이 "왜 묶였나" 줄을 영원히 못 낸다.
+func TestRenderPickShowsBundleEvidenceEvenWithoutAxes(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:    model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0},
+			Link:    judge.Link{Item: "mem", Detail: "세션이 함께 지정했다"}, // Axes 없음
+			Claimed: true,
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "묶은 근거: 세션이 함께 지정했다") {
+		t.Fatalf("축이 없어도 근거 문장이 나와야 한다:\n%s", got)
+	}
+}
+
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{

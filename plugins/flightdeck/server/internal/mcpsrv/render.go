@@ -798,6 +798,17 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	return b.String()
 }
 
+// 묶음 구성원 표식 — 셋이고, 서로 다르다.
+//
+// ★ internal/service/pick.go 의 BundleMember.Claimed 주석이 세 상태를 못박는다:
+// 집었다 · 시도했지만 실패했다 · 아직 안 봤다(추천, 시도 자체가 없다). 표식이 둘뿐이면
+// 뒤의 둘이 하나로 뭉개지고, 그러면 "탈락"과 "아직 안 건드림"이 화면에서 같아진다.
+const (
+	markClaimed  = "+" // Claimed=true — 집었다
+	markRejected = "✗" // Claimed=false, Rejection!=nil — 집으려 했는데 실패했다
+	markProposed = "○" // Claimed=false, Rejection=nil — 아직 집기를 시도하지 않았다(추천 경로)
+)
+
 // renderBundle 은 묶음 절이다. 순수 함수다.
 //
 // ★ **어느 갈래에서도 침묵하지 않는다.** 셋을 다 말한다:
@@ -819,9 +830,19 @@ func renderBundle(bi *service.BundleInfo) string {
 	}
 	fmt.Fprintf(&b, "\n묶음 구성원 %d건 (선두는 위의 항목이다):\n", len(bi.Members))
 	for _, m := range bi.Members {
-		mark := "+"
-		if m.Rejection != nil || !m.Claimed {
-			mark = "✗"
+		// ★ 세 상태를 세 표식으로 낸다(internal/service/pick.go 의
+		// BundleMember.Claimed 주석이 적은 그 쌍 그대로). Claimed 필드 하나만 보고
+		// 가르면(!Claimed) "집었다"의 반대를 전부 "실패"로 접는데, 그 반대에는
+		// **아직 시도조차 안 한 추천 후보**가 섞여 있다. 그걸 실패와 같은 표식으로
+		// 찍으면 4건 추천에서 셋이 ✗ 로 보이고, 그걸 본 에이전트가 "셋이 탈락했다"로
+		// 읽어 묶음을 버리고 혼자 다시 집는다 — 판정이 방금 지어 준 묶음을
+		// 화면의 표식 하나가 무너뜨리는 것이다.
+		mark := markProposed // Claimed=false, Rejection=nil → 아직 집기를 시도하지 않았다(추천 경로)
+		switch {
+		case m.Claimed:
+			mark = markClaimed
+		case m.Rejection != nil:
+			mark = markRejected
 		}
 		fmt.Fprintf(&b, "\n  %s %s — %s [%s]\n", mark, m.Item.ID, m.Item.Title, m.Item.State)
 		if m.Rejection != nil {
@@ -831,12 +852,19 @@ func renderBundle(bi *service.BundleInfo) string {
 				"필요하면 그 세션에게 note(kind:\"ask\") 로 알려라\n")
 			continue
 		}
+		// ★ 축이 비어도 근거가 비는 것은 아니다. pickBundle(item_ids 로 지정한
+		// 묶음)이 만드는 Link 는 Axes 가 없다 — 판정 없이 세션이 그대로 지정했기
+		// 때문이다(pick.go:427) — 그런데 Detail 은 "세션이 함께 지정했다"로 채워
+		// 온다. len(Axes)>0 으로만 게이트를 걸면 그 경로(**item_ids 로 집는
+		// 전체 경로**)의 구성원은 영원히 "왜 묶였나" 줄을 못 낸다.
 		if len(m.Link.Axes) > 0 {
 			axes := make([]string, 0, len(m.Link.Axes))
 			for _, a := range m.Link.Axes {
 				axes = append(axes, string(a))
 			}
 			fmt.Fprintf(&b, "    묶은 근거: [%s] %s\n", strings.Join(axes, " + "), m.Link.Detail)
+		} else if strings.TrimSpace(m.Link.Detail) != "" {
+			fmt.Fprintf(&b, "    묶은 근거: %s\n", m.Link.Detail)
 		}
 		if len(m.Item.Paths) > 0 {
 			fmt.Fprintf(&b, "    경로: %s\n", strings.Join(m.Item.Paths, ", "))
