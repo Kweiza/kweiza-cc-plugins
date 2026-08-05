@@ -69,20 +69,28 @@ func TestFinishWithoutBodyRefusesAndSaysWhatToWrite(t *testing.T) {
 	}
 }
 
+// 후속 등록이 실패하면 넷 전부가 롤백된다.
+//
+// ★ 실패 수단이 **중복 id 에서 성립하지 않는 선행 조건으로 바뀌었다.** 계약은 그대로다.
+//
+//	앞선 판은 중복 id 로 이 축을 쟀는데, 그 갈래는 이제 흡수한다 — 같은 id 의 항목이
+//	이미 존재하므로 원자성이 지키려던 "후속이 유입되지 않은" 상태가 성립하지 않고,
+//	롤백하면 **원리적으로 파생 불가한 판단 본문**이 함께 사라지기 때문이다
+//	(finish.go 의 ② 주석). 중복은 실패를 만들기 편한 수단이었을 뿐 이 시험의 대상이
+//	아니었으므로, 수단만 갈고 롤백 계약은 여기서 계속 지킨다.
 func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
 	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
 	addItem(t, s, "p", "batch7", nil, nil)
-	addItem(t, s, "p", "already-there", nil, nil) // 후속과 id 가 부딪힐 항목
 	claimed(t, s, "p", me.Session.ID, "batch7")
 
 	// ★ 대조가 성립하는지 **결과를 읽기 전에** 단정한다.
-	//   ① 충돌 상대가 실제로 있어야 후속 등록이 정말 실패한다
+	//   ① 후속 id 가 비어 있어야 "중복이 아닌 사유로 실패했다"가 성립한다
 	//   ② 끝내려는 항목이 선점 상태여야 "종료가 롤백됐다"가 의미를 가진다
 	//   ③ 판단이 0건이어야 "판단도 안 남았다"를 말할 수 있다
-	if n := countRows(t, st, `SELECT count(*) FROM item WHERE project='p' AND id='already-there'`); n != 1 {
-		t.Fatalf("사전 조건이 깨졌다 — 충돌 상대가 %d건이다", n)
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE project='p' AND id='bad-after'`); n != 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 후속 id 가 이미 %d건 있어 중복 갈래로 샌다", n)
 	}
 	before, err := st.GetItem(ctx(), "p", "batch7")
 	if err != nil {
@@ -101,13 +109,14 @@ func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 		Title:   "batch7 랜딩",
 		Body:    "①…②…③…④…",
 		Followups: []FollowupInput{
-			{ID: "already-there", Title: "후속", Body: "본문"},
+			// 선행 조건이 비었다 — item·job·sha 중 0개다. duplicate 가 아닌 거절이다.
+			{ID: "bad-after", Title: "후속", Body: "본문", After: []model.After{{}}},
 		},
 	})
 	if err == nil {
-		t.Fatalf("id 가 부딪히는 후속은 실패해야 한다")
+		t.Fatalf("불변식을 깨는 후속은 실패해야 한다 — 흡수는 중복 id 한 갈래뿐이다")
 	}
-	if !strings.Contains(err.Error(), "후속 항목 already-there 등록 실패") {
+	if !strings.Contains(err.Error(), "후속 항목 bad-after 등록 실패") {
 		t.Fatalf("실패 사유가 후속 등록임을 말하지 않는다: %v", err)
 	}
 
@@ -144,8 +153,8 @@ func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 		Scan(&payload); err != nil {
 		t.Fatalf("실패 사유 이벤트가 없다: %v", err)
 	}
-	if !strings.Contains(payload, "already-there") {
-		t.Fatalf("실패 사유에 무엇이 부딪혔는지가 없다: %s", payload)
+	if !strings.Contains(payload, "bad-after") {
+		t.Fatalf("실패 사유에 무엇이 실패했는지가 없다: %s", payload)
 	}
 }
 
@@ -606,5 +615,140 @@ func TestFinishAcceptsFollowupWithGoodCoordinatePaths(t *testing.T) {
 	}
 	if len(res.Followups) != 1 || len(res.Followups[0].Paths) != 2 {
 		t.Fatalf("후속 경로가 안 들어갔다: %+v", res.Followups)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 후속 id 충돌 — 판단은 롤백되지 않는다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 후속 id 가 이미 있으면 그 후속만 건너뛰고 **판단은 남는다.**
+//
+// ★ 이 축의 전부다. 후속 중복은 복구 가능하다 — 같은 id 의 항목이 이미 존재하므로
+// "후속이 유입되지 않은" 상태가 아니다. 판단 본문은 그 세션의 머릿속에만 있어
+// 롤백되면 영영 사라진다. 비대칭이 명확하므로 흡수하는 쪽이 맞다.
+//
+// 같은 함수의 ④(자원 반납)가 이미 같은 판단을 내렸다 — 남이 이미 반납했거나
+// 회수했으면 finish 를 실패시키지 않고 원장에만 남긴다.
+func TestFinishKeepsJudgmentWhenFollowupIDAlreadyExists(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저 끝내는 세션")
+	b := openSession(t, s, "p", repo, wt, "cc-b", "나중에 끝내는 세션")
+	addItem(t, s, "p", "collide-a", nil, nil)
+	addItem(t, s, "p", "collide-b", nil, nil)
+	claimed(t, s, "p", a.Session.ID, "collide-a")
+	claimed(t, s, "p", b.Session.ID, "collide-b")
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: a.Session.ID, ItemID: "collide-a", Outcome: model.ItemDone,
+		Title: "A 의 마무리", Body: "A 의 판단",
+		Followups: []FollowupInput{{ID: "shared-followup", Title: "후속", Body: "A 가 만들었다"}},
+	}); err != nil {
+		t.Fatalf("A 의 마무리가 실패했다: %v", err)
+	}
+
+	// 대조 성립 단정 — 읽기 전에 먼저.
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'shared-followup'`); n != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — A 의 후속이 %d건이다", n)
+	}
+
+	const bBody = "B 의 판단 — 이 본문은 어디에도 파생될 수 없다"
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: b.Session.ID, ItemID: "collide-b", Outcome: model.ItemDone,
+		Title: "B 의 마무리", Body: bBody,
+		Followups: []FollowupInput{{ID: "shared-followup", Title: "같은 이름", Body: "B 도 같은 이름을 골랐다"}},
+	})
+	if err != nil {
+		t.Fatalf("후속 id 가 겹쳤다고 마무리 전체가 실패했다 — 복구 불가한 판단이 사라진다: %v", err)
+	}
+
+	if n := countRows(t, st, `SELECT count(*) FROM judgment WHERE body = ?`, bBody); n != 1 {
+		t.Fatalf("B 의 판단이 %d건 남았다(1이어야 한다) — 롤백이 원리적으로 파생 불가한 자산을 지웠다", n)
+	}
+}
+
+// 건너뛴 후속은 **응답에 실린다.** 흡수와 발화는 한 쌍이다.
+//
+// 조용히 넘기면 세션은 후속이 들어간 줄 알고 떠나고, 그 후속은 남이 만든 다른 항목이다.
+// 그러면 이 함수는 "판단을 지켰다"면서 더 나쁜 거짓을 만든다.
+func TestFinishReportsSkippedFollowupInsteadOfSwallowingIt(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저")
+	b := openSession(t, s, "p", repo, wt, "cc-b", "나중")
+	addItem(t, s, "p", "report-a", nil, nil)
+	addItem(t, s, "p", "report-b", nil, nil)
+	claimed(t, s, "p", a.Session.ID, "report-a")
+	claimed(t, s, "p", b.Session.ID, "report-b")
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: a.Session.ID, ItemID: "report-a", Outcome: model.ItemDone,
+		Title: "A", Body: "A 의 판단",
+		Followups: []FollowupInput{{ID: "taken-id", Title: "후속", Body: "A 가 만들었다"}},
+	}); err != nil {
+		t.Fatalf("A 의 마무리가 실패했다: %v", err)
+	}
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: b.Session.ID, ItemID: "report-b", Outcome: model.ItemDone,
+		Title: "B", Body: "B 의 판단",
+		Followups: []FollowupInput{
+			{ID: "taken-id", Title: "겹친 것", Body: "B 도 같은 이름"},
+			{ID: "fresh-id", Title: "안 겹친 것", Body: "이건 새 것이다"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("B 의 마무리가 실패했다: %v", err)
+	}
+
+	if len(res.SkippedFollowups) != 1 || res.SkippedFollowups[0] != "taken-id" {
+		t.Fatalf("건너뛴 후속이 응답에 없다 — 세션은 안 들어간 것을 들어간 줄 안다: %+v", res.SkippedFollowups)
+	}
+	// 안 겹친 후속은 정상적으로 들어간다. 하나가 겹쳤다고 나머지를 버리지 않는다.
+	if len(res.Followups) != 1 || res.Followups[0].ID != "fresh-id" {
+		t.Fatalf("안 겹친 후속이 안 들어갔다: %+v", res.Followups)
+	}
+}
+
+// 건너뛴 사실은 **원장에도** 남는다. 응답은 그 세션만 보고 사라진다.
+func TestFinishLogsSkippedFollowupToLedger(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저")
+	b := openSession(t, s, "p", repo, wt, "cc-b", "나중")
+	addItem(t, s, "p", "ledger-a", nil, nil)
+	addItem(t, s, "p", "ledger-b", nil, nil)
+	claimed(t, s, "p", a.Session.ID, "ledger-a")
+	claimed(t, s, "p", b.Session.ID, "ledger-b")
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: a.Session.ID, ItemID: "ledger-a", Outcome: model.ItemDone,
+		Title: "A", Body: "A 의 판단",
+		Followups: []FollowupInput{{ID: "ledger-dup", Title: "후속", Body: "A 가 만들었다"}},
+	}); err != nil {
+		t.Fatalf("A 의 마무리가 실패했다: %v", err)
+	}
+
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped'`); n != 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 건너뛴 기록이 이미 %d건 있다", n)
+	}
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: b.Session.ID, ItemID: "ledger-b", Outcome: model.ItemDone,
+		Title: "B", Body: "B 의 판단",
+		Followups: []FollowupInput{{ID: "ledger-dup", Title: "겹친 것", Body: "B 도 같은 이름"}},
+	}); err != nil {
+		t.Fatalf("B 의 마무리가 실패했다: %v", err)
+	}
+
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped'`); n != 1 {
+		t.Fatalf("건너뛴 사실이 원장에 %d건 남았다(1이어야 한다) — 응답은 그 세션과 함께 사라진다", n)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped' AND payload LIKE '%ledger-dup%'`); n != 1 {
+		t.Fatalf("원장 기록에 **어느** 후속이 겹쳤는지가 없다 — 좌표 없는 기록은 나중에 못 되짚는다")
 	}
 }
