@@ -17,12 +17,17 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 		m  = "machine-1"
 		cc = "cc-aaa"
 	)
+	// ★ wantUn(버려진 카드 수)을 **반드시** 단정한다. 이것이 없으면 `owningRoot` 가
+	//   언제나 "" 를 내도(= 카드를 전부 버려도) want:0 케이스가 전부 초록이다 —
+	//   실측으로 14건 중 10건이 그렇게 통과했다. want 만 보는 표는 "안 보고했다"와
+	//   "판정을 아예 못 했다"를 구분하지 못한다.
 	cases := []struct {
-		name  string
-		cards []SplitCard
-		roots []string
-		want  int
-		why   string
+		name   string
+		cards  []SplitCard
+		roots  []string
+		want   int
+		wantUn int
+		why    string
 	}{
 		{
 			name: "같은 트리에 값이 둘이면 보고한다",
@@ -132,19 +137,41 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins", CCSessionID: cc},
 			},
-			roots: nil,
-			want:  0,
-			why:   "git 을 못 읽었을 때 추측으로 보고하면 실측 기준 거짓 양성이 56%다",
+			roots:  nil,
+			want:   0,
+			wantUn: 2,
+			why:    "git 을 못 읽었을 때 추측으로 보고하면 실측 기준 거짓 양성이 56%다. 다만 **버렸다고 말한다**",
 		},
 		{
-			name: "소유 트리를 못 찾은 경로는 건너뛴다",
+			name: "소유 트리를 못 찾은 경로는 건너뛰고 센다",
 			cards: []SplitCard{
 				{SessionID: "s1", MachineID: m, Worktree: "/elsewhere", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/elsewhere/sub", CCSessionID: cc},
 			},
-			roots: testRoots,
+			roots:  testRoots,
+			want:   0,
+			wantUn: 2,
+			why:    "git 이 모르는 트리에 대고 '접혔어야 한다'를 판정할 근거가 없다 — 대신 침묵하지 않는다",
+		},
+		{
+			name: ".claude 관례도 같이 본다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.claude/worktrees/C", CCSessionID: cc},
+			},
+			roots: []string{"/repo"},
 			want:  0,
-			why:   "git 이 모르는 트리에 대고 '접혔어야 한다'를 판정할 근거가 없다",
+			why:   "하네스가 만드는 자리다. 이 갈래가 없으면 원장의 .claude/worktrees 경로 36개가 전부 거짓 양성이 된다",
+		},
+		{
+			name: "중첩 관례 경로에서 안쪽 트리도 루트로 본다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A/.claude/worktrees/B", CCSessionID: cc},
+			},
+			roots: []string{"/repo"},
+			want:  0,
+			why:   "첫 매치에서 멈추면 B 가 루트 목록에 안 들어가 정상 정규화된 두 루트가 한 보고로 묶인다",
 		},
 		{
 			// ★ 이 케이스의 roots 를 줄이지 마라. testRoots 를 쓰면 /repo-backup 이 자기
@@ -155,28 +182,51 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/repo-backup/sub", CCSessionID: cc},
 			},
-			roots: []string{"/repo"},
-			want:  0,
-			why:   "/repo 는 /repo-backup/sub 의 조상이 아니다 — 문자열 접두로 보면 둘이 한 트리로 묶인다",
+			roots:  []string{"/repo"},
+			want:   0,
+			wantUn: 1,
+			why:    "/repo 는 /repo-backup/sub 의 조상이 아니다 — 문자열 접두로 보면 둘이 한 트리로 묶인다",
 		},
 		{
+			// ★ roots 를 `" /repo/sub/.. "` 로 두는 것이 이 케이스의 핵심이다.
+			//   루트 쪽 TrimSpace 가 빠지면 루트가 상대 경로가 되어 filepath.Rel 이
+			//   에러를 내고 카드 셋이 전부 버려진다 — wantUn 0 이 깨져 잡힌다.
+			//   ★ 다만 **Clean 은 이 케이스가 못 잡는다.** owningRoot 가 쓰는
+			//   filepath.Rel 이 인자를 내부에서 다시 Clean 하므로 루트 쪽 Clean 을
+			//   지워도 매칭은 그대로다. 달라지는 것은 보고에 적히는 Root 값뿐이고,
+			//   그것은 TestDetectUnnormalizedSplitReportsDetail 이 잠근다.
 			name: "같은 트리를 여러 표기로 적어도 한 값으로 본다",
 			cards: []SplitCard{
 				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/repo/", CCSessionID: cc},
 				{SessionID: "s3", MachineID: m, Worktree: "/repo/sub/..", CCSessionID: cc},
 			},
-			roots: []string{" /repo "},
+			roots: []string{" /repo/sub/.. "},
 			want:  0,
-			why:   "Clean·TrimSpace 가 없으면 표기 차이가 갈림으로 보고된다 — 없는 문제에 배너가 켜진다",
+			why:   "Clean·TrimSpace 가 없으면 표기 차이가 갈림으로 보고되거나 카드가 통째로 버려진다",
+		},
+		{
+			name: "경로가 아무 데도 안 가리키면 세어서 낸다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: ".", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "a/..", CCSessionID: cc},
+			},
+			roots:  testRoots,
+			want:   0,
+			wantUn: 2,
+			why:    "3중키는 섰는데 경로가 없다 — 조용히 넘기면 판정 대상이던 카드가 흔적 없이 사라진다",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, _ := DetectUnnormalizedSplit(c.cards, c.roots)
+			got, un := DetectUnnormalizedSplit(c.cards, c.roots)
 			if len(got) != c.want {
 				t.Fatalf("보고 %d건, 원하는 것 %d건 — %s\n입력: %+v\n결과: %+v",
 					len(got), c.want, c.why, c.cards, got)
+			}
+			if un != c.wantUn {
+				t.Fatalf("버린 카드 %d장, 원하는 것 %d장 — 보고 수가 맞아도 "+
+					"카드를 전부 버렸다면 판정을 못 한 것이다\n입력: %+v", un, c.wantUn, c.cards)
 			}
 		})
 	}
@@ -184,12 +234,18 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 
 // 대조 단정 — 함수가 항상 빈 결과를 내도 위 표의 다수가 통과한다(want 0 이 많다).
 // 이 시험이 보고의 **내용**까지 잠근다.
+//
+// ★ 첫 루트를 `" /repo/sub/.. "` 로 두는 것이 의도된 것이다. 루트 쪽 `filepath.Clean`
+// 을 지워도 **매칭은 안 깨진다** — `owningRoot` 가 쓰는 `filepath.Rel` 이 인자를
+// 내부에서 다시 Clean 하기 때문이다. 깨지는 것은 보고에 **적히는 값**뿐이라
+// (`Root` 가 `/repo/sub/..` 로 나간다) `want 0`/`wantUn` 만 보는 표로는 그 회귀를
+// 영영 못 잡는다. 여기서 `r.Root` 를 정규화된 값으로 못박아 그 자리를 막는다.
 func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 	got, _ := DetectUnnormalizedSplit([]SplitCard{
 		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s2", MachineID: "m", Worktree: "/repo/a", CCSessionID: "cc"},
 		{SessionID: "s3", MachineID: "m", Worktree: "/repo/a/b", CCSessionID: "cc"},
-	}, testRoots)
+	}, []string{" /repo/sub/.. ", "/repo/.flightdeck/worktrees/A", "/repo/.flightdeck/worktrees/B"})
 	if len(got) != 1 {
 		t.Fatalf("보고 %d건, 원하는 것 1건: %+v", len(got), got)
 	}
