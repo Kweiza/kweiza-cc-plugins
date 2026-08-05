@@ -83,6 +83,35 @@ B 가 왜 안 갱신되는가. 런처(`bin/fd` 셸 스크립트)는 **플러그�
 
 ### 3.1 갈림 탐지 — 원장만으로, 클라이언트 판과 무관하게
 
+> ★ 개정(2026-08-05) — 아래 함수 시그니처·구조체·판정 규칙 넷은 실측 두 번에 무너져
+> **랜딩판과 다르다.** 최종 사양은 `internal/judge/split.go` 의
+> `DetectUnnormalizedSplit` 함수 주석에 있다(주석 자체가 이 개정 이력을 담고 있으니
+> 그것을 옮겼다). 무엇이 바뀌었나:
+>
+> - `func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport`
+>   → `func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]SplitReport, int)`
+>   (둘째 반환값은 **어느 트리에도 못 붙인 카드 수** — 침묵 금지)
+> - `SplitReport{CCSessionID, MachineID, Ancestor string; Descendants, SessionIDs []string}`
+>   → `SplitReport{CCSessionID, MachineID, Root string; Recorded, SessionIDs []string}`
+> - 판정: "두 `Worktree` 가 경로 조상·자손 관계일 때" → **같은 (머신, cc, 소유 트리)인데
+>   기록된 worktree 값이 둘 이상**
+> - "형제 관계는 보고하지 않는다"는 결론은 남지만, 그것을 내던 **조상-자손 판정 자체가
+>   폐기됐다** — 소유 트리가 다르면 애초에 다른 그룹이라 보고되지 않는 것이지, 경로
+>   접두 관계로 걸러내는 것이 아니다.
+>
+> 실측이 규칙을 두 번 무너뜨렸다:
+>
+> ```
+> ① 조상-자손 경로 쌍            → 조상-자손 쌍 100건 중 56건(56%)이 거짓 양성
+> ② 살아 있는 git 워크트리 루트   → 보고 31건 중 26건(84%)이 거짓 양성
+> ③ 살아 있는 루트 ∪ 관례 복원    → 거짓 양성 0 (랜딩판)
+> ```
+>
+> ①이 무너진 이유: 링크 워크트리가 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의
+> **자손 경로**에 살아서, 정규화가 완벽히 도는 클라이언트도 조상-자손 쌍을 만든다.
+> ②가 무너진 이유: 원장의 링크-워크트리 경로 93개 중 **81개가 이미 지워진 워크트리**라
+> `git worktree list` 가 그것을 모르고 저장소 루트로 흡수한다.
+
 `internal/judge` 에 순수 함수 하나를 둔다.
 
 ```go
@@ -152,6 +181,17 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport
 미선점 항목 `fd-vcs-stamp-blind-to-worktree` 의 몫이다.
 
 ### 3.2 카드 접기 — service 가 계산, render 가 소비
+
+> ★ 개정(2026-08-05) — 이 절은 **구현됐다가 되돌려졌다.** main 이 보드의 조직 원리를
+> "살아 있는 세션 N건"(`v.Sessions` 전부)에서 "잡혀 있는 작업 N건"(선점 있는 카드만)으로
+> 바꿨다(`fd-board-folds-open-only-cards`, 0.7.0 `36c766d`; 병합 시점 main 은 0.8.0
+> `40deeef`). 선점 필터가 형제 갈림의 근원을 먼저 잘라내면서 이 절이 전제하는
+> "형제로 갈린 카드가 보드를 부풀린다"가 무너졌다 — 실측: 형제 중복이 옛 보드
+> 22% → 새 보드 **0%**. 사람이 "되돌리고 새 보드 모델 위에서 다시 판단하도록 항목을
+> 재개방"으로 판정했다(병합 커밋 `8518198`). 재개방 항목:
+> `fd-fold-cards-under-claim-based-board`. 되돌린 코드는 그 병합의 첫 부모 `45b116a`
+> 에 온전히 남아 있다. 아래 타입·필드·렌더 모양은 **그 되돌려진 판 기준**이고
+> 랜딩판에는 없다.
 
 ```go
 // Conversation 은 같은 대화의 카드 묶음이다.
@@ -287,12 +327,16 @@ hook 복구 갈래                            GET /sessions (신규)
 
 board                                     Board()
                                             sessionCards()          기존
-                                            → Conversations 계산     신규 3.2
+                                            → Conversations 계산     신규 3.2 (★되돌려짐)
                                             → DetectUnnormalizedSplit 신규 3.1
                                           RenderBoard()
-                                            머리줄 = 대화 수
+                                            머리줄 = 대화 수      (★되돌려짐 — §3.2 참고)
                                             배너 = 갈림 보고
 ```
+
+> ★ 개정(2026-08-05) — `Conversations 계산` 과 `머리줄 = 대화 수` 는 §3.2 와 함께
+> 되돌려졌다. 랜딩판 `Board()` 는 `sessionCards()` → `DetectUnnormalizedSplit` 만
+> 배선하고, `RenderBoard()` 의 머리줄은 그대로 `잡혀 있는 작업 N건`(카드 수)이다.
 
 ## 5. 오류 처리
 
@@ -309,8 +353,9 @@ board                                     Board()
 
 - `DetectUnnormalizedSplit` — 조상·자손이면 보고 · 형제면 **보고 안 함** · cc 가 다르면
   보고 안 함 · 빈 cc 끼리는 보고 안 함 · 머신이 다르면 보고 안 함.
-- 접기 — 같은 cc N장이 묶음 1개 · 빈 cc 는 각자 1장 · `IsSelf` 가 묶음으로 올라감 ·
-  `PathCount` 가 합집합 건수 · `Sessions` 는 안 변함.
+- 접기(★되돌려짐 — §3.2 참고, 랜딩판에 이 시험 없음) — 같은 cc N장이 묶음 1개 ·
+  빈 cc 는 각자 1장 · `IsSelf` 가 묶음으로 올라감 · `PathCount` 가 합집합 건수 ·
+  `Sessions` 는 안 변함.
 - ack 분모 — 판단 0인 카드가 분모에서 빠짐 · 빈 ack 은 여전히 안 남김.
 - `GET /sessions` — 있으면 200 · 없으면 404이고 **행이 안 생김**(질의 뒤 카드 수 단정).
 
@@ -366,9 +411,15 @@ windows/amd64 교차 빌드 · 살아 있는 브랜치와 `merge-tree` 무충돌
 
 ## 9. 완료 판정
 
+> ★ 개정(2026-08-05) — 3행이 원래 "머리줄이 대화 수를 내고 `detail` 이 워크트리별로
+> 전개한다"를 완료의 모양으로 적고 있었다. **그대로 두면 핸드오프가 이 항목을 `done`
+> 으로 닫는다.** 하지만 §3.2 의 접기는 되돌려졌다(병합 `8518198`) — 이 항목은 지금
+> `claimed` 이고, 완료의 모양은 "닫는 것"이 아니라 **재개방**이다. 아래 행을 그렇게
+> 고쳤다.
+
 | 항목 | 완료의 모양 |
 |---|---|
 | `fd-session-worktree-is-cwd-not-repo-root` | 탐지가 랜딩하고, 배포 간극이 판단으로 기록된다. `resolveProject` 는 안 고친다 |
 | `fd-session-lookup-without-upsert` | 조회가 서고, 복구 갈래가 그것을 타고, 그 갈래에 시험이 닿는다 |
-| `fd-board-counts-one-conversation-many-times` | 머리줄이 대화 수를 내고 `detail` 이 워크트리별로 전개한다 |
+| `fd-board-counts-one-conversation-many-times` | ★개정 — 접기가 되돌려졌다(§3.2). 완료의 모양은 "머리줄이 대화 수를 낸다"가 **아니라**, 되돌리고 새 보드 모델(선점 기준 `잡혀 있는 작업 N건`) 위에서 다시 판단하도록 항목을 **재개방**하는 것이다. 되돌린 코드는 `8518198` 의 첫 부모 `45b116a` 에 있다 |
 | `fd-ack-metric-measures-card-split` | 분모가 갈라지고, 재측정 조건을 적은 판단과 함께 넘긴다(`done` 아님) |
