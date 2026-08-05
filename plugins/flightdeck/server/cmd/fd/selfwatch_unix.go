@@ -26,3 +26,8 @@ func exeIDOfPath(path string) (ExeID, error) {
 
 // selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
 func selfWatchSupported() bool { return true }
+
+// execSelf 는 진짜 syscall.Exec 다. 성공하면 **돌아오지 않는다.**
+func execSelf(exe string, argv, env []string) error {
+	return syscall.Exec(exe, argv, env)
+}

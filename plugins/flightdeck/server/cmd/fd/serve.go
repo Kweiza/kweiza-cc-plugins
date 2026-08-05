@@ -130,13 +130,36 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// ★ 감시기에게는 **자기만의 취소 손잡이**를 준다. 서버 ctx 를 그대로 주면
+	// 드레인(= 그 ctx 취소)이 감시기 자신도 죽여서 exec 까지 못 간다.
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	serveCtx, drainServe := context.WithCancel(ctx)
+	defer drainServe()
+
+	served := make(chan struct{})
+	watcher := newSelfWatcher(log, path)
+	go watcher.Run(watchCtx, func() {
+		drainServe() // api.Serve 가 srv.Shutdown 으로 인플라이트를 마무리한다
+		<-served     // 그것이 실제로 끝날 때까지 기다린다
+	})
+
 	log.Info("기동", "route", clip(*addr, 120), "db_path", clip(path, 200),
 		"api_version", service.APIVersion, "auth_required", token != "")
 
-	if err := api.Serve(ctx, *addr, handler, log); err != nil {
+	serveErr := api.Serve(serveCtx, *addr, handler, log)
+	close(served)
+	if serveErr != nil {
 		// api.Serve 가 이미 원인 전문을 남겼다. 여기서 더하는 것은 **처방**이다.
 		log.Error("서버를 띄우지 못했다", "route", clip(*addr, 120),
-			"error", err.Error(), "reason", PortAdvice(*addr, err))
+			"error", serveErr.Error(), "reason", PortAdvice(*addr, serveErr))
+		return 1
+	}
+	// 드레인이 자동 갱신 때문이었으면 exec 가 이미 이 프로세스를 갈아치웠다.
+	// 여기에 도달했다는 것은 exec 가 실패했거나 사람이 껐다는 뜻이다.
+	if st := watcher.Status(); st.Outcome == "failed" {
+		log.Error("자동 갱신이 실패해 서버가 내려간 상태다 — 재기동이 필요하다",
+			"detail", clip(st.Detail, 400))
 		return 1
 	}
 	log.Info("종료", "route", clip(*addr, 120))
