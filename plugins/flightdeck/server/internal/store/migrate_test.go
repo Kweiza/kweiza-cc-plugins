@@ -213,7 +213,15 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 		t.Fatalf("Open 실패: %v", err)
 	}
 	seed(t, s, "P")
-	prev := SchemaVersion - 1
+	// ★ 리터럴 3 이다. SchemaVersion-1 이 아니다.
+	//
+	// 이 시험이 재현하려는 옛 상태는 "picked_with 가 생기기 직전", 즉 **004 직전인
+	// 3** 이다. 그 사실은 004_pick_bundle.sql 에 고정돼 있고 뒤에 무슨 증분이 더
+	// 붙든 변하지 않는다. SchemaVersion-1 로 적으면 005 를 쓰는 사람이 — pick_eval
+	// 을 건드린 적도 없는데 — `판올림 뒤 옛 행을 못 읽는다` 로 터지는 시험을
+	// 물려받는다(전제 DELETE 가 004 를 남겨 picked_with 를 도로 만들어 버리기
+	// 때문이다). 고정점을 고정점으로 적는다.
+	const prev = 3
 	for _, q := range []string{
 		`INSERT INTO pick_eval(project, session_id, at, picked, rejected)
 		   VALUES ('P','S1','2026-08-01T00:00:00.000000Z','old-lead','[]')`,
