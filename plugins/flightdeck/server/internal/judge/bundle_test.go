@@ -50,6 +50,22 @@ func TestSamePathsCountsOnlyExactTokens(t *testing.T) {
 		{"중복은 한 번만",
 			[]string{"s.go", "./s.go"}, []string{"s.go"}, []string{"s.go"}},
 		{"빈 토큰은 무시한다", []string{"", "  ", "a.go"}, []string{"a.go", ""}, []string{"a.go"}},
+
+		// ★ 아래 둘은 normPath 가 components(paths.go)에 얹혀 있다는 사실을 이 축의
+		// 좌표계로 못박는다. "표기 흔들림은 흡수한다" 한 줄은 `.`·중복 슬래시만 보므로
+		// 정규화 규칙을 앞뒤로 흔드는 변이 둘이 그 줄을 통과한다(실측: 둘 다 전 스위트 초록).
+		//
+		// 공백: components 의 TrimSpace 를 지우면 `fd add --paths "a.go, b.go"` 처럼
+		// 사람이 쉼표 뒤에 띄어 적은 토큰이 자기 자신과도 안 맞아 경로 축이 통째로
+		// 죽는다 — 오류가 아니라 '겹침 없음'으로 나와 정상 응답과 구분이 안 된다.
+		{"앞뒤 공백은 흡수한다 — 안 그러면 사람이 띄어 적은 토큰의 경로 축이 조용히 죽는다",
+			[]string{" a.go "}, []string{"a.go"}, []string{" a.go "}},
+		// ".." : components 가 **일부러** 안 걷어낸다(paths.go 주석). 걷어내면
+		// `../a.go` 와 `a.go` 가 같은 경로가 되어, 서로 다른 디렉토리를 가리키는 두 항목이
+		// 경로 축으로 붙는다. 등록 목록의 ".." 는 입력 오류이고, 조용히 정규화하면 안 보인다.
+		{"'..' 는 정규화하지 않는다 — 접으면 다른 디렉토리끼리 같은 경로가 된다",
+			[]string{"../a.go"}, []string{"a.go"}, nil},
+
 		{"양쪽 다 비면", nil, nil, nil},
 	}
 	for _, c := range cases {
@@ -187,6 +203,39 @@ func TestLinkOfCarriesEverySharedPath(t *testing.T) {
 	}
 	if strings.Contains(l.Detail, "p/only-a.go") {
 		t.Fatalf("겹치지 않은 경로가 근거에 실렸다: %q", l.Detail)
+	}
+}
+
+// 근거 줄의 경로는 **선두가 선언한 원문·선언 순서**다.
+//
+// ★ SamePaths 표는 "돌려주는 표기는 a 쪽 원문"을 함수 좌표계에서만 잠근다. 그런데
+// 그 규율이 화면까지 오려면 LinkOf 가 **선두를 a 로** 넘겨야 하고, 그 인자 순서는
+// 표에서 안 보인다 — 실측으로 `SamePaths(other…, lead…)` 로 뒤바꿔도 전 스위트가
+// 초록이었다(위 TestLinkOfCarriesEverySharedPath 는 양쪽 표기가 같아 못 가른다).
+// 뒤바뀌면 선두 카드의 근거 줄에 **이웃이 적은 표기와 이웃이 적은 순서**가 뜬다.
+// 사람은 선두를 보고 있는데 자기가 안 적은 줄을 읽게 되고, 그러면 "내가 적은 그 줄"을
+// 못 찾는다 — SamePaths 주석이 원문 표기를 고집하는 이유가 정확히 그것이다.
+//
+// 그래서 두 축을 같이 본다: 표기(`./`가 붙은 선두 원문)와 순서(선두의 선언 순서).
+func TestLinkOfCarriesLeadSpellingAndOrder(t *testing.T) {
+	sib := SiblingIndex{"a": {"J9"}, "b": {"J9"}}
+	// 같은 두 경로를 양쪽이 **다른 표기·다른 순서**로 선언했다.
+	l := LinkOf(cand("a", 0, []string{"./svc/z.go", "svc//m.go"}),
+		cand("b", 1, []string{"svc/m.go", "svc/z.go"}), sib)
+	if l == nil {
+		t.Fatal("링크가 nil 이다")
+	}
+	// 표기: 선두 원문 그대로여야 한다. "svc/z.go" 만 보면 "./svc/z.go" 에도 걸려
+	// 뒤바뀐 변이를 못 가르므로 선두 원문 전체를 본다.
+	for _, want := range []string{"./svc/z.go", "svc//m.go"} {
+		if !strings.Contains(l.Detail, want) {
+			t.Fatalf("근거가 선두 원문 %q 가 아니라 이웃 표기를 실었다: %q", want, l.Detail)
+		}
+	}
+	// 순서: 선두가 선언한 순서(z 먼저, m 나중)여야 한다.
+	iz, im := strings.Index(l.Detail, "./svc/z.go"), strings.Index(l.Detail, "svc//m.go")
+	if iz > im {
+		t.Fatalf("근거의 경로 순서가 선두 선언 순서(z→m)가 아니다: %q", l.Detail)
 	}
 }
 
@@ -496,6 +545,132 @@ func TestEligibleBundleOverlapsStillCatchOtherConversation(t *testing.T) {
 	}
 }
 
+// overlapIDs 는 겹침으로 보고된 세션 id 를 보고된 순서대로 편다.
+// 집합이 아니라 **슬라이스**로 보는 이유는, 하나가 빠졌을 때 "누가 빠졌나"를
+// 실패 메시지가 바로 말하게 하기 위해서다.
+func overlapIDs(os []Overlap) []string {
+	out := make([]string, 0, len(os))
+	for _, o := range os {
+		out = append(out, o.SessionID)
+	}
+	return out
+}
+
+// 묶음 겹침은 **자기 카드도** 건너뛴다 — cc 를 못 읽은 세션에서도 그래야 한다.
+//
+// ★ 위 TestEligibleBundleOverlapsSkipSiblingCardOfSameConversation 이 "self(id 일치)와
+// 형제(cc 일치)를 한 시험에 같이 둔다"고 적었지만, 그 시험의 자기 카드(S1)는 SelfCC 와
+// **같은 cc** 도 달고 있어 형제 규칙 하나만으로도 걸러진다. 그래서 id 비교 쪽은
+// 사실상 안 물려 있었다 — 실측으로 `OverlapsWithLive(…, in.Self, …)` 의 Self 인자를
+// 통째로 "" 로 바꿔도 전 스위트가 초록이었다.
+//
+// 그 상태에서 무엇이 깨지나: cc 관측이 실패한 세션(SelfCC="")은 형제 규칙이 안 도는데
+// id 규칙마저 없으면 **자기 발자국이 자기에게 겹침으로 보고된다.** 착수 직후 footprint 가
+// 이미 그 경로를 담으므로 상시 점등이고, 상시 점등된 경고는 판별력이 0이 된다.
+//
+// 남(S8)을 함께 두는 이유는 늘 같다 — 자기를 빼는 것이 겹침 축을 통째로 끄는 것이면 안 된다.
+func TestEligibleBundleOverlapsSkipOwnCardEvenWithoutCC(t *testing.T) {
+	sib := SiblingIndex{"lead": {"J1"}, "mem": {"J1"}}
+	in := EligibleInput{
+		Self: "S1", SelfCC: "", // 내 cc 를 못 읽었다 — 형제 규칙이 안 돈다
+		Candidates: []Candidate{
+			cand("lead", 0, []string{"lead-only.go"}),
+			cand("mem", 1, []string{"member-only.go"}),
+		},
+		Live: []LiveSession{
+			// 내 카드. cc 가 비어 있으므로 **id 로만** 걸러진다.
+			{ID: "S1", CCSessionID: "", Paths: []string{"lead-only.go", "member-only.go"}},
+			// 진짜 남. 저쪽 cc 도 비어 있다 — 빈 cc 둘은 형제가 아니다.
+			{ID: "S8", CCSessionID: "", Paths: []string{"member-only.go"}},
+		},
+	}
+	b, _ := EligibleBundle(in, sib)
+	if got := overlapIDs(b.Lead.Overlaps); !reflect.DeepEqual(got, []string{"S8"}) {
+		t.Fatalf("겹침이 %v 다 — 내 카드 S1 은 빠지고 남 S8 만 남아야 한다", got)
+	}
+}
+
+// 묶음 경로는 **선두 ∪ 구성원 전부**다 — 셋 다 각각 확인한다.
+//
+// ★ 기존 두 시험(TestEligibleBundleOverlapsUseWholeBundlePaths ·
+// TestEligibleBundleOverlapsCoverEveryMemberPath)은 구성원 **한 명**의 경로만
+// 대조로 쓴다. 그래서 두 변이가 그 둘을 통과한다(실측: 둘 다 전 스위트 초록):
+//
+//	· bundlePaths 에서 `add(b.Lead.Item.Paths)` 를 지운다 → 선두 경로로 난 겹침이 사라진다.
+//	  선두는 이 세션이 실제로 손댈 첫 파일이라, 가장 흔한 충돌이 통째로 조용해진다.
+//	· 구성원 루프를 `b.Members[0]` 하나로 좁힌다 → 둘째 구성원부터가 안 보인다.
+//	  묶음은 정의상 여럿을 함께 집는 기능이므로 이 침묵은 묶음이 클수록 커진다.
+//
+// 그래서 선두·첫 구성원·둘째 구성원의 경로를 **각각 한 세션씩만** 만지게 갈라 두고,
+// 셋이 전부 나오는지 본다. 하나라도 빠지면 어느 쪽이 빠졌는지 메시지가 바로 말한다.
+func TestEligibleBundleOverlapsCoverLeadAndEveryMember(t *testing.T) {
+	sib := SiblingIndex{"a-lead": {"J1"}, "b-mem1": {"J1"}, "c-mem2": {"J1"}}
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("a-lead", 0, []string{"lead-only.go"}),
+			cand("b-mem1", 1, []string{"m1-only.go"}),
+			cand("c-mem2", 2, []string{"m2-only.go"}),
+		},
+		Live: []LiveSession{
+			{ID: "S-lead", Paths: []string{"lead-only.go"}},
+			{ID: "S-m1", Paths: []string{"m1-only.go"}},
+			{ID: "S-m2", Paths: []string{"m2-only.go"}},
+		},
+	}
+	b, rej := EligibleBundle(in, sib)
+	if b == nil {
+		t.Fatalf("적격이 있는데 묶음이 nil 이다(탈락 %v)", rej)
+	}
+	// 전제: 셋이 정말 한 묶음인가. 아니면 아래 단정은 합집합을 증명하지 못한다.
+	if b.Lead.Item.ID != "a-lead" || !reflect.DeepEqual(memberIDs(b), []string{"b-mem1", "c-mem2"}) {
+		t.Fatalf("전제가 깨졌다 — 선두 %q 구성원 %v(a-lead + [b-mem1 c-mem2] 를 기대)",
+			b.Lead.Item.ID, memberIDs(b))
+	}
+	want := []string{"S-lead", "S-m1", "S-m2"}
+	if got := overlapIDs(b.Lead.Overlaps); !reflect.DeepEqual(got, want) {
+		t.Fatalf("겹침이 %v 다 — %v 를 기대했다(선두 ∪ 구성원 전부의 합집합이어야 한다)", got, want)
+	}
+}
+
+// 묶음 경로의 중복 제거와 원문 표기를 겹침 **쌍** 좌표계에서 못박는다.
+//
+// ★ 선두와 구성원이 같은 파일을 서로 다른 표기로 선언하는 것은 실제로 흔하다
+// (한쪽은 `./x`, 한쪽은 `x`). 그때 두 가지가 조용히 무너진다 — 둘 다 실측으로
+// 전 스위트 초록이었다:
+//
+//	· `!seen[n]` 을 지우면 같은 파일이 쌍 **두 줄**로 뜬다. OverlapPairs 는 원문
+//	  문자열로 쌍을 접으므로 표기가 다르면 접지 못한다. 사람은 충돌이 둘이라고 읽는다.
+//	· `out = append(out, p)` 를 정규형 `n` 으로 바꾸면 화면의 왼쪽 경로가 항목이 적은
+//	  줄과 달라진다 — SamePaths 주석이 원문을 고집하는 이유와 같은 사고다.
+//
+// 그래서 쌍을 통째로 단정한다. len 만 보면 표기 변이가, 표기만 보면 중복 변이가 샌다.
+func TestEligibleBundleOverlapPairsDedupeAndKeepDeclaredSpelling(t *testing.T) {
+	sib := SiblingIndex{"a-lead": {"J1"}, "b-mem": {"J1"}}
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("a-lead", 0, []string{"./shared/x.go"}), // 같은 파일, 다른 표기
+			cand("b-mem", 1, []string{"shared//x.go"}),
+		},
+		Live: []LiveSession{{ID: "S9", Paths: []string{"shared/x.go"}}},
+	}
+	b, rej := EligibleBundle(in, sib)
+	if b == nil {
+		t.Fatalf("적격이 있는데 묶음이 nil 이다(탈락 %v)", rej)
+	}
+	if b.Lead.Item.ID != "a-lead" || len(b.Members) != 1 {
+		t.Fatalf("전제가 깨졌다 — 선두 %q 구성원 %v", b.Lead.Item.ID, memberIDs(b))
+	}
+	if len(b.Lead.Overlaps) != 1 {
+		t.Fatalf("겹친 세션이 %d건이다 — S9 하나여야 한다: %+v", len(b.Lead.Overlaps), b.Lead.Overlaps)
+	}
+	want := [][2]string{{"./shared/x.go", "shared/x.go"}}
+	if got := b.Lead.Overlaps[0].Pairs; !reflect.DeepEqual(got, want) {
+		t.Fatalf("겹친 쌍이 %v 다 — %v 를 기대했다(같은 파일은 한 줄, 왼쪽은 선두가 적은 원문)", got, want)
+	}
+}
+
 // 사유가 없으면 "왜 저것이 아니라 이것인가"에 답할 수 없다.
 //
 // ★ "의존자"·"묶음"·"최고령" 라벨 존재만 확인하면 부족하다 — Reason 을 통째로
@@ -543,6 +718,85 @@ func TestEligibleBundleAbsorbsBlockedItemWhenBlockerIsLead(t *testing.T) {
 		if m.Item.ID == "A-blocked" && !strings.Contains(b.Links[i].Detail, "B-blocker") {
 			t.Fatalf("흡수 근거에 선행 좌표가 없다: %q", b.Links[i].Detail)
 		}
+	}
+}
+
+// 흡수된 구성원의 링크는 축이 정확히 [after] 다.
+//
+// ★ 위 시험은 흡수 링크의 Detail 만 본다. 그래서 Axes 를 [sibling] 으로 바꾸거나
+// 통째로 비워도 전 스위트가 초록이었다(실측). Link 주석이 "축을 뭉개지 않는다"고
+// 적어 둔 자리가 정작 흡수 경로에서만 안 물려 있었다.
+//
+// 무엇이 깨지나. [sibling] 이면 화면이 "같은 판단에 함께 매달렸다"고 말하는데
+// 이 둘을 잇는 것은 판단이 아니라 선행이다 — 근거가 거짓이 되고, 사람은 있지도 않은
+// 판단을 찾으러 간다. 비면 "셋 다 맞는 쌍"과 "이유를 모르는 쌍"이 화면에서 같아진다.
+func TestEligibleBundleAbsorbedLinkCarriesAfterAxisOnly(t *testing.T) {
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("B-blocker", 0, nil),
+			cand("A-blocked", 1, nil, afterItem("B-blocker")),
+		},
+		Facts: AfterFacts{ItemStates: map[string]model.ItemState{"B-blocker": model.ItemOpen}},
+	}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if b == nil {
+		t.Fatalf("묶음이 nil 이다(탈락 %v)", rej)
+	}
+	found := false
+	for i, m := range b.Members {
+		if m.Item.ID != "A-blocked" {
+			continue
+		}
+		found = true
+		if !reflect.DeepEqual(b.Links[i].Axes, []BundleAxis{AxisAfter}) {
+			t.Fatalf("흡수 링크의 축이 %v 다 — 흡수는 선행 축(after) 하나다", b.Links[i].Axes)
+		}
+	}
+	if !found {
+		t.Fatalf("전제가 깨졌다 — 막힌 항목이 흡수되지 않았다: 구성원 %v", memberIDs(b))
+	}
+}
+
+// 묶음의 Dependents·Oldest 는 **구성원까지 합친** 값이다.
+//
+// ★ 이 둘은 정렬 키 ①·③의 입력이자 Reason 에 찍히는 값인데, 지금까지는 구성원의
+// 기여가 안 물려 있었다 — `b.Dependents += c.Dependents` 를 지우거나
+// Oldest 갱신을 지워도 전 스위트가 초록이었다(실측). lessBundle 자체는
+// TestLessBundlePrefersOlder 등이 손으로 만든 Bundle 로 직접 부르므로, 그 값을
+// **누가 채우나**는 그 시험들이 안 본다.
+//
+// 무엇이 깨지나. Dependents 가 선두 것만이면 "이걸 풀어야 남이 움직이는 정도"가
+// 묶음 크기와 무관해져 키 ①이 묶음을 과소평가한다. Oldest 가 선두 것만이면
+// 오래 방치된 구성원을 끌고 있는 묶음이 키 ③에서 젊게 보인다.
+//
+// 여기서는 선두가 **더 젊고 의존자가 더 적게** 되도록 일부러 배치한다 —
+// 선두 값이 그대로 새면 두 단정이 동시에 붉어진다.
+func TestBundleAggregatesDependentsAndOldestFromMembers(t *testing.T) {
+	lead := cand("a-lead", 5, nil) // 나중에 생성됨
+	lead.Dependents = 2
+	mem := cand("z-mem", 0, nil) // 더 오래됨
+	mem.Dependents = 3
+
+	sib := SiblingIndex{"a-lead": {"J1"}, "z-mem": {"J1"}}
+	b, rej := EligibleBundle(EligibleInput{Self: "S1", Candidates: []Candidate{lead, mem}}, sib)
+	if b == nil {
+		t.Fatalf("묶음이 nil 이다(탈락 %v)", rej)
+	}
+	// 전제: 선두가 a-lead 인가. 합산이 사라지면 z-mem(의존자 3)이 키 ①로 이겨
+	// 여기서 먼저 붉어진다 — 그것도 정당한 실패다.
+	if b.Lead.Item.ID != "a-lead" || !reflect.DeepEqual(memberIDs(b), []string{"z-mem"}) {
+		t.Fatalf("전제가 깨졌다 — 선두 %q 구성원 %v", b.Lead.Item.ID, memberIDs(b))
+	}
+	if b.Dependents != 5 {
+		t.Fatalf("의존자 합이 %d 다 — 선두 2 + 구성원 3 = 5 여야 한다", b.Dependents)
+	}
+	if !b.Oldest.Equal(t0) {
+		t.Fatalf("최고령이 %s 다 — 구성원 z-mem 의 생성 시각(%s)이어야 한다",
+			b.Oldest.UTC(), t0.UTC())
+	}
+	if !strings.Contains(b.Reason, "의존자 합 5") {
+		t.Fatalf("Reason 이 합산된 실제 값을 안 싣는다: %q", b.Reason)
 	}
 }
 
