@@ -1,7 +1,9 @@
 package service
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kweiza/flightdeck/internal/judge"
@@ -132,5 +134,87 @@ func TestPickBundleClosedMemberIsRejectedWithTheClosedCode(t *testing.T) {
 	if m.Rejection.Reason != judge.RejectClosed {
 		t.Fatalf("사유 코드가 %q 다 — %q 여야 한다(안전망 %q 로 접혔다)",
 			m.Rejection.Reason, judge.RejectClosed, RejectClaimFailed)
+	}
+}
+
+// ⑤ 묶음 사유의 **쥔 건수**는 실제로 쥔 수다 — 요청한 수가 아니다.
+//
+// ★ `held := 1 + heldMembers` 를 `1 + len(rest)` 로 바꿔도 전 스위트가 초록이었다.
+// 그러면 구성원이 하나라도 실패했을 때 응답이 **쥐지 않은 건수를 쥐었다고 말한다** —
+// 3건 묶음에서 둘 다 실패해도 "묶음 3건 중 3건을 이 세션이 쥐고 있고"가 나온다.
+// 이 파일이 held 와 newly 를 애초에 가른 이유가 그 문장 하나 때문이었는데(★ "응답이
+// 일어나지 않은 쓰기를 보고한다"), 정작 held 쪽이 안 물려 있었다. 동시 세션이 서른인
+// 판에서 "쥐었다고 믿는데 안 쥔" 항목은 두 세션이 같은 파일을 동시에 고치는 사고가 된다.
+func TestPickBundleReasonCountsWhatItActuallyHolds(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	addItem(t, s, "p", "held-by-other", []string{"services/b.go"}, nil)
+	addItem(t, s, "p", "gone", []string{"services/c.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: other.Session.ID,
+		ItemID: "held-by-other"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+	if err := st.SetItemState(ctx(), "p", "gone", model.ItemDropped, "버린다"); err != nil {
+		t.Fatalf("항목 폐기 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "held-by-other", "gone"}})
+	if err != nil {
+		t.Fatalf("선두가 성립해야 한다: %v", err)
+	}
+
+	// 응답이 스스로 말하는 것에서 기대값을 뽑는다 — 상수를 적으면 시험이 응답과
+	// 따로 놀고, 그러면 둘이 갈라져도 초록이다.
+	held := 1 // 선두
+	for _, m := range res.Bundle.Members {
+		if m.Claimed {
+			held++
+		}
+	}
+	if held != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원 둘 다 실패해야 한다: %+v", res.Bundle.Members)
+	}
+	want := fmt.Sprintf("묶음 %d건 중 %d건", 3, held)
+	if !strings.Contains(res.Reason, want) {
+		t.Fatalf("사유가 실제 쥔 건수를 안 말한다 — %q 가 없다: %q", want, res.Reason)
+	}
+}
+
+// ⑥ 묶음 **구성원의 경로 실재 판정**이 응답에 실린다(item_ids 로 집는 경로).
+//
+// ★ `m.Notes, m.PathCheck = sub.Notes, sub.PathCheck` 에서 PathCheck 를 빼도 전 스위트가
+// 초록이었다. 그러면 화면이 구성원마다 "이 응답은 그 축을 읽지 않았다"를 내고 —
+// 서버는 읽을 수 있는데 못 읽었다고 고백한다 — 오등록 구성원의 `fd move <id> --project X`
+// 줄이 통째로 사라진다. 그 줄은 경로가 남의 프로젝트에 있는 항목을 사람이 알 **유일한**
+// 통로다. 추천 경로(pickRecommend)는 자기 자리에서 따로 채우므로 물려 있었고,
+// 선점 경로만 비어 있었다 — 계층이 아니라 **갈래** 사이의 빈 칸이다.
+func TestPickBundleMemberCarriesItsPathVerdictOnTheClaimPath(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	// 선두는 실재하는 경로(newRepo 가 README.md 를 만든다), 구성원은 어디에도 없는 경로.
+	addItem(t, s, "p", "lead", []string{"README.md"}, nil)
+	addItem(t, s, "p", "mem", []string{"nowhere/at/all.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 집혔어야 한다: %+v", res.Bundle.Members)
+	}
+	if res.Bundle.Members[0].PathCheck == nil {
+		t.Fatal("구성원의 경로 실재 판정이 안 실렸다 — 화면이 '축을 안 읽었다'로 고백하게 된다")
+	}
+	// 선두 것을 복사한 게 아니라 자기 것이어야 한다.
+	if res.PathCheck != nil && res.Bundle.Members[0].PathCheck.Summary == res.PathCheck.Summary {
+		t.Fatalf("구성원이 선두의 판정을 받았다: 선두=%q 구성원=%q",
+			res.PathCheck.Summary, res.Bundle.Members[0].PathCheck.Summary)
 	}
 }

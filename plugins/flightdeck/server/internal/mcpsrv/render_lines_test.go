@@ -518,3 +518,40 @@ func TestRenderPickNoteCountsMatchTheNotes(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderPickUnclaimedMemberTellsWhatToDoNext 는 못 집은 구성원 뒤의 **행동 지시**를
+// 못박는다. 그 두 줄을 지워도 전 스위트가 초록이었다(실측).
+//
+// ★ 안 그러면 무엇이 깨지나. 사유 코드는 "왜 못 집었나"에만 답한다 — 세션이 다음에
+// 무엇을 해야 하는지는 이 줄에만 있다. 묶음의 값은 "선두는 원자, 구성원은 최선 노력"인데,
+// 그 규율은 **못 집은 구성원을 두고 진행해도 된다는 것을 세션이 알 때만** 성립한다.
+// 이 줄이 사라지면 세션은 실패한 구성원 앞에서 멈추거나(묶음이 사실상 원자가 된다),
+// 남에게 알리지 않고 그 항목을 조용히 버린다 — 그 항목은 이 판에 선점 만료도 반납도
+// 없어서 사람이 손대기 전까지 아무도 못 집는다.
+func TestRenderPickUnclaimedMemberTellsWhatToDoNext(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickClaimed, Reason: "선두를 선점했다",
+		Item:   &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Branch: "lead",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{
+			{
+				Item:      model.Item{ID: "mem-held", Title: "남이 쥠", CreatedAt: t0},
+				Rejection: &model.Rejection{Item: "mem-held", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"},
+			},
+			{Item: model.Item{ID: "mem-ok", Title: "집힌 것", CreatedAt: t0}, Claimed: true},
+		}},
+	}, t0)
+
+	// 지시는 **그 구성원 절 안**에 있어야 한다 — 응답 아무 데나 있으면 어느 구성원
+	// 이야기인지 사람이 못 짚는다.
+	seg := bundleMemberSegment(t, got, "mem-held")
+	for _, want := range []string{"나머지를 진행한다", `note(kind:"ask")`} {
+		if !strings.Contains(seg, want) {
+			t.Fatalf("못 집은 구성원 절에 행동 지시 %q 가 없다:\n%s\n전체:\n%s", want, seg, got)
+		}
+	}
+	// 집힌 구성원에는 안 붙는다 — 상시 점등된 지시는 판별력이 0이다.
+	if strings.Contains(bundleMemberSegment(t, got, "mem-ok"), "나머지를 진행한다") {
+		t.Fatalf("집힌 구성원에도 실패 지시가 붙었다:\n%s", got)
+	}
+}
