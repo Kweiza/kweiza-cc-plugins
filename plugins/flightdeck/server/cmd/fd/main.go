@@ -38,7 +38,9 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd next                                 추천 1건 + 탈락 사유 전부. **선점하지 않는다**
   fd pick <item-id>                       선점(오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
-  fd finish <item-id> --body …            판단+후속+종료+반납을 한 번에
+  fd finish <item-id> --body … [--close]  판단+후속+종료+반납을 한 번에. --close 면 세션도 닫는다
+  fd close [--why …]                      이 세션을 닫는다. 선점이 남아 있으면 거절한다.
+                                          **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
   fd land [--ok|--fail <사유>|--leave <사유>]
@@ -121,6 +123,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runAdd(ctx, args[1:], stdout)
 	case "finish":
 		return app.runFinish(ctx, args[1:], stdout)
+	case "close":
+		return app.runClose(ctx, args[1:], stdout)
 	case "move":
 		return app.runMove(ctx, args[1:], stdout)
 	case "land":
