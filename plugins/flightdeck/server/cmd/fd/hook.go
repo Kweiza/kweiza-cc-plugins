@@ -224,38 +224,28 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	// 그 상태의 /clear 는 rekey 대상을 몰라 건너뛰고 카드가 두 장이 되는데, 그때 고아가 되는
 	// 것이 하필 **첫 구간의 선점과 판단을 든 카드**다.
 	//
-	// OpenSession 은 3중키 upsert 라 옛 cc 의 카드 A 가 **있으면** 그것을 그대로 돌려준다.
-	// 아래 rekey 가 그 카드를 새 cc 로 옮기고, 이어지는 OpenSession(cc) 이 같은 카드로 떨어진다.
-	//
-	// ★ **없으면 만든다 — upsert 이므로.** 그리고 그때 손해가 없는 것은 rekey 가 성공할 때뿐이다.
-	// 여기 "손해가 없다"고 무조건 적혀 있었다. 거짓이라 고친다. 정확히는 이렇다:
+	// FindSession 은 **찾기만 하는** 조회라 옛 cc 의 카드 A 가 있으면 그것을 그대로 돌려주고,
+	// 없으면 오류를 낸다(만들지 않는다). 아래 rekey 가 그 카드를 새 cc 로 옮기고,
+	// 이어지는 OpenSession(cc) 이 같은 카드로 떨어진다.
 	//
 	//	옛 cc 의 카드가 있다  + rekey 성공 → 카드 1장. 이 갈래가 노린 것이다
-	//	옛 cc 의 카드가 있다  + rekey 거절 → 카드 2장. 다만 둘 다 원래 있던 것이다(이 갈래 탓이 아니다)
-	//	옛 cc 의 카드가 없다  + rekey 성공 → 카드 1장. 방금 만든 빈 카드가 새 cc 로 옮겨 가 손해가 없다
-	//	옛 cc 의 카드가 없다  + rekey 거절 → **카드 2장. 그중 한 장은 이 줄이 만든 빈 카드다**
+	//	옛 cc 의 카드가 있다  + rekey 거절 → 카드 2장. 다만 둘 다 원래 있던 것이다
+	//	옛 cc 의 카드가 없다  + rekey 성공 → 해당 없음(찾은 것이 없으면 rekey 를 안 탄다)
+	//	옛 cc 의 카드가 없다  + rekey 거절 → 카드 1장. **조회가 아무것도 안 만든다**
 	//
-	// 마지막 줄이 이 갈래가 실제로 만드는 손해다 — 죽은 cc 를 진 빈 카드가 남고 아래
-	// OpenSession(cc) 이 또 하나를 만든다. 도달 조건이 3중이라(늦은 심기 + 이 워크트리에
-	// 카드가 없던 비콘 cc + **서버가 닿는 상태에서의** 거절) 어느 시험도 여기 안 닿는다.
-	//
-	// ★ **`Created` 로 "방금 만든 카드면 입양하지 않는다"로 고치면 더 나빠진다.** 위 셋째 줄이
-	// 2장이 되기 때문이다 — 빈 카드는 이 조회 자체가 만들었으므로 입양을 건너뛰어도 안 사라지고,
-	// 대신 rekey 가 성공했을 경우의 합치기만 잃는다. 진짜 고치려면 **카드를 안 만드는 조회**가
-	// 필요한데 지금 REST 에 그런 자리가 없다(POST /sessions 하나뿐이다).
-	// 그 자리는 큐 항목 fd-session-lookup-without-upsert 다.
-	//
-	// ★ 자리는 여기여야 한다 — **아래 OpenSession 보다 앞이다.** 이 되찾기까지가 "rekey 먼저"
-	// 한 덩이다. 뒤로 밀면 새 cc 의 카드 B 가 먼저 생겨 rekey 가 3중키 UNIQUE 에 걸린다.
+	// ★ 넷째 갈래가 2장에서 1장이 된 것이 fd-session-lookup-without-upsert 의 성과다.
+	//   옛 코드는 여기서 OpenSession(3중키 upsert)을 조회로 썼고, 그것이 행이 없을 때
+	//   **만들었다.** 지금은 GET /api/v1/sessions 라 만들 수 없다.
 	if haveBeacon && beacon.SessionID == "" && beacon.CCSessionID != "" && beacon.CCSessionID != cc {
-		old, _, oerr := a.OpenSession(ctx, beacon.CCSessionID, "")
+		old, oerr := a.FindSession(ctx, beacon.CCSessionID)
 		switch {
 		case oerr != nil:
-			// 못 찾아도 오류가 아니다 — 비콘을 못 찾은 것과 같은 급이라 폴백한다(오늘 거동).
+			// 못 찾아도 오류가 아니다 — 비콘을 못 찾은 것과 같은 급이라 폴백한다.
+			// ★ 그리고 이제 **아무것도 안 만든다.** 이것이 옛 코드와의 차이 전부다.
 			a.log.Warn("비콘의 옛 cc 로 카드를 못 찾았다 — 이번 전환은 합치지 못한다",
 				"error", oerr.Error(), "cc", clip(beacon.CCSessionID, 40))
-		case old.Session.ID != "":
-			beacon.SessionID = old.Session.ID
+		case old.ID != "":
+			beacon.SessionID = old.ID
 		}
 	}
 

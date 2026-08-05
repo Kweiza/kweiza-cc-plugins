@@ -208,6 +208,29 @@ func (a *App) CloseSession(ctx context.Context, sessionID, why string) (model.Se
 	return out.Session, nil
 }
 
+// FindSession 은 이 좌표의 세션을 **찾기만** 한다. 없으면 오류다(만들지 않는다).
+//
+// ★ Client 에 새 메서드를 안 만든다 — 범용 Read 가 캐시·열화까지 이미 갖고 있고,
+// 같은 갈래를 둘로 만들면 한쪽만 고칠 때 조용히 어긋난다.
+func (a *App) FindSession(ctx context.Context, ccSession string) (model.Session, error) {
+	q := url.Values{
+		"machine":  {a.machine},
+		"worktree": {a.proj.Worktree},
+		"cc":       {ccSession},
+	}
+	res, err := a.cli.Read(ctx, "/api/v1/sessions?"+q.Encode())
+	if err != nil {
+		return model.Session{}, err
+	}
+	var body struct {
+		Session model.Session `json:"session"`
+	}
+	if uerr := json.Unmarshal(res.Body, &body); uerr != nil {
+		return model.Session{}, fmt.Errorf("세션 조회 응답 해석 실패: %w", uerr)
+	}
+	return body.Session, nil
+}
+
 // clientAPIVersion 은 이 바이너리가 아는 계약 버전이다.
 // 서버와 같은 상수를 쓴다 — 두 벌로 두면 스큐 배너가 자기 자신을 못 본다.
 const clientAPIVersion = service.APIVersion
