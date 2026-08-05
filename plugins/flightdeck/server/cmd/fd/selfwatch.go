@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/buildinfo"
 )
 
@@ -93,13 +94,87 @@ func Decide(start, now, lastFailed ExeID, statErr error) (Action, string) {
 
 // defaultSelfWatchInterval 은 실행 파일을 다시 재는 주기다.
 //
-// ★ **근거 있는 값이 아니다.** 갱신은 사람이 `plugin update` 를 누른 뒤에만 오고,
-// 그때 이 정도 안에 따라오면 충분하다는 판단이다. 근거를 만들 수 있으면 그때 고친다
-// (fd-live-window-baseline 이 같은 종류의 부채다).
+// ★ **이 상수가 통제하는 것은 갱신 반응 시간이 아니다.** 그 전제는 실측으로 반증됐다:
+// 런처가 실행 파일을 다시 만드는 것은 새 세션이 `bin/fd` 를 부를 때이고, 그 상류 지연이
+// 사슬을 지배한다. 이 주기는 최악 사슬의 1% 미만이라 0으로 줄여도 사람이 체감하는
+// 반응 시간은 안 줄어든다. **틀린 주석은 근거 없는 주석보다 나쁘다** — 다음 사람이
+// 이 값을 줄여 반응을 개선하려 들고, 아무 일도 안 일어난다.
+//
+// 이 상수가 실제로 통제하는 것은 **스큐 창**이다: 새 클라이언트가 옛 서버를 부르는 구간.
+// 그 창의 비용에는 이 저장소가 이미 이름을 붙였다(§7 의 버전 스큐 배너).
+//
+// **실측(2026-08-05, 정본 DB `event` 표 9733행 · 46.24시간 · 3.51건/분).**
+// 길이 편향을 보정한 "창 안에 스큐 호출이 0건일 확률":
+//
+//	창 10s → 80.5% · 15s → 75.5% · **30s → 66.7%** · 60s → 58.6% · 120s → 51.9% · 300s → 44.4%
+//
+// (읽기는 `event` 표에 한 행도 안 남으므로 이 표는 **낙관적**이다 — 실제 호출률은 더 높다.)
+//
+// **꺾임이 없다.** 상한은 selfUpdateSkewCeiling 이 잡고, 하한은 사실상 없다 —
+// stat 1회가 773ns 라 1초 주기여도 CPU 0.00008% 이고, 정상 회차는 로그를 한 줄도 안 낸다.
+// 즉 1s~120s 가 전부 평탄하다. 그 안에서 30초를 고른 것에 데이터가 주는 근거는 없고,
+// **없는 꺾임을 지어내지 않는다**(fd-live-window-baseline 이 남긴 형식이다).
+// 붙드는 것은 값이 아니라 selfUpdateReactionBudget 이 상한 아래라는 사실이다.
 const defaultSelfWatchInterval = 30 * time.Second
 
 // selfVerifyTimeout 은 자식 selfcheck 하나에 주는 시간이다.
+//
+// 실측 10회 전부 <10ms(15MB DB). 상한이 1500배 큰 것은 의도다 — 콜드 DB·큰 증분에서
+// 초 단위로 늘 수 있다. 그 여유가 예산에 실리는 것은 selfUpdateReactionBudget 이 말한다.
 const selfVerifyTimeout = 15 * time.Second
+
+// selfUpdateReactionBudget 은 실행 파일 교체부터 새 프로세스가 뜨기까지, **서버 몫**의
+// 최악 시간이다. 자유 상수가 아니라 **파생**이다 — 상한이 선언된 항의 합이다.
+//
+//	탐지(티커 대기)        ≤ defaultSelfWatchInterval
+//	검증(자식 selfcheck)   ≤ selfVerifyTimeout
+//	드레인(인플라이트 마무리) ≤ api.ShutdownGrace
+//
+// ★ **exec + 기동은 항으로 안 넣는다.** 실측 13~17ms 인데 선언된 상한이 없고, 넣으려면
+// 근거 없는 상한 하나를 새로 만들어야 한다 — 이 상수가 없애려는 것이 정확히 그것이다.
+// 예산은 "상한이 선언된 항의 합"이지 "일어날 수 있는 모든 일의 합"이 아니다.
+//
+// ★ **되풀이는 안 덮는다.** `ActRefuse` 를 내는 자리 둘은 되풀이 성질이 **정반대**라
+// 한 이름으로 접으면 안 된다:
+//   - TOCTOU(검증 중 파일이 또 바뀜) — `lastFail` 을 안 건드리므로 사슬이 통째로 한 판 더
+//     돈다. 이 예산은 **한 판의 최악**이라 그 되풀이를 안 덮는다.
+//   - 검증 실패 — `lastFail` 을 걸어 `Decide` 가 그 판에 대해 **한 판도 더 안 돈다.**
+//     그러면 예산은 유계로 말할 것이 없다: 파일이 또 바뀔 때까지 서버가 안 바뀌므로
+//     **예산의 적용 자체가 안 된다.** 그 구간의 스큐 창은 사람이 손댈 때까지 무한이다.
+//
+// ★ 이 식이 있는 이유는 숫자가 아니라 **결합을 보이게 하는 것**이다. api.ShutdownGrace 를
+// 늘리는 사람이 자기가 자기 갱신 반응 시간을 늘린다는 것을 여기서 본다. 그 결합을 말하는
+// 자리가 이것 말고 없다.
+const selfUpdateReactionBudget = defaultSelfWatchInterval + selfVerifyTimeout + api.ShutdownGrace
+
+// selfUpdateSkewCeiling 은 스큐 창의 상한이다. **이쪽이 실측에서 나온 값이다.**
+//
+// 기준은 §10 이 이미 명시한 실패 모양이다 — "경고가 상시 점등돼 판별력을 잃는다".
+// 갱신의 **과반**이 스큐 호출 0건이어야 배너가 그 판별력을 갖고, 위 도착 분포에서
+// 그 조건은 창 ≤ 약 120초다(120s 에서 51.9%, 300s 에서 44.4%).
+//
+// TestSelfUpdateBudgetFitsSkewCeiling 이 selfUpdateReactionBudget ≤ 이 값을 붙든다.
+// 산문에만 있는 만료 조건은 아무도 안 본다 — 상한을 넘기는 커밋이 빨간불을 받아야 한다.
+const selfUpdateSkewCeiling = 120 * time.Second
+
+// DetectLag 는 실행 파일이 바뀐 시각과 그것을 관측한 시각의 차다. 순수 함수다.
+//
+// 예산의 첫 항(탐지)을 **사후에 잴 수 있는 유일한 자리**다. 성공한 자기 갱신은 exec 로
+// 프로세스가 갈아치워져 원장에 한 행도 안 남으므로(selfUpdateStatus 의 "성공은 여기 안
+// 남는다"), 교체를 본 그 순간의 로그가 아니면 이 값을 나중에 만들 길이 없다.
+//
+// ★ mtime 이 미래면(시계 어긋남·NFS) **0 으로 접지 않고 못 쟀다고 답한다.** 접으면
+// "즉시 봤다"와 "잴 수 없다"가 같은 값이 되고, 그 둘은 뜻이 반대다.
+func DetectLag(now time.Time, id ExeID) (time.Duration, bool) {
+	if !id.OK {
+		return 0, false
+	}
+	d := now.Sub(time.Unix(0, id.MtimeNano))
+	if d < 0 {
+		return 0, false
+	}
+	return d, true
+}
 
 // selfUpdateStatus 는 자동 갱신 축의 현재 상태다.
 //
@@ -282,13 +357,13 @@ func (w *selfWatcher) clearStall() {
 
 // Run 은 감시 루프다. ctx 가 끝나면 돌아온다.
 //
-// drain 은 "리스너를 닫고 그것이 실제로 닫힐 때까지 기다린다"이다.
-// ★ **우아한 마무리가 아니다.** api.Serve 의 BaseContext 가 serveCtx 라서 인플라이트
-// 요청 컨텍스트가 전부 그 자손이고, 드레인은 그 ctx 를 취소하는 것으로 시작한다 —
-// srv.Shutdown 이 기다리기 전에 도는 요청들이 먼저 끊긴다. 그래도 되는 근거는 요청이
-// 끝난다는 것이 아니라 **클라이언트의 아웃박스 + 멱등키**다(설계 §3①): 끊긴 쓰기는
-// 재시도로 돌아오고 중복은 멱등키가 접는다. drain 을 부르는 이유는 요청을 살리기
-// 위해서가 아니라, exec 전에 **포트를 확실히 놓기** 위해서다.
+// drain 은 "인플라이트를 마무리하고, 리스너가 실제로 닫힐 때까지 기다린다"이다.
+// drain 을 부르는 이유는 **둘**이다 — 도는 요청을 마치는 것과, exec 전에 포트를 확실히 놓는 것.
+//
+// ★ 앞선 판은 첫째를 못 했고 주석이 그 사실을 "아웃박스 + 멱등키가 덮는다"로 정당화했다.
+// 그 근거는 성립하지 않았다: 절단은 미도달이 아니라 서버가 답한 500 이라 아웃박스도
+// 낡음 배너도 안 탄다(아웃박스는 미도달 기구다). 지금은 api.Serve 가 요청 컨텍스트를
+// 서버 수명 ctx 에서 떼어 두어 실제로 마무리한다.
 func (w *selfWatcher) Run(ctx context.Context, drain func()) {
 	if !w.watching {
 		w.log.Info("자기 재기동 감시를 안 켠다", "reason", clip(w.reason, 200))
@@ -325,7 +400,15 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 	if act != ActVerify {
 		return act
 	}
-	w.log.Info("실행 파일이 교체됐다 — 검증한다", "reason", clip(why, 300))
+	// ★ detect_lag 는 **예산의 첫 항을 사후에 잴 수 있는 유일한 자리다**(DetectLag 참조).
+	// 못 재면 필드를 안 싣는다 — 0 을 실으면 "즉시 봤다"로 읽힌다.
+	if lag, ok := DetectLag(time.Now(), now); ok {
+		w.log.Info("실행 파일이 교체됐다 — 검증한다",
+			"reason", clip(why, 300), "detect_lag_ms", lag.Milliseconds())
+	} else {
+		w.log.Info("실행 파일이 교체됐다 — 검증한다",
+			"reason", clip(why, 300), "detect_lag", "못 쟀다")
+	}
 
 	vctx, cancel := context.WithTimeout(ctx, selfVerifyTimeout)
 	defer cancel()
@@ -360,6 +443,15 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 	// 멀쩡하다. 종료 의사는 신호 컨텍스트를 보는 shutdownRequested 가 안다.
 	// ctx.Err() 도 함께 보는 이유는 다르다: 그쪽이 끊겼으면 리스너가 이미 없다.
 	if w.shuttingDown() || ctx.Err() != nil {
+		// ★ **이 갈래는 화면에 못 간다. 그래서 setStatus 를 안 부른다.**
+		// 진입 조건이 곧 "서버가 이미 내려가는 중"이다 — shuttingDown() 이 참이면 serveCtx 도
+		// 끊겨 api.Serve 가 srv.Shutdown 안이고, Shutdown 은 **리스너를 먼저 닫는다**.
+		// ctx(watchCtx) 쪽은 더 확실하다: stopWatch() 는 api.Serve 가 반환한 뒤에만 불린다.
+		// selfUpdateStatus 는 메모리 전용이고 유일한 독자가 /healthz 라, 여기 적은 값은
+		// **어떤 커넥션으로도 못 읽힌다**(실측: 드레인 시작 뒤 /healthz 새 연결은 전부 거절,
+		// 미리 맺은 keep-alive 도 Shutdown 이 닫는다). 적어 두면 다음 사람이 화면에서 사유를
+		// 볼 수 있다고 믿는다 — 죽은 쓰기보다 그 믿음이 비싸다.
+		// **사유가 닿는 유일한 좌표는 이 로그 줄이다.**
 		w.log.Info("검증 중 종료 요청이 와 재기동을 접는다", "exe", clip(w.exePath, 200))
 		return ActNothing
 	}
@@ -389,14 +481,21 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 	drain()
 
 	// ★ **여기서 한 번 더 묻는다.** 진짜 창은 위 검사 다음 몇 줄이 아니라 drain() 전체다 —
-	// drain() 은 api.Serve 의 셧다운 유예만큼(현재 10초) 매달릴 수 있고, 그 사이에 온
-	// SIGTERM 은 drainServe() 를 이미 취소된 것으로 만들고 <-served 를 그 종료로 풀어 준다.
+	// drain() 은 api.ShutdownGrace 만큼 매달릴 수 있고, 그 사이에 온 SIGTERM 은
+	// drainServe() 를 이미 취소된 것으로 만들고 <-served 를 그 종료로 풀어 준다.
 	// 그러면 아무 저항 없이 syscall.Exec 에 닿는다 — 되돌릴 수 없는 자리다.
+	//
+	// ★ 이 창은 드레인이 실물이 되면서 **처음으로 실재한다.** 앞선 판은 드레인이 인플라이트를
+	// 즉시 잘라서 실측 7ms 였고, 그래서 이 검사는 이론이었다. 지금은 마무리를 기다리므로
+	// 유예만큼 열린다 — 이 갈래를 침묵으로 두면 안 되는 이유가 그것이다.
 	//
 	// 여기서 ctx(watchCtx)로 다시 묻지 않는 이유가 있다: serveWithWatcher 는 close(served)
 	// **직후** 정상적으로 stopWatch() 를 부른다. 그것을 종료 의사로 읽으면 멀쩡한 재기동이
 	// 매번 접힌다 — 기능 자체가 죽는다.
 	if w.shuttingDown() {
+		// ★ 여기도 setStatus 를 안 부른다 — 위 갈래와 같은 이유이고 이쪽이 더 분명하다.
+		// drain() 은 `drainServe(); <-served` 이고 served 는 **api.Serve 가 반환한 뒤**에 닫힌다.
+		// 즉 이 줄이 도는 시점에 리스너는 확실히 없다. 로그가 사유의 전부다.
 		w.log.Info("드레인 중 종료 요청이 와 재기동을 접는다 — 서버는 이미 내려갔다",
 			"exe", clip(w.exePath, 200))
 		return ActNothing

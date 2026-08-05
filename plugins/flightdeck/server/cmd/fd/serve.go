@@ -97,7 +97,7 @@ func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContai
 	}
 }
 
-func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) http.Handler {
+func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) api.Handler {
 	opt.Fallback = webH
 	return api.NewServer(svc, opt)
 }
@@ -193,7 +193,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 // 안 끊기고(stopWatch() 는 api.Serve 가 돌아온 **뒤에** 불린다), serveCtx 는 감시기 자신의
 // 드레인으로도 끊긴다. 그래서 신호 컨텍스트인 ctx 를 그대로 읽는 술어를 따로 건네준다 —
 // exec 직전 두 자리가 그것으로 묻는다.
-func serveWithWatcher(ctx context.Context, addr string, h http.Handler, log *slog.Logger, w *selfWatcher) int {
+func serveWithWatcher(ctx context.Context, addr string, h api.Handler, log *slog.Logger, w *selfWatcher) int {
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	defer stopWatch()
 	serveCtx, drainServe := context.WithCancel(ctx)
@@ -206,11 +206,14 @@ func serveWithWatcher(ctx context.Context, addr string, h http.Handler, log *slo
 	go func() {
 		defer close(watchDone)
 		w.Run(watchCtx, func() {
-			// ★ 이것은 **우아한 마무리가 아니다.** api.Serve 의 BaseContext 가 serveCtx 라
-			// 인플라이트 요청 컨텍스트가 전부 그 자손이고, 여기서 그 ctx 를 취소하는 순간
-			// srv.Shutdown 이 기다리기도 전에 도는 요청들이 함께 끊긴다.
-			// 그래도 되는 근거는 요청이 끝난다는 것이 아니라 **클라이언트의 아웃박스 +
-			// 멱등키**다(설계 §3①): 끊긴 쓰기는 재시도로 돌아오고 중복은 멱등키가 접는다.
+			// ★ 드레인은 **인플라이트를 마무리한다.** api.Serve 가 요청 컨텍스트를 serveCtx
+			// 에서 떼어 두었고(BaseContext), 여기서 그 ctx 를 취소하면 Serve 가 ① 수명이
+			// 정해지지 않은 응답(SSE)에 종료를 알리고 ② srv.Shutdown 으로 남은 요청을
+			// 기다린다. api.ShutdownGrace 를 넘긴 것만 끊기고 그때는 ERROR 가 뜬다.
+			//
+			// ★ 그 대가로 exec 가 **최대 그 유예만큼 늦는다.** 그 값이 자기 갱신 반응 시간의
+			// 항이다(아래 selfUpdateReactionBudget). 실측으로는 수명이 정해진 요청의 최댓값이
+			// 0.864초라 통상 그 만큼도 안 늦는다.
 			drainServe()
 			<-served // 리스너가 실제로 닫힐 때까지 기다린다 — 그 전에 exec 하면 포트가 겹친다
 		})
