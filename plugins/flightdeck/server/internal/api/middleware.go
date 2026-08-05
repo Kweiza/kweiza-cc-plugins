@@ -118,6 +118,14 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// ★ 도달 관측은 **판정보다 먼저**, 그리고 판정 결과와 무관하게 남긴다.
+		//
+		// 통과한 요청만 세면 "루프백에서 왔는데 토큰이 틀려 거절된" 요청이 관측에서
+		// 빠지고, 그러면 면제가 멀쩡히 닿는 서버가 계속 "아무도 못 받는다"고 말한다.
+		// 이 축이 답하는 질문은 "인증을 통과했는가"가 아니라 **"루프백이 여기까지 오는가"**다.
+		if IsLoopback(r.RemoteAddr) {
+			s.loopbackSeen.Store(true)
+		}
 		d := JudgeAuth(r.RemoteAddr, r.Header.Get("Authorization"), s.opt.Token, s.opt.RequireTokenOnLoopback)
 		if !d.OK {
 			s.met.incUnauthorized()
@@ -126,7 +134,7 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 			s.writeError(w, r, Classified{
 				Status: http.StatusUnauthorized, Code: "unauthorized",
 				Message:  d.Reason,
-				Guidance: "Authorization: Bearer <token> 을 실어라. 루프백은 토큰 없이 통과한다(/healthz 가 그 설정을 알린다).",
+				Guidance: UnauthorizedGuidance(s.loopbackReach()),
 			})
 			return
 		}

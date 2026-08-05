@@ -80,6 +80,23 @@ func portOf(addr string) string {
 // 앞선 판은 바깥 mux 에서 화면을 붙였고, 그래서 대시보드의 쓰기 둘이 인증·한도·멱등·
 // 패닉복구·액세스로그·지표를 전부 우회했다(토큰을 켠 배포에서 비루프백 무인증 폐기가
 // 실제로 성공했다). 조립을 두 자리로 나누면 한쪽만 잠긴다.
+// serveAPIOptions 는 serve 가 api 표면에 넘길 옵션을 만든다. 순수 함수다.
+//
+// ★ 순수로 뽑아 둔 이유가 이 항목 자체다. 조립이 serve 본문 안에만 있으면 축 하나가
+// 빠져도(예: 컨테이너 판정을 안 넘겨도) 전 스위트가 초록이고, 어긋남은 운영에서만 보인다.
+// 정확히 그 모양이었다 — /healthz 는 "루프백은 통과한다"고 광고하는데 배선상 아무도
+// 통과하지 못했고, 아무 시험도 그것을 안 잡았다.
+func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool,
+	selfUpdate func() api.SelfUpdateStatus) api.Options {
+	return api.Options{
+		Token:         token,
+		RatePerMinute: ratePerMinute,
+		Log:           log,
+		InContainer:   inContainer,
+		SelfUpdate:    selfUpdate,
+	}
+}
+
 func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) http.Handler {
 	opt.Fallback = webH
 	return api.NewServer(svc, opt)
@@ -127,11 +144,9 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	// ★ watcher 를 buildHandler 보다 먼저 만든다 — api.Options.SelfUpdate 콜백이
 	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
 	watcher := newSelfWatcher(log, path)
-	handler := buildHandler(svc, webH, api.Options{
-		Token:         token,
-		RatePerMinute: *rate,
-		Log:           log,
-		SelfUpdate: func() api.SelfUpdateStatus {
+	inContainer, _ := detectContainer()
+	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer,
+		func() api.SelfUpdateStatus {
 			st := watcher.Status()
 			out := api.SelfUpdateStatus{
 				Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
@@ -145,8 +160,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 				out.LastAt = &at
 			}
 			return out
-		},
-	})
+		}))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

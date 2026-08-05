@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/service"
@@ -57,6 +58,18 @@ type Options struct {
 	// ★ 콜백인 이유: 이 값은 **계속 변한다.** 조립 시점의 스냅숏을 박으면
 	// /healthz 가 영원히 기동 직후 상태를 낸다.
 	SelfUpdate func() SelfUpdateStatus
+
+	// InContainer 는 이 서버가 컨테이너 안인가다. **배선이 판정해 준다.**
+	//
+	// ★ 이 표면이 쓰는 곳은 하나뿐이다 — 루프백 면제가 안 닿을 때 **그 사유를 말하는 것**.
+	// 컨테이너에서는 호스트의 127.0.0.1 요청이 도커 브리지를 거쳐 172.x 로 보이고,
+	// 그래서 면제가 구조적으로 안 걸린다. 그 사실을 모르면 운영자는 자기 토큰 설정을
+	// 의심하며 시간을 쓴다(실제로 그렇게 됐다).
+	//
+	// 불리언인 이유: 사람이 읽을 문장은 표면의 몫이다. 배선이 문자열을 넘기면
+	// self_update 축의 문구("자기 갱신을 안 한다")가 인증 문맥으로 새어 든다 —
+	// 그 둘은 같은 신호(/.dockerenv)를 보지만 하려는 말이 다르다.
+	InContainer bool
 
 	// Fallback 은 REST 라우트에 안 걸린 요청을 받을 핸들러다(보통 대시보드).
 	// nil 이면 JSON 404 를 낸다.
@@ -113,6 +126,27 @@ type server struct {
 	// mux 는 라우팅 표다. 게이트가 **mux 에 닿기 전에** 되돌아 나갈 때
 	// 라우트 라벨을 스스로 풀기 위해 보관한다 — 아래 resolveRoute 참조.
 	mux *http.ServeMux
+
+	// loopbackSeen 은 **루프백으로 도달한 요청이 실제로 있었는가**다.
+	//
+	// ★ 설정만으로는 면제가 닿는지 알 수 없다. 컨테이너 배포에서는 호스트의
+	// 127.0.0.1 요청이 브리지 게이트웨이(172.x)로 보여 IsLoopback 이 false 이고,
+	// 그래서 면제를 받는 클라이언트가 **하나도 없는데** 설정은 열려 있다.
+	// 그 어긋남을 /healthz 와 401 처방이 말하려면 이 관측이 있어야 한다.
+	//
+	// 단조 증가다(한 번 참이면 안 내려간다). 나중에 도달이 끊긴 것을 잡으려면
+	// 마지막 시각을 재야 하는데, 이 축이 답하려는 질문은 "닿기는 하는가"이고
+	// 거기에는 한 번의 관측이면 충분하다 — 켜졌다 꺼지는 값은 배너를 깜빡이게 한다.
+	loopbackSeen atomic.Bool
+}
+
+// loopbackReach 는 설정과 관측을 합쳐 면제의 실제 도달 여부를 낸다.
+func (s *server) loopbackReach() LoopbackReach {
+	return LoopbackReach{
+		Configured:  !s.opt.RequireTokenOnLoopback,
+		Observed:    s.loopbackSeen.Load(),
+		InContainer: s.opt.InContainer,
+	}
 }
 
 // resolveRoute 는 이 요청의 라우트 라벨을 낸다.
