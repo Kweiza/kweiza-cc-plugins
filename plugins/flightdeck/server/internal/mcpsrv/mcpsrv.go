@@ -72,6 +72,7 @@ type Option func(*builder)
 type builder struct {
 	projectID   string
 	projectPath string
+	worktree    string
 	machineID   string
 	getenv      func(string) (string, bool)
 	cwd         string
@@ -166,6 +167,26 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	} else if id.ProjectID != "" {
 		id.Warnings = append(id.Warnings,
 			"프로젝트 좌표를 경로의 마지막 성분으로 정했다 — 워크트리에서는 주 저장소와 다를 수 있다")
+	}
+
+	// 워크트리도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고, 안 넣었다가 같은 사고를 겪었다.
+	//
+	// ★ 이 패키지가 스스로 푸는 규칙(워크트리 = 자기 cwd)은 **저장소 하위 디렉토리에서 틀린다.**
+	// 53c18ba 가 훅 쪽을 `git rev-parse --show-toplevel` 로 바꿨는데 이 계층은 안 바꿨고,
+	// 그래서 두 계층이 같은 창에 다른 좌표를 매겼다. 세션 카드의 키가 (머신·워크트리·cc)
+	// 3중키라 그 갈림은 가드 하나가 아니라 **카드 자체를 쪼갠다.**
+	//
+	// 실측(2026-08-04): 같은 cc·같은 머신인데 상하위 경로로 갈린 카드쌍 60건,
+	// 남의 워크트리 하위 경로에 있는 카드 80건. session.worktree 에
+	// `…/kweiza-cc-plugins` 와 `…/kweiza-cc-plugins/plugins/flightdeck/server` 가 나란히 있다.
+	//
+	// ★ 여기서 git 을 부르지 않는 이유는 프로젝트 축과 같다 — **같은 판정을 두 자리에 두지 않는다.**
+	// `--show-toplevel` 은 이미 진입점(cmd/fd 의 resolveProject)이 푼다. 이 계층은 순수하게 남는다.
+	if b.worktree != "" {
+		id.Worktree = b.worktree
+	} else if id.Worktree != "" {
+		id.Warnings = append(id.Warnings,
+			"워크트리를 cwd 로 정했다 — 저장소 하위 디렉토리에서 열면 훅의 --show-toplevel 과 갈려 카드가 쪼개진다")
 	}
 
 	// 머신 id 도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고 같은 사고를 겪었다.
@@ -986,6 +1007,23 @@ func WithProject(id, path string) Option {
 // 프로젝트 축이 먼저 같은 사고를 겪고 주입으로 고쳤는데 머신 축만 그 교정에서 빠져 있었다.
 func WithMachine(id string) Option {
 	return func(b *builder) { b.machineID = strings.TrimSpace(id) }
+}
+
+// WithWorktree 는 세션의 워크트리 절대경로를 **주입**한다. 위 둘과 같은 자리, 같은 이유다.
+//
+// 이 패키지가 스스로 푸는 규칙(워크트리 = 자기 cwd)은 진입점의 규칙
+// (`git rev-parse --show-toplevel`, 53c18ba)과 다르다. 저장소 하위 디렉토리에서 Claude Code 를
+// 열면 그 둘이 갈리고, 3중키의 둘째 축이 갈리므로 **한 창이 카드 두 장으로 열린다.**
+// 프로젝트 축과 머신 축이 차례로 같은 사고를 겪고 주입으로 고쳤는데 워크트리 축만 남아 있었다.
+//
+// 빈 값은 주입이 아니다 — 안 넣은 것과 같이 다뤄 cwd 규칙으로 떨어지고 경고를 남긴다.
+// 지어낸 좌표로 카드를 여는 것보다 "cwd 로 정했다"고 말하는 쪽이 낫다.
+func WithWorktree(path string) Option {
+	return func(b *builder) {
+		if p := strings.TrimSpace(path); p != "" {
+			b.worktree = filepath.Clean(p)
+		}
+	}
 }
 
 // WithBeaconDir 는 창 비콘을 둘 디렉토리를 준다.
