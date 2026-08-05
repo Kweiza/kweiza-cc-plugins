@@ -20,12 +20,26 @@
 
 ```bash
 cd plugins/flightdeck
-docker compose up -d
+FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null)" docker compose up -d
 curl -s localhost:7420/healthz
 ```
 
 `{"ok":true,"api_version":"1","db_ok":true,…}` 가 나오면 됐다.
 화면은 <http://localhost:7420> — 읽기 전용 한 장이다.
+
+두 가지를 환경에서 받는다:
+
+- **`FD_TOKEN`** — 안 주면 인증이 꺼진 채 뜬다. 그 사실은 `/healthz` 가 말하지만,
+  **말할 뿐 막지는 않는다.** 이미 토큰을 쓰던 서버를 옮기는 중이라면 반드시 같은 값을 준다.
+- **`FD_UID`/`FD_GID`** — 이미지는 `nonroot`(65532)로 도는데 볼륨 `~/.flightdeck` 는
+  호스트 사용자의 것이다. 기본값 1000 이 아니면(`id -u`) 주지 않는 한 DB 를 열되 못 쓴다.
+
+플러그인으로 켰다면 저장소가 아니라 **설치된 캐시 자리**에서 띄운다 — 그것이
+`/plugin` 이 받아 둔 그 판이다:
+
+```bash
+cd ~/.claude/plugins/cache/<마켓플레이스>/flightdeck/<버전>
+```
 
 도커 없이 돌리려면:
 
