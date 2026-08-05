@@ -168,6 +168,9 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		in.Pending = len(pend)
 	} else {
 		a.log.Warn("아웃박스 조회 실패", "error", err.Error())
+		// ★ 로그로만 흘리면 아무도 안 본다. 훅 로그는 사람이 찾아가야 나오고,
+		// 셀 수 없는 큐는 재생도 적재도 막힌 상태라 가장 급한 축이다.
+		in.Unreadable = append(in.Unreadable, a.cli.Outbox.Dir()+": "+err.Error())
 	}
 	// ★ 옛 채널 자리의 대기도 더한다. 업그레이드 직후에는 고정 큐가 비어 있고
 	// 판단은 전부 옛 자리에 남아 있는 것이 흔한 상태라, 고정 큐만 보면 배너가
@@ -175,6 +178,11 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	// "이 머신에 쌓여 있다"는 문장은 그대로 참이다: 옛 자리도 이 머신 안이다.
 	for _, lo := range a.cli.LegacyLeftovers() {
 		in.Pending += lo.Pending
+		// ★ lo.Pending 은 셀 수 없었으면 **0 이다** — 사유는 lo.Err 에만 담긴다.
+		// 그러니 Err 을 따로 안 옮기면 손상된 큐가 배너에서 정확히 0건으로 보인다.
+		if lo.Err != "" {
+			in.Unreadable = append(in.Unreadable, lo.Dir+": "+lo.Err)
+		}
 	}
 
 	cc := a.ccSessionID(p.SessionID)

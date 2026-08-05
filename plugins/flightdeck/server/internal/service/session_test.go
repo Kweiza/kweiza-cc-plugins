@@ -313,3 +313,38 @@ func TestBeatDropsBadCoordinatePathsButKeepsSignal(t *testing.T) {
 		t.Fatalf("원장에 버린 경로 둘째 건이 안 남았다: %s", payload)
 	}
 }
+
+// 세션을 열거나 상태를 바꾸는 것은 **도구 호출이 아니다.**
+//
+// 그 둘이 mcp 를 찍던 동안 화면은 "mcp 0초"라고 내면서 실제로는 MCP 도구를 한 번도
+// 안 부른 세션을 가리켰다 — 설계 §4 의 신호 표가 mcp 를 "도구 호출"로 정의하는데
+// 그것과 어긋났다(실측: 카드 26장 중 16장이 mcp 하나뿐이었다).
+//
+// ★ **다른 종류로 옮겼는지가 아니라 안 찍는지를 본다.** 종류를 더하려면 schema.sql 의
+// CHECK 를 바꿔야 하고, SQLite 에서 그것은 표 재생성이며, 재생성은 declaredTables 와
+// destructiveOps 양쪽 가드에 걸린다. "언제 열렸나"는 session.opened_at 이 이미 담고,
+// ListLive 의 창 판정도 그 컬럼을 따로 본다 — signal 표에 같은 사실을 두 벌 둘 이유가 없다.
+func TestOpenSessionAndSetStateLeaveNoSignal(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-quiet", "조용")
+
+	sig, err := st.Signals(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("신호 조회 실패: %v", err)
+	}
+	if len(sig) != 0 {
+		t.Fatalf("세션을 열기만 했는데 신호가 %v 다 — 화면이 '이 세션이 도구를 불렀다'고 거짓말한다", sig)
+	}
+
+	if err := s.SetState(ctx(), sess.Session.ID, model.SessionBlocked, "막힌 사유"); err != nil {
+		t.Fatalf("상태 변경 실패: %v", err)
+	}
+	sig, err = st.Signals(ctx(), sess.Session.ID)
+	if err != nil {
+		t.Fatalf("신호 조회 실패: %v", err)
+	}
+	if len(sig) != 0 {
+		t.Fatalf("상태를 바꿨더니 신호가 생겼다 — 상태 전이는 도구 호출이 아니다: %v", sig)
+	}
+}

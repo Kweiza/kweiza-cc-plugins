@@ -14,10 +14,16 @@ import (
 // add 하다 나는데(프로젝트 좌표를 세션의 cwd 가 정한다) 되돌리는 `move` 는 CLI 에만 있다.
 //
 // 처음에는 MCP 에 move 도구를 더하는 쪽으로 갔다. **설계 §6 이 그 판정을 뒤집었다** —
-// "도구 수를 6개로 눌러 잡는 이유는 컨텍스트 예산이다"가 근거와 함께 적힌 원칙이고,
-// 시험 둘(TestToolTableIsSix · TestInitializeAndToolsListRoundTrip)이 그것을 강제한다.
+// "도구 수를 예산 안에 묶는 이유는 컨텍스트다"가 근거와 함께 적힌 원칙이고,
+// 시험 둘(TestToolTableIsSeven · TestInitializeAndToolsListRoundTrip)이 그것을 강제한다.
 // 그리고 같은 절이 이 부류의 처방을 이미 정해 뒀다:
 // **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
+//
+// ★ 위 두 이름을 정확히 적는 이유: 앞선 판의 그 줄은 `TestToolTableIsSix` 를 인용했는데
+// 그 이름은 레포에 없다(land 를 더하며 TestToolTableIsSeven 으로 개명됐다) —
+// grep 하는 사람이 빈손이 됐다. 판정 자체는 안 뒤집혔다: 도구가 여섯에서 일곱이 된 것은
+// 예산을 안 건드렸기 때문이고(늘어난 고정비는 이름 하나, 설명 90자 상한 그대로 — DESIGN §6),
+// "예산을 쓰는 도구는 안 더한다"는 이 항목의 판정은 그래서 지금도 산다.
 //
 // 그래서 예산을 안 쓰는 자리를 골랐다. MCP 세션은 Bash 로 CLI 를 부를 수 있으므로
 // **능력은 이미 있고 없던 것은 앎**이다. 앎이 필요한 순간은 오등록이 **만들어지는 그때**이고,
@@ -61,6 +67,9 @@ func TestAddResponseNamesTheProjectAndTheWayBack(t *testing.T) {
 // ★ 이 항목은 move 를 도구로 더하지 않고 응답 문구로 푸는 쪽으로 판정했다 — 그 판정이
 // 여기서 못박는 전부다. 도구 **개수**의 정본은 protocol_test.go 의 TestToolTableIsSeven
 // 하나여야 한다(정본이 둘이면 하나만 고쳐진 날 조용히 갈린다) — 그래서 개수는 여기서 안 잰다.
+// ★ 다만 그 "하나"는 아직 의도지 사실이 아니다 — 지금 개수를 실제로 세는 시험은 셋이다:
+// TestToolTableIsSeven · TestInitializeAndToolsListRoundTrip · TestPickGainsItemIDsWithoutGrowingToolCount.
+// 여기서 안 재는 판정은 그대로 옳지만, 넷째를 만들지 않는 것만으로 "정본 하나"가 되지는 않는다.
 func TestFixingMisregistrationDidNotGrowTheToolTable(t *testing.T) {
 	for _, n := range ToolNames() {
 		if n == "move" {

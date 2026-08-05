@@ -14,6 +14,7 @@ import (
 // 살아 있는 5건 중 3건에 경고가 붙어 판별력이 0이 된 그 화면이다.
 
 const (
+	PrescribeLaneTurn  = "lane-turn" // lane-turn:<줄 행 id>
 	PrescribeOverlap   = "overlap"   // overlap:<상대 세션 id>
 	PrescribeOutside   = "outside"   // outside:<경로>
 	PrescribeSilent    = "silent"    // 대상 없음
@@ -108,6 +109,19 @@ type PrescribeInput struct {
 	LastJudgment time.Time
 	// NewPaths 는 마지막 판단 이후 새로 만진 경로 수다.
 	NewPaths int
+	// LaneTurnRow 는 랜딩 줄에서 **지금 이 세션 차례가 된 줄 행의 번호**다. 0 이면 차례가 아니다.
+	//
+	// ★ 불리언이 아니라 행 번호인 이유는 억제 키가 `lane-turn:<이 번호>` 이기 때문이다.
+	// suppressed 가 silent 외 모든 키를 무조건 누르고, 발화 기록(event)은 추가 전용이며,
+	// 그 기록을 읽는 창의 하한인 session.opened_at 은 재개해도 안 되돌아간다. 셋을 이으면
+	// 접미 없는 `lane-turn` 하나는 **세션 카드 수명 전체에 걸쳐 정확히 1회**로 굳는다.
+	// 그런데 굶주림 정책상 차례를 받고 랜딩에 실패한 세션은 맨 뒤로 가서 **새 줄 행**을 받는다 —
+	// 그 세션에게 두 번째 차례는 영영 안 뜨고, 그 뒤에 선 전원이 그만큼 더 기다린다.
+	// 행 번호를 키에 실으면 "같은 행에는 한 번"과 "새 행에는 다시"가 한 규칙에서 같이 나온다.
+	//
+	// ★ 판정 자체(맨 앞이 나인가 · 레인을 쥔 사람이 없는가)는 호출자 몫이다. 이 패키지는
+	// 저장층을 모르고, 순서 집행이 걸리는 자리는 하나여야 한다.
+	LaneTurnRow int64
 	// Emitted 는 이미 낸 키 → 낸 시각이다.
 	//
 	// ★ 불리언이 아니라 시각인 이유: 억제 해제 규칙(silent 은 판단 뒤 다시 뜬다)이
@@ -125,11 +139,52 @@ type Prescription struct {
 
 // Prescribe 는 지금 내야 할 처방 전부를 낸다. 표시 상한은 FoldPrescriptions 가 건다.
 //
-// 순서는 고정이다: overlap → outside → unclaimed → silent.
-// overlap 이 맨 앞인 이유는 **그것만이 남이 알아야 하는 사건**이기 때문이다.
-// 나머지 셋은 이 세션의 규율 축이라 접혀도 남의 화면이 틀리지 않는다.
+// 순서는 고정이다: lane-turn → overlap → outside → unclaimed → silent.
+// 앞의 둘이 앞인 이유는 **그 둘만이 남에게 걸리는 사건**이기 때문이다.
+// 뒤의 셋은 이 세션의 규율 축이라 접혀도 남이 지금 보는 화면이 바로 틀리지는 않는다
+// — 다만 outside 는 남이 보는 겹침 판정의 **입력**을 낡은 채로 둔다(아래 대가 문단).
+//
+// ★ **개정 — lane-turn 을 들이면서 맨 앞을 내줬다.** 원래 이 자리는 "overlap 이 맨 앞인
+// 이유는 그것만이 남이 알아야 하는 사건이기 때문이고, 나머지 셋은 접혀도 남의 화면이
+// 틀리지 않는다"였다. lane-turn 에 대해 그 둘째 문장은 거짓이고, 첫째 논거는 오히려
+// overlap 보다 **강하게** 성립한다. 기구가 이렇다: 접힌 처방도 호출자가 **전부** 발화
+// 기록하고(PrescribeMax 주석), suppressed 는 silent 외 모든 키를 무조건 누른다. 이으면
+// lane-turn 이 한 번 접히는 순간 그 줄 행의 차례 통지는 **영구히 사라지고**, 그 세션은
+// 레인을 안 쥔 채 남아 **뒤에 선 전원의 랜딩이 선다.** 게다가 그 실패는 화면에 안 뜬다 —
+// 원장에는 "정상적으로 접혔다"로만 남는다. overlap 은 접혀도 남이 겹침을 늦게 알 뿐
+// 아무도 멈추지 않는다.
+//
+// ★ **대가는 치른다 — 그런데 그 대가가 떨어지는 자리를 원래 틀리게 적었다.** 이 자리는
+// 원래 "상한을 넘는 턴에서 접히는 쪽이 lane-turn 이 아니라 overlap 이 된다"였다. 틀렸다:
+// FoldPrescriptions 는 `ps[:PrescribeMax]` 로 **뒤를 자르므로** 접히는 것은 이 순서의
+// 뒤쪽 전부다. 맨 뒤부터 silent · unclaimed · outside 가 먼저 접히고, overlap 은
+// lane-turn 이 떠 있는 턴이면 **셋째 상대부터** 접힌다(상한 3 중 한 자리를 lane-turn 이 쓴다).
+//
+// 그래서 우리가 실제로 뒤로 민 것은 overlap 이 아니라 **그 뒤 축들**이고, 완화 근거 둘은
+// 축마다 다르게 성립한다:
+//
+//	· **키가 쪼개져 있다** — overlap 은 상대마다, outside 는 경로마다 별개 키라
+//	  접히는 것이 통지 하나지 축 전체가 아니다. 다만 overlap 이 하나라도 접히는 턴이면
+//	  이미 overlap 이 적어도 둘 표시된 뒤인 반면, **lane-turn 이 뜬 턴에 overlap 이 둘만 더 떠도**
+//	  outside 는 그 턴에 한 건도 표시되지 않는다. 부분 손실과 전량 손실은 다르다.
+//	· **확인율** — 0/31 은 overlap 의 수치다(위 silent 임계 주석의 정정 문단. 카드가 갈려
+//	  처방은 발자국 카드에 뜨고 ack 은 판단 카드에 꽂히므로 원리적으로 0). outside 에는
+//	  이 근거가 **없다** — 같은 실측에서 outside 는 2건 뜨고 둘 다 확인됐다(PrescribeMax 문단).
+//
+// 즉 "접혀도 되는 쪽은 이미 아무도 안 읽고 있었다"는 overlap 에만 참이다. 그런데도 이 순서를
+// 고르는 이유는 손실의 **크기**다: 접힌 키도 호출자가 전부 발화 기록하고 suppressed 는
+// silent 외 모든 키를 무조건 누르므로 접힘에서 되돌아오는 축은 silent 하나뿐인데,
+// outside 한 경로가 접히면 남이 보는 겹침 판정의 입력이 그 경로만큼 낡은 채로 남고,
+// lane-turn 이 접히면 레인이 빈 채로 남아 **뒤에 선 전원**이 선다. 그리고 접기 자체가
+// 드물다 — 처방이 뜬 턴 35개 중 2개였다(PrescribeMax 문단).
+//
+// 이 순서를 잠근 것은 TestLaneTurnSurvivesFolding(맨 앞 · 접힘)과
+// TestAxisOrderIsLockedWhereverTwoAxesCanCoexist(축 순서 전체)다.
 func Prescribe(in PrescribeInput) []Prescription {
 	var out []Prescription
+	if p, ok := laneTurnPrescription(in); ok {
+		out = append(out, p)
+	}
 	out = append(out, overlapPrescriptions(in)...)
 	out = append(out, outsidePrescriptions(in)...)
 	if p, ok := unclaimedPrescription(in); ok {
@@ -149,7 +204,36 @@ func FoldPrescriptions(ps []Prescription) (shown []Prescription, folded int) {
 	return ps[:PrescribeMax], len(ps) - PrescribeMax
 }
 
-// ① 남과 경로가 겹치기 시작했다 — 상대마다 1회.
+// ① 랜딩 레인 차례가 왔다 — 줄 행마다 1회.
+//
+// ★ 맨 앞이다. 근거는 Prescribe 독스트링에 있다(접히면 그 줄 행의 통지가 영구 소실이고
+// 뒤 줄 전원이 선다). 파일 순서 == 호출 순서라 이 함수도 맨 위에 있다.
+//
+// ★ **0 은 "차례 아님"이다** — 그리고 호출자가 레인을 못 읽었을 때도 0 이 들어온다.
+// 둘을 안 가르는 것이 맞다. "못 읽었다"를 "차례다"로 접으면 줄과 점유가 어긋난 자리로
+// 세션을 보내고, 그 세션은 레인 획득이 실패하는 자리에서 처방을 믿은 대가를 치른다.
+// 음수는 존재할 수 없는 값이라(줄 행 id 는 AUTOINCREMENT rowid) 같이 접는다.
+func laneTurnPrescription(in PrescribeInput) (Prescription, bool) {
+	if in.LaneTurnRow <= 0 {
+		return Prescription{}, false
+	}
+	key := fmt.Sprintf("%s:%d", PrescribeLaneTurn, in.LaneTurnRow)
+	if suppressed(in, key) {
+		return Prescription{}, false
+	}
+	return Prescription{
+		Key:    key,
+		Reason: fmt.Sprintf("랜딩 줄 맨 앞이 이 세션이고 레인을 쥔 사람이 없다(줄 행 %d)", in.LaneTurnRow),
+		Text: fmt.Sprintf(
+			"랜딩 레인 차례가 왔다 — 줄 맨 앞이 너고(줄 행 %d) 레인을 쥔 사람이 없다.\n"+
+				"  → land() 로 레인을 쥐고 랜딩을 시작해라. 끝나면 land(result='ok') 로 보고하고 반납한다.\n"+
+				"  → 차례를 흘리면 레인은 빈 채로 남는다 — 뒤에 선 세션 전원이 그동안 못 움직인다.\n"+
+				"  → 랜딩할 것이 없어졌으면 land(leave='사유') 로 줄에서 빠져라. 그것도 뒤를 푼다.",
+			in.LaneTurnRow),
+	}, true
+}
+
+// ② 남과 경로가 겹치기 시작했다 — 상대마다 1회.
 func overlapPrescriptions(in PrescribeInput) []Prescription {
 	others := append([]LiveSession(nil), in.Others...)
 	// 순서를 고정한다 — 같은 입력에 같은 출력이어야 시험이 순서를 단정할 수 있다.
@@ -197,7 +281,7 @@ func sameConversation(a, b string) bool {
 	return a != "" && a == b
 }
 
-// ② 선점한 항목의 선언 경로 밖 — 경로마다 1회.
+// ③ 선점한 항목의 선언 경로 밖 — 경로마다 1회.
 //
 // ★ 선언 경로가 하나도 없으면 이 축은 **안 돈다.** 빈 선언에 대고 "밖"을 판정할 수 없고,
 // 빈 선언을 "전부 밖"으로 접으면 paths 를 안 적은 항목 하나가 첫 턴에 처방을 쏟는다.
@@ -229,7 +313,7 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 	return out
 }
 
-// ③ 선점 없이 편집 — 세션당 1회.
+// ④ 선점 없이 편집 — 세션당 1회.
 //
 // ★ 이 조건은 흔하다. 세션당 1회로 눌러 잡지 않으면 편집마다 떠서 §4 의 실패가 된다.
 //
@@ -316,7 +400,7 @@ func comparablePath(p string) bool {
 	return p != "" && !strings.HasPrefix(p, "/")
 }
 
-// ④ 오래 일했는데 판단이 0건.
+// ⑤ 오래 일했는데 판단이 0건.
 func silentPrescription(in PrescribeInput) (Prescription, bool) {
 	reason, ok := silentReason(in)
 	if !ok || suppressed(in, PrescribeSilent) {

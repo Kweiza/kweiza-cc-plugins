@@ -97,8 +97,24 @@ func (s *Store) ListEvents(ctx context.Context, kind string, since time.Time, li
 // "이 키를 언제 냈나"(억제 판정)에 답한다. 최신순으로 주면 호출자가 뒤집어야 하고,
 // 그 뒤집기를 잊으면 억제가 조용히 틀린다.
 //
-// ★ 상한이 없다. 세션 하나의 처방 이벤트는 조건 넷 × 대상 수라 원리적으로 작고,
-// 상한을 걸면 오래된 키가 잘려 **이미 낸 처방이 다시 뜬다** — 이 함수가 막으려는 바로 그 사고다.
+// ★ 상한이 없다. 상한을 걸면 오래된 키가 잘려 **이미 낸 처방이 다시 뜬다** —
+// 이 함수가 막으려는 바로 그 사고다. 그것을 감당하는 근거가 "세션 하나의 처방 이벤트는
+// 원리적으로 작다"인데, **조건마다 늘어나는 축이 달라 하나의 곱으로 적을 수 없다**
+// (judge/prescribe.go 의 조건 다섯. 넷에서 다섯이 된 것은 lane-turn 이 들어오면서다):
+//
+//	unclaimed : 접미 없는 키 하나 — 세션당 1건이 상한이다(suppressed 가 무조건 누른다)
+//	silent    : 접미 없는 키 하나이되 **판단 뒤에만 억제가 풀린다**(judge 의 suppressed 가
+//	            silent 하나만 예외로 둔다) — 다시 뜨려면 그 사이에 판단이 하나 이상 남아야 한다
+//	overlap   : 살아 있는 남의 세션마다 하나(overlap:<세션 id>)
+//	outside   : 선언 경로 밖에서 만진 경로마다 하나(outside:<경로>)
+//	lane-turn : **그 세션이 받은 줄 행마다** 하나(lane-turn:<줄 행 id>) —
+//	            유일하게 "대상 수"가 아닌 축이다
+//
+// ★ 그래도 lane-turn 축이 작은 이유를 적어 둔다. 세션은 살아 있는 줄 행을 한 번에 하나만
+// 가지므로(landing_queue_one_live_per_session 부분 유니크 인덱스 · EnqueueLanding 은 재진입에서
+// 기존 행을 그대로 낸다) **새 줄 행은 앞 행이 닫힌 뒤에만 나온다.** 즉 이 축의 건수는 그 세션이
+// 실제로 돈 랜딩 왕복 횟수이고, 한 왕복마다 세션의 쓰기 호출(land → report·leave·finish)이나
+// 사람의 회수가 든다 — 저절로 늘어나는 축이 아니다.
 func (s *Store) ListSessionEvents(ctx context.Context, sessionID, kind string, since time.Time) ([]model.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, at, project, session_id, kind, payload FROM event

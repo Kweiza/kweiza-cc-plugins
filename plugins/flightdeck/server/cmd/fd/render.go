@@ -34,6 +34,14 @@ type SessionStartInput struct {
 	Blocked    []model.Judgment
 	Pending    int    // 아웃박스에 남아 있는 판단 수 — 고정 자리 + 옛 채널 자리 합계(hookSessionStart 참고)
 	Notice     string // 도구가 스스로 못 한 것(예: machine-id 를 못 적었다)
+
+	// Unreadable 은 **세다 걸린** 큐다. 각 원소는 "<자리>: <사유>".
+	//
+	// ★ Pending 과 갈라 둔 이유는 하나다 — **0 과 '못 쟀다'를 가른다.** 셀 수 없는 큐는
+	// Pending 에 0 으로 들어가는데(Leftover.Pending 이 0값으로 남는다), 그러면 배너에서
+	// "아무것도 안 쌓였다"와 구별이 안 되고 0 은 '깨끗하다'로 읽힌다. RenderHealth 가
+	// disk_known 에 대해 이미 같은 규율을 쓴다.
+	Unreadable []string
 }
 
 // RenderSessionStart 는 SessionStart 훅이 stdout 으로 내는 additionalContext 본문이다. 순수 함수다.
@@ -65,6 +73,17 @@ func RenderSessionStart(in SessionStartInput) string {
 	}
 	if in.Pending > 0 {
 		fmt.Fprintf(&b, "아직 못 보낸 판단 %d건이 이 머신에 쌓여 있다 — 서버가 살아나면 자동 재생된다\n", in.Pending)
+	}
+	// ★ 셀 수 없었던 큐는 **위 건수와 따로** 낸다. 합치면 0 에 묻히고, 묻히면 침묵이다.
+	//
+	// ★ **"막혀 있다"고 단정하지 마라.** Leftover.Err 은 대기열 읽기 실패와 격리 파일 읽기
+	// 실패를 **한 칸에 담는다**(outbox.go 의 leftover). 그래서 격리만 손상된 큐도 여기 오는데,
+	// 그 큐의 대기열은 멀쩡히 세어져 위 줄이 "자동 재생된다"를 이미 말한 뒤다 — 단정하면
+	// 배너가 두 줄 사이에서 스스로를 반박한다. 아는 것만 말하고 판정은 doctor 에 넘긴다.
+	for _, u := range in.Unreadable {
+		fmt.Fprintf(&b, "아웃박스를 못 셌다 — %s\n"+
+			"  이 자리는 재생이나 적재가 막혀 있을 수 있다. `fd doctor` 가 어느 파일인지 찍는다\n",
+			clip(u, 300))
 	}
 	if in.Notice != "" {
 		fmt.Fprintf(&b, "! %s\n", clip(in.Notice, 400))

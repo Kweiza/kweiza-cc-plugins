@@ -15,6 +15,11 @@ services:
     #   포트 선점·DB 손상은 재시작해도 같은 자리에서 죽으므로,
     #   서버가 **사유를 남기고 종료**하고 그 줄이 `docker logs` 에 남는다.
     restart: unless-stopped
+    # ★ api.ShutdownGrace(10초)보다 **커야 한다.** 같거나 작으면 유예를 다 쓴 종료가
+    #   SIGKILL 과 같은 순간에 잘려서 "유예 안에 마무리를 못 했다" ERROR 조차 안 남는다 —
+    #   정확히 그 줄이 필요한 상황에서 사라진다. docker 기본값이 10초라 부등식이 깨져 있었다.
+    #   TestComposeStopGraceExceedsShutdownGrace 가 이 부등식을 붙든다.
+    stop_grace_period: 20s
     # ★ 볼륨 주인의 uid 로 돈다. 이미지는 `USER nonroot`(65532)로 굳어 있는데 볼륨은
     #   호스트 사용자(보통 1000)의 것이라, 그대로 두면 DB 를 **열되 못 쓴다** —
     #   읽기는 되므로 기동은 성공하고, 첫 쓰기에서야 SQLite 가 readonly 로 죽는다.

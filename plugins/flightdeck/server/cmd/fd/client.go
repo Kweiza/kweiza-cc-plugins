@@ -66,23 +66,46 @@ func parseAPIError(status int, path string, raw []byte) *APIError {
 
 // Client 는 서버 하나에 붙는 클라이언트다.
 //
-// ★ **이 Client 는 "한 번에 한 호출" 전제 위에 서 있다. 동시 호출에 안전하지 않다.**
+// ★ **축이 둘이고, 둘은 성질이 다르다. 뭉개면 틀린 처방이 나온다.**
 //
-// 이 파일도, Cache 도, Outbox 도 잠금이 하나도 없다(cmd/fd 비시험 코드에 sync·atomic 0건).
-// 지금 그것이 문제가 안 되는 이유는 **호출자가 전부 순차**라서다:
+// 이 주석은 오래 "호출자가 전부 순차라 안전하다"고 적어 뒀는데, 그 문장은
+// **한 프로세스 안에서만** 참이었다. 파일로 공유되는 상태는 프로세스를 가로질러 다툰다.
 //
-//   - CLI 서브명령은 한 프로세스가 명령 하나를 처리하고 끝난다.
-//   - `fd mcp` 는 mcpsrv.Serve 의 프레임 루프가 프레임을 하나씩 돈다.
+// ── 프로세스 **내부** 축 — 오늘 안전하다
 //
-// 즉 여기 초록은 "지금 안전하다"이지 **"병렬화해도 안전하다"가 아니다.** 겹치면 셋이 깨진다:
+//	Session(아래 필드). mcpBackend 가 호출마다 갈아 쓰지만, `fd mcp` 는 한 프로세스가
+//	한 세션이라 매번 같은 값이 들어간다. mcpsrv.Serve 의 프레임 루프도 순차다.
+//	그 순차성을 TestServeNeverOverlapsBackend 가 붙들고 있다 — 프레임 루프를 병렬로
+//	바꾸는 커밋은 거기서 빨강을 보고, 그때 이 필드를 인자로 내려야 한다.
 //
-//  1. Session — 아래 필드 주석. mcpBackend 가 호출마다 갈아 쓴다.
-//  2. Outbox.Append — 중복 키 검사가 List→검사→쓰기라 겹치면 둘 다 통과한다(outbox.go).
-//  3. Cache.Put — 키마다 tmp 경로가 하나뿐이라 같은 경로에 동시에 쓰면 섞인다(cache.go).
+// ── 프로세스 **간** 축 — 대부분 잠금으로 닫았다(outbox_lock.go). 남은 자리는 아래에 적는다
 //
-// -race 는 이것을 **원리적으로 못 본다** — 동시 진입이 없으니 볼 경합이 없다.
-// 그래서 전제를 시험으로 묶어 뒀다: internal/mcpsrv 의 TestServeNeverOverlapsBackend.
-// 프레임 루프를 병렬로 바꾸는 커밋은 거기서 빨강을 보고, 위 셋을 함께 고쳐야 초록이 된다.
+//	아웃박스 자리는 채널과 무관하게 머신당 하나로 일부러 고정돼 있다(설계 §7).
+//	그래서 세션마다 뜨는 `fd mcp`, 세션 시작마다 뜨는 훅, 사람이 치는 셸 명령이
+//	**같은 파일**을 다툰다. 재현으로 확인된 피해 셋:
+//
+//	 1. Outbox.Append 의 List→검사→쓰기 (outbox.go)
+//	 2. Outbox.Replay 의 List→send→되쓰기 — **가장 무겁다.** 스냅숏을 되쓰면 그 사이
+//	    들어온 판단이 격리에도 안 남고 삭제된다(실측 33/300). 이 항목이 처음 지목한
+//	    셋에는 이것이 없었다.
+//	 3. Cache.Put 의 tmp 경로 (cache.go)
+//
+//	★ **프로세스 내 sync.Mutex 로는 이 셋을 하나도 못 막는다.** 다른 fd 프로세스는
+//	그 뮤텍스가 있는 줄도 모른다. 그리고 **잠금만 넣고 되쓰기를 병합으로 안 바꾸면
+//	오히려 나빠진다**(실측: 유실 50/300 → 279/300). 잠금이 순서를 결정적으로 만들어
+//	낡은 스냅숏이 거의 항상 이기기 때문이다.
+//
+//	★ **닫히지 않은 자리 둘을 명시한다** — "프로세스 간 축을 닫았다"로 읽히면 안 된다.
+//	 · quarantine 의 rejected.jsonl O_APPEND 는 잠금 밖이다. 겹치면 같은 줄이 두 번
+//	   들어간다(실측 199/200 — 다만 main 도 198/200 이라 이 커밋의 회귀는 아니다).
+//	   추가 전용이라 **유실이 아니라 중복**이고, 피해는 doctor 집계가 부푸는 정도다.
+//	 · 잠금을 예산 안에 못 잡으면 무잠금 병합으로 떨어진다(fail-open). 큐가 깊고 세션이
+//	   몰리면 실제로 일어난다 — 수치는 outbox_lock.go 의 queueLockBudget 주석에 있다.
+//
+// ★ -race 는 이 축을 **원리적으로 못 본다.** 이유가 옛 주석과 다르다 — "동시 진입이
+// 없어서"가 아니라, 동시 진입이 **있는데도** 공유 상태가 Go 메모리가 아니라 파일이라서다.
+// 다섯 축을 재현하는 내내 DATA RACE 는 0건이었다. 이 축의 관문은 -race 가 아니라
+// **큐 내용에 대한 바이트 단정**이다(outbox_concurrency_test.go).
 type Client struct {
 	URL    string
 	Token  string
@@ -102,8 +125,11 @@ type Client struct {
 
 	// Session 은 멱등 키의 앞 절반이다. 없을 수 있다(세션 열기 전).
 	//
-	// ★ **공유 가변 상태다.** 읽는 자리는 KeyFor 하나뿐이지만, 쓰는 자리는 여럿이고
-	// 그중 mcpbackend.go 의 넷(Pick·Note·AddItem·Finish)은 **호출마다** 갈아 쓴다.
+	// ★ **공유 가변 상태다.** 실측(이 커밋 시점): 쓰는 자리 17(app.go 2 · cmds.go 6 ·
+	// hook.go 3 · mcpbackend.go 6), 읽는 자리 5(client.go 의 KeyFor 둘 · app.go 셋).
+	// 그중 mcpbackend.go 의 여섯(Pick 둘 · Note · AddItem · Finish · land)은 **호출마다**
+	// 갈아 쓴다. 옛 주석은 "읽는 자리는 KeyFor 하나뿐 · mcpbackend 의 넷"이라 적었는데
+	// 둘 다 낡았었다 — 세는 문장은 늘 낡으므로 고칠 때 함께 다시 세라.
 	// 쓰기와 읽기 사이에 잠금이 없으므로 겹치면 그 자리에서 깨진다 —
 	// 문자열은 (ptr,len) 둘이라 찢긴 값이 나올 수 있고, 그 값이 곧 멱등 키다.
 	//
@@ -127,10 +153,13 @@ func newClient(sd StateDir, get func(string) (string, bool), home string, log *s
 			timeout = d
 		}
 	}
-	ob := newOutbox(get, home)
+	// ★ 로거를 큐에 물린다. 큐 잠금을 못 잡아 무잠금으로 떨어지는 갈래가 있는데,
+	// 그것이 조용하면 "잠금을 넣었다"가 거짓 안심이 된다 — 무잠금 갈래는 오늘과 같은
+	// 동작이라 나빠지진 않지만, 얼마나 자주 일어나는지는 보여야 한다.
+	ob := newOutbox(get, home).withLogger(log)
 	var legacy []*Outbox
 	for _, d := range LegacyOutboxDirs(get, home, ob.Dir()) {
-		legacy = append(legacy, newOutboxAt(d))
+		legacy = append(legacy, newOutboxAt(d).withLogger(log))
 	}
 	return &Client{
 		Endpoint: ep, // 출처를 들고 있는다 — fd doctor·fd setup 이 '왜 저 주소인가'를 찍는다
