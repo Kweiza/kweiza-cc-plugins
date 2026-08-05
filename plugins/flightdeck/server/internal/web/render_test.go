@@ -224,14 +224,13 @@ func TestDashboardSaysWhatTheWindowCutOff(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	now := time.Now().UTC()
 
-	// 숨은 세션 — 개시 시각도 신호도 창(기본 2시간) 밖인 3시간 전으로 되돌린다.
+	// 숨은 세션 — 개시 시각을 창(기본 2시간) 밖인 3시간 전으로 되돌린다.
+	// ★ 신호는 안 심는다 — openSession 은 Beat 를 안 부르므로 이 세션은 애초에
+	// signal 행이 0건이다. opened_at 만으로 ListLive 의 창 판정이 완결된다.
 	hidden := f.openSession("cc-hidden", "숨은 세션")
 	hiddenAt := now.Add(-3 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
 	if _, err := f.st.DB().Exec(`UPDATE session SET opened_at = ? WHERE id = ?`, hiddenAt, hidden.ID); err != nil {
 		t.Fatalf("세션 개시 시각 되돌리기 실패: %v", err)
-	}
-	if _, err := f.st.DB().Exec(`UPDATE signal SET at = ? WHERE session_id = ?`, hiddenAt, hidden.ID); err != nil {
-		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
 	}
 	// 보이는 세션 하나 — 대조군.
 	f.openSession("cc-visible", "보이는 세션")

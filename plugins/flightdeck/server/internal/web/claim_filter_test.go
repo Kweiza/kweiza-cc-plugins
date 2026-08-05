@@ -71,7 +71,12 @@ func TestClaimedCardCarriesActivityBadge(t *testing.T) {
 	ctx := context.Background()
 
 	quiet := f.openSession("cc-quiet", "조용")
-	f.claimOne(quiet.ID, "it-quiet") // pick 은 mcp 신호를 남기지만 활동은 아니다
+	f.claimOne(quiet.ID, "it-quiet")
+	// mcp 뿐인 카드다 — activityKinds 가 mcp 를 빼므로(format.go) "mcp 뿐"이 이 화면
+	// 전 경로(서비스 → 보드 → 렌더)에서 "활동 없음"으로 나오는지를 여기서 잰다.
+	if err := f.svc.Beat(ctx, quiet.ID, model.SignalMCP, nil); err != nil {
+		t.Fatalf("신호 실패: %v", err)
+	}
 
 	busy := f.openSession("cc-busy", "바쁨")
 	f.claimOne(busy.ID, "it-busy")
@@ -117,13 +122,13 @@ func TestNowSectionKeepsClaimHoldersOutsideTheWindow(t *testing.T) {
 
 	stale := f.openSession("cc-stale", "오래 조용")
 	f.claimOne(stale.ID, "it-stuck")
-	// 개시 시각과 신호를 전부 창(기본 2시간) 밖으로 되돌린다.
+	// 개시 시각을 창(기본 2시간) 밖으로 되돌린다.
+	// ★ 신호는 안 심는다 — openSession + claimOne(pick) 둘 다 Beat 를 안 부르므로
+	// 이 세션은 애초에 signal 행이 0건이다. opened_at 만으로 ListLive 의 창 판정과
+	// ActivityOf 의 "활동 없음" 판정이 둘 다 완결된다.
 	old := time.Now().UTC().Add(-12 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
 	if _, err := f.st.DB().Exec(`UPDATE session SET opened_at = ? WHERE id = ?`, old, stale.ID); err != nil {
 		t.Fatalf("개시 시각 되돌리기 실패: %v", err)
-	}
-	if _, err := f.st.DB().Exec(`UPDATE signal SET at = ? WHERE session_id = ?`, old, stale.ID); err != nil {
-		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
 	}
 
 	_, html := f.get("")

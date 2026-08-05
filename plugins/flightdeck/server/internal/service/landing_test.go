@@ -24,8 +24,20 @@ import (
 func twoSessions(t *testing.T, s *Service) (a, b string) {
 	t.Helper()
 	dirA, dirB := tmpBase(t), tmpBase(t)
-	return openSession(t, s, "p", dirA, dirA, "cc-A", "트랙A").Session.ID,
-		openSession(t, s, "p", dirB, dirB, "cc-B", "트랙B").Session.ID
+	idA := openSession(t, s, "p", dirA, dirA, "cc-A", "트랙A").Session.ID
+	idB := openSession(t, s, "p", dirB, dirB, "cc-B", "트랙B").Session.ID
+
+	// ★ 신호를 **명시적으로** 남긴다. 이 파일의 여러 시험이 "점유자의 마지막 신호
+	// 나이"를 단정하는데, 그 값은 세션 열기가 찍던 mcp 비트에 얹혀 있었다.
+	// 열기는 도구 호출이 아니므로 더는 신호가 아니다 — 픽스처가 재려는 축을
+	// 픽스처가 직접 세운다. 신호를 안 세우고 단정을 nil 허용으로 낮추면
+	// "나이를 못 재면 회수 판정을 사람이 할 수 없다"는 그 줄들의 존재 이유가 사라진다.
+	for _, id := range []string{idA, idB} {
+		if err := s.Beat(ctx(), id, model.SignalTool, nil); err != nil {
+			t.Fatalf("픽스처 신호 실패: %v", err)
+		}
+	}
+	return idA, idB
 }
 
 // liveQueue 는 지금 줄에 서 있는 행 수다(창 무시).
@@ -715,7 +727,7 @@ func TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(세션 열기가 Beat 한다)
+	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(twoSessions 가 Beat 한다)
 	// "없음"이 나오면 그것은 거짓이다.
 	if n := countRows(t, st, `SELECT count(*) FROM signal WHERE session_id = ?`, a); n == 0 {
 		t.Fatalf("사전 조건이 깨졌다 — 이 세션에 신호가 하나도 없다")
