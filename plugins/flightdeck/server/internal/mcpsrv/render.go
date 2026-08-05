@@ -133,6 +133,32 @@ func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
 	return strings.Join(parts, " · ")
 }
 
+// activityKinds 는 "이 세션이 일하고 있나"에 답하는 신호다.
+//
+// ★ **mcp 와 push 는 일부러 뺐다.** mcp 는 서비스가 세션을 열 때와 상태를 바꿀 때마다
+// 찍으므로(service/session.go) 포함하면 아무것도 안 한 세션도 점등돼 판별력이 0이 된다 —
+// 실측: 카드 26장 중 16장이 신호가 mcp 하나뿐이고 그 시각이 opened_at 과 같았다.
+// push 는 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
+var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
+
+// activityOf 는 "이 세션이 일하고 있나"와 그 사유를 낸다. 순수 함수다.
+//
+// 화면 ①이 선점을 필터로 쓰는 이상 이 배지가 **"쥐고만 있고 안 하는 세션"**을 가리키는
+// 유일한 축이다. 불리언만 내면 사람이 무엇을 근거로 회수할지 못 정하므로 사유를 함께 낸다.
+// 이 판정은 죽음을 말하지 않는다 — 나이를 숫자로 낼 뿐이고 회수는 사람이 한다(설계 §4).
+func activityOf(sig map[model.SignalKind]time.Time, now time.Time) (bool, string) {
+	var newest time.Time
+	for _, k := range activityKinds {
+		if at, ok := sig[k]; ok && at.After(newest) {
+			newest = at
+		}
+	}
+	if newest.IsZero() {
+		return false, "○ 활동 없음"
+	}
+	return true, "● 활동 " + FormatAge(now.Sub(newest)) + " 전"
+}
+
 // formatPaths 는 경로를 몇 개까지만 보여준다.
 func formatPaths(paths []string, limit int) string {
 	if len(paths) == 0 {
@@ -207,37 +233,58 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if strings.TrimSpace(opt.Notice) != "" {
 		head = append(head, opt.Notice)
 	}
+	// ★★ 선점 필터. 이 화면이 답하는 질문은 "누가 살아 있나"가 아니라
+	// **"어느 작업이 잡혀 있나"** 다. 선점 없는 카드는 안 낸다 — 자기 카드도 예외가 없다.
+	//
+	// ★ 필터가 **여기**여야 하는 이유. toolBoard 는 `v.Sessions` 로 겹침(judge.OverlapsWithLive)과
+	// cc 표류(DriftedTwins)를 **직접 계산한다.** 그 슬라이스를 줄이면 선점 없이 편집하는
+	// 세션이 남의 겹침 판정에서도 사라지고, 카드가 여러 장으로 갈린 사실을 말해 주는
+	// 유일한 배너도 죽는다 — 조용한 오탐이 아니라 조용한 미탐이다. 그래서 렌더 안에서만 거른다.
+	claimed := make([]service.SessionCard, 0, len(v.Sessions))
+	for _, c := range v.Sessions {
+		if len(c.View.Claims) > 0 {
+			claimed = append(claimed, c)
+		}
+	}
+	folded := len(v.Sessions) - len(claimed)
+
 	head = append(head,
 		fmt.Sprintf("보드 · %s · %s · %s",
 			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
-		// ★ 대화 수가 먼저다. 카드 수는 괄호 안이다 — 사람이 이 줄로 하는 판단은
-		//   "지금 몇 개가 동시에 돌고 있나"이고, 그 답은 카드가 아니라 대화다.
-		//   실측(2026-08-05): 카드 88장이 대화 23개였다 — 3.8배로 부풀린 수였다.
-		fmt.Sprintf("대화 %d개(카드 %d장) (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
-			len(v.Conversations), len(v.Sessions), FormatAge(v.Window)),
+		fmt.Sprintf("잡혀 있는 작업 %d건 (선점 기준이다 — 세션의 생사가 아니다)",
+			len(claimed)+len(v.OutsideClaims)),
 	)
 	if b := splitBanner(v.Splits); b != "" {
 		head = append(head, b)
 	}
 
-	ranked := rankConversations(v, opt.Self, now)
+	ranked := rankCards(v, claimed, opt.Self, now)
 	blocks := make([]string, 0, len(ranked))
 	for _, c := range ranked {
-		blocks = append(blocks, conversationCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
+		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
 	var foot []string
-	// ★ Sessions 는 찼는데 Conversations 가 비면 소리 내어 말한다. 폴백하지 않는다 —
-	//   즉석 접기로 덮으면 배선이 빠진 사실이 숨겨지고, 그 침묵이 이 브랜치가 막으려는
-	//   사고 그 자체다. 서로 모순인 문서를 조용히 내보내는 것보다 모순을 말하는 것이 낫다.
-	if len(v.Conversations) == 0 && len(v.Sessions) > 0 {
-		foot = append(foot, fmt.Sprintf(
-			"⚠ 카드 %d장이 있는데 대화 묶음이 비었다 — 접기 파생이 안 돌았다"+
-				"(BoardView.Conversations 미배선). 카드 절은 비어 있지만 세션은 있다.",
-			len(v.Sessions)))
+	if len(claimed)+len(v.OutsideClaims) == 0 {
+		// ★ 0건의 뜻이 바뀌었다. 예전에는 "이 창에 다른 세션이 없다"였고 지금은
+		//   **"아무도 항목을 안 쥐고 있다"** 다. 후자는 정상 상태라, 그 사실을 말해야
+		//   사람이 없는 서버 장애를 찾아 헤매지 않는다.
+		foot = append(foot, "잡혀 있는 작업이 없다 — 아무 세션도 큐 항목을 쥐고 있지 않다. 서버 장애가 아니다.")
 	}
-	if len(v.Sessions) == 0 {
-		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
+	// ★ 창 밖인데 항목을 쥔 세션. **창을 이 화면에 걸지 않는다** — 걸면 회수가 가장
+	// 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
+	// 카드가 아니라 한 줄인 이유: git 파생을 안 읽었다(창 밖까지 파생하면 카드당
+	// git 호출 1~4회가 세션 수만큼 터진다). 그 사실을 줄머리가 말한다.
+	for _, ov := range v.OutsideClaims {
+		_, act := activityOf(ov.Signals, now)
+		foot = append(foot, fmt.Sprintf("창 밖 선점 · %s %s · %s · 파생 안 읽음",
+			ShortID(ov.Session.ID), strings.Join(ov.Claims, ", "), act))
+	}
+	// ★ 접은 것을 침묵하지 않는다. 그리고 **조율에서 빠진 게 아니라는 사실**을 함께 말한다 —
+	// 안 그러면 읽는 쪽이 "저 세션은 아무도 안 본다"로 잘못 읽는다.
+	if folded > 0 {
+		foot = append(foot, fmt.Sprintf(
+			"선점 없는 세션 %d건은 안 낸다 — 겹침 처방은 그 세션들도 그대로 본다.", folded))
 	}
 	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
 	// 이 줄이 없으면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
@@ -347,7 +394,10 @@ func joinAll(head, blocks, foot []string, tail string) string {
 //
 // ★ 앞선 판은 목록 위치 순으로 잘랐다. 그래서 열린 ask 가 붙은 카드가 조용한 카드보다
 // 먼저 접힐 수 있었고, 사건을 카드에 붙여도 예산이 그것을 먼저 버렸다.
-func rankCards(v service.BoardView, self string, now time.Time) []service.SessionCard {
+// ★ cards 를 따로 받는다 — v.Sessions 가 아니다. 화면은 선점을 든 카드만 내지만
+// selfPaths 는 **거르지 않은 v.Sessions** 에서 찾아야 한다: 내가 선점 없이 일하는 중이면
+// 내 카드는 화면에 없어도 내 경로는 있고, 그 경로가 남과 겹치는지가 정렬의 근거이기 때문이다.
+func rankCards(v service.BoardView, cards []service.SessionCard, self string, now time.Time) []service.SessionCard {
 	hasNote := map[string]bool{}
 	for _, j := range v.Asks {
 		hasNote[j.SessionID] = true
@@ -385,8 +435,8 @@ func rankCards(v service.BoardView, self string, now time.Time) []service.Sessio
 		card service.SessionCard
 		rank int
 	}
-	tmp := make([]withRank, len(v.Sessions))
-	for i, c := range v.Sessions {
+	tmp := make([]withRank, len(cards))
+	for i, c := range cards {
 		tmp[i] = withRank{card: c, rank: rank(c)}
 	}
 	sort.SliceStable(tmp, func(i, j int) bool {
@@ -424,120 +474,6 @@ func splitBanner(reports []judge.SplitReport) string {
 		"⚠ 대화 %d개의 카드가 상하위 경로로 갈렸다 — 그 카드를 연 클라이언트에서 "+
 			"워크트리 정규화(4de4b21)가 안 돈다. 정규화가 도는 판은 이 모양을 만들 수 없다.",
 		len(ccs))
-}
-
-// rankConversations 는 묶음을 정렬한다.
-//
-// ★ 사건(ask·blocked)이 붙은 형제가 **하나라도** 있으면 묶음 전체가 그 등급을 받는다.
-// 카드 단위로 보면 판단이 붙은 카드와 발자국이 있는 카드가 갈려 있을 때
-// 묶음이 맨 아래로 떨어진다 — 그것이 이 항목이 고치려는 갈림 그 자체다.
-func rankConversations(v service.BoardView, self string, now time.Time) []service.Conversation {
-	hasNote := map[string]bool{}
-	for _, j := range v.Asks {
-		hasNote[j.SessionID] = true
-	}
-	for _, j := range v.Blocked {
-		hasNote[j.SessionID] = true
-	}
-
-	var selfPaths []string
-	for _, c := range v.Conversations {
-		if c.IsSelf {
-			for _, k := range c.Cards {
-				selfPaths = append(selfPaths, k.View.Paths...)
-			}
-		}
-	}
-
-	rank := func(c service.Conversation) int {
-		noted := false
-		for _, k := range c.Cards {
-			if k.View.Session.ID == self {
-				return 0
-			}
-			if hasNote[k.View.Session.ID] {
-				noted = true
-			}
-		}
-		switch {
-		case c.IsSelf:
-			return 0
-		case noted:
-			return 1
-		}
-		if len(selfPaths) > 0 {
-			for _, k := range c.Cards {
-				if judge.PathsOverlap(selfPaths, k.View.Paths) {
-					return 2
-				}
-			}
-		}
-		return 3
-	}
-
-	out := append([]service.Conversation{}, v.Conversations...)
-	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := rank(out[i]), rank(out[j])
-		if ri != rj {
-			return ri < rj
-		}
-		return lastSignalOfConversation(out[i], now).After(lastSignalOfConversation(out[j], now))
-	})
-	return out
-}
-
-// lastSignalOfConversation 은 묶음 안 카드들의 마지막 신호 중 가장 최근이다.
-func lastSignalOfConversation(c service.Conversation, now time.Time) time.Time {
-	var last time.Time
-	for _, k := range c.Cards {
-		if t := lastSignal(k, now); t.After(last) {
-			last = t
-		}
-	}
-	return last
-}
-
-// conversationCard 는 묶음 하나를 그린다.
-//
-// 기본은 요약 한 줄 묶음이고, detail 일 때만 워크트리별로 전개한다.
-// 합집합 경로 **목록**은 어느 경우에도 안 낸다 — 대화가 만지는 자리가 실제보다
-// 넓어 보이고, 그러면 겹침 축을 읽는 사람이 없는 다툼을 본다.
-func conversationCard(c service.Conversation, now time.Time, pathLimit int, detail bool,
-	asks, blocked []model.Judgment) string {
-	if len(c.Cards) == 0 {
-		return ""
-	}
-	// 카드가 한 장이면 접을 것이 없다 — 기존 카드 모양 그대로 낸다.
-	if len(c.Cards) == 1 {
-		return boardCard(c.Cards[0], now, pathLimit, detail, asks, blocked)
-	}
-
-	lead := c.Cards[0]
-	var b strings.Builder
-	mark := " "
-	if c.IsSelf {
-		mark = "*"
-	}
-	fmt.Fprintf(&b, "%s%s… · 대화 1개(카드 %d장 · 워크트리 %d개) · %s\n",
-		mark, ShortID(lead.View.Session.ID), len(c.Cards), c.Worktrees, lead.View.Session.State)
-	fmt.Fprintf(&b, "   경로 %d개(워크트리 %d개에 걸쳐)", c.PathCount, c.Worktrees)
-	for _, k := range c.Cards {
-		for _, cl := range k.View.Claims {
-			fmt.Fprintf(&b, " | 선점 %s @ %s", cl, k.View.Session.Worktree)
-		}
-	}
-	b.WriteString("\n")
-	if detail {
-		for _, k := range c.Cards {
-			fmt.Fprintf(&b, "   ├ %s  경로 %d\n", k.View.Session.Worktree, len(k.View.Paths))
-		}
-	}
-	for _, k := range c.Cards {
-		for _, l := range noteLines(k.View.Session.ID, asks, blocked, now) {
-			b.WriteString(l + "\n")
-		}
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.
@@ -585,15 +521,19 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 		state += "(" + clip(v.Session.BlockedWhy, 80) + ")"
 	}
 
-	claims := "선점 없음"
-	if len(v.Claims) > 0 {
-		claims = "선점 " + strings.Join(v.Claims, ", ")
-	}
+	// ★ 선점이 이 카드의 **존재 이유**다(화면 ①은 선점을 든 카드만 낸다). 그래서
+	// 메타 줄이 아니라 머리줄에 온다. 항목 id 는 전부 낸다 — 이 화면의 필터가 곧
+	// 이 값이라, 말없이 자르면 화면이 자기 근거를 숨긴다.
+	claims := strings.Join(v.Claims, ", ")
+	_, act := activityOf(v.Signals, now)
 
+	// ★ 줄 수는 **둘로 유지한다.** 카드당 한 줄이 늘면 예산(1200토큰) 안에 드는 카드 수가
+	// 줄고, boardCardFloor 가 예산을 이기는 갈래로 밀려 기본 출력이 상한을 넘는다
+	// (실측: 3줄로 늘렸더니 24세션 기본 보드가 1208토큰이 됐다).
 	lines := []string{
-		fmt.Sprintf("%s%s %s · %s · %s · %s",
-			mark, ShortID(v.Session.ID), label, branch, state, formatPaths(v.Paths, pathLimit)),
-		fmt.Sprintf("   %s | %s", FormatSignals(v.Signals, now), claims),
+		fmt.Sprintf("%s%s %s · %s", mark, ShortID(v.Session.ID), claims, act),
+		fmt.Sprintf("   %s · %s · %s · %s · %s",
+			label, branch, state, formatPaths(v.Paths, pathLimit), FormatSignals(v.Signals, now)),
 	}
 	if !v.HasFootprint {
 		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
@@ -830,13 +770,55 @@ func firstLine(title, body string) string {
 func RenderPick(r service.PickResult, now time.Time) string {
 	var b strings.Builder
 
+	// 묶음 수를 **둘** 센다. 하나로 뭉개면 응답이 안 한 일을 셈에 넣는다.
+	//
+	//	n     = 이 응답이 다루는 묶음 크기(선두 + 구성원 전부). 요청·제안된 규모다.
+	//	heldN = 이 응답이 실제로 쥔 수(선두 + Claimed 인 구성원). **관측된 규모**다.
+	//	unclaimed = 구성원 중 안 집힌 것들의 id — 아래에서 이름으로 부른다.
+	//
+	// ★ 예전에는 겹침 범위 줄과 브랜치 줄이 둘 다 len(Members)+1 을 썼다. 그런데
+	// service.pickBundle 은 **집은 구성원의 경로만** 합쳐서 겹침을 판정한다. 3건 중
+	// 1건만 집힌 응답이 "묶음 3건의 경로를 전부 합쳐서 봤다"고 말하면, 겹침 0건을
+	// 본 세션은 못 집은 2건의 경로까지 안전하다고 결론짓는다 — 겹침 축은 정확히
+	// 그 결론을 막으려고 있는 축이다. 커버리지 과장은 침묵보다 나쁘다.
+	//
+	// Bundle 이 nil 이면 이 응답이 그 축을 안 읽은 것이므로 둘 다 1(단독 문구)로 둔다 —
+	// renderBundle 이 그 부재를 따로 말하고, 여기서 흉내 내지 않는다.
+	n, heldN := 1, 1
+	var unclaimed []string
+	if r.Bundle != nil {
+		n = len(r.Bundle.Members) + 1
+		for _, m := range r.Bundle.Members {
+			if m.Claimed {
+				heldN++
+			} else {
+				unclaimed = append(unclaimed, m.Item.ID)
+			}
+		}
+	}
 	switch r.Mode {
 	case service.PickRecommended:
-		b.WriteString("pick · 추천 1건 — **아직 선점하지 않았다**\n")
+		if n > 1 {
+			fmt.Fprintf(&b, "pick · 추천 묶음 %d건 — **아직 선점하지 않았다**\n", n)
+		} else {
+			b.WriteString("pick · 추천 1건 — **아직 선점하지 않았다**\n")
+		}
 	case service.PickClaimed:
-		b.WriteString("pick · 선점했다\n")
+		if n > 1 {
+			fmt.Fprintf(&b, "pick · 선점했다 — 묶음 %d건 중 %d건\n", n, heldN)
+		} else {
+			b.WriteString("pick · 선점했다\n")
+		}
 	case service.PickResumed:
-		b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
+		// ★ 재개 갈래도 묶음 수를 말한다. 예전에는 이 줄만 묶음을 통째로 빠뜨려서,
+		// 묶음 재개 응답의 머리줄이 단독 재개와 글자 하나 다르지 않았다 — 세션은
+		// 자기가 몇 건을 쥔 채 이 브랜치로 돌아왔는지를 머리줄에서 못 읽었다.
+		if n > 1 {
+			fmt.Fprintf(&b, "pick · 재개 — 선두는 이미 내 선점이다(선점 시각은 그대로 둔다). "+
+				"묶음 %d건 중 %d건을 쥐고 있다\n", n, heldN)
+		} else {
+			b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
+		}
 	default:
 		b.WriteString("pick · 적격 0건\n")
 	}
@@ -871,6 +853,59 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		}
 	}
 
+	// 묶음 절. renderBundle 이 세 갈래(부재·단독·구성원 목록)를 전부 말한다 —
+	// 이 위치는 항목 블록 뒤·브랜치 줄 앞이다.
+	b.WriteString(renderBundle(r.Bundle))
+	// 꼬리의 "겹침:" 줄이 **어떤 경로 집합**을 보고 나온 값인지 말한다. RenderTail 은
+	// 모든 도구가 쓰고 묶음을 모르므로 이 자리가 유일한 발화처다.
+	//
+	// ★ 규칙은 **모드마다 다르다.** 한 줄로 뭉치면 한쪽이 반드시 거짓이 된다 —
+	// 실제로 한 번 그랬다(아래 참고). 겹침을 누가 어떻게 계산하는지가 갈리기 때문이다:
+	//
+	//	추천(PickRecommended)  judge.EligibleBundle 이 bundlePaths(선두 ∪ **구성원 전부**)로
+	//	                       낸 Lead.Overlaps 를 그대로 싣는다. 아직 아무것도 안 집었지만
+	//	                       **판정 범위는 묶음 전체**다 — 그게 이 추천을 통째로 집었을 때
+	//	                       부딪히는지를 미리 답하는 값이기 때문이다.
+	//	선점·재개             service.pickBundle 이 **집은 것만** allPaths 에 합쳐 다시 낸다.
+	//	                       (pickExplicit 은 구성원 0건이라 선두뿐 — 같은 규칙의 밑변이다.)
+	//
+	// 예전엔 둘 다 heldN(=쥔 수)으로 갈랐다. 추천은 아무것도 안 쥐므로 heldN 이 늘 1 이라,
+	// 구성원 있는 추천이 "항목 X 의 경로만 봤다 · 구성원 N건은 판정에 안 들어갔다"를 찍었다 —
+	// **둘 다 거짓이다.** 관측한 것을 안 했다고 말하는 것이라, 이 고침 물결이 닫으려던
+	// 결함과 같은 부류다(방향만 반대다: 과장이 아니라 축소).
+	//
+	// 그래서 게이트는 heldN 이 아니라 **r.Mode** 다. 브랜치 줄은 그대로 heldN 을 쓴다 —
+	// 그 줄의 질문은 "지금 무엇을 쥐었나"라서 heldN 이 옳다. 두 줄이 다른 수를 쓰는 것이
+	// 정상이고, 그 이유가 이 주석이다.
+	//
+	// Bundle 이 nil 일 때는 아무 말도 안 한다 — 그 응답은 묶음 축 자체를 안 읽었고
+	// (구버전 서버·옛 캐시) 범위를 단정할 근거가 없다. 그 부재는 renderBundle 이 말한다.
+	if r.Bundle != nil && r.Item != nil {
+		// scopeN = 이 응답의 겹침이 **실제로 합친** 항목 수.
+		scopeN := heldN
+		if r.Mode == service.PickRecommended {
+			scopeN = n // 추천은 묶음 전체를 합쳐서 본다(아직 안 집었어도)
+		}
+		if scopeN > 1 {
+			fmt.Fprintf(&b, "겹침 판정 범위: 묶음 %d건의 경로를 전부 합쳐서 봤다 — "+
+				"남과 부딪히는지는 묶음 단위 질문이다.\n", scopeN)
+		} else {
+			fmt.Fprintf(&b, "겹침 판정 범위: 항목 %s 의 경로만 봤다 — "+
+				"이 응답이 합친 경로는 그것뿐이다.\n", r.Item.ID)
+		}
+		// 판정 밖으로 빠진 구성원은 **이름으로** 부른다. 수만 말하면 어느 것의 경로가
+		// 밖인지 못 가리고, 세션은 겹침 0건을 묶음 전체에 적용해 버린다.
+		//
+		// ★ 추천 모드에는 이 줄이 없다 — 안 집은 구성원의 경로도 **판정에 들어갔기
+		// 때문이다.** 여기서 습관적으로 unclaimed 를 찍으면 그것이 정확히 위에서 말한
+		// 그 거짓말이 된다.
+		if r.Mode != service.PickRecommended && len(unclaimed) > 0 {
+			fmt.Fprintf(&b, "  안 집은 구성원 %d건(%s)의 경로는 이 판정에 **안 들어갔다** — "+
+				"그 항목들에 대해서는 겹침을 관측하지 않았다.\n",
+				len(unclaimed), strings.Join(unclaimed, ", "))
+		}
+	}
+
 	if r.Claim != nil {
 		fmt.Fprintf(&b, "선점 시각: %s (%s 전)\n",
 			r.Claim.At.UTC().Format("2006-01-02 15:04 UTC"), FormatAge(now.Sub(r.Claim.At)))
@@ -878,6 +913,25 @@ func RenderPick(r service.PickResult, now time.Time) string {
 
 	if r.Branch != "" {
 		fmt.Fprintf(&b, "\n브랜치: %s\n", r.Branch)
+		if r.Bundle != nil && len(r.Bundle.Members) > 0 {
+			// 브랜치는 선두 하나뿐이다 — 구성원은 같은 워크트리에 얹혀 갈 뿐 각자
+			// 브랜치를 갖지 않는다. 이 사실을 안 말하면 "브랜치가 구성원마다
+			// 따로 있나"로 읽힐 여지가 남는다.
+			//
+			// ★ 여기서 세는 것은 **쥔 수(heldN)** 다. 요청 크기를 쓰면 "3건을 이
+			// 워크트리에서 함께 한다"가 나오는데, 그중 2건은 남이 쥐고 있어 이 세션이
+			// 손댈 수 없다 — 그대로 믿은 세션은 남의 항목을 자기 브랜치에서 고친다.
+			switch {
+			case heldN > 1:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. %d건을 이 워크트리에서 함께 한다.\n", heldN)
+			case r.Mode == service.PickRecommended:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. 구성원 %d건은 아직 선점 전이라 "+
+					"지금 확정된 것은 선두 1건뿐이다.\n", len(r.Bundle.Members))
+			default:
+				fmt.Fprintf(&b, "  묶음 선두의 id 다. 구성원 %d건은 이 응답이 못 집었다 — "+
+					"이 워크트리에서 함께 하는 것은 선두 1건뿐이다.\n", len(r.Bundle.Members))
+			}
+		}
 		if len(r.Setup) > 0 {
 			b.WriteString("워크트리 준비:\n")
 			for _, c := range r.Setup {
@@ -914,6 +968,145 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
 	}
 	fmt.Fprintf(&b, "\n%s", FormatFreshness(r.Derived))
+	return b.String()
+}
+
+// RenderBundleUnaccounted 는 **요청했는데 응답이 설명하지 않은 id** 를 낸다. 순수 함수다.
+//
+// ★ 이 문장이 없으면 무엇이 깨지나. item_ids 를 모르는 구서버는 그 필드를 조용히
+// 버리고 경로의 선두 하나만 집은 뒤 200 을 낸다 — api_version 이 양쪽 다 "1" 이라
+// SkewBanner 도 안 뜬다. 그러면 `pick(item_ids:[a,b,c])` 가 정상 응답처럼 보이는데
+// b·c 는 아무도 안 쥔 상태다. 선점이 존재하는 이유가 바로 그 상황을 막는 것이므로,
+// 이건 화면 문제가 아니라 **선점 계약이 깨진 것**이고 반드시 이름을 부른다.
+//
+// 원인을 지어내지 않는다 — 구서버일 수도, 프록시가 필드를 떨어뜨렸을 수도, 응답이
+// 중간에서 갈렸을 수도 있다. 확실한 것 하나만 말한다: 이 id 들을 이 세션이 쥐었다는
+// 근거가 응답 어디에도 없다.
+func RenderBundleUnaccounted(missing []string) string {
+	if len(missing) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "★ 요청한 항목 %d건을 이 응답이 설명하지 않는다: %s\n",
+		len(missing), strings.Join(missing, ", "))
+	b.WriteString("  이 세션이 그것들을 쥐었다는 근거가 응답 어디에도 없다 — " +
+		"선점됐다고 가정하고 손대면 남과 같은 파일을 동시에 고치게 된다.\n")
+	b.WriteString("  서버가 item_ids 를 모르는 판일 수 있다(구서버 + 신 클라이언트). " +
+		"`fd status` 로 서버 판을 보고, 필요하면 하나씩 item_id 로 다시 집어라.\n")
+	return b.String()
+}
+
+// 묶음 구성원 표식 — 셋이고, 서로 다르다.
+//
+// ★ internal/service/pick.go 의 BundleMember.Claimed 주석이 세 상태를 못박는다:
+// 집었다 · 시도했지만 실패했다 · 아직 안 봤다(추천, 시도 자체가 없다). 표식이 둘뿐이면
+// 뒤의 둘이 하나로 뭉개지고, 그러면 "탈락"과 "아직 안 건드림"이 화면에서 같아진다.
+const (
+	markClaimed  = "+" // Claimed=true — 집었다
+	markRejected = "✗" // Claimed=false, Rejection!=nil — 집으려 했는데 실패했다
+	markProposed = "○" // Claimed=false, Rejection=nil — 아직 집기를 시도하지 않았다(추천 경로)
+)
+
+// renderBundle 은 묶음 절이다. 순수 함수다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다.** 셋을 다 말한다:
+// 축을 안 읽었다 · 묶을 게 없어 단독이다 · 이런 것들과 묶였다.
+// 침묵하면 "묶을 게 없다"와 "이 축을 안 봤다"가 같은 화면이 되고,
+// 그러면 판정이 통째로 실패한 날에도 pick 은 평소와 똑같아 보인다.
+// renderPathCheck 이 같은 이유로 이상이 없어도 한 줄을 찍는다.
+func renderBundle(bi *service.BundleInfo) string {
+	if bi == nil {
+		// ★ 이 문장은 이제 **정말로 축을 안 읽은 응답에만** 붙는다. 서비스의 세 갈래
+		// (추천 · item_id 선점/재개 · 묶음)가 전부 non-nil 을 내므로, nil 이 남는 길은
+		// 둘뿐이다: 이 필드를 모르는 구서버, 또는 필드가 생기기 전에 굳은 오프라인 캐시.
+		// 그래서 원인 둘을 그대로 대는 것이 옳다 — 한때 이 문장이 현행 서버의 신선한
+		// 응답에도 붙어서 두 원인이 다 거짓이었고, 그 구멍은 pickExplicit 이 축을
+		// 채우면서 닫혔다(그 함수의 주석 참고).
+		//
+		// 겹침 범위는 여기서 **단정하지 않는다.** 축을 안 읽은 응답이라 이 응답이 어떤
+		// 경로 집합으로 겹침을 봤는지도 알 수 없다 — 모르는 것을 "선두 경로만 봤다"로
+		// 메우면 부재를 값으로 접는 같은 실패를 한 칸 옆에서 반복하는 것이 된다.
+		return "\n묶음: 이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n" +
+			"  그래서 아래 겹침이 어떤 경로 집합을 보고 나온 값인지도 이 응답만으로는 알 수 없다.\n"
+	}
+	var b strings.Builder
+	if len(bi.Members) == 0 {
+		// ★ "함께 갈 항목이 없다"고 단정하지 않는다. 구성원 0건이 나오는 갈래가 둘인데
+		// 두 갈래가 말하는 사실이 다르기 때문이다:
+		//   추천 경로  — 이웃을 **찾아봤고** 직접 이어진 것이 없었다.
+		//   item_id 경로 — 이웃을 **애초에 안 찾았다**(방사형 판정을 안 돌린다).
+		// 두 번째에 대고 "함께 갈 항목이 없다"고 하면 관측한 적 없는 사실을 단정하게
+		// 되고, 그걸 읽은 세션은 이 항목에 형제가 없다고 결론짓는다. 어느 쪽인지는
+		// Scope 가 말한다 — 그래서 여기서 Scope 를 **반드시** 찍는다(예전에는 구성원이
+		// 있을 때만 찍어서, 정작 0건일 때 그 사실이 침묵으로 사라졌다).
+		b.WriteString("\n묶음: 구성원이 없다 — 단독이다.\n")
+		if bi.Reason != "" {
+			fmt.Fprintf(&b, "  %s\n", bi.Reason)
+		}
+		if bi.Scope != "" {
+			fmt.Fprintf(&b, "  묶음 범위: %s\n", bi.Scope)
+		}
+		return b.String()
+	}
+	fmt.Fprintf(&b, "\n묶음 구성원 %d건 (선두는 위의 항목이다):\n", len(bi.Members))
+	for _, m := range bi.Members {
+		// ★ 세 상태를 세 표식으로 낸다(internal/service/pick.go 의
+		// BundleMember.Claimed 주석이 적은 그 쌍 그대로). Claimed 필드 하나만 보고
+		// 가르면(!Claimed) "집었다"의 반대를 전부 "실패"로 접는데, 그 반대에는
+		// **아직 시도조차 안 한 추천 후보**가 섞여 있다. 그걸 실패와 같은 표식으로
+		// 찍으면 4건 추천에서 셋이 ✗ 로 보이고, 그걸 본 에이전트가 "셋이 탈락했다"로
+		// 읽어 묶음을 버리고 혼자 다시 집는다 — 판정이 방금 지어 준 묶음을
+		// 화면의 표식 하나가 무너뜨리는 것이다.
+		mark := markProposed // Claimed=false, Rejection=nil → 아직 집기를 시도하지 않았다(추천 경로)
+		switch {
+		case m.Claimed:
+			mark = markClaimed
+		case m.Rejection != nil:
+			mark = markRejected
+		}
+		fmt.Fprintf(&b, "\n  %s %s — %s [%s]\n", mark, m.Item.ID, m.Item.Title, m.Item.State)
+		if m.Rejection != nil {
+			fmt.Fprintf(&b, "    못 집었다: %-16s %s\n",
+				m.Rejection.Reason, clip(m.Rejection.Detail, 160))
+			b.WriteString("    이 항목 없이 나머지를 진행한다. " +
+				"필요하면 그 세션에게 note(kind:\"ask\") 로 알려라\n")
+			continue
+		}
+		// ★ 축이 비어도 근거가 비는 것은 아니다. pickBundle(item_ids 로 지정한
+		// 묶음)이 만드는 Link 는 Axes 가 없다 — 판정 없이 세션이 그대로 지정했기
+		// 때문이다(pick.go:427) — 그런데 Detail 은 "세션이 함께 지정했다"로 채워
+		// 온다. len(Axes)>0 으로만 게이트를 걸면 그 경로(**item_ids 로 집는
+		// 전체 경로**)의 구성원은 영원히 "왜 묶였나" 줄을 못 낸다.
+		if len(m.Link.Axes) > 0 {
+			axes := make([]string, 0, len(m.Link.Axes))
+			for _, a := range m.Link.Axes {
+				axes = append(axes, string(a))
+			}
+			fmt.Fprintf(&b, "    묶은 근거: [%s] %s\n", strings.Join(axes, " + "), m.Link.Detail)
+		} else if strings.TrimSpace(m.Link.Detail) != "" {
+			fmt.Fprintf(&b, "    묶은 근거: %s\n", m.Link.Detail)
+		}
+		if len(m.Item.Paths) > 0 {
+			fmt.Fprintf(&b, "    경로: %s\n", strings.Join(m.Item.Paths, ", "))
+		}
+		b.WriteString(indent(strings.TrimRight(renderPathCheck(m.PathCheck, m.Item.ID), "\n"), "    ") + "\n")
+		if len(m.Notes) > 0 {
+			fmt.Fprintf(&b, "    연결된 판단 %d건 (전문):\n", len(m.Notes))
+			for _, j := range m.Notes {
+				fmt.Fprintf(&b, "      [%s] %s · %s\n", j.Kind,
+					j.At.UTC().Format("2006-01-02 15:04"), clip(firstLine(j.Title, j.Body), 100))
+				if strings.TrimSpace(j.Body) != "" {
+					b.WriteString(indent(clip(j.Body, 4000), "        ") + "\n")
+				}
+			}
+		}
+	}
+	if bi.Reason != "" {
+		fmt.Fprintf(&b, "\n왜 이 묶음인가: %s\n", bi.Reason)
+	}
+	if bi.Scope != "" {
+		fmt.Fprintf(&b, "묶음 범위: %s\n", bi.Scope)
+	}
 	return b.String()
 }
 
@@ -1039,10 +1232,44 @@ func RenderFinish(r service.FinishResult) string {
 	} else {
 		b.WriteString("후속 0건 — 이번에 나온 후속이 정말 없다면 그대로 두고, 있다면 지금 add 로 넣어라.\n")
 	}
+	// ★ 건너뛴 후속은 **반드시 낸다.** 안 내면 세션이 "후속 N건 등록"만 보고 떠나는데,
+	// 그 id 의 항목은 남이 만든 다른 것이다 — 흡수가 조용한 거짓이 된다.
+	if len(r.SkippedFollowups) > 0 {
+		fmt.Fprintf(&b, "후속 %d건은 **안 넣었다** — 같은 id 가 이미 있다: %s\n",
+			len(r.SkippedFollowups), strings.Join(r.SkippedFollowups, ", "))
+		b.WriteString("  그 id 의 항목은 남이 만든 것일 수 있다. 내용이 다르면 다른 id 로 add 해라.\n")
+	}
 	if len(r.Released) > 0 {
 		fmt.Fprintf(&b, "자원 반납: %s\n", strings.Join(r.Released, ", "))
 	}
-	b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
+	// ★ 아직 쥔 항목을 **이름으로 부른다.** finish 는 항목 하나만 닫는데(항목마다
+	// 자기 판단이 필요하다) pick 은 묶음을 집는다 — 그 비대칭 때문에 묶음 3건을 집은
+	// 세션은 finish 한 번 뒤에도 2건을 쥔 채로 남는다. 지금까지 그 사실을 말하는
+	// 표면이 하나도 없었고, schema.sql 에는 만료가 없고 세션이 닫혀도 선점이 안
+	// 풀리므로 그 2건은 **사람이 강제로 풀 때까지 아무도 못 집는다.**
+	// 여기서 침묵하면 그 상태가 만들어지는 것을 아무도 모른 채 지나간다.
+	switch {
+	case r.StillHeld == nil:
+		// nil 은 "0건"이 아니다 — 조회가 실패했거나 서버 판이 이 축을 안 낸다.
+		b.WriteString("이 세션이 아직 쥔 다른 항목이 있는지는 이 응답이 못 읽었다 — " +
+			"`fd status` 로 확인해라(있는데 안 닫으면 아무도 그것을 못 집는다).\n")
+	case len(*r.StillHeld) == 0:
+		b.WriteString("이 세션이 쥔 항목은 이제 0건이다 — 남은 선점이 없다.\n")
+	default:
+		fmt.Fprintf(&b, "★ 이 세션이 **아직 쥐고 있는** 항목 %d건: %s\n",
+			len(*r.StillHeld), strings.Join(*r.StillHeld, ", "))
+		b.WriteString("  finish 는 항목 하나만 닫는다 — 항목마다 자기 판단이 필요하기 때문이다. " +
+			"위 항목들은 여전히 이 세션의 선점이라 **남이 못 집는다.** " +
+			"각각 finish 로 닫거나, 안 할 거면 그 판단을 남기고 닫아라.\n")
+	}
+	// 문장이 조건부인 이유: 중복 id 후속은 트랜잭션 밖으로 빠졌다(finish.go 의 ② 주석).
+	// 넷이 한 트랜잭션이라고 그대로 적으면 그 응답에서만 거짓이 된다.
+	if len(r.SkippedFollowups) > 0 {
+		b.WriteString("판단 저장·종료·자원 반납은 한 트랜잭션이었다 — " +
+			"위 후속만 빠졌고, 그것이 판단을 지킨 값이다.\n")
+	} else {
+		b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
+	}
 	return b.String()
 }
 

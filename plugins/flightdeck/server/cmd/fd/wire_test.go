@@ -284,3 +284,139 @@ func TestMoveSuggestionSurvivesFromFilesystemToScreen(t *testing.T) {
 		t.Errorf("지목에 프로젝트 id 가 아니라 경로가 실렸다:\n%s", out)
 	}
 }
+
+// 묶음이 서버에서 만들어져 JSON 을 건너 렌더까지 그대로 오는지 본다.
+// 손으로 구성한 PickResult 로는 이 이음매를 못 본다.
+//
+// ★ 형제 관계는 하네스의 **실물 store** 로 만든다. fd CLI 의 finish 에는
+// 후속 인자가 없어서(cmds.go 에 --followup 이 0건이다) 그 경로로는 형제를 못 만든다.
+// 이 시험이 지키려는 것은 **읽기 경로**(서버 → JSON → 클라이언트 → 렌더)이므로
+// 쓰기를 store 로 놓는 것이 범위를 정확히 맞춘다.
+func TestPickBundleSurvivesTheWire(t *testing.T) {
+	h := newHarness(t)
+
+	if code, out := h.run("", "open", "--label", "묶음왕복"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, id := range []string{"w1-sib", "w2-sib"} {
+		if code, out := h.run("", "add", "--id", id, "--title", id+" 제목",
+			"--body", id+" 본문", "--path", "services/"+id+".go"); code != 0 {
+			t.Fatalf("항목 등록 실패(%s, %d):\n%s", id, code, out)
+		}
+	}
+	// 형제로 만든다 — finish 가 만드는 모양 그대로(한 handoff 판단이 둘을 가리킨다).
+	if _, err := h.st.AddJudgment(context.Background(), model.Judgment{
+		Project: h.project, Kind: model.JudgmentHandoff,
+		Title: "쪼갰다", Body: "이건 따로 빼자",
+		Links: []model.JudgmentLink{
+			{TargetKind: "item", TargetID: "w1-sib"},
+			{TargetKind: "item", TargetID: "w2-sib"},
+		},
+	}); err != nil {
+		t.Fatalf("형제 준비 실패: %v", err)
+	}
+
+	// ① 추천이 묶음으로 온다.
+	code, out := h.run("", "next")
+	if code != 0 {
+		t.Fatalf("next 실패(%d):\n%s", code, out)
+	}
+	mustContain(t, "묶음 추천", out, "묶음 구성원", "묶은 근거", "sibling", "w1-sib", "w2-sib")
+
+	// ② 묶음을 집는다. 브랜치는 선두 하나다.
+	code, claimed := h.run("", "pick", "w1-sib", "w2-sib")
+	if code != 0 {
+		t.Fatalf("묶음 선점 실패(%d):\n%s", code, claimed)
+	}
+	if !strings.Contains(claimed, "브랜치: w1-sib") {
+		t.Fatalf("선두 브랜치가 안 나온다:\n%s", claimed)
+	}
+	if n := strings.Count(claimed, "브랜치: "); n != 1 {
+		t.Fatalf("브랜치 줄이 %d개다 — 묶음의 브랜치는 선두 하나뿐이다:\n%s", n, claimed)
+	}
+	if !strings.Contains(claimed, "w2-sib") {
+		t.Fatalf("구성원이 응답에 없다:\n%s", claimed)
+	}
+
+	// ③ store 레벨에서 **둘 다 실제로 선점됐는지** 확인한다. 렌더 문자열만 보면
+	// "브랜치: w1-sib 만 찍히고 w2-sib 는 선점 안 됐는데도 문구만 맞다"를 못 잡는다 —
+	// 이 하자가 바로 이 태스크가 닫는 것이다.
+	//
+	// ★ 존재만 보지 않는다 — **누가 쥐었는지**(SessionID)까지 이 세션의 것과 맞춰 본다.
+	// 존재만 보면 "w2-sib 를 남이 먼저 쥐고 있어서 이 세션은 못 받았는데 응답 문구에는
+	// (탈락 사유로) 이름이 남는" 경우를 놓친다 — 그 경우도 "존재하고 안 풀렸다"는 참이다.
+	sessions, err := h.st.ListSessions(context.Background(), h.project)
+	if err != nil {
+		t.Fatalf("세션 조회 실패: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("대조 전제가 깨졌다 — 세션이 %d개다(1개여야 이 세션이 누구인지 모호하지 않다)", len(sessions))
+	}
+	me := sessions[0].ID
+	for _, id := range []string{"w1-sib", "w2-sib"} {
+		cl, err := h.st.GetClaim(context.Background(), h.project, id)
+		if err != nil {
+			t.Fatalf("%s 가 store 에서 선점되지 않았다: %v", id, err)
+		}
+		if cl.ReleasedAt != nil {
+			t.Fatalf("%s 의 선점이 이미 풀려 있다: %+v", id, cl)
+		}
+		if cl.SessionID != me {
+			t.Fatalf("%s 가 이 세션(%s) 의 선점이 아니다: %+v", id, me, cl)
+		}
+	}
+}
+
+// 리뷰 라운드 1 finding 1(CRITICAL) — 공백뿐인 위치 인자를 길이만으로 걸렀더니
+// `fd pick "   "` 가 종료코드 0·"브랜치: …"·워크트리 명령을 냈다. 이 태스크가
+// 닫으려던 "성공을 보고하지만 아무것도 안 집었다"가 인자 축 하나로 되살아난
+// 것이다. 옛 코드(TakeFirstPositional 시절)의 `strings.TrimSpace(itemID) == ""`
+// 판정을 다시 세운다 — **종료코드와 문구**를 단정한다(출력 텍스트만 보면
+// "브랜치: wa" 처럼 무해해 보이는 문구도 통과시킨다).
+func TestPickRejectsBlankPositionalIDs(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open", "--label", "공백id"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, arg := range []string{"", "   "} {
+		code, out := h.run("", "pick", arg)
+		if code != 2 {
+			t.Fatalf("공백 id(%q)인데 종료코드가 %d 다(2 를 기대):\n%s", arg, code, out)
+		}
+		mustContain(t, "공백 id 거절", out, "집을 항목 id 를 줘라")
+		if strings.Contains(out, "브랜치:") {
+			t.Fatalf("공백 id(%q)인데 브랜치 줄이 나왔다 — 추천 경로로 빠졌다는 뜻이다:\n%s", arg, out)
+		}
+	}
+}
+
+// 리뷰 라운드 1 finding 2 — id 사이에 플래그가 끼면 flag.Parse 는 그 뒤를 전부
+// 위치 인자로 남긴다. 오타(`--bogus`)도 예외가 아니라서, 뒤쪽 병합이 "-" 판정
+// 없이 그대로 다 삼키면 오타가 항목 id 로 둔갑해 서버에 실려 가고, 서버가
+// 그것만 "못 찾음"으로 거절해도 묶음의 나머지는 성공해 **종료코드가 0** 이 된다.
+// 같은 오타가 맨 앞에 오면(`fd pick ua --bogus`) flag 오류로 정상 거절되므로,
+// 자리만 옮기면 통과하는 비대칭을 여기서 막는다.
+func TestPickRejectsFlagLikeTailArgument(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open", "--label", "꼬리플래그"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, id := range []string{"ta-tail", "tb-tail"} {
+		if code, out := h.run("", "add", "--id", id, "--title", id+" 제목", "--body", id+" 본문"); code != 0 {
+			t.Fatalf("항목 등록 실패(%s, %d):\n%s", id, code, out)
+		}
+	}
+
+	code, out := h.run("", "pick", "ta-tail", "--cc-session", "cc-session-uuid-1", "tb-tail", "--bogus")
+	if code != 2 {
+		t.Fatalf("플래그처럼 보이는 꼬리 인자(--bogus)인데 종료코드가 %d 다(2 를 기대):\n%s", code, out)
+	}
+	mustContain(t, "꼬리 플래그 거절", out, "--bogus")
+
+	// 거절이 반쪽 선점을 허용하면 안 된다 — store 에 아무것도 안 남아야 한다.
+	for _, id := range []string{"ta-tail", "tb-tail"} {
+		if _, err := h.st.GetClaim(context.Background(), h.project, id); err == nil {
+			t.Fatalf("거절됐는데 %s 가 선점됐다", id)
+		}
+	}
+}

@@ -38,9 +38,12 @@ var migration002 string
 //go:embed migrations/003_landing_queue.sql
 var migration003 string
 
+//go:embed migrations/004_pick_bundle.sql
+var migrationPickBundle string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -64,6 +67,7 @@ type Migration struct {
 var migrations = []Migration{
 	{To: 2, Name: "멱등 기록을 DB 로", SQL: migration002},
 	{To: 3, Name: "랜딩 순서 큐", SQL: migration003},
+	{To: 4, Name: "pick_eval 이 묶음을 담는다", SQL: migrationPickBundle},
 }
 
 // timeLayout 은 저장용 시각 표기다.
@@ -237,6 +241,42 @@ func CheckPragmas(got map[string]string) error {
 	// 정렬 없이 map 순회라 순서가 흔들리지만, 사유 전문이 목적이라 순서는 무의미하다.
 	return fmt.Errorf("DSN pragma 가 실제로 걸리지 않았다: %s "+
 		"— 드라이버가 모르는 pragma 이름을 조용히 무시하므로 DSN 문법을 확인하라", strings.Join(bad, ", "))
+}
+
+// readMigrationState 는 DB 의 스키마 상태를 읽는다. **순수 함수가 아니다** — 질의 셋을 던진다.
+// 판정은 여기서 안 한다. 읽은 값을 PlanMigration(순수 함수)에 그대로 넘기는 것이 이 함수의 전부다.
+//
+// ★ Open 경로(마이그레이션 적용)와 검증 경로(ProbeMigration 읽기 전용)가 **같은 탐지를 쓴다**.
+// 두 벌로 두면 한쪽만 고쳐져 실제 열기와 검증이 갈린다 — 낡은 탐지로 재기동을 승인하면
+// 새 바이너리·새 DB 스키마가 실행 도중 맞지 않는 조용한 사고가 난다.
+func readMigrationState(ctx context.Context, db *sql.DB) (hasTable bool, dbVersion, objects int, err error) {
+	// schema_version 테이블 존재 확인
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, "schema_version").Scan(&n); err != nil {
+		return false, 0, 0, fmt.Errorf("schema_version 테이블 존재 확인 실패: %w", err)
+	}
+	hasTable = n > 0
+
+	// DB 버전 읽기
+	if hasTable {
+		var v sql.NullInt64
+		if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
+			return false, 0, 0, fmt.Errorf("schema_version 읽기 실패: %w", err)
+		}
+		if v.Valid {
+			dbVersion = int(v.Int64)
+		}
+	}
+
+	// 객체 수 계산
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view')`,
+	).Scan(&objects); err != nil {
+		return false, 0, 0, fmt.Errorf("sqlite_master 읽기 실패: %w", err)
+	}
+
+	return hasTable, dbVersion, objects, nil
 }
 
 func (s *Store) verifyPragmas(ctx context.Context) error {
@@ -521,25 +561,9 @@ func (s *Store) applyUpgrades(ctx context.Context, from int) error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	hasTable, err := s.hasTable(ctx, "schema_version")
+	hasTable, dbVersion, objects, err := readMigrationState(ctx, s.db)
 	if err != nil {
 		return err
-	}
-	var dbVersion int
-	if hasTable {
-		var v sql.NullInt64
-		if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
-			return fmt.Errorf("schema_version 읽기 실패: %w", err)
-		}
-		if v.Valid {
-			dbVersion = int(v.Int64)
-		}
-	}
-	var objects int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view')`,
-	).Scan(&objects); err != nil {
-		return fmt.Errorf("sqlite_master 읽기 실패: %w", err)
 	}
 
 	plan := PlanMigration(hasTable, dbVersion, objects, SchemaVersion)
@@ -629,16 +653,6 @@ func (s *Store) rollbackable(err error, backupPath string) error {
 	s.log.Error("마이그레이션 실패 — 되돌리는 절차를 함께 낸다",
 		"path", s.path, "reason", hint, "error", err.Error())
 	return fmt.Errorf("%w — %s", err, hint)
-}
-
-func (s *Store) hasTable(ctx context.Context, name string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("테이블 존재 확인 실패(name=%q): %w", name, err)
-	}
-	return n > 0, nil
 }
 
 // BackupSuffix 는 백업 파일 이름의 꼬리를 만든다. 사전순 = 시간순이다.

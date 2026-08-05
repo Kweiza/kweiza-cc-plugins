@@ -743,9 +743,18 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 				"하나의 신호로 판정해 두 번 틀렸다. 지금 할 수 있는 것: note(kind=ask) 로 점유자에게 묻거나, "+
 				"웹 대시보드의 '선점 회수' 버튼(사유 필수)을 쓴다."), tailOpts{}), true)
 	}
+	// ★ 둘을 동시에 주면 합치거나 한쪽을 우선하지 않고 거절한다. 어느 쪽을
+	//   골라도 "무엇을 집었는가"가 호출자의 의도가 아니라 서버의 임의 선택이
+	//   되고, 그것이 이 도구가 지키려는 사실 그 자체를 흐린다.
+	if strings.TrimSpace(a.ItemID) != "" && len(a.ItemIDs) > 0 {
+		return textResult(s.withTail(ctx, RenderRefusal("pick",
+			"item_id 와 item_ids 를 함께 줬다",
+			"둘 중 하나만 써라 — 하나면 item_id, 묶음이면 item_ids 에 선두부터 순서대로."), tailOpts{}), true)
+	}
 
 	res, err := s.be.Pick(ctx, service.PickInput{
-		Project: s.id.ProjectID, SessionID: sessionID, ItemID: strings.TrimSpace(a.ItemID),
+		Project: s.id.ProjectID, SessionID: sessionID,
+		ItemID: strings.TrimSpace(a.ItemID), ItemIDs: a.ItemIDs,
 	})
 	// 추천(item_id 없음)은 읽기라 캐시 처방이 온다. 값을 버리지 않고 배너와 함께 낸다 —
 	// 다만 **선점은 아무것도 안 됐다**는 사실을 그 배너가 말한다(선점의 처방은 거절이다).
@@ -760,6 +769,20 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 		return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
 	}
 	tail := s.tail(ctx, tailOpts{overlaps: res.Overlaps, observed: true})
+	// ★ **보낸 것과 돌아온 것을 대조한다.** 이 자리가 요청(a.ItemIDs)과 응답(res)을
+	// 둘 다 보는 유일한 지점이다 — 백엔드가 in-process 서비스든 원격 서버를 치는
+	// cmd/fd 프록시든 똑같이 지난다.
+	//
+	// 안 하면: item_ids 를 모르는 구서버가 선두만 집고 200 을 내는데(양쪽 api_version
+	// 이 "1" 이라 SkewBanner 는 안 뜬다) 이 도구는 그걸 성공으로 렌더한다. 세션은
+	// 안 쥔 항목을 쥐었다고 믿고 남의 작업 위에서 일한다 — 선점이 막으려는 사고 그 자체다.
+	//
+	// isError=true 로 낸다. 본문은 그대로 실어 보낸다 — 선두는 실제로 집혔을 수 있고
+	// 그 브랜치·워크트리 명령을 지우면 성공한 절반까지 함께 버리는 셈이 된다.
+	if missing := judge.UnaccountedIDs(a.ItemIDs, res.AccountedIDs()); len(missing) > 0 {
+		return textResult(notice+RenderPick(res, s.now())+"\n\n"+
+			RenderBundleUnaccounted(missing)+"\n"+tail, true)
+	}
 	return textResult(notice+RenderPick(res, s.now())+"\n\n"+tail, false)
 }
 

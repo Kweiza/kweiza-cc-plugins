@@ -46,73 +46,6 @@ type SessionCard struct {
 	IsSelf      bool              `json:"is_self"`
 }
 
-// Conversation 은 같은 대화(cc)의 카드 묶음이다.
-//
-// ★ 원장을 안 건드린다 — **표시 계층만**이다. 카드는 여전히 3중키로만 같고, 이 묶음은
-// 보드가 "지금 몇 개가 동시에 돌고 있나"에 참말을 하기 위한 파생일 뿐이다.
-type Conversation struct {
-	CCSessionID string        `json:"cc_session_id,omitempty"`
-	Cards       []SessionCard `json:"cards"`
-	IsSelf      bool          `json:"is_self"`
-	// PathCount 는 합집합 **건수**다. 목록은 만들지 않는다 — 합쳐서 내면
-	// "이 대화가 만지는 자리"가 실제보다 넓어 보이고, 그러면 겹침 축을 읽는
-	// 사람이 없는 다툼을 본다.
-	PathCount int `json:"path_count"`
-	Worktrees int `json:"worktrees"`
-}
-
-// FoldConversations 는 카드를 대화 단위로 접는다. 순수 함수다.
-//
-// ★ 접는 기준은 judge.SameConversation(cc 동등)이다 — 겹침·처방이 이미 쓰는 그 판정의
-// 세 번째 소비자가 되는 것이지 새 판정이 아니다. 빈 cc 는 접지 않는다(카드 1장짜리
-// 묶음이 된다) — 그 규칙이 judge.LiveSession.CCSessionID 주석에 못박혀 있다.
-//
-// ★ 입력을 변형하지 않는다. BoardView.Sessions 는 그대로 나가야 한다 —
-// dashboard.json 계약이 깨지면 그것으로 실측하는 스크립트가 전부 깨진다.
-func FoldConversations(cards []SessionCard) []Conversation {
-	out := make([]Conversation, 0, len(cards))
-	idx := map[string]int{} // cc → out 의 자리. 빈 cc 는 안 담는다
-
-	for _, c := range cards {
-		cc := c.View.Session.CCSessionID
-		if i, ok := idx[cc]; ok {
-			out[i].Cards = append(out[i].Cards, c)
-			out[i].IsSelf = out[i].IsSelf || c.IsSelf
-			continue
-		}
-		out = append(out, Conversation{CCSessionID: cc, Cards: []SessionCard{c}, IsSelf: c.IsSelf})
-		// ★ 색인에 담을지를 judge 가 정한다. SameConversation(cc, cc) 는 cc 가 비면
-		//   false 라서, 빈 cc 는 색인에 안 들어가고 따라서 **다음 빈 cc 카드와 절대
-		//   안 묶인다.** "빈 값끼리는 같지 않다"는 판정을 여기서 다시 쓰지 않고
-		//   그 함수 하나에 남겨 두기 위한 형태다 — cc != "" 로 적으면 같은 판정이
-		//   두 자리에 살고, 한쪽만 고치는 순간 조용히 어긋난다.
-		if judge.SameConversation(cc, cc) {
-			idx[cc] = len(out) - 1
-		}
-	}
-
-	for i := range out {
-		seenWT := map[string]bool{}
-		seenPath := map[string]bool{}
-		for j, c := range out[i].Cards {
-			seenWT[c.View.Session.Worktree] = true
-			for _, p := range c.View.Paths {
-				seenPath[p] = true
-			}
-			// ★ Paths 를 **깊게 복사**한다. SessionCard 를 값으로 담으면 슬라이스는
-			//   원본과 같은 배열을 공유하고, 그러면 소비자가 표시용으로 한 번
-			//   정렬하는 것만으로 BoardView.Sessions 가 조용히 오염된다(실측 재현됨).
-			//   "Sessions 를 안 바꾼다"가 이 과제의 최우선 제약인데, 얕은 복사는 그
-			//   방벽을 이 층위에서 이미 뚫어 놓는다. 규칙으로 막지 않고 구조로 막는다 —
-			//   이 저장소가 "검사가 아니라 부재로 강제한다"를 쓰는 것과 같은 판정이다.
-			out[i].Cards[j].View.Paths = append([]string(nil), c.View.Paths...)
-		}
-		out[i].Worktrees = len(seenWT)
-		out[i].PathCount = len(seenPath)
-	}
-	return out
-}
-
 // splitCardsOf 는 카드에서 갈림 탐지 입력을 뽑는다.
 //
 // judge 가 SessionCard 를 직접 받지 않는 이유: 그러면 판정 계층이 표시 계층의
@@ -144,9 +77,6 @@ type BoardView struct {
 	At       time.Time     `json:"at"`
 	Window   time.Duration `json:"window"`
 	Sessions []SessionCard `json:"sessions"`
-	// Conversations 는 Sessions 를 대화 단위로 접은 것이다. Sessions 는 그대로 둔다 —
-	// 소비자가 셋(MCP 보드·dashboard.json·웹)이고 각자 속도로 옮긴다.
-	Conversations []Conversation `json:"conversations,omitempty"`
 	// Splits 는 워크트리 정규화가 안 돈 흔적이다. **비어 있는 것이 정상**이고,
 	// 하나라도 있으면 그 카드를 연 클라이언트가 4de4b21 이전 판이라는 뜻이다.
 	//
@@ -169,6 +99,18 @@ type BoardView struct {
 	OutOfWindow int `json:"out_of_window,omitempty"`
 	// OldestOutside 는 창 밖 세션 중 가장 오래된 마지막 신호 시각이다.
 	OldestOutside time.Time `json:"oldest_outside,omitempty"`
+	// OutsideClaims 는 **창 밖인데 선점을 든 세션**이다. 화면 ①이 선점을 필터로 쓰면서
+	// 창은 안 걸기 때문에 필요하다 — 창을 함께 걸면 회수가 가장 필요한 카드(오래 조용한데
+	// 항목을 쥔 세션)가 먼저 사라진다. 실측: 마지막 활동 709분 전인 세션이 항목 하나를
+	// 12시간째 쥐고 있었다.
+	//
+	// ★ **아무것도 안 거른다.** Sessions·OutOfWindow 는 그대로다. 이미 도는 순회
+	// (OldestOutside)에 조건 하나를 얹은 것뿐이라 새 질의도 새 git 호출도 없다.
+	//
+	// ★ 카드가 아니라 **원시 뷰**다. git 파생(브랜치·ahead·미커밋)이 안 붙어 있다 —
+	// 파생은 카드당 git 호출 1~4회고 캐시가 없어서, 창 밖까지 파생하면 세션 수만큼 터진다.
+	// 표시 계층이 이 사실을 말해야 한다: 이 줄은 "무엇이 잠겼나"만 답하고 파생 축은 모른다.
+	OutsideClaims []model.SessionView `json:"outside_claims,omitempty"`
 	Derived
 }
 
@@ -197,7 +139,6 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	}
 
 	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
-	view.Conversations = FoldConversations(cards)
 	// ★ 침묵하지 않는다. 루트를 못 읽었거나 어느 트리에도 못 붙인 카드가 있으면
 	//   그 사실을 파생 기록에 남긴다 — 안 남기면 "갈림 없음"과 "판정을 못 했다"가
 	//   화면에서 같아진다.
@@ -243,6 +184,14 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 		for _, v := range all {
 			if shown[v.Session.ID] {
 				continue
+			}
+			// ★ 창 밖인데 항목을 쥔 세션. 화면 ①이 선점을 필터로 쓰면서 창은 안 걸기
+			// 때문에 이 줄이 필요하다 — 이 조건이 없으면 **회수가 가장 필요한 카드**가
+			// 정확히 창 때문에 화면에서 사라진다. 여기서 모으는 이유는 이 순회가 이미
+			// 돌고 있어서다: 새 질의도 새 git 파생도 안 는다(all 은 DB 전용이고
+			// store.ListLive 가 Claims 를 이미 채워 준다).
+			if len(v.Claims) > 0 {
+				view.OutsideClaims = append(view.OutsideClaims, v)
 			}
 			// 숨은 세션의 "마지막으로 언제 봤나" — 그 세션 신호들의 최댓값이다.
 			var lastSeen time.Time

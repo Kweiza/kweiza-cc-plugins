@@ -878,12 +878,23 @@ func (t *Tx) RecordPickEval(e model.PickEval) error {
 		return fmt.Errorf("탈락 사유 직렬화 실패(project=%q session=%q): %w",
 			clip(e.Project, 64), clip(e.SessionID, 64), err)
 	}
+	// 빈 목록은 NULL 로 간다. 빈 배열로 쓰면 "단독이었다"와
+	// "묶음을 냈는데 구성원이 0이었다"가 저장에서 같아진다 — 후자는 상태가 아니다.
+	var with any
+	if len(e.PickedWith) > 0 {
+		s, err := marshalStrings(e.PickedWith)
+		if err != nil {
+			return fmt.Errorf("묶음 구성원 직렬화 실패(project=%q): %w", clip(e.Project, 64), err)
+		}
+		with = s
+	}
 	if e.At.IsZero() {
 		e.At = nowStamp()
 	}
 	if _, err := t.tx.ExecContext(t.ctx,
-		`INSERT INTO pick_eval(project, session_id, at, picked, rejected) VALUES (?, ?, ?, ?, ?)`,
-		e.Project, e.SessionID, fmtTime(e.At), nullStr(e.Picked), string(buf)); err != nil {
+		`INSERT INTO pick_eval(project, session_id, at, picked, picked_with, rejected)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		e.Project, e.SessionID, fmtTime(e.At), nullStr(e.Picked), with, string(buf)); err != nil {
 		return fmt.Errorf("추천 판정 기록 실패(project=%q session=%q): %w",
 			clip(e.Project, 64), clip(e.SessionID, 64), err)
 	}
