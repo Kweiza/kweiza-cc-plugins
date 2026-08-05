@@ -456,3 +456,66 @@ func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
 			second.RowID, got, wantSecond)
 	}
 }
+
+// TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed 은 이 축이 **지금 무엇을 재는지**를
+// 그대로 잠근다. 고발이 아니라 관측이다.
+//
+// `lane-turn` 이 지정하는 행동은 `land()` 인데 **land 경로는 ackPrescriptions 를 한 번도
+// 안 지난다.** 반대로 처방과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 을 확인 처리한다 —
+// ackPrescriptions 가 키를 안 가리고 그 세션에 **열린 것을 전부** 닫기 때문이다.
+// 즉 이 키에 대해 확인은 **정확히 반대 신호**를 잰다: 처방대로 랜딩한 세션은 미확인으로
+// 남고, 처방을 무시하고 판단만 남긴 세션이 확인으로 잡힌다.
+//
+// ★ 여기 잠긴 것은 **계약이 아니라 현재 사실**이다(godoc 에 사실을 적고 그 사실을 잠그는
+// 이 레포의 방식). 통로를 뚫는 수리 — land 가 자기가 응답한 키만 골라 ack — 를 하면 이
+// 시험이 **먼저** 빨개진다. 그때 고칠 것은 이 시험이 아니라 여기 적힌 사실이고, 그 자리를
+// 놓치지 말라고 이 시험이 있다. 통로 뚫기는 선언 경로(service/landing.go) 밖이라
+// 후속 항목으로 올렸다.
+//
+// ★ AckReach(board.go)는 이것과 **다른 축**이다 — 키를 안 보고 세션 단위로 센다.
+// 그래서 "lane-turn 확인율"이라는 수치는 코드 어디에도 없다. 설계 §10 이 인용하는
+// "overlap 0/31" 은 사람이 따로 잰 값이다. 이 구분을 안 적으면 다음 사람이 §10 의
+// 수치를 키별 확인율로 읽는다.
+func TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed(t *testing.T) {
+	svc, st := newSvc(t)
+	a, b := twoSessions(t, svc)
+
+	// a 가 레인을 쥐고 b 가 뒤에 선다. a 가 놓으면 b 의 차례다.
+	landOrFail(t, svc, a, "turn")
+	mine := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+
+	want := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, mine.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != want {
+		t.Fatalf("차례 처방이 안 떴다(기대 %q): %v — 이 시험의 전제가 깨졌다", want, got)
+	}
+
+	// ① 처방이 시킨 그대로 한다 — land() 를 부른다.
+	landOrFail(t, svc, b, "turn")
+
+	acks, err := st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 0 {
+		t.Fatalf("land 경로가 ack 을 남겼다(%d건) — **통로가 뚫렸다는 뜻이다.**\n"+
+			"그렇다면 고칠 것은 이 시험이 아니라 이 시험의 주석과 DESIGN §10 의 서술이다: %+v",
+			len(acks), acks)
+	}
+
+	// ② 처방과 아무 상관 없는 판단 한 줄을 남긴다.
+	if _, err := svc.Note(ctx(), NoteInput{
+		Project: "p", SessionID: b, Kind: model.JudgmentDecision,
+		Title: "레인과 무관한 판단", Body: "랜딩과 아무 상관 없는 내용이다",
+	}); err != nil {
+		t.Fatalf("note 실패: %v", err)
+	}
+	acks, err = st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 1 || !strings.Contains(acks[0].Payload, want) {
+		t.Fatalf("상관없는 note 가 %q 를 확인 처리하지 않았다: %+v\n"+
+			"이 단정이 깨졌다면 ackPrescriptions 가 키를 가리기 시작한 것이다 — 그것이 수리다", want, acks)
+	}
+}

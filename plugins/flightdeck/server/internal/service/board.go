@@ -65,6 +65,16 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 
 // AckReach 는 처방 확인율이 지금 무엇을 재고 있는지다.
 // Emitted 와 Reachable 이 크게 다르면 그 차이가 곧 카드 갈림이다.
+//
+// ★ **세 값 다 세션 단위다 — 키를 안 본다.** `prescribe` 이벤트가 있는 세션 수와
+// `prescribe_ack` 이벤트가 있는 세션 수를 셀 뿐이라, **키별 확인율은 여기서 안 나온다.**
+// 설계 §10 이 인용하는 "overlap 0/31" 같은 수치는 사람이 따로 잰 값이고 이 구조체가 낸
+// 것이 아니다. 그 구분을 놓치면 §10 의 수치를 이 필드로 재현하려다 다른 값을 얻는다.
+//
+// ★ 분자에는 축의 뒤집힘이 하나 섞여 있다: ack 을 남기는 경로는 판단을 쓰는 쪽(note·finish)
+// 뿐이고 `land` 는 그 통로를 안 지난다(service/prescribe.go 의 ackPrescriptions 주석).
+// 그래서 행동이 `land()` 인 처방을 **정확히 따른** 세션은, 판단을 따로 안 남기면
+// 여기서 미확인으로 센다.
 type AckReach struct {
 	Emitted   int `json:"emitted"`
 	Reachable int `json:"reachable"`

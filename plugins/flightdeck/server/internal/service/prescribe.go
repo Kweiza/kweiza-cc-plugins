@@ -229,6 +229,19 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 //
 // ★ **실패해도 판단 저장을 되돌리지 않는다.** 판단이 재생성 불가한 자산이고 ack 은 계측이다.
 // 다만 삼키지 않는다 — WARN 으로 남긴다.
+//
+// ★ **이 통로를 지나는 것은 판단을 남기는 경로뿐이다(note·finish). `land` 는 안 지난다.**
+// 그래서 행동이 `land()` 인 처방(`lane-turn`)에 대해 확인은 **정확히 반대 신호**를 잰다 —
+// 처방대로 랜딩한 세션은 미확인으로 남고, 처방을 무시하고 상관없는 판단만 남긴 세션이
+// 확인으로 잡힌다. 위 "note 한 번이 전부를 닫는다"가 그 뒤집힘을 완성한다: 키를 안 가리므로
+// 레인과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 까지 닫는다.
+//
+// 이것은 **계약이 아니라 현재 사실**이고 `TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed`
+// 가 그대로 잠갔다 — 통로를 뚫으면(land 가 자기가 응답한 키만 골라 ack) 그 시험이 먼저
+// 빨개진다. 그때 고칠 것은 시험이 아니라 여기 적힌 사실이다.
+//
+// ★ 이 축과 `AckReach`(board.go)를 섞지 마라. 저쪽은 키를 안 보고 **세션 단위**로 센다.
+// 키별 확인율을 내는 코드는 없다 — 설계 §10 의 "overlap 0/31" 은 사람이 따로 잰 값이다.
 func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID string) {
 	sess, err := s.st.GetSession(ctx, sessionID)
 	if err != nil {
