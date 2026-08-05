@@ -188,6 +188,35 @@ func TestPrescribe(t *testing.T) {
 			},
 			wantKeys: nil,
 		},
+		{
+			// 발자국도 선점도 없는 세션이다 — 나머지 넷이 전부 안 도는 자리라
+			// lane-turn 축만 남는다.
+			name: "레인 차례가 오면 lane-turn 이 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 7, LastJudgment: pt0,
+			},
+			wantKeys: []string{"lane-turn:7"},
+		},
+		{
+			name: "같은 줄 행에는 다시 안 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 7, LastJudgment: pt0,
+				Emitted: map[string]time.Time{"lane-turn:7": pt0.Add(-time.Minute)},
+			},
+			wantKeys: nil,
+		},
+		{
+			// ★ **억제 키에 줄 행 번호를 넣은 이유가 이 케이스다.** 차례를 받고 랜딩에
+			//   실패한 세션은 굶주림 정책상 맨 뒤로 가서 새 줄 행을 받는다. 접미 없이
+			//   `lane-turn` 하나만 쓰면 suppressed 가 그 키를 영구히 누르므로
+			//   그 세션에게 두 번째 차례가 영영 안 뜨고, 그 뒤 줄 전원이 그만큼 선다.
+			name: "새 줄 행에는 다시 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 9, LastJudgment: pt0,
+				Emitted: map[string]time.Time{"lane-turn:7": pt0.Add(-time.Minute)},
+			},
+			wantKeys: []string{"lane-turn:9"},
+		},
 	}
 
 	for _, c := range cases {
@@ -250,5 +279,63 @@ func TestFoldPrescriptions(t *testing.T) {
 	shown, folded = FoldPrescriptions(mk(10))
 	if len(shown) != PrescribeMax || folded != 10-PrescribeMax {
 		t.Fatalf("상한을 안 지켰다: shown=%d folded=%d", len(shown), folded)
+	}
+}
+
+// ★ **접힘 시험** — 상한을 넘겨 놓고 lane-turn 이 살아남는지 본다.
+//
+// 순서만 단정하는 표 케이스로는 이 축이 원리적으로 안 보인다. 표는 전부 상한 아래에서
+// 돌아 lane-turn 이 목록 어디에 있든 초록이 나기 때문이다. 그런데 lane-turn 에게 접힘은
+// **영구 소실**이다: 접힌 처방도 호출자가 전부 발화 기록하고(PrescribeMax 주석),
+// suppressed 는 silent 외 모든 키를 무조건 누른다. 한 번 접히면 그 줄 행의 차례 통지는
+// 다시 안 뜨고, 그 세션은 레인을 안 쥔 채 남아 **뒤에 선 전원의 랜딩이 선다.**
+// 그리고 그 실패는 화면에 안 뜬다 — 원장에는 "정상적으로 접혔다"로만 남는다.
+//
+// overlap 을 상한만큼 까는 것이 억지 상황이 아니다: 발화 55건 중 31건이 overlap 이고
+// 세션 7개에 몰렸다(PrescribeMax 주석의 실측). 한 턴 최대 발화는 6건이었다.
+func TestLaneTurnSurvivesFolding(t *testing.T) {
+	others := []LiveSession{
+		{ID: "01SESSIONA", Paths: []string{"cmd/fd/hook.go"}},
+		{ID: "01SESSIONB", Paths: []string{"cmd/fd/hook.go"}},
+		{ID: "01SESSIONC", Paths: []string{"cmd/fd/hook.go"}},
+	}
+	in := PrescribeInput{
+		Now: pt0, SessionID: "me",
+		Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"internal/judge"}}},
+		TurnPaths:    []string{"cmd/fd/hook.go"},
+		Others:       others,
+		LaneTurnRow:  7,
+		LastJudgment: pt0, NewPaths: 1,
+	}
+
+	all := Prescribe(in)
+	// 순서 자체도 여기서 잠근다: lane-turn → overlap → outside.
+	want := []string{"lane-turn:7", "overlap:01SESSIONA", "overlap:01SESSIONB", "overlap:01SESSIONC", "outside:cmd/fd/hook.go"}
+	got := keys(all)
+	if len(got) != len(want) {
+		t.Fatalf("처방 구성이 다르다: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("순서가 다르다(%d번째): got %v, want %v", i, got, want)
+		}
+	}
+
+	shown, folded := FoldPrescriptions(all)
+	if folded == 0 {
+		t.Fatalf("접히지 않았다 — 이 시험이 겨냥한 상황 자체가 안 만들어졌다(처방 %d건, 상한 %d)", len(all), PrescribeMax)
+	}
+	found := false
+	for _, p := range shown {
+		if p.Key == "lane-turn:7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지는 영구히 사라지고 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
+			len(others), keys(shown), folded)
+	}
+	if shown[0].Key != "lane-turn:7" {
+		t.Fatalf("lane-turn 이 맨 앞이 아니다 — overlap 이 하나만 더 늘어도 접힌다: %v", keys(shown))
 	}
 }
