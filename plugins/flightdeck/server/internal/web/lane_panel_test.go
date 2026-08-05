@@ -73,8 +73,24 @@ func newLaneFixture(t *testing.T) *laneFixture {
 		t.Fatalf("점유자 신호 실패: %v", err)
 	}
 
-	// 최종 좌표: 점유자 대기·획득 = 10분 · 점유자 신호 = 4분 · 대기자 대기·신호 = 7분
-	clk.advance(4 * time.Minute)
+	// ★ 대기자의 신호도 픽스처가 세운다. 예전에는 세션 열기가 찍던 mcp 비트가
+	//   이 자리를 대신했는데, 열기는 도구 호출이 아니므로 더는 안 찍는다.
+	//
+	//   시각을 대기 경과(7분)와 **일부러 벌린다.** 같은 값이면 패널이 대기 경과를
+	//   신호 칸에 그대로 찍어도 시험이 초록이다 — 바로 위에서 점유자 행에 대해
+	//   막은 것과 같은 결함이 대기자 행에만 남는다.
+	clk.advance(2 * time.Minute)
+	if err := f.svc.Beat(ctx, waiter, model.SignalTool, nil); err != nil {
+		t.Fatalf("대기자 신호 실패: %v", err)
+	}
+
+	// 최종 좌표: 점유자 대기·획득 = 10분 · 점유자 신호 = 4분 · 대기자 대기 = 7분 · 대기자 신호 = 2분
+	//
+	// ★ 신호 둘은 **픽스처가 직접 찍은 값**이다(전에는 세션 열기의 mcp 비트가
+	//   대기자 쪽을 대신했다). 넷이 전부 다른 값인 것이 이 픽스처의 계약이다.
+	//   대기 경과는 여전히 실시계라 화면에서 안 맞는다 —
+	//   후속 `fd-lane-timestamps-ignore-injected-clock`.
+	clk.advance(2 * time.Minute)
 	return &laneFixture{fixture: f, clk: clk, holder: holder, waiter: waiter}
 }
 
@@ -114,7 +130,7 @@ func TestLanePanelDrawsEveryRowWithItsAxes(t *testing.T) {
 	// 서비스 시계로 찍히므로 지금도 참이다 — 대기 경과를 신호 칸에 찍는 오류는 이것이 잡는다.
 	lane := laneSectionOf(t, html)
 	mustContain(t, lane, "4분 전", "점유자의 마지막 신호 나이(4분)가 없다 — 대기 경과를 그 칸에 찍은 것이다")
-	mustContain(t, lane, "7분 전", "대기자의 대기 경과(7분)가 없다")
+	mustContain(t, lane, "2분 전", "대기자의 마지막 신호 나이(2분)가 없다 — 대기 경과(7분)가 아니다. 그 둘이 같은 값이면 이 단정은 아무것도 안 지킨다")
 	if strings.Contains(lane, "10분 전") {
 		t.Fatal("레인 절이 10분 전을 찍는다 — 위 결함이 고쳐졌다는 뜻이다. " +
 			"이 갈래를 지우고 분 단위 단정 넷을 되살려라(fd-lane-timestamps-ignore-injected-clock)")

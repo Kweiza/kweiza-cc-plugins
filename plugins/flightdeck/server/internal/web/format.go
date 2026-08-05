@@ -132,11 +132,16 @@ func SignalAges(now time.Time, sig map[model.SignalKind]time.Time) []SignalAge {
 //
 // ★ **mcp 와 push 는 일부러 뺐다.**
 //
-//	mcp  — 서비스가 세션을 열 때와 상태를 바꿀 때마다 찍는다(service/session.go 의
-//	       t.Beat(..., SignalMCP, now)). 포함하면 아무것도 안 한 세션도 점등돼
-//	       배지의 판별력이 0이 된다. 실측: 카드 26장 중 16장이 신호가 mcp 하나뿐이고
-//	       그 시각이 opened_at 과 같았다.
+//	mcp  — 도구 호출이면 무엇이든 찍는다. mcpsrv 의 callTool 이 이름을 안 가리고
+//	       dispatch **전에** 찍으므로 읽기 전용 board 하나로도 점등되고,
+//	       service.Note 도 찍는데 그 문은 REST 로 열려 있어 PreCompact 훅의
+//	       **자동 초안**과 CLI fd note 가 들어온다. 사람도 에이전트도 아무 일을
+//	       안 한 시점에 켜지는 신호라 배지의 판별력이 0이 된다.
 //	push — 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
+//
+// ★ 옛 근거는 "세션 열기와 상태 전이가 mcp 를 찍는다"였다(실측: 카드 26장 중 16장이
+// mcp 하나뿐이었다). 그 두 자리는 지웠다 — 열기는 도구 호출이 아니기 때문이다.
+// 근거가 바뀌었을 뿐 결론은 그대로다.
 //
 // 이 목록을 늘리기 전에 그 신호가 **사람이나 에이전트의 작업**을 뜻하는지 먼저 물어라.
 var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
