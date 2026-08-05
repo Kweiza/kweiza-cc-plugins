@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -105,6 +106,11 @@ func (s *server) handleAddItem(w http.ResponseWriter, r *http.Request) {
 type claimRequest struct {
 	Project   string `json:"project"`
 	SessionID string `json:"session_id"`
+	// ItemIDs 는 묶음 선점이다. **선두를 포함한 순서대로**이고, 비면 경로 id 단독 선점이다.
+	//
+	// ★ 라우트를 안 늘린 이유: 새 라우트는 "어느 것을 써야 하나"를 새 개념으로 만든다(설계 §1②).
+	// 경로에 선두가 남아 있으므로 멱등 키·오프라인 거절·이벤트 라벨이 그대로 산다.
+	ItemIDs []string `json:"item_ids"`
 }
 
 // handleClaimItem 은 지정한 항목을 선점하거나 **맥락을 다시 낸다**(재개 경로).
@@ -117,9 +123,25 @@ func (s *server) handleClaimItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	infoFrom(r.Context()).setSession(req.SessionID)
-	res, err := s.svc.Pick(r.Context(), service.PickInput{
-		Project: req.Project, SessionID: req.SessionID, ItemID: r.PathValue("id"),
-	})
+
+	// 경로의 항목과 item_ids 의 선두가 어긋나면 거절한다. 합치거나 한쪽을 우선하면
+	// "무엇을 집었는가"가 모호해지고, 선두 id 가 곧 브랜치 이름이 된다 — pick 응답이
+	// 나르는 것 중 가장 중요한 사실이라 짐작으로 메우지 않는다. 아직 s.svc.Pick 을
+	// 안 불렀으니 쓰기는 하나도 안 열렸다.
+	pathID := r.PathValue("id")
+	if len(req.ItemIDs) > 0 && req.ItemIDs[0] != pathID {
+		s.fail(w, r, &service.RefusedError{What: "claim",
+			Reason: fmt.Sprintf("경로의 항목(%s)과 item_ids 의 선두(%s)가 다르다",
+				clip(pathID, 64), clip(req.ItemIDs[0], 64)),
+			Guidance: "선두가 브랜치 이름이 된다 — 경로와 item_ids[0] 을 같게 맞춰라."})
+		return
+	}
+
+	in := service.PickInput{Project: req.Project, SessionID: req.SessionID, ItemID: pathID}
+	if len(req.ItemIDs) > 0 {
+		in = service.PickInput{Project: req.Project, SessionID: req.SessionID, ItemIDs: req.ItemIDs}
+	}
+	res, err := s.svc.Pick(r.Context(), in)
 	if err != nil {
 		s.fail(w, r, err)
 		return
