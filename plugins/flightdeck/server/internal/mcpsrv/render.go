@@ -711,6 +711,12 @@ func boardDetailFoot(v service.BoardView) []string {
 			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
+	if r := v.AckReach; r != nil && r.Emitted > 0 {
+		out = append(out, fmt.Sprintf(
+			"확인율 — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
+				"(두 수가 크게 다르면 그 차이가 카드 갈림이다)",
+			r.Emitted, r.Reachable, r.Acked))
+	}
 	return out
 }
 

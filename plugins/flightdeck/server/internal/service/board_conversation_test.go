@@ -273,3 +273,67 @@ func TestBoardNotesUnattributedCards(t *testing.T) {
 		t.Fatalf("트리에 못 붙인 카드가 있는데 split-detect 축이 없다\nFailures: %+v", view.Failures)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ack 도달성(§10) — Task 5. store.AckReach 자체는 internal/store/prescribe_reach_test.go
+// 가 잠근다. 여기서는 **운영 진입점(Board)** 을 그대로 타는 배선만 잠근다 —
+// TestBoardFillsConversations·TestBoardFillsSplits 와 같은 이유다: 순수 조회 함수만
+// 시험하면 Board() 안의 배선 한 줄을 지워도 스위트가 초록이다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ★ 운영 진입점을 그대로 탄다. store.AckReach 를 직접 부르는 시험만 있으면
+//
+//	Board() 안의 `view.AckReach = &AckReach{...}` 한 줄을 지워도(조회는 여전히 돌지만
+//	결과를 버려도) 이 패키지의 스위트가 초록이다 — 실측 확인됨.
+func TestBoardWiresAckReach(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	sess := openSession(t, s, "p", repo, repo, "cc-1", "")
+
+	st.LogEvent(ctx(), "prescribe", "p", sess.Session.ID, map[string]any{"key": "k"})
+	if _, err := st.AddJudgment(ctx(), model.Judgment{
+		Project: "p", SessionID: sess.Session.ID, Kind: model.JudgmentDecision,
+		Title: "t", Body: "b",
+	}); err != nil {
+		t.Fatalf("AddJudgment: %v", err)
+	}
+	st.LogEvent(ctx(), "prescribe_ack", "p", sess.Session.ID, map[string]any{"keys": []string{"k"}})
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if view.AckReach == nil {
+		t.Fatal("Board 가 AckReach 를 배선하지 않았다 — view.AckReach 가 nil 이다")
+	}
+	if view.AckReach.Emitted != 1 || view.AckReach.Reachable != 1 || view.AckReach.Acked != 1 {
+		t.Errorf("view.AckReach = %+v, want {Emitted:1 Reachable:1 Acked:1}", *view.AckReach)
+	}
+}
+
+// ★ 확인율 조회가 실패해도 보드가 안 죽고, 그 사실이 Failures 에 "ack-reach" 축으로
+// 남는지 잠근다 — TestBoardNotesWhenWorktreeRootsAreUnreadable(split-detect 축)과 같은
+// 짝이다. event 표를 지워 **이 축만** 정확히 깨뜨린다 — Board() 의 다른 파생
+// (GetProject·ListLive·ListOpen·ListHeld·LandingLane)은 event 표를 안 건드리므로
+// 이렇게 하면 ack-reach 축 하나만 격리해서 실패시킬 수 있다.
+func TestBoardNotesWhenAckReachFails(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "트랙2")
+
+	if _, err := st.DB().ExecContext(context.Background(), `DROP TABLE event`); err != nil {
+		t.Fatalf("event 표 제거 실패(시험 전제 준비): %v", err)
+	}
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err) // 파생이 실패해도 보드는 응답을 낸다
+	}
+	if view.AckReach != nil {
+		t.Errorf("조회가 실패했는데 AckReach 가 채워졌다: %+v", view.AckReach)
+	}
+	if !hasFailure(view, "ack-reach") {
+		t.Fatalf("event 표가 없어 확인율 조회가 실패했는데 ack-reach 축이 Failures 에 없다\n"+
+			"Failures: %+v", view.Failures)
+	}
+}
