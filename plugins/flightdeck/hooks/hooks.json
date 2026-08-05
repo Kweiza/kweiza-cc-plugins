@@ -58,6 +58,19 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook session-end",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
