@@ -1163,3 +1163,189 @@ func TestRenderFinishSaysWhichFollowupsWereSkipped(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 전수 리뷰 — 묶음 구성원의 경로 축 · 묶음 범위 공개
+// ─────────────────────────────────────────────────────────────────────────────
+
+// bundleMemberSegment 는 렌더 결과에서 구성원 **하나의 절만** 잘라 낸다.
+//
+// ★ 이 헬퍼가 없으면 이 부류가 통째로 안 잡힌다. 전체 문자열에 대한
+// strings.Contains 는 **출력을 넓히는 모든 변경을 통과시킨다** — 선두의 판정이
+// 구성원 셋에 그대로 복사돼도, 옆 구성원 것이 붙어도 "있다"는 다 참이기 때문이다.
+// 실측으로 확인한 것도 그것이다: renderPathCheck 의 인자를 Members[0] 것으로
+// 바꿔도 전 스위트가 초록이었다. 그래서 구성원 머리줄("\n  <표식> <id> — ")부터
+// 다음 머리줄 직전까지를 잘라, **그 안에서만** 단정한다.
+func bundleMemberSegment(t *testing.T, rendered, id string) string {
+	t.Helper()
+	marks := []string{markClaimed, markRejected, markProposed}
+	start := -1
+	for _, mark := range marks {
+		if i := strings.Index(rendered, "\n  "+mark+" "+id+" — "); i >= 0 {
+			start = i + 1 // 자기 머리줄부터 — 앞의 개행은 버린다
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("구성원 %s 의 머리줄이 없다:\n%s", id, rendered)
+	}
+	rest := rendered[start:]
+	end := len(rest)
+	for _, mark := range marks {
+		if i := strings.Index(rest, "\n  "+mark+" "); i >= 0 && i < end {
+			end = i
+		}
+	}
+	return rest[:end]
+}
+
+// TestRenderPickGivesEachBundleMemberItsOwnPathVerdict 는 묶음 구성원의
+// `경로 실재` 줄을 못박는다. 실측: 그 줄을 **통째로 지워도**, 심지어 **엉뚱한
+// 항목 id 로 `fd move` 를 내도** 전 스위트가 초록이었다.
+//
+// ★ 왜 이 줄이 지켜져야 하나. 이 축이 내는 `fd move <id> --project X` 가
+// **유일한 행동 지시**다. 오등록은 워크트리에서 띄운 세션이 자기가 어디에
+// 넣는지 모른 채 add 할 때 나고(RenderAdd 의 주석이 그 실물 10건을 적는다),
+// 묶음으로 집힌 구성원은 그 화면조차 안 거친다 — 이 줄이 사라지면 그 항목의
+// 오등록을 사람이 알 통로가 없다.
+//
+// ★ 세 갈래를 **서로 다른 값**으로 깐다: 정상 · 오등록 · 축을 못 읽음.
+// 값이 같으면 "선두 것이 복사됐다"와 "각자 제 것을 받았다"가 같은 화면이 되고,
+// 그러면 이 시험이 지키려는 것을 정확히 못 지킨다. 오등록 구성원을 **선두가
+// 아닌 자리**(Members[1])에 두는 것도 같은 이유다 — Members[0] 에 두면
+// "Members[0].Item.ID 를 쓴다"는 변이가 정답과 구별되지 않는다.
+func TestRenderPickGivesEachBundleMemberItsOwnPathVerdict(t *testing.T) {
+	const (
+		leadSum   = "선두 경로 1개 중 1개가 이 프로젝트(proj)에 있다."
+		okSum     = "mem-ok 경로 2개 중 2개가 이 프로젝트(proj)에 있다."
+		movedSum  = "mem-moved 경로 1개 전부 이 프로젝트에 없다 — kweiza-cc-plugins 에는 있다. 오등록일 수 있다."
+		unreadSum = "이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다."
+	)
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item:      &model.Item{Project: "proj", ID: "lead", Title: "선두", State: model.ItemClaimed, Paths: []string{"a.go"}, CreatedAt: t0},
+		Branch:    "lead",
+		PathCheck: &judge.ItemPathVerdict{Kind: judge.KindOK, Summary: leadSum},
+		Bundle: &service.BundleInfo{
+			Reason: "의존자 합 0 · 묶음 4건 · 선두 lead",
+			Members: []service.BundleMember{
+				{
+					Item:      model.Item{Project: "proj", ID: "mem-ok", Title: "정상", State: model.ItemClaimed, Paths: []string{"b.go", "c.go"}, CreatedAt: t0},
+					Claimed:   true,
+					PathCheck: &judge.ItemPathVerdict{Kind: judge.KindOK, Summary: okSum},
+				},
+				{
+					Item:    model.Item{Project: "proj", ID: "mem-moved", Title: "오등록", State: model.ItemClaimed, Paths: []string{"plugins/x.go"}, CreatedAt: t0},
+					Claimed: true,
+					PathCheck: &judge.ItemPathVerdict{
+						Kind: judge.KindMisregistered, Suggest: "kweiza-cc-plugins", Summary: movedSum,
+					},
+				},
+				{
+					Item:      model.Item{Project: "proj", ID: "mem-unread", Title: "안 읽음", State: model.ItemOpen, CreatedAt: t0},
+					Link:      judge.Link{Item: "mem-unread", Detail: "세션이 함께 지정했다"},
+					PathCheck: nil, // 구서버·옛 캐시
+				},
+			},
+		},
+	}
+	got := RenderPick(res, t0)
+
+	// ① 구성원마다 한 줄씩, 빠짐없이. 선두까지 넷이다.
+	// (줄 삭제 변이와 "nil 이면 건너뛴다" 변이가 여기서 죽는다 — 후자는 셋만 남긴다.)
+	if n := strings.Count(got, "경로 실재: "); n != 4 {
+		t.Fatalf("경로 실재 줄이 %d개다 — 선두 1 + 구성원 3 = 4여야 한다:\n%s", n, got)
+	}
+
+	// ② 각자 **제 것**이다. 자기 절 안에 자기 요약이 있고, 남의 요약은 없다.
+	segs := map[string]string{
+		"mem-ok":     bundleMemberSegment(t, got, "mem-ok"),
+		"mem-moved":  bundleMemberSegment(t, got, "mem-moved"),
+		"mem-unread": bundleMemberSegment(t, got, "mem-unread"),
+	}
+	own := map[string]string{"mem-ok": okSum, "mem-moved": movedSum, "mem-unread": unreadSum}
+	all := []string{leadSum, okSum, movedSum, unreadSum}
+	for id, seg := range segs {
+		// 구성원 절 안에서는 4칸 들여쓴다 — 바로 위의 "경로: <목록>" 과 같은 깊이다.
+		if !strings.Contains(seg, "\n    경로 실재: "+own[id]) {
+			t.Fatalf("구성원 %s 의 절에 자기 경로 판정이 없다:\n%s\n전체:\n%s", id, seg, got)
+		}
+		for _, other := range all {
+			if other == own[id] {
+				continue
+			}
+			if strings.Contains(seg, other) {
+				t.Fatalf("구성원 %s 의 절에 남의 경로 판정이 붙었다(%q):\n%s\n전체:\n%s", id, other, seg, got)
+			}
+		}
+	}
+
+	// ③ 행동 지시는 **그 구성원의 id 로** 나온다. 하나뿐이고, 오등록인 자리에만 있다.
+	if !strings.Contains(segs["mem-moved"], "`fd move mem-moved --project kweiza-cc-plugins`") {
+		t.Fatalf("오등록 구성원에 되돌리는 명령이 자기 id 로 안 나온다:\n%s\n전체:\n%s", segs["mem-moved"], got)
+	}
+	if n := strings.Count(got, "fd move "); n != 1 {
+		t.Fatalf("`fd move` 가 %d번 나온다 — 오등록으로 판정된 항목 하나에만 나와야 한다:\n%s", n, got)
+	}
+	for _, wrong := range []string{"fd move lead", "fd move mem-ok", "fd move mem-unread"} {
+		if strings.Contains(got, wrong) {
+			t.Fatalf("오등록이 아닌 항목에 %q 를 지시했다 — 그것이 곧 오등록 단정이다:\n%s", wrong, got)
+		}
+	}
+	// 되돌리는 명령도 그 구성원 아래에 딸려 들여쓴다(들여쓰기가 풀리면 선두의 지시로 읽힌다).
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "fd move ") && !strings.HasPrefix(line, "    ") {
+			t.Fatalf("되돌리는 명령이 구성원 아래로 안 들어갔다: %q\n전체:\n%s", line, got)
+		}
+	}
+}
+
+// TestRenderPickCarriesBundleScopeWhenMembersExist 는 `묶음 범위:` 공개 줄을
+// 못박는다. 실측: 구성원이 있는 갈래의 그 줄을 지워도 전 스위트가 초록이었다
+// (구성원 0건 갈래는 TestRenderBundleEmptyStatesItsScope 가 이미 물고 있다).
+//
+// ★ 이 줄은 **"형제 축을 못 읽었다"는 고백을 나르는 유일한 통로**다. 조용히
+// 사라지면 서버가 부분 관측을 전체 관측처럼 보고하게 되고, 그걸 읽은 세션은
+// 이 묶음이 이웃 전부를 본 결과라고 결론짓는다 — 판정이 절반만 돌아간 날에도
+// 화면이 평소와 똑같아지는, 이 저장소가 반복해서 맞은 그 실패다.
+//
+// 추천과 선점 **양쪽**에서 본다. 두 모드는 머리줄부터 다른 분기라, 한쪽만
+// 보면 나머지 한쪽에서 이 줄이 빠져도 초록이 유지될 수 있다.
+func TestRenderPickCarriesBundleScopeWhenMembersExist(t *testing.T) {
+	const scope = "관찰한 후보는 전체 5건이다 · 형제 축은 이번에 못 읽었다"
+	cases := []struct {
+		name    string
+		mode    service.PickMode
+		state   model.ItemState
+		claimed bool
+	}{
+		{"추천", service.PickRecommended, model.ItemOpen, false},
+		{"선점", service.PickClaimed, model.ItemClaimed, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := RenderPick(service.PickResult{
+				Mode: c.mode, Reason: "사유",
+				Item:   &model.Item{ID: "lead", Title: "선두", State: c.state, CreatedAt: t0},
+				Branch: "lead",
+				Bundle: &service.BundleInfo{
+					Reason: "의존자 합 0 · 묶음 2건 · 선두 lead",
+					Scope:  scope,
+					Members: []service.BundleMember{{
+						Item:    model.Item{ID: "mem", Title: "구성원", State: c.state, CreatedAt: t0},
+						Claimed: c.claimed,
+					}},
+				},
+			}, t0)
+
+			// 절 자체의 줄로 나와야 한다 — Reason("왜 이 묶음인가") 뒤에 붙는 별도 줄이다.
+			if !strings.Contains(got, "\n묶음 범위: "+scope+"\n") {
+				t.Fatalf("구성원이 있는데 묶음 범위가 화면에 안 실린다 — 부분 관측이 전체 관측으로 읽힌다:\n%s", got)
+			}
+			// Reason 과 뭉개지지도 않는다: 둘은 서로 다른 사실이다(왜 묶였나 vs 무엇을 봤나).
+			if !strings.Contains(got, "\n왜 이 묶음인가: 의존자 합 0 · 묶음 2건 · 선두 lead\n") {
+				t.Fatalf("묶음 사유 줄이 사라졌다:\n%s", got)
+			}
+		})
+	}
+}
