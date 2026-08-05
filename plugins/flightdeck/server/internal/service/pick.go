@@ -41,16 +41,24 @@ type PickInput struct {
 
 // PickResult 는 pick 한 번의 결과다.
 type PickResult struct {
-	Mode     PickMode          `json:"mode"`
-	Reason   string            `json:"reason"` // 왜 이것인가 · 왜 못 골랐나. **항상 채운다**
-	Item     *model.Item       `json:"item,omitempty"`
-	Claim    *model.Claim      `json:"claim,omitempty"`
-	Overlaps []judge.Overlap   `json:"overlaps,omitempty"` // 탈락 사유가 아니다. 거르지 않고 알린다
-	Rejected []model.Rejection `json:"rejected,omitempty"` // 탈락 사유 **전부**
-	Notes    []model.Judgment  `json:"notes,omitempty"`    // 이 항목에 연결된 판단 전문
-	Branch   string            `json:"branch,omitempty"`   // 항목 id 가 곧 브랜치 이름이다(전역 유일)
-	Setup    []string          `json:"setup,omitempty"`    // 워크트리 준비 명령
-	Scope    string            `json:"scope"`              // 무엇을 후보로 봤나 — 안 본 것을 침묵하지 않는다
+	Mode     PickMode        `json:"mode"`
+	Reason   string          `json:"reason"` // 왜 이것인가 · 왜 못 골랐나. **항상 채운다**
+	Item     *model.Item     `json:"item,omitempty"`
+	Claim    *model.Claim    `json:"claim,omitempty"`
+	Overlaps []judge.Overlap `json:"overlaps,omitempty"` // 탈락 사유가 아니다. 거르지 않고 알린다
+	// Rejected 는 **추천**(pickRecommend) 경로가 낸 탈락 사유 전부다 — 후보 중
+	// 적격에 못 든 것들이 여기 온다.
+	//
+	// ★ 묶음 선점(pickBundle) 경로의 구성원 실패는 여기 **안 온다** — 그 사유는
+	// Bundle.Members[].Rejection 에 산다(리뷰 라운드 1 finding 4). 두 곳에 겹쳐 실으면
+	// 같은 실패를 두 번 세게 된다 — 침묵보다 중복 계수가 낫다는 말은 여기엔 안 통한다,
+	// 이건 침묵이 아니라 **같은 사실을 두 자리에 적는 것**이라 사유 분포 집계가 깨진다.
+	// 그래서 일부러 한 곳에만 둔다.
+	Rejected []model.Rejection `json:"rejected,omitempty"`
+	Notes    []model.Judgment  `json:"notes,omitempty"`  // 이 항목에 연결된 판단 전문
+	Branch   string            `json:"branch,omitempty"` // 항목 id 가 곧 브랜치 이름이다(전역 유일)
+	Setup    []string          `json:"setup,omitempty"`  // 워크트리 준비 명령
+	Scope    string            `json:"scope"`            // 무엇을 후보로 봤나 — 안 본 것을 침묵하지 않는다
 	// QueueOpen 은 **남은** 열린 항목 수다(이 호출이 집은 것을 뺀 값).
 	//
 	// ★ 포인터인 이유가 둘이다.
@@ -98,6 +106,20 @@ type BundleInfo struct {
 
 // BundleMember 는 묶음 구성원 하나다.
 type BundleMember struct {
+	// Item 은 이 구성원의 항목 전문이다.
+	//
+	// ★ 못 집은 구성원도 채운다(리뷰 라운드 1 finding 1). pickExplicit 이 선점에
+	// 실패하면 자기가 이미 읽은 항목도 버리고 빈 PickResult 를 낸다(그 함수의 본문은
+	// 이 태스크가 안 고친다 — 전역 제약). 그래서 pickBundle 이 실패한 구성원마다
+	// 표시용으로 한 번 더 읽는다: 추천 경로는 항상 실물 Item 을 내므로, 묶음 경로도
+	// 같은 모양을 지켜야 이 필드를 그대로 읽는 화면(태스크 10)이 못 집은 구성원만
+	// 빈 줄(id="", state="")로 찍는 일이 없다.
+	//
+	// 딱 한 갈래는 못 채운다 — 요청한 id 가 애초에 큐에 없을 때(재조회도 실패한다).
+	// 그때는 State 등 나머지 필드를 정직하게 비운 채로 두되 **ID 만은 채운다**
+	// (요청받은 id 를 보존한다) — 존재하지 않는 항목의 상태를 지어내지 않는다.
+	// (같은 id 는 Link.Item·Rejection.Item 에도 있지만, 화면이 늘 보는 자리는
+	// Item 이라서 거기에도 있어야 한다.)
 	Item      model.Item             `json:"item"`
 	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
@@ -407,6 +429,15 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 			PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: id}, live, selfCC, d, now)
 		if serr != nil {
 			m.Rejection = rejectionOf(id, serr)
+			// pickExplicit 이 실패로 던진 PickResult 는 비어 있다(Item 도 포함해서) —
+			// 자기가 이미 읽은 항목을 실패와 함께 버린다. 화면에 빈 줄(id="")로 뜨지
+			// 않도록 한 번 더 읽는다. 이 조회조차 실패하면 id 가 애초에 없는 것이므로
+			// State 는 정직하게 비우고 ID 만 남긴다(BundleMember.Item 의 계약 참고).
+			if it, ierr := s.st.GetItem(ctx, proj.ID, id); ierr == nil {
+				m.Item = it
+			} else {
+				m.Item.ID = id
+			}
 			s.log.WarnContext(ctx, "묶음 구성원 선점 실패 — 나머지를 진행한다",
 				"project", proj.ID, "session_id", in.SessionID, "item", clip(id, 64),
 				"error", serr.Error())
@@ -429,7 +460,9 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 	// ★ 파생 신선도도 묶음 전체를 반영해 다시 낸다. 선두 단독 호출 시점의 스냅샷을
 	// 그대로 두면 구성원 처리 중에 d 에 쌓인 실패(예: 안전하지 않은 id 라 워크트리
 	// 명령을 못 낸 구성원)가 응답에서 사라진다 — d 는 이 함수 전체가 공유하는
-	// 누산기라 이 재계산은 부작용이 없다(d.result 는 순수 조회다).
+	// 누산기라 이 재계산은 부작용이 없다(d.result 는 순수 조회다). 리뷰 라운드 1
+	// finding 2 가 이 한 줄이 진짜로 관측 가능한 사실을 바꾼다는 것을 실측으로
+	// 반증했다 — TestPickBundleDerivedReflectsMemberSetupFailure 가 그 반증을 잠근다.
 	res.Derived = d.result(now)
 
 	claimed := 1 // 선두는 이미 집었다
@@ -458,6 +491,24 @@ func dedupeIDs(ids []string) []string {
 	return out
 }
 
+// 묶음 구성원 선점 실패의 탈락 사유 코드 — rejectionOf 가 낸다.
+//
+// ★ judge.Reject* 표(internal/judge/eligible.go)와 **다른 자리**에 둔다. 그 표는
+// 추천 시점의 적격 판정(judge.Eligible)이 pick_eval.rejected 에 남기는 사유고,
+// 이건 선점 **시도 자체**가 store 축에서 실패한 결과다 — 질문이 다르다(적격이냐
+// vs 지금 잡혔냐). 같은 이름 공간에 섞으면 두 생애주기가 뭉개진다.
+//
+// 리뷰 라운드 1 finding 3: 문자열 리터럴로 두면 rejection.reason_code 로 분기하는
+// 소비자가 참조할 심볼이 없고, 오타를 컴파일러가 못 잡는다.
+const (
+	// RejectClaimNotFound 는 지정한 id 가 큐에 없다는 뜻이다(오타이거나 지워졌다).
+	RejectClaimNotFound = "not-found"
+	// RejectClaimFailed 는 store 오류가 알려진 두 타입(ClaimHeldError·ClaimRefusedError)
+	// 어느 쪽도 아닐 때의 안전망이다. Detail 에 원문이 항상 남으므로 코드가
+	// 뭉툭해도 왜인지는 여전히 읽을 수 있다.
+	RejectClaimFailed = "claim-failed"
+)
+
 // rejectionOf 는 구성원 선점 실패를 탈락 사유 한 줄로 바꾼다. 순수 함수다.
 //
 // ★ 실물 오류 타입은 store.ClaimHeldError(남이 쥐고 있다)·store.ClaimRefusedError
@@ -469,12 +520,12 @@ func dedupeIDs(ids []string) []string {
 // 항상 원문을 남긴다 — 매칭되는 타입이 없어 code 가 fallback 이어도 Detail 만으로
 // 왜인지는 알 수 있게 한다.
 func rejectionOf(id string, err error) *model.Rejection {
-	code := "claim-failed"
+	code := RejectClaimFailed
 	var held *store.ClaimHeldError
 	var refused *store.ClaimRefusedError
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		code = "not-found"
+		code = RejectClaimNotFound
 	case errors.As(err, &held):
 		code = judge.RejectClaimed // 남이 이미 선점했다 — Eligible 축과 같은 코드를 쓴다
 	case errors.As(err, &refused):

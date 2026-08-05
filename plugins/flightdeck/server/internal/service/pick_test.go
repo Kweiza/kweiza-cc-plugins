@@ -1142,3 +1142,110 @@ func TestPickBundleOverlapsCoverWholeBundle(t *testing.T) {
 		t.Fatalf("구성원 경로의 겹침이 묶음 응답에 안 실렸다: %+v", res.Overlaps)
 	}
 }
+
+// 못 집은 구성원도 실물 Item 을 실어야 한다 — 리뷰 라운드 1 finding 1.
+// pickExplicit 이 실패하면 자기가 이미 읽은 항목도 버리고 빈 PickResult 를 낸다.
+// 그걸 그대로 두면 구성원의 Item 이 {Project:"" ID:"" State:""} 로 찍히고, 추천
+// 경로는 항상 실물 Item 을 내므로 태스크 10의 화면이 못 집은 구성원만 빈 줄로
+// 그린다. id·state 가 살아 있는지를 본다(존재하는 항목이 남에게 막힌 경우).
+func TestPickBundleBlockedMemberCarriesRealItem(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "taken", []string{"services/b.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: other.Session.ID, ItemID: "taken"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "taken"}})
+	if err != nil {
+		t.Fatalf("구성원 하나가 막혔다고 pick 이 실패했다: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 1건이어야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 못 집었어야 한다: %+v", m)
+	}
+	if m.Item.ID != "taken" {
+		t.Fatalf("못 집은 구성원의 Item.ID 가 %q 다 — 요청한 id(taken)와 같아야 한다", m.Item.ID)
+	}
+	if m.Item.State == "" {
+		t.Fatalf("못 집은 구성원의 Item.State 가 비었다 — 항목이 실재하는데 빈 값을 냈다: %+v", m.Item)
+	}
+}
+
+// 요청한 id 가 애초에 큐에 없으면(재조회도 실패) State 를 지어내지 않되,
+// 요청한 id 자체는 Item.ID 에 남아야 한다 — BundleMember.Item 계약의 나머지 절반.
+func TestPickBundleUnknownMemberIDStillCarriesRequestedID(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "no-such-item"}})
+	if err != nil {
+		t.Fatalf("구성원 하나가 없다고 pick 이 실패했다: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 1건이어야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.Item.ID != "no-such-item" {
+		t.Fatalf("없는 id 인데 Item.ID 에 요청한 id 가 안 남았다: %q", m.Item.ID)
+	}
+	if m.Item.State != "" {
+		t.Fatalf("존재하지 않는 항목의 상태를 지어냈다: %q", m.Item.State)
+	}
+	if m.Rejection == nil || m.Rejection.Reason != RejectClaimNotFound {
+		t.Fatalf("사유 코드가 %q 여야 한다: %+v", RejectClaimNotFound, m.Rejection)
+	}
+}
+
+// Derived 는 묶음 전체를 반영해 다시 계산해야 한다 — 리뷰 라운드 1 finding 2.
+// 구성원 처리 중에 쌓인 실패(안전하지 않은 id 라 워크트리 준비 명령을 못 낸 구성원)가
+// 선두 단독 호출 시점의 스냅샷에는 없다. 서비스 계층의 ValidateItemID 검증을
+// 정상 경로(AddItem)로는 우회할 수 없으므로 store 를 직접 써서 그런 항목을 넣는다.
+func TestPickBundleDerivedReflectsMemberSetupFailure(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+
+	// '..' 가 있어 ValidateItemID 가 거절하는 모양이다 — 워크트리 준비 명령을 못 낸다.
+	unsafeID := "bad id/../x"
+	if err := st.Tx(ctx(), func(t *store.Tx) error {
+		return t.AddItem(model.Item{
+			Project: "p", ID: unsafeID, Title: "위험한 id", Body: "store 로 직접 넣었다",
+			Paths: []string{"services/unsafe.go"}, State: model.ItemOpen,
+		})
+	}); err != nil {
+		t.Fatalf("안전하지 않은 id 항목 준비 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", unsafeID}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	// 사전 조건: JudgeClaim 은 id 형식을 안 본다 — 안전하지 않은 id 도 선점 자체는 성공한다.
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 안전하지 않은 id 도 선점은 성공해야 한다: %+v", res.Bundle.Members)
+	}
+	var found bool
+	for _, f := range res.Failures {
+		if strings.Contains(f.Axis, "setup:") && strings.Contains(f.Axis, "bad id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("구성원의 워크트리 준비 실패가 묶음 응답의 파생 실패 목록에 없다: %+v", res.Failures)
+	}
+}
