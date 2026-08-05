@@ -1115,23 +1115,46 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 	Splits []judge.SplitReport `json:"splits,omitempty"`
 ```
 
-`sessionCards` 의 시그니처에 루트 목록을 더한다. 지금은
+**`sessionCards` 의 시그니처를 바꾸지 마라.** 호출부가 셋이고 그중 둘이 이 브랜치가
+못 여는 파일이다(실측):
 
-```go
-func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
+```
+internal/service/board.go:157   ← 내 자리
+internal/service/finish.go:374  ← Global Constraints 의 "안 여는 파일"
+internal/service/pick.go:171    ← 같음. 01KZ7FR2 가 미랜딩으로 잡고 있다
 ```
 
-이고, 이것을 다음으로 바꾼다.
+대신 **루트를 함께 내는 변형을 만들고, 기존 이름은 얇은 껍데기로 남긴다.** 그러면
+`finish.go`·`pick.go` 는 한 글자도 안 바뀐다.
+
+지금 이름을 바꾼다:
 
 ```go
-// 반환의 둘째 값은 **git 이 아는 워크트리 루트 목록**이다.
+// sessionCardsAndRoots 는 sessionCards 에 **git 이 아는 워크트리 루트 목록**을 더해 낸다.
+//
 // 갈림 탐지가 그것 없이는 못 돌고(judge.DetectUnnormalizedSplit), 여기서 이미
-// `git worktree list` 를 한 번 돌렸으므로 호출부가 다시 부르면 그 비용이 두 배가 된다.
-// git 을 못 읽었으면 nil 이다 — 빈 것과 못 읽은 것을 호출부가 가를 수 있어야 한다.
-func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
+// `git worktree list` 를 한 번 돌렸으므로 호출부가 다시 부르면 이 서버에서 가장 비싼
+// 일이 두 배가 된다. git 을 못 읽었으면 nil 이다 — 빈 것과 못 읽은 것을 호출부가
+// 가를 수 있어야 한다.
+func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
 ```
 
-함수 안에서 `wts` 가 채워진 직후(앵커: `wts, heads = s.worktreeIndex(ctx, g, d)`) 루트를 모은다.
+(본문은 그대로 두고 반환만 셋으로 늘린다. 모든 `return` 을 고친다 — 오류 갈래는 `return nil, nil, err`.)
+
+그리고 **기존 이름을 껍데기로 남긴다.** 바로 아래에 둔다.
+
+```go
+// sessionCards 는 루트가 필요 없는 호출부를 위한 껍데기다(finish.go · pick.go).
+//
+// ★ 그 둘의 시그니처를 안 바꾸려고 이 껍데기를 둔다 — 이 브랜치는 그 파일들을 안 연다
+//   (다른 세션이 미랜딩으로 잡고 있다). 로직은 sessionCardsAndRoots 하나뿐이다.
+func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
+	cards, _, err := s.sessionCardsAndRoots(ctx, proj, cut, self, d)
+	return cards, err
+}
+```
+
+`sessionCardsAndRoots` 안에서 `wts` 가 채워진 직후(앵커: `wts, heads = s.worktreeIndex(ctx, g, d)`) 루트를 모은다.
 
 ```go
 		wts, heads = s.worktreeIndex(ctx, g, d)
@@ -1145,11 +1168,14 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 `roots` 는 함수 머리에서 `var roots []string` 으로 선언한다. 모든 `return` 을 세 값으로
 고친다(오류 갈래는 `return nil, nil, err`).
 
-`Board` 의 호출부를 고친다. 앵커: `cards, err := s.sessionCards(...)`.
+`Board` 의 호출부만 고친다. 앵커: `cards, err := s.sessionCards(ctx, proj, s.cut(now, window), opt.Self, d)`.
 
 ```go
-	cards, roots, err := s.sessionCards(ctx, proj, s.cut(now, window), opt.Self, d)
+	cards, roots, err := s.sessionCardsAndRoots(ctx, proj, s.cut(now, window), opt.Self, d)
 ```
+
+**`finish.go`·`pick.go` 의 호출부는 건드리지 않는다** — 껍데기가 그대로 받는다.
+바꾼 뒤 `grep -rn "sessionCards(" internal/` 로 그 둘이 안 바뀌었는지 확인해라.
 
 그리고 `view.Conversations = …` 바로 다음 줄에 더한다.
 
@@ -1181,9 +1207,54 @@ cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestSplitCards
 
 기대: PASS.
 
-- [ ] **Step 5: 되돌려 빨강을 확인한다**
+- [ ] **Step 5: 되돌려 빨강을 확인한다 — 넷**
 
-`splitCardsOf` 에서 `MachineID` 를 안 싣도록 바꾸고 돌린다. 기대: FAIL. 되돌린다.
+빨강이 안 나오면 그 시험이 아무것도 안 잡는 것이다. **시험을 고쳐라(구현을 고치지 마라).**
+
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | `splitCardsOf` 가 `MachineID` 를 안 싣게 | `TestSplitCardsOfCarriesTriple` |
+| 2 | **`Board` 안의 `view.Splits = ...` 한 줄 제거** | `TestBoardFillsSplits` |
+| 3 | `sessionCardsAndRoots` 가 `roots` 를 nil 로 내게 | `TestBoardFillsSplits`(루트가 없으면 보고가 못 나온다) |
+| 4 | `TestOwningRootPicksTheLongestMatch` 에 더한 `wantUn` 단정 제거 뒤, `judge` 의 `owningRoot` 가 항상 `""` 를 내게 | 그 시험이 **단독으로** FAIL 해야 한다 |
+
+**2번이 이 과제의 핵심 방어다.** Task 2 에서 정확히 같은 자리(`view.Conversations` 배선)가
+무시험이어서 한 줄을 지워도 전 패키지 12개가 초록이었다. 같은 사고를 두 번 내지 않는다.
+
+배선 시험은 `board_conversation_test.go` 에 더한다(Task 2 가 만든 파일이고 `newSvc` 사용법이
+거기 이미 있다).
+
+```go
+// ★ 운영 진입점(Board)을 그대로 탄다. splitCardsOf 만 시험하면 배선 한 줄을 지워도
+//   스위트가 초록이다 — Task 2 가 그 사고를 실제로 냈다.
+func TestBoardFillsSplits(t *testing.T) {
+	s, _ := newSvc(t)
+	// 같은 (머신, cc)로 카드 둘을 연다: 하나는 트리 루트, 하나는 그 하위 디렉토리.
+	// 정규화가 돌았다면 둘 다 루트로 적혔을 모양이라 갈림 보고가 하나 나와야 한다.
+	// 세션을 여는 정확한 절차는 board_test.go 의 기존 시험을 그대로 따른다.
+	...
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if len(view.Sessions) < 2 {
+		t.Fatalf("카드 %d장 — 이 시험이 아무것도 안 재고 있다", len(view.Sessions))
+	}
+	if len(view.Splits) == 0 {
+		t.Fatal("Splits 가 비었다 — Board 가 DetectUnnormalizedSplit 을 안 부르거나 루트를 안 넘긴다")
+	}
+}
+```
+
+**주의: 이 시험이 트리비얼 통과하지 않게 하라.** `len(view.Sessions) < 2` 가드가 그
+방어다 — 세션을 못 열면 `Splits` 가 비는 것이 당연해서, 그 가드가 없으면 배선이 죽어도
+"갈림이 없구나"로 초록이 난다. Task 2 의 재검토가 같은 함정을 실제로 확인했다.
+
+시험용 워크트리 경로는 **git 이 실제로 아는 트리**여야 한다(`sessionCardsAndRoots` 가
+`git worktree list` 로 루트를 읽는다). `newSvc` 가 세우는 임시 저장소의 실제 경로를 쓰고,
+하위 디렉토리는 그 아래 아무 이름이나 쓴다 — 디렉토리가 없어도 판정에는 문제 없다
+(경로 문자열만 본다). 루트를 못 읽는 하네스면 이 시험은 3번 뮤테이션과 구분이 안 되므로,
+**먼저 `roots` 가 비지 않는지 확인**하고 비면 시험을 그에 맞게 고쳐라.
 
 - [ ] **Step 6: 커밋**
 
