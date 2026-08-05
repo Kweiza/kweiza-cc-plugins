@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -253,6 +254,12 @@ func TestEligibleBundleDependentsBeatSize(t *testing.T) {
 
 // 키 ①②③이 전부 동점이면 ④(선두 id 사전순)가 브랜치 이름을 정한다.
 // 실측의 형제 3건이 정확히 이 경우다 — 생성 시각이 마이크로초까지 같다.
+//
+// 여기서 겸사겸사 Links·Members 의 문서화된 불변식 둘도 확인한다:
+// 길이가 같아야 하고(Links 는 Members 와 같은 순서·같은 길이), Members 는
+// fit(=lessCandidate 로 이미 정렬된 목록)의 순서를 물려받아야 한다. 셋 다 동점이라
+// lessCandidate 의 동점 처리(id 사전순)로 fit = [a-first, m-mid, z-last] 가 되므로
+// 선두 a-first 의 구성원은 정확히 이 순서(m-mid, z-last)로 나와야 한다.
 func TestEligibleBundleTieBreaksByLeadID(t *testing.T) {
 	sib := SiblingIndex{"m-mid": {"J1"}, "a-first": {"J1"}, "z-last": {"J1"}}
 	in := EligibleInput{Self: "S1", Candidates: []Candidate{
@@ -262,8 +269,76 @@ func TestEligibleBundleTieBreaksByLeadID(t *testing.T) {
 	if b.Lead.Item.ID != "a-first" {
 		t.Fatalf("동점에서 선두 id 사전순이어야 한다 — 선두가 %q 다", b.Lead.Item.ID)
 	}
-	if len(b.Members) != 2 {
-		t.Fatalf("형제 셋이 한 묶음이어야 한다 — 구성원 %v", memberIDs(b))
+	if got := memberIDs(b); len(got) != 2 || got[0] != "m-mid" || got[1] != "z-last" {
+		t.Fatalf("Members 가 fit 의 사전순을 안 물려받았다 — 구성원 %v, 기대 [m-mid z-last]", got)
+	}
+	if len(b.Links) != len(b.Members) {
+		t.Fatalf("Links 와 Members 의 길이가 다르다 — Links %d건, Members %d건", len(b.Links), len(b.Members))
+	}
+}
+
+// 정렬 키 ④(선두 id 사전순)를 lessBundle 을 직접 불러 확인한다.
+//
+// ★ EligibleBundle 을 통해서 확인하면 안 되는 이유: bundles 슬라이스는
+// lessCandidate 로 이미 사전순 정렬된 fit 에서 만들어지고, lessCandidate 자신의
+// 동점 처리도 id 사전순이라 sort.SliceStable 이 그 순서를 그대로 지킨다.
+// 그러면 ④(lessBundle 의 마지막 줄)를 통째로 `return false` 로 바꿔 지워도
+// 답이 안 바뀐다 — 이 시험은 사실 ④가 아니라 lessCandidate 가 SliceStable 을
+// 거쳐 새어나온 결과를 재확인하고 있을 뿐이다(TestEligibleBundleTieBreaksByLeadID
+// 가 그 함정이다). 그래서 손으로 만든 Bundle 둘로 lessBundle 을 직접 부른다.
+func TestLessBundleTieBreaksByLeadID(t *testing.T) {
+	// ①②③을 전부 동점으로 고정한다: Dependents 같음, Members 길이 같음, Oldest 같음.
+	mk := func(leadID string) Bundle {
+		return Bundle{
+			Lead:       cand(leadID, 0, nil),
+			Dependents: 3,
+			Members:    []Candidate{cand("m", 1, nil)},
+			Oldest:     t0,
+		}
+	}
+	a, z := mk("a-first"), mk("z-last")
+	if !lessBundle(a, z) {
+		t.Fatalf("①②③ 동점인데 id 사전순(a-first < z-last)으로 안 이겼다")
+	}
+	if lessBundle(z, a) {
+		t.Fatalf("역방향이 대칭이 아니다 — z-last 가 a-first 를 이겼다")
+	}
+}
+
+// 정렬 키 ③(최고령 ↑)을 lessBundle 을 직접 불러 확인한다.
+//
+// ★ EligibleBundle 을 통해서 확인하면 같은 함정에 빠진다: lessCandidate 의
+// **둘째** 키도 생성 시각 오름차순이라, fit 이 이미 나이순으로 정렬돼 있고
+// bundles 순서가 그 순서를 물려받아 ③을 지워도 우연히 같은 답이 나올 수 있다.
+// 그래서 선두 id 를 일부러 "기대와 반대" 로 배정한다 — older 의 선두 id 를
+// newer 의 선두 id 보다 사전순으로 **뒤**에 둔다. ③이 사라져 ④(id)로
+// 새면 승자가 뒤집혀서 잡힌다.
+func TestLessBundlePrefersOlder(t *testing.T) {
+	older := Bundle{Lead: cand("z-old", 0, nil), Dependents: 1, Members: []Candidate{cand("m", 0, nil)}, Oldest: t0}
+	newer := Bundle{Lead: cand("a-new", 0, nil), Dependents: 1, Members: []Candidate{cand("m", 0, nil)}, Oldest: t0.Add(time.Hour)}
+	if !lessBundle(older, newer) {
+		t.Fatalf("①② 동점인데 최고령(older)이 안 이겼다")
+	}
+	if lessBundle(newer, older) {
+		t.Fatalf("역방향이 대칭이 아니다 — 더 최근인데 이겼다")
+	}
+}
+
+// Reason 의 최고령 표기가 분 단위로 잘리면, 실측 형제들처럼 초·마이크로초
+// 단위로만 다른 두 최고령이 ③으로 서로 다른 승자를 냈는데도 Reason 문자열은
+// 똑같이 찍힌다 — "왜 이것이고 저것이 아닌가"에 답해야 하는 원장이
+// 정작 그 답의 근거를 감추는 셈이다.
+func TestBundleAroundReasonDistinguishesCloseOldest(t *testing.T) {
+	mk := func(offset time.Duration) Bundle {
+		it := openItem("solo", 0)
+		it.CreatedAt = t0.Add(offset)
+		lead := Candidate{Item: it}
+		return bundleAround(lead, []Candidate{lead}, SiblingIndex{})
+	}
+	a := mk(0)
+	b := mk(30 * time.Second)
+	if a.Reason == b.Reason {
+		t.Fatalf("최고령이 30초 다른데 Reason 문자열이 같다(분 단위 표기라 구분이 안 된다): %q", a.Reason)
 	}
 }
 
@@ -340,13 +415,19 @@ func TestEligibleBundleOverlapsUseWholeBundlePaths(t *testing.T) {
 }
 
 // 사유가 없으면 "왜 저것이 아니라 이것인가"에 답할 수 없다.
+//
+// ★ "의존자"·"묶음"·"최고령" 라벨 존재만 확인하면 부족하다 — Reason 을 통째로
+// "의존자 · 묶음 · 최고령 순으로 골랐다" 같은 일반 문구로 바꿔도 라벨 세 개가
+// 다 들어 있어 통과한다. 그 문구엔 실제 값도, 키④(선두)도 없다. Reason 은
+// "네 키의 실제 값" 이라고 문서에 적어 뒀으니 실제 값을 확인한다.
 func TestEligibleBundleCarriesReason(t *testing.T) {
 	sib := SiblingIndex{"y1": {"J1"}, "y2": {"J1"}}
 	in := EligibleInput{Self: "S1", Candidates: []Candidate{cand("y1", 0, nil), cand("y2", 1, nil)}}
 	b, _ := EligibleBundle(in, sib)
-	for _, want := range []string{"의존자", "묶음", "최고령"} {
+	// 의존자 0, 묶음 2건(y1+y2), 선두 y1(동점에서 사전순으로 이긴다) — 셋 다 실측값이다.
+	for _, want := range []string{"의존자 합 0", "묶음 2건", "선두 y1"} {
 		if !strings.Contains(b.Reason, want) {
-			t.Fatalf("사유에 %q 가 없다: %q", want, b.Reason)
+			t.Fatalf("사유에 실제 값 %q 가 없다: %q", want, b.Reason)
 		}
 	}
 }
