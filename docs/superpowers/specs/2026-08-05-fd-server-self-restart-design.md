@@ -70,8 +70,24 @@
 "이미 낡은 채로 시작한 서버"가 자기를 최신으로 기억해 영원히 트리거하지 않는다.
 `/proc` 이 없는 유닉스에서는 경로 stat 으로 떨어지고, 그때 이 갈래를 못 본다는 사실을 로그에 남긴다.
 
-`ExeID` 의 `dev·inode` 는 유닉스 전제다. 이 파일 전체가 유닉스 빌드 태그 뒤에 있고,
-비유닉스는 `selfwatch_other.go` 의 no-op 이 받는다.
+`ExeID` 의 `dev·inode` 는 유닉스 고유다.
+
+> **정정 (구현이 이 문단을 바꿨다).** 원래 여기에는 "이 파일 전체가 유닉스 빌드 태그 뒤에 있고,
+> 비유닉스는 `selfwatch_other.go` 의 **no-op** 이 받는다"라고 적혀 있었다. 실제로 실린 것은 다르고,
+> 그 차이는 의도적이다.
+>
+> **① 파일 전체에 태그를 안 붙인다.** `selfwatch.go` 는 태그가 없고(`ExeID`·`Same`·`Action`·`Decide`
+> 와 감시기 본체가 여기 한 벌만 있다), 태그가 붙는 것은 `selfwatch_unix.go`·`selfwatch_other.go` 이며
+> 그 안에는 진짜로 갈리는 셋(`exeIDOfPath`·`selfWatchSupported`·`execSelf`)만 있다.
+> 파일 전체에 태그를 붙이면 구조체가 태그 양쪽에 두 벌이 되고, 필드 집합이 갈리는 순간
+> **태그 없는 `_test.go` 가 다른 플랫폼에서만 컴파일에 실패한다.** 계획 실행 중 실제로 그렇게 깨졌고
+> `GOOS=windows go vet ./cmd/fd/` 이 그것을 잡았다(`go build` 는 `_test.go` 를 건너뛰어 못 잡는다).
+>
+> **② 비유닉스는 no-op 이 아니라 오류다.** no-op 은 "쟀는데 안 바뀌었다"와 "못 쟀다"를 같은 값으로
+> 접는다 — 그러면 감시기가 조용히 아무것도 안 하는 상태로 살고, 그것이 이 설계가 §13 에서 없애려는
+> 침묵 그대로다. `execSelf` 에서는 더 나쁘다: 빈 성공을 돌려주면 호출부가 **드레인까지 마친 뒤**
+> "재기동했다"로 읽고 서버는 내려간 채로 남는다. 그래서 셋 다 `errSelfWatchUnsupported` 를 감싼
+> 오류를 내고, `newSelfWatcher` 는 그 사실을 `Watching=false` + 사유로 화면에 올린다.
 
 **왜 소스 mtime + 자체 빌드가 아닌가**: 그러면 빌드 판정 사다리가 `bin/fd` 런처와 서버 두 벌이 된다.
 이 저장소는 "같은 판정을 두 자리에 두면 한쪽만 고칠 때 조용히 어긋난다"를 세 번 겪었고
@@ -103,8 +119,9 @@ bare 경로에는 되살릴 감시자가 없다. 이것이 이 기능이 오늘�
 
 | 자리 | 무엇 | 신규/변경 |
 |---|---|---|
-| `cmd/fd/selfwatch.go` | `ExeID` · `Replaced` · `Decide` 순수 함수 + 감시 루프 | 신규 |
-| `cmd/fd/selfwatch_other.go` | 비유닉스 no-op. `internal/window/proc_other.go` 가 선례 | 신규 |
+| `cmd/fd/selfwatch.go` | **태그 없음.** `ExeID` · `Same` · `Action` · `Decide` 순수 함수 + 감시기 본체 | 신규 |
+| `cmd/fd/selfwatch_unix.go` | `//go:build unix` — `exeIDOfPath` · `selfWatchSupported` · `execSelf` | 신규 |
+| `cmd/fd/selfwatch_other.go` | `//go:build !unix` — 같은 셋을 **오류로**(no-op 이 아니다. §②의 정정을 본다). `internal/window/proc_other.go` 가 선례 | 신규 |
 | `cmd/fd/selfcheck.go` | `fd selfcheck --db` 서브명령 | 신규 |
 | `internal/store/probe.go` | `ProbeMigration(path) (MigrationPlan, error)` — 읽기 전용 | 신규 |
 | `cmd/fd/serve.go` | 감시기 기동 + 트리거 처리 | 변경 |
