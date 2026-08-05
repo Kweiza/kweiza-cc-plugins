@@ -319,38 +319,93 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 	// ★ judge.FilterPathCoordinate 를 직접 부르지 않고 FilterFootprintPaths 를 거친다 —
 	// 같은 패키지 안에서 같은 연산에 이름이 둘 생기는 것을 막는다(service.go 의
 	// FilterFootprintPaths 주석: "존재 이유는 계층뿐이다").
+	//
+	// ★ 이것은 **좌표계 축**이다. 포함 축("이 경로가 이 카드의 트리 안인가")은 여기서
+	// 판정할 수 없다 — 기준 트리가 세션 카드에 있고 그것은 아래 Tx 안에서 읽는다.
+	// 두 축을 한 이름으로 뭉개면 "걸러졌다"가 문자 집합만 걸렀다는 뜻이 된다.
 	kept, rejected := FilterFootprintPaths(paths)
-	// ★ session.beat 의 payload 에 원본 경로 전부를 실으면 무한히 커질 수 있으므로
-	// 앞 5개만 자르고, 잘렸다는 사실이 드러나도록 총 건수(rejected)를 payload 에 함께 둔다.
-	// 사유 전체까지 실을 필요는 없다 — 경로가 무엇이었는지가 핵심이고, 왜는 로그(아래)가 낸다.
-	const droppedPathsLimit = 5
-	droppedPaths := make([]string, 0, len(rejected))
-	for i, r := range rejected {
-		if i >= droppedPathsLimit {
-			break
-		}
-		droppedPaths = append(droppedPaths, clip(r.Path, 200))
-	}
+
+	// 포함 축 판정 결과. Tx 안에서 세션의 워크트리를 읽어야 나오므로 여기 담아
+	// Tx 뒤의 경고 로그가 읽는다.
+	var outside []string
+
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		sess, err := t.GetSession(sessionID)
 		if err != nil {
 			return err
 		}
-		// ★ count 의 의미가 이 항목에서 조용히 바뀌었다 — 전에는 len(paths)(제출 전부),
-		// 지금은 len(kept)(관문을 통과한 것). 기존 원장 질의가 두 정의를 걸치게 된다.
-		// count + rejected 로 예전 값(len(paths))을 복원할 수 있다.
+
+		// ★ 포함 축 — 좌표계를 통과한 것 중 **카드의 워크트리 밖**을 가른다.
+		//
+		// 이 관문이 없어서 서브에이전트가 `cp -r` 로 뜬 저장소 사본
+		// (`/tmp/…/scratchpad/mut/repo/…`)이 발자국으로 들어왔고, Stop 훅이 그것을
+		// 근거로 "항목을 선점하지 않고 고치고 있다"는 처방을 쐈다 — 그 순간 실제
+		// 저장소와 그 세션의 워크트리는 **둘 다 `git status` 0줄**이었다.
+		//
+		// 규율은 발자국 쪽 기존 규약 그대로다: **버리되 남긴다.** 거절하지 않는 이유는
+		// 위 좌표계 축과 같고(훅이 죽으면 생존 신호가 끊긴다), 조용히 지우지 않는
+		// 이유는 그것이 이 함수가 없애려는 침묵 그 자체이기 때문이다.
+		//
+		// ★ 기준 트리는 **세션의 워크트리**다(프로젝트 루트가 아니다). 셋을 재고 골랐다:
+		//
+		//	① RelPath 가 이미 그 기준을 쓴다. 프로젝트 루트로 바꾸면 rel 좌표계가 둘이
+		//	   되고, 겹침 축 전체가 "모든 rel 은 같은 기준"이라는 전제 위에 서 있다.
+		//	② 형제 워크트리와 주 저장소의 같은 파일은 **다른 파일**이다. 워크트리 기준일
+		//	   때만 둘 다 `cmd/fd/hook.go` 로 접혀 병합 충돌 축과 일치한다(5ccf915 가
+		//	   "같은 repo-상대 경로를 만지면 실제로 충돌한다 — 진짜 겹침이다"로 못박았다).
+		//	③ 워크트리 밖 경로는 **이미 죽은 데이터**다. rel 로 못 옮겨 절대경로로 남고,
+		//	   그러면 judge/prescribe.go 의 comparablePath 가 "비교 불가능"으로 걸러낸다.
+		//	   즉 버리는 것은 정보 손실이 아니라 **겹침 축에서 못 쓰던 것을 원장으로
+		//	   옮기는 것**이다 — 아래 dropped_paths 에 경로가 그대로 남는다.
+		//
+		// 접두 일치는 안 쓴다. RelPathWithin 이 filepath.Rel 로 성분 단위로 계산한다
+		// (DESIGN §3 이 조상 트리 등록을 일부러 없앤 것과 같은 이유다).
+		inside := make([]string, 0, len(kept))
+		outside = outside[:0]
+		for _, p := range kept {
+			rel, within := RelPathWithin(sess.Worktree, p)
+			if rel == "" {
+				continue
+			}
+			if !within {
+				outside = append(outside, p)
+				continue
+			}
+			inside = append(inside, rel)
+		}
+
+		// ★ session.beat 의 payload 에 원본 경로 전부를 실으면 무한히 커질 수 있으므로
+		// 앞 5개만 자르고, 잘렸다는 사실이 드러나도록 총 건수(rejected·outside)를
+		// payload 에 함께 둔다. 사유 전체까지 실을 필요는 없다 — 경로가 무엇이었는지가
+		// 핵심이고, 왜는 로그(아래)가 낸다.
+		const droppedPathsLimit = 5
+		droppedPaths := make([]string, 0, droppedPathsLimit)
+		for _, r := range rejected {
+			if len(droppedPaths) >= droppedPathsLimit {
+				break
+			}
+			droppedPaths = append(droppedPaths, clip(r.Path, 200))
+		}
+		for _, p := range outside {
+			if len(droppedPaths) >= droppedPathsLimit {
+				break
+			}
+			droppedPaths = append(droppedPaths, clip(p, 200))
+		}
+
+		// ★ count 의 의미가 **두 번** 바뀌었다 — len(paths)(제출 전부) → len(kept)
+		// (좌표계 통과) → 지금은 len(inside)(포함 축까지 통과, 즉 실제로 Touch 한 수).
+		// 기존 원장 질의가 세 정의를 걸치게 된다.
+		// count + rejected + outside 로 맨 처음 값(len(paths))을 복원할 수 있다.
 		t.LogEvent("session.beat", sess.Project, sessionID, map[string]any{
-			"kind": string(kind), "count": len(kept), "rejected": len(rejected),
+			"kind": string(kind), "count": len(inside),
+			"rejected": len(rejected), "outside": len(outside),
 			"dropped_paths": droppedPaths,
 		})
 		if err := t.Beat(sessionID, kind, now); err != nil {
 			return err
 		}
-		for _, p := range kept {
-			rel := RelPath(sess.Worktree, p)
-			if rel == "" {
-				continue
-			}
+		for _, rel := range inside {
 			// origin=observed. "선언했으나 안 건드림"과 "선언 없이 건드림"을 뭉개지 않는다.
 			if err := t.Touch(sessionID, rel, model.OriginObserved, now); err != nil {
 				return err
@@ -372,6 +427,14 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 		s.log.WarnContext(ctx, "발자국 경로를 좌표계 관문이 버렸다",
 			"session_id", clip(sessionID, 64), "dropped", len(rejected),
 			"first_reason", rejected[0].Reason)
+	}
+	// ★ 좌표계 거절과 **따로** 낸다. 둘은 다른 축이고, 합치면 "무엇이 왜 사라졌나"가
+	// 다시 뭉개진다 — 이 항목이 없애려던 것이 정확히 그 뭉갬이다.
+	// 이 줄이 뜨는 흔한 원인은 서브에이전트가 저장소 사본을 스크래치패드에 뜬 것이다.
+	if len(outside) > 0 {
+		s.log.WarnContext(ctx, "발자국 경로가 카드의 워크트리 밖이라 버렸다",
+			"session_id", clip(sessionID, 64), "dropped", len(outside),
+			"first_path", clip(outside[0], 200))
 	}
 	return nil
 }

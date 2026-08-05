@@ -114,12 +114,12 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason:   fmt.Sprintf("%d번째 후속: %v", i, err),
+				Reason:   fmt.Sprintf("%d번째 후속: %v", i+1, err),
 				Guidance: "후속 항목 id 도 브랜치 이름으로 그대로 쓰인다."}
 		}
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i, clip(f.ID, 64)),
+				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i+1, clip(f.ID, 64)),
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
 					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다."}
 		}
@@ -131,7 +131,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// 다른 문에서 배신한다).
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i, clip(f.ID, 64), err),
+				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i+1, clip(f.ID, 64), err),
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
 					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
 		}

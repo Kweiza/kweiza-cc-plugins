@@ -299,6 +299,18 @@ func coveredByClosed(in PrescribeInput) bool {
 //
 // 선언 경로는 저장소 상대다. 절대경로는 카드의 워크트리 밖이라는 뜻이고(RelPath 가 그때만
 // 원본을 남긴다), 그 좌표는 이 판정이 읽을 수 있는 것이 아니다.
+//
+// ★ 상류가 막힌 뒤에도 이 가드는 **존치한다.** service.Beat 가 포함 축 관문을 세워
+// 이제 워크트리 밖 경로는 애초에 footprint 로 안 들어간다(service.RelPathWithin).
+// 그래도 지우면 안 되는 이유는 둘이다:
+//
+//	① 이미 들어온 것이 DB 에 남아 있다 — 실측 시점(2026-08-05) observed 발자국
+//	   406개 중 108개(27%)가 절대경로였고, 그 행들은 관문이 생겨도 사라지지 않는다.
+//	② 발자국의 원천이 훅 하나가 아니다. 선언 경로(declared)·항목 경로도 같은 컬럼에
+//	   들어오고, 그중 이관(legacy)은 좌표계만 보고 포함 축은 안 본다.
+//
+// 즉 이것은 중복 방어가 아니라 **다른 시점의 데이터를 읽는 방어**다. 지우려면 먼저
+// 옛 행을 옮기거나 지워야 하고, 그것은 별개 항목이다.
 func comparablePath(p string) bool {
 	p = strings.TrimSpace(p)
 	return p != "" && !strings.HasPrefix(p, "/")

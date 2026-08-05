@@ -575,8 +575,11 @@ func TestAddItemSaysWhichPathIsWrong(t *testing.T) {
 	if err == nil {
 		t.Fatal("통과시켰다")
 	}
-	if !strings.Contains(err.Error(), "2번째") {
-		t.Errorf("몇 번째 경로인지 안 말한다: %s", err.Error())
+	// ★ 틀린 것은 목록의 **세 번째**(`e\f.go`)다. 그러므로 "3번째"라고 말해야 한다 —
+	// 전에는 range 인덱스를 그대로 실어 "2번째"라고 했고, 그 말을 믿은 사람은
+	// 멀쩡한 `c/d.go` 를 고치러 갔다.
+	if !strings.Contains(err.Error(), "3번째") {
+		t.Errorf("몇 번째 경로인지 안 말한다(1-based 여야 한다): %s", err.Error())
 	}
 }
 

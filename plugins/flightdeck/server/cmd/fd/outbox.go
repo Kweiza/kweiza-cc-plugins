@@ -359,7 +359,7 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 			e.Tries++
 			if qerr := o.quarantine(RejectedEntry{Entry: e, Reason: v.Reason, At: o.stamp()}); qerr != nil {
 				// 격리에 실패하면 **버리지 않는다.** 큐에 남겨 두는 쪽이 잃는 것보다 낫다.
-				stopReason = fmt.Sprintf("%d번째(%s)를 격리하지 못했다: %v", i, clip(e.Key, 40), qerr)
+				stopReason = fmt.Sprintf("%d번째(%s)를 격리하지 못했다: %v", i+1, clip(e.Key, 40), qerr)
 				left = append(left, entries[i:]...)
 				break
 			}
@@ -380,7 +380,7 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 		left = append(left, e)
 		left = append(left, entries[i+1:]...)
 		stopReason = fmt.Sprintf("%d번째(%s)에서 멈췄다(%d회째): %v",
-			i, clip(e.Key, 40), e.Tries, err)
+			i+1, clip(e.Key, 40), e.Tries, err)
 		break
 	}
 	if err := o.keep(left); err != nil {
@@ -466,7 +466,9 @@ func readRejected(path string) ([]RejectedEntry, error) {
 		}
 		var r RejectedEntry
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			return out, fmt.Errorf("격리 %d번째 줄 해석 실패: %w", i, err)
+			// ★ i+1 이다. 같은 파일의 readOutbox 는 line++ 로 이미 1-based 였고
+			// 여기만 range 인덱스를 그대로 실어, **한 파일 안에 두 규약이 공존했다.**
+			return out, fmt.Errorf("격리 %d번째 줄 해석 실패: %w", i+1, err)
 		}
 		out = append(out, r)
 	}
