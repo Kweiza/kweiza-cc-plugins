@@ -81,8 +81,12 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]Split
 		add(r)
 	}
 	// 관례로 알려진 루트를 카드 경로에서 되읽는다 — 지워진 워크트리를 덮는다.
+	// ★ 경로 하나가 관례 루트를 **여럿** 품을 수 있다(워크트리 안에서 하네스가 또
+	//   `.claude/worktrees/X` 를 만드는 배치). 첫 것만 담으면 안쪽 트리가 roots 에
+	//   아예 안 들어가 owningRoot 의 최장 매칭이 복구할 수 없고, 정상 정규화된 루트
+	//   둘이 한 보고로 묶인다. 전부 담는다.
 	for _, c := range cards {
-		if r := conventionRoot(c.Worktree); r != "" {
+		for _, r := range conventionRoots(c.Worktree) {
 			add(r)
 		}
 	}
@@ -94,11 +98,17 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]Split
 		cc := strings.TrimSpace(c.CCSessionID)
 		m := strings.TrimSpace(c.MachineID)
 		wt := strings.TrimSpace(c.Worktree)
-		if cc == "" || m == "" || wt == "" {
+		// ★ 빈 cc 판정을 여기서 다시 쓰지 않는다 — SameConversation 이 "빈 값끼리는
+		//   같지 않다"를 정의하는 한 자리이고, 그 판정이 두 자리에 살면 한쪽만 고칠 때
+		//   조용히 어긋난다.
+		if !SameConversation(cc, cc) || m == "" || wt == "" {
 			continue // 3중키가 안 서는 카드다 — 판정 대상이 아니고 '버렸다'고 셀 것도 아니다
 		}
 		wt = filepath.Clean(wt)
 		if wt == "." {
+			// 3중키는 섰는데 경로가 아무 데도 안 가리킨다. **세어서 낸다** —
+			// 조용히 넘기면 판정 대상이었던 카드가 흔적 없이 사라진다.
+			unattributed++
 			continue
 		}
 		root := owningRoot(wt, roots)
@@ -146,7 +156,7 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]Split
 	return out, unattributed
 }
 
-// conventionRoot 는 경로 안에서 **관례로 알려진** 워크트리 루트를 되읽는다. 순수 함수다.
+// conventionRoots 는 경로 안에서 **관례로 알려진** 워크트리 루트를 전부 되읽는다. 순수 함수다.
 //
 // ★ 추측이 아니다. flightdeck 자신이 그 자리에 워크트리를 만든다 — `pick` 응답의
 // "워크트리 준비" 절이 `git worktree add '.flightdeck/worktrees/<항목id>'` 를 출력한다.
@@ -157,23 +167,34 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]Split
 // 원장의 링크-워크트리 경로 93개 중 81개가 이미 지워진 것이었고, 그 상태로는
 // 보고의 84%가 거짓 양성이었다.
 //
-// 못 찾으면 빈 문자열이다.
-func conventionRoot(p string) string {
+// ★ **전부** 낸다. 하나만 내면(첫 매치에서 멈추면) 중첩 배치
+// `<repo>/.flightdeck/worktrees/A/.claude/worktrees/B` 에서 안쪽 트리 B 가 루트 목록에
+// 아예 안 들어가고, 그러면 정상 정규화된 두 루트가 한 보고로 묶인다(거짓 양성).
+// 오늘 원장에 그 배치는 0건이지만, 워크트리 안에서 도는 세션에 하네스가 자기 워크트리를
+// 만들면 바로 생긴다.
+//
+// ★ 이 관례가 **거짓 음성** 쪽으로 틀린다는 것을 알고 쓴다. `worktrees/X` 모양인데
+// 실제로는 워크트리가 아닌 디렉토리면 그 카드가 자기만의 트리로 빠져나가 진짜 갈림이
+// 안 보고된다. 거짓 양성으로 두 번(56%·84%) 신뢰를 잃은 축이라 이 방향을 택했다.
+//
+// 못 찾으면 nil 이다.
+func conventionRoots(p string) []string {
 	p = strings.TrimSpace(p)
 	if p == "" {
-		return ""
+		return nil
 	}
 	segs := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
+	var out []string
 	for i := 0; i+2 < len(segs); i++ {
 		if segs[i] != ".flightdeck" && segs[i] != ".claude" {
 			continue
 		}
-		if segs[i+1] != "worktrees" || segs[i+2] == "" {
+		if segs[i+1] != "worktrees" {
 			continue
 		}
-		return filepath.FromSlash(strings.Join(segs[:i+3], "/"))
+		out = append(out, filepath.FromSlash(strings.Join(segs[:i+3], "/")))
 	}
-	return ""
+	return out
 }
 
 // owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
