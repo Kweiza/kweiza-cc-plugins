@@ -111,6 +111,16 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			"item", clip(in.ItemID, 64), "reason", v.Reason)
 		return FinishResult{}, &RefusedError{What: "finish", Reason: v.Reason, Guidance: v.Guidance}
 	}
+	// 후속을 안 실었으면 **한 번** 붙잡는다 — 판정과 사유는 finish_followups.go 에 있다.
+	// body 관문(위 JudgeFinish)과 같은 자리·같은 모양이다: 빠진 것을 그 자리에서 말한다.
+	if len(in.Followups) == 0 {
+		if refused := s.judgeMissingFollowups(ctx, in); refused != nil {
+			s.log.WarnContext(ctx, "마무리 거절 — 후속이 안 실렸다",
+				"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+				"item", clip(in.ItemID, 64))
+			return FinishResult{}, refused
+		}
+	}
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
