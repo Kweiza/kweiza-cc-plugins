@@ -74,6 +74,7 @@ func (c *Cache) Put(path string, body []byte, at time.Time) error {
 	// 그러면 서버가 죽은 바로 그 순간에 마지막 스냅숏까지 잃는다.
 	tmp := c.tmpPath(path)
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		os.Remove(tmp) // 만들어 놓고 실패한 자리다 — 유일한 이름은 다음 Put 이 안 덮는다
 		return fmt.Errorf("캐시 기록 실패: %w", err)
 	}
 	if err := os.Rename(tmp, filepath.Join(c.dir, CacheKey(path))); err != nil {

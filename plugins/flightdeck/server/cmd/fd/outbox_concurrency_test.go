@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -38,7 +40,16 @@ func roundDir(t *testing.T, base string, i int) string {
 
 // bothAtOnce 는 두 함수를 배리어로 **동시에** 출발시킨다. 수면도 채널 강제도 없다 —
 // 강제해야만 나는 결함과 그냥 나는 결함을 섞지 않기 위해서다.
+//
+// ★ **GOMAXPROCS 를 최소 2 로 올린다. 이 줄이 없으면 관문이 환경 하나로 사라진다.**
+// 실측: `-test.cpu=1` 이나 GOMAXPROCS=1 이면 잠금을 **통째로 꺼도** 아래 세 시험이
+// 3/3 통과한다. 고루틴 둘이 진짜로 겹치지 않으니 볼 경합이 없어서다. 그 상태의 초록은
+// "안전하다"가 아니라 "아무것도 안 쟀다"인데 화면에는 똑같이 ok 로 보인다 —
+// 이 저장소가 반복해서 경계한 '전 시험 초록 상태로 사는 결함' 그 모양이다.
 func bothAtOnce(a, b func()) {
+	if runtime.GOMAXPROCS(0) < 2 {
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
+	}
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -211,5 +222,67 @@ func TestConcurrentReplaysNeverResurrectASentEntry(t *testing.T) {
 	if resurrected > 0 {
 		t.Errorf("서버가 이미 받은 줄이 %d/%d 회 큐로 되살아났다 — 다음 재생이 다시 보낸다",
 			resurrected, concurrentRounds)
+	}
+}
+
+// 재생 결과의 "남았다"가 **병합 뒤 파일 기준**이다 — 스냅숏 기준이 아니다.
+//
+// ★ 이 단정이 없으면 settle 의 `remaining = len(out)` 를 지워도 전 시험이 초록이다
+// (리뷰의 변이 실험이 잡았다). 위의 세 시험은 큐 내용만 보고 ReplayResult 는 안 본다.
+//
+// 재생 도중 새 판단이 쌓이면 남은 건수는 **1** 이다. 스냅숏 기준으로 세면 0 이 나오고,
+// 그러면 도구가 "다 보냈다"고 말하는데 큐에는 판단이 남아 있다.
+func TestReplayReportsRemainingFromTheFileNotTheSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	seedQueue(t, dir, "first")
+	replayer, appender := newOutboxAt(dir), newOutboxAt(dir)
+
+	// 전송 중에 남이 쌓는다 — 재생의 스냅숏에는 없는 줄이다.
+	res, err := replayer.Replay(context.Background(),
+		func(context.Context, OutboxEntry) error {
+			if aerr := appender.Append(entry("arrived-mid-flight")); aerr != nil {
+				t.Fatalf("끼어드는 Append 가 실패했다: %v", aerr)
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("Replay 가 오류를 냈다: %v", err)
+	}
+	if res.Remaining != 1 {
+		t.Errorf("Remaining 이 %d 다 — 1 이어야 한다. 파일에는 판단이 남아 있는데 "+
+			"결과가 스냅숏 기준이면 도구가 '다 보냈다'고 말한다", res.Remaining)
+	}
+	// ★ 그리고 **사유가 비면 안 된다.** ReplayResult 는 건수와 왜 남았는지를 함께 내겠다고
+	// 스스로 적어 둔 타입인데, 이 갈래는 내가 멈춘 것이 아니라 남이 쌓은 것이라
+	// stopReason 이 비어 있다 — 그대로 두면 "…남았다 — " 로 대시만 남는다.
+	if strings.HasSuffix(strings.TrimSpace(res.Detail), "—") || !strings.Contains(res.Detail, "새로 쌓였다") {
+		t.Errorf("Detail 이 사유 없이 끝났다: %q", res.Detail)
+	}
+}
+
+// 임시 파일을 만들어 놓고 실패한 자리도 치운다.
+//
+// ★ tmp 이름이 유일해진 대가다. 고정 이름일 때는 다음 호출이 같은 이름을 O_TRUNC 로
+// 재사용해 청소가 공짜였는데, 유일해지는 순간 아무도 그것을 안 치운다. rename 실패에만
+// 정리를 붙였다가 리뷰에서 잡혔다 — `os.WriteFile` 은 O_CREATE|O_TRUNC 로 **먼저 만들고**
+// 쓰므로 ENOSPC·EDQUOT 로 실패해도 파일이 남는다.
+func TestKeepRemovesTheTempWhenWritingFails(t *testing.T) {
+	dir := t.TempDir()
+	o := newOutboxAt(dir)
+	// pending.jsonl 자리를 디렉토리로 막아 rename 을 실패시킨다(쓰기는 성공한다).
+	if err := os.MkdirAll(o.pendingPath(), 0o755); err != nil {
+		t.Fatalf("자리를 못 막았다: %v", err)
+	}
+	if err := o.keep([]OutboxEntry{entry("k1")}); err == nil {
+		t.Fatal("전제가 깨졌다 — keep 이 성공했다")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("디렉토리를 못 읽었다: %v", err)
+	}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("실패한 임시 파일이 남았다: %s — 유일한 이름은 다음 호출이 안 덮는다", e.Name())
+		}
 	}
 }

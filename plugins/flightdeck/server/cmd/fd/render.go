@@ -75,10 +75,15 @@ func RenderSessionStart(in SessionStartInput) string {
 		fmt.Fprintf(&b, "아직 못 보낸 판단 %d건이 이 머신에 쌓여 있다 — 서버가 살아나면 자동 재생된다\n", in.Pending)
 	}
 	// ★ 셀 수 없었던 큐는 **위 건수와 따로** 낸다. 합치면 0 에 묻히고, 묻히면 침묵이다.
-	// 그 큐는 지금 재생도 새 적재도 막혀 있다(List 오류가 Replay·Append 둘 다의 첫 줄이다).
+	//
+	// ★ **"막혀 있다"고 단정하지 마라.** Leftover.Err 은 대기열 읽기 실패와 격리 파일 읽기
+	// 실패를 **한 칸에 담는다**(outbox.go 의 leftover). 그래서 격리만 손상된 큐도 여기 오는데,
+	// 그 큐의 대기열은 멀쩡히 세어져 위 줄이 "자동 재생된다"를 이미 말한 뒤다 — 단정하면
+	// 배너가 두 줄 사이에서 스스로를 반박한다. 아는 것만 말하고 판정은 doctor 에 넘긴다.
 	for _, u := range in.Unreadable {
 		fmt.Fprintf(&b, "아웃박스를 못 셌다 — %s\n"+
-			"  그 큐는 지금 재생도, 새 판단 적재도 막혀 있다. `fd doctor` 가 전량을 찍는다\n", clip(u, 300))
+			"  이 자리는 재생이나 적재가 막혀 있을 수 있다. `fd doctor` 가 어느 파일인지 찍는다\n",
+			clip(u, 300))
 	}
 	if in.Notice != "" {
 		fmt.Fprintf(&b, "! %s\n", clip(in.Notice, 400))

@@ -81,8 +81,9 @@ func SaveIdentity(dir string, k Key, cc, sessionID string, now time.Time) (Beaco
 // write 는 비콘 하나를 원자적으로 적는다.
 //
 // ★ 임시 파일 이름에 **자기 pid 를 넣는다.** 키마다 고정 임시 경로를 쓰면 같은 창의 훅과 MCP 가
-// 동시에 쓸 때 서로의 임시 파일을 덮는다 — cmd/fd 의 Cache.Put 이 가진 바로 그 결함이다
-// (cmd/fd/client.go:67-83 이 스스로 동시성 안전하지 않다고 적어 뒀다).
+// 동시에 쓸 때 서로의 임시 파일을 덮는다. cmd/fd 의 Cache.Put 이 같은 결함을 갖고 있었고
+// 지금은 고쳐졌다(cache.go 의 tmpPath — 그쪽은 pid 에 난수까지 붙인다. 한 프로세스 안
+// 두 고루틴도 같은 키를 다투기 때문이다. 여기도 같은 이유로 언젠가 난수가 필요해진다).
 func write(dir string, k Key, b Beacon) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("비콘 디렉토리를 못 만들었다(%s): %w", dir, err)

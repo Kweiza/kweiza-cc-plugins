@@ -358,10 +358,21 @@ func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int
 		}
 		out := make([]OutboxEntry, 0, len(cur))
 		for _, e := range cur {
+			// ★ **키가 빈 줄은 절대 안 지운다.** 병합은 키 문자열로 매칭하므로 빈 키끼리
+			// 서로 별칭이 된다 — 하나가 배달되면 나머지가 격리에도 안 남고 사라진다.
+			// 옛 구현은 위치로 지워서 이 별칭이 없었으니, 안 막으면 이 커밋이 만든 회귀다.
+			// 지금 작성기는 빈 키를 안 만들지만(FreshKey·IdempotencyKey 가 nosession 을
+			// 채운다) 손편집·부분 기록으로 들어온 줄까지 잃을 이유는 없다. 남기고 말한다.
+			if e.Key == "" {
+				o.warn("키 없는 줄이 큐에 있다 — 재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)",
+					"dir", o.dir, "path", e.Path)
+				out = append(out, e)
+				continue
+			}
 			if done[e.Key] {
 				continue // 보냈거나 격리했다
 			}
-			if e.Key == bumpedKey {
+			if bumpedKey != "" && e.Key == bumpedKey {
 				e.Tries++
 			}
 			out = append(out, e)
@@ -377,7 +388,10 @@ func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int
 	// 잠금 없이도 다시 읽고 빼는 쪽이 창을 훨씬 좁힌다(오늘보다 나쁘지 않다).
 	o.warn("큐 잠금 없이 재생 결과를 반영한다 — 겹친 재생이 있으면 판단이 사라질 수 있다",
 		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
-	return remaining, merge()
+	// ★ 한 줄로 쓰지 마라(`return remaining, merge()`). Go 는 반환값들의 평가 순서를
+	// 규정하지 않아서, merge 가 갱신하는 remaining 을 그 전에 읽을지 후에 읽을지가 미정이다.
+	merr := merge()
+	return remaining, merr
 }
 
 // errText 는 nil 오류를 빈 문자열로 낸다. 로그 인자에서 <nil> 을 안 보이게 한다.
@@ -423,6 +437,10 @@ func (o *Outbox) keep(entries []OutboxEntry) error {
 	// 남아 있는 한 그 자리는 열려 있다.
 	tmp := fmt.Sprintf("%s.%s.tmp", o.pendingPath(), tmpNonce())
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		// ★ 여기도 치운다. os.WriteFile 은 O_CREATE|O_TRUNC 로 **먼저 만들고** 쓰므로
+		// ENOSPC·EDQUOT·EIO 로 실패해도 파일은 남는다. 이름이 유일해진 뒤로는 다음
+		// 호출이 같은 이름을 재사용해 덮어 주지 않으니, 실패할 때마다 잔해가 하나씩 쌓인다.
+		os.Remove(tmp)
 		return fmt.Errorf("아웃박스 기록 실패: %w", err)
 	}
 	if err := os.Rename(tmp, o.pendingPath()); err != nil {
@@ -514,8 +532,17 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 		res.Detail = fmt.Sprintf("판단 %d건 재생 · %d건은 영구 거절이라 격리했다(%s) — %s",
 			sent, res.Rejected, o.rejectedPath(), rejectReason)
 	default:
+		// ★ 사유가 빌 수 있다. Remaining 은 이제 **병합 뒤 파일 기준**이라, 내가 멈춰서가
+		// 아니라 **재생 도중 남이 쌓아서** 남는 갈래가 생겼다(옛 구현에는 없던 갈래다:
+		// 거기서는 Remaining>0 이 곧 break 였다). 그때 stopReason 은 비어 있고, 그대로
+		// 두면 "…남았다 — " 로 대시만 남는다. ReplayResult 는 건수와 **왜 남았는지**를
+		// 함께 내겠다고 스스로 적어 둔 타입이므로 그 계약을 빈 문자열로 깨면 안 된다.
+		why := stopReason
+		if why == "" {
+			why = "재생 중에 새로 쌓였다 — 다음 재생이 보낸다"
+		}
 		res.Detail = fmt.Sprintf("판단 %d건 재생 · %d건 격리 · %d건 남았다 — %s",
-			sent, res.Rejected, res.Remaining, stopReason)
+			sent, res.Rejected, res.Remaining, why)
 	}
 	return res, nil
 }
