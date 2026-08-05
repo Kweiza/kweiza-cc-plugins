@@ -165,11 +165,34 @@ type BoardRenderOptions struct {
 	Notice string
 }
 
+// boardCardFloor 는 예산이 아무리 빠듯해도 내는 카드 수다. **예산보다 세다.**
+//
+// ★ 이 바닥이 없어서 보드가 카드를 0장 냈다. 실측(2026-08-05 01:12 UTC): 살아 있는
+// 세션 34건, 카드 0장, "34건을 예산 때문에 접었다" 한 줄만.
+//
+// 기제: 고정분(머리·발·꼬리·배너)을 루프 **앞에서** 재고 `used+cost > budget` 이면
+// break 하므로, 고정분만으로 예산을 넘으면 **첫 블록에서 즉시 break 해 kept==0** 이 된다.
+// 그 출력은 예산을 지키지도 못하면서(고정분이 이미 넘었다) 보드의 본체를 100% 잃는다 —
+// 양쪽을 다 잃는 유일한 결말이라 어떤 예산 정책으로도 정당화되지 않는다.
+// 예산의 목적은 화면을 작게 하는 것이지 **비우는 것이 아니다.**
+//
+// 그래서 바닥이 예산을 이긴다. 넘긴 사실은 아래에서 소리 내어 말한다 — 조용히 넘기면
+// "기본 출력은 예산 안이다"라는 이 함수의 계약이 거짓이 되고, 거짓인 계약은 다음 사람이
+// 못 고친다(고정분에 상한을 더한 이번 변경도 그 계약을 믿었으면 시작조차 못 했다).
+//
+// 값이 3인 이유: 이 보드에서 사람이 카드로 하는 일은 "누가 내 자리를 만지나"이고,
+// rankCards 가 ① 나 ② 사건 붙은 카드 ③ 나와 겹치는 카드 순으로 이미 정렬한다.
+// 앞 셋이면 그 질문의 답이 나온다 — 바닥은 화면을 채우는 값이 아니라 **판별력이 죽는 지점**이다.
+const boardCardFloor = 3
+
 // RenderBoard 는 보드 한 장을 사람이 읽는 텍스트로 만든다. 순수 함수다.
 //
 // 기본 출력은 BoardTokenBudget 안이다. 넘치면 세션 블록을 자르고
 // **잘랐다는 사실과 남은 건수를 찍는다** — 조용히 자르면 "세션이 셋뿐"과
 // "셋만 보여준다"가 구분되지 않는다.
+//
+// 한 가지 예외가 boardCardFloor 다 — 고정분이 예산을 다 먹어도 카드는 그만큼 낸다.
+// 그때는 출력이 예산을 넘고, 넘었다는 사실과 넘긴 주체를 함께 찍는다.
 func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	now := opt.Now
 	if now.IsZero() {
@@ -249,18 +272,35 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		if kept < len(blocks)-1 {
 			reserve = 24
 		}
-		if used+cost+reserve > budget {
+		// ★ 카드 바닥이 예산보다 세다 — boardCardFloor 주석을 보라.
+		if used+cost+reserve > budget && kept >= boardCardFloor {
 			break
 		}
 		used += cost
 		kept++
 	}
-	if kept == len(blocks) {
+
+	// 두 사실은 **따로** 말한다. "접었다"는 카드가 넘쳤다는 것이고, 아래 ⚠ 는 고정분이
+	// 넘쳤다는 것이다. 원인이 다르므로 뭉치면 읽는 사람이 손댈 자리를 못 찾는다.
+	var notes []string
+	if kept < len(blocks) {
+		notes = append(notes, fmt.Sprintf("… 세션 %d건을 예산(%d토큰) 때문에 접었다 — detail=true 로 전부 본다",
+			len(blocks)-kept, budget))
+	}
+	if used > budget {
+		msg := fmt.Sprintf(
+			"⚠ 이 출력은 예산 %d토큰을 %d토큰 넘는다 — 넘긴 것은 카드가 아니라 고정분(머리·발·꼬리·배너)이다",
+			budget, used-budget)
+		if kept > 0 {
+			msg += fmt.Sprintf(". 카드 %d장은 바닥(%d장)이 지켰다", kept, boardCardFloor)
+		}
+		notes = append(notes, msg)
+	}
+	if len(notes) == 0 {
 		return joinAll(head, blocks, foot, opt.Tail)
 	}
 	shown := append([]string(nil), blocks[:kept]...)
-	shown = append(shown, fmt.Sprintf("… 세션 %d건을 예산(%d토큰) 때문에 접었다 — detail=true 로 전부 본다",
-		len(blocks)-kept, budget))
+	shown = append(shown, notes...)
 	return joinAll(head, shown, foot, opt.Tail)
 }
 
@@ -418,22 +458,45 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 	return strings.Join(lines, "\n")
 }
 
+// cardNoteLimit 은 카드 하나가 싣는 사건 줄 수다.
+//
+// ★ 이것이 **카드 바닥의 비용**을 정한다. boardCardFloor 는 예산을 이기고 카드를 남기는데,
+// 그 카드 한 장의 크기에 상한이 없으면 바닥이 예산을 얼마나 넘길지도 상한이 없다.
+// 실측(2026-08-05, 살아 있는 세션 33건): 남은 카드 3장에 사건 줄이 8개 붙어 예산을
+// 531토큰 넘겼고, 그 줄들이 초과분의 대부분이었다.
+//
+// 이 축은 세션이 오래 살수록 자란다(한 세션이 ask 를 계속 남긴다). 즉 꼬리·배너와
+// 같은 O(N) 이고, 같은 이유로 상한이 필요하다. 최신순으로 앞의 몇 개만 낸다 —
+// 오래된 요청보다 방금 온 요청이 지금 조율에 필요한 것이다.
+const cardNoteLimit = 2
+
 // noteLines 는 이 카드가 실을 사건 줄이다.
 //
 // ★ 전역 꼬리를 없애지 않는다. 카드가 접히면 사건도 접히므로 꼬리가 그 안전망이다.
+// 상한에 걸려 안 보인 것도 마찬가지다 — 수를 말하고, 전부는 detail 과 꼬리가 맡는다.
 func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) []string {
 	var out []string
+	dropped := 0
 	add := func(kind string, js []model.Judgment) {
+		shown := 0
 		for _, j := range js {
 			if j.SessionID != sessionID {
 				continue
 			}
+			if shown >= cardNoteLimit {
+				dropped++
+				continue
+			}
+			shown++
 			out = append(out, fmt.Sprintf("   [%s %s] %s",
 				kind, FormatAge(now.Sub(j.At)), clip(firstLine(j.Title, j.Body), 100)))
 		}
 	}
 	add("ask", asks)
 	add("blocked", blocked)
+	if dropped > 0 {
+		out = append(out, fmt.Sprintf("   … 이 세션의 사건 %d건 더 — detail=true 로 전부 본다", dropped))
+	}
 	return out
 }
 
@@ -767,6 +830,18 @@ type TailInput struct {
 	OverlapsNote     string // 안 읽었으면 왜 안 읽었나
 }
 
+// tailOverlapLimit 은 꼬리가 **줄을 내는** 겹침 세션 수다. 건수는 머리줄이 전부 센다.
+//
+// ★ 안쪽 차원은 이미 잘리고 있었는데(겹침 한 건 안의 경로쌍 4개) **바깥 차원인 겹침 건수에는
+// 상한이 없었다.** 꼬리는 모든 응답에 붙고 board 에서는 고정분이라, 겹침 줄이 늘면 카드가
+// 그만큼 밀려난다. 즉 꼬리가 살아 있는 세션 수에 O(N) 으로 자라는데 예산은 상수다.
+// 실측(2026-08-05): 겹침 16줄일 때 788토큰 = 예산 1200 의 66%.
+//
+// ★★ 알림 쪽에 같은 상한을 **여기 두지 않는다.** 그 축은 tailNoteLimit(mcpsrv.go)이 이미
+// 쥐고 있다 — 같은 판정을 두 자리에 두면 반드시 표류한다(이 패키지가 워크트리·머신·프로젝트
+// 축에서 세 번 겪고 세 번 다 주입으로 고친 그 사고다).
+const tailOverlapLimit = 5
+
 // RenderTail 은 응답 꼬리를 만든다. 순수 함수다.
 func RenderTail(in TailInput) string {
 	var lines []string
@@ -800,7 +875,13 @@ func RenderTail(in TailInput) string {
 		lines = append(lines, "겹침: 없음 — 살아 있는 세션 어느 것과도 경로가 안 겹친다.")
 	default:
 		lines = append(lines, fmt.Sprintf("겹침 %d건 (거르지 않고 알린다):", len(in.Overlaps)))
-		for _, o := range in.Overlaps {
+		for i, o := range in.Overlaps {
+			if i >= tailOverlapLimit {
+				lines = append(lines, fmt.Sprintf(
+					"  · … %d건 더 — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
+					len(in.Overlaps)-tailOverlapLimit))
+				break
+			}
 			pairs := make([]string, 0, len(o.Pairs))
 			for i, p := range o.Pairs {
 				if i >= 4 {

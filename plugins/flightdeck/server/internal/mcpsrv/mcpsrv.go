@@ -656,7 +656,10 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 
 	notes := append(append([]model.Judgment(nil), view.Asks...), view.Blocked...)
 	tail := s.tail(ctx, tailOpts{
-		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID),
+		// self 는 위에서 이미 구한 openedIdentity 다 — 이 프로세스가 **실제로 연 카드**의
+		// 좌표라, 표류 배너가 쓰는 것과 같은 기준점이다. 둘이 갈리면 배너는 "갈렸다"고
+		// 하는데 겹침은 형제를 못 빼는 상태가 된다.
+		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID, self.CCSessionID),
 		observed: true,
 		notes:    notes,
 		haveNote: true,
@@ -714,6 +717,9 @@ func liveOf(cards []service.SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// ★ 대화 id 를 함께 넘긴다 — 없으면 형제 카드가 남으로 보여 자기 자신과
+			// 겹친다고 알린다. 판정은 judge.OverlapsWithLive 한 자리에만 있다.
+			CCSessionID: c.View.Session.CCSessionID,
 		})
 	}
 	return out
