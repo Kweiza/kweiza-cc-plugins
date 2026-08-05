@@ -72,6 +72,10 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 	srv := mcpsrv.New(newMCPBackend(app), log,
 		mcpsrv.WithProject(app.proj.ID, app.proj.Path),
 		mcpsrv.WithMachine(app.machine),
+		// 워크트리도 여기서 넣는다. resolveProject 가 --show-toplevel 로 이미 푼 값이고,
+		// 이 한 줄이 없으면 MCP 는 자기 cwd 를 워크트리로 봐서 훅과 3중키가 갈린다 —
+		// 저장소 하위 디렉토리에서 연 창이 카드 두 장이 된다(TestHookAndMCPAgreeOnWorktreeFromSubdir).
+		mcpsrv.WithWorktree(app.proj.Worktree),
 		mcpsrv.WithBeaconDir(app.beaconDir))
 	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())
