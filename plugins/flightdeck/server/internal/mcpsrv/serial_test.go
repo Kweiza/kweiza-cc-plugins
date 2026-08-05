@@ -17,19 +17,18 @@ import (
 // ★ 이 전제는 mcpsrv 안에서 끝나지 않는다. `fd mcp` 의 운영 배선인 cmd/fd 의 Client 가
 // 통째로 그 위에 서 있다:
 //
-//   - mcpBackend 가 호출마다 app.cli.Session 을 갈아 쓴다(mcpbackend.go 의 네 자리 —
-//     Pick·Note·AddItem·Finish). 그 값의 소비자는 멱등 키다(client.go 의 KeyFor).
-//   - Outbox.Append 의 중복 키 검사가 List→검사→O_APPEND 다 — 겹치면 서로를 못 보고
-//     둘 다 통과해서, 없애려던 "한 판단이 여러 줄"이 그대로 돌아온다.
-//   - Cache.Put 은 tmp 경로가 키마다 하나뿐이다 — 같은 path 로 겹치면 같은 tmp 에
-//     겹쳐 쓴 뒤 각자 rename 한다. 교체는 원자인데 내용이 두 응답의 뒤섞임일 수 있다.
+//   - mcpBackend 가 호출마다 app.cli.Session 을 갈아 쓴다(mcpbackend.go 의 여섯 자리 —
+//     Pick 둘·Note·AddItem·Finish·land). 그 값의 소비자는 멱등 키다(client.go 의 KeyFor).
 //
-// cmd/fd 의 비시험 코드에 동기화 기구는 **0건**이다(sync·atomic 모두). 즉 저 셋은
-// "지금 안전하다"이지 "병렬화해도 안전하다"가 아니다.
+// ★ **이 시험이 지키는 범위가 좁아졌다.** 옛 주석은 여기에 Outbox.Append 와 Cache.Put 도
+// 함께 적어 뒀는데, 그 둘은 프로세스 **간** 축이라 애초에 이 시험이 못 보는 자리였다 —
+// 프레임 루프를 아무리 순차로 돌려도 다른 fd 프로세스가 같은 파일을 만진다. 그래서
+// 그 둘은 이 전제 밖에서 이미 닫혔다(cmd/fd/outbox_lock.go 의 프로세스 간 잠금,
+// cache.go 의 호출별 tmp). 여기 남은 것은 **한 프로세스 안의 축 하나**뿐이다.
 //
-// -race 는 이것을 **원리적으로 못 본다** — 동시 진입이 아예 없으므로 볼 경합이 없다.
+// -race 는 이 축을 **원리적으로 못 본다** — 동시 진입이 아예 없으므로 볼 경합이 없다.
 // 그래서 초록이 아무것도 보증하지 않는다. 이 시험이 그 자리를 메운다: 디스패치를
-// 병렬로 바꾸는 커밋은 여기서 빨강을 보고, 위 셋을 함께 고쳐야 초록으로 돌아온다.
+// 병렬로 바꾸는 커밋은 여기서 빨강을 보고, Session 을 함께 고쳐야 초록으로 돌아온다.
 
 // serialProbe 는 백엔드 호출의 **동시 진입**을 센다.
 //
@@ -205,11 +204,12 @@ func TestServeNeverOverlapsBackend(t *testing.T) {
 
 	if maxInflight != 1 {
 		t.Fatalf("백엔드에 동시 진입이 %d건 있었다(겹친 메서드: %s).\n"+
-			"프레임 루프를 병렬로 바꿨다면, 같은 커밋에서 아래도 함께 고쳐야 한다:\n"+
-			"  · cmd/fd/mcpbackend.go — app.cli.Session 갈아쓰기 네 자리(Pick·Note·AddItem·Finish)\n"+
-			"  · cmd/fd/outbox.go — Append 의 중복 키 검사가 List→검사→쓰기라 둘 다 통과한다\n"+
-			"  · cmd/fd/cache.go — Put 의 tmp 경로가 키마다 하나라 같은 path 끼리 섞인다\n"+
-			"cmd/fd 비시험 코드에는 지금 동기화 기구가 0건이다. 왜 그런지는 client.go 의 Client 주석에 있다.",
+			"프레임 루프를 병렬로 바꿨다면, 같은 커밋에서 아래를 함께 고쳐야 한다:\n"+
+			"  · cmd/fd/mcpbackend.go — app.cli.Session 갈아쓰기 여섯 자리(Pick 둘·Note·AddItem·Finish·land)\n"+
+			"    고칠 방법은 잠금이 아니라 **인자화**다. Session 은 KeyFor 에만 필요하고 호출자가\n"+
+			"    이미 세션을 손에 들고 있으므로, 넘겨 주면 공유 가변 상태 자체가 없어진다.\n"+
+			"아웃박스·캐시의 프로세스 간 축은 이미 닫혀 있다(cmd/fd/outbox_lock.go · cache.go 의 tmpPath).\n"+
+			"자세한 갈래는 client.go 의 Client 주석에 있다.",
 			maxInflight, strings.Join(overlapped, ", "))
 	}
 

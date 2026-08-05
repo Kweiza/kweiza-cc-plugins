@@ -56,12 +56,11 @@ func newCache(sd StateDir) *Cache { return &Cache{dir: sd.sub("cache")} }
 // Put 은 성공 응답을 보관한다. 실패해도 상위 동작을 죽이지 않고 사유를 돌려준다 —
 // 캐시 쓰기 실패는 지금 이 요청의 실패가 아니다. 다만 **삼키지도 않는다.**
 //
-// ★ 아래 원자 교체는 **프로세스 안에서 호출이 겹치지 않는다는 전제 위에 있다**
-// (Client 타입 주석의 셋 중 셋째). tmp 경로가 키마다 하나뿐이라, 같은 path 로 둘이
-// 동시에 들어오면 같은 tmp 파일에 겹쳐 쓴 뒤 각자 rename 한다 — 교체는 원자인데
-// **교체되는 내용이 두 응답의 뒤섞임**일 수 있다. rename 이 막아 주는 것은
-// 부분 기록이지 동시 기록이 아니다.
-// 전제를 깨는 커밋은 internal/mcpsrv 의 TestServeNeverOverlapsBackend 에서 빨강을 본다.
+// ★ 임시 파일 이름은 **호출마다 다르다**(tmpPath). 고정 이름이던 시절에는 같은 path 로
+// 둘이 동시에 들어오면 같은 tmp 파일을 O_TRUNC 로 열고 각자 offset 0 부터 써서,
+// 교체는 원자인데 **교체되는 내용이 두 응답의 이어붙임**이 됐다. 길이가 1바이트만
+// 달라도 JSON 이 깨진다. rename 이 막아 주는 것은 부분 기록이지 동시 기록이 아니다 —
+// 원자여야 했던 것은 rename 한 단계가 아니라 "임시 파일에 쓰고 옮긴다"는 두 단계다.
 func (c *Cache) Put(path string, body []byte, at time.Time) error {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return fmt.Errorf("캐시 디렉토리 생성 실패: %w", err)
@@ -73,14 +72,24 @@ func (c *Cache) Put(path string, body []byte, at time.Time) error {
 	}
 	// 원자적으로 바꾼다. 부분 기록된 캐시는 다음 읽기에서 "깨진 JSON"이 되고,
 	// 그러면 서버가 죽은 바로 그 순간에 마지막 스냅숏까지 잃는다.
-	tmp := filepath.Join(c.dir, CacheKey(path)+".tmp")
+	tmp := c.tmpPath(path)
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
 		return fmt.Errorf("캐시 기록 실패: %w", err)
 	}
 	if err := os.Rename(tmp, filepath.Join(c.dir, CacheKey(path))); err != nil {
+		os.Remove(tmp) // 이름이 유일해졌으니 실패한 tmp 를 다음 Put 이 안 덮는다
 		return fmt.Errorf("캐시 교체 실패: %w", err)
 	}
 	return nil
+}
+
+// tmpPath 는 이번 Put 만 쓰는 임시 파일 자리다. **호출마다 달라야 한다.**
+//
+// ★ pid 만으로는 부족하다 — 한 프로세스 안 두 고루틴도 같은 키를 다툰다(훅은
+// PostToolUse·PreCompact 가 async 라 동기 훅과 겹쳐 돈다). pid-only 판은 프레임 루프를
+// 병렬화하는 날 조용히 무력해진다.
+func (c *Cache) tmpPath(path string) string {
+	return filepath.Join(c.dir, CacheKey(path)+"."+tmpNonce()+".tmp")
 }
 
 // Get 은 보관된 응답을 낸다. 없으면 오류다(빈 값을 내면 "없음"과 "빈 결과"가 뭉개진다).
