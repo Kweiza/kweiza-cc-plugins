@@ -23,7 +23,9 @@
 ## 안 하는 것 — 그리고 왜
 
 - **`signal.kind` 에 `open` 을 더하지 않는다.** 항목 본문이 지시한 길인데 못 간다. `schema.sql` 은 버전 1 고정이고(`pick_eval` 에 `picked_with` 가 없다), SQLite 는 CHECK 를 `ALTER` 로 못 바꾸며, 재생성은 위 두 가드에 정면으로 걸린다.
-- **옛 거짓 행 백필을 안 한다.** 원래 제안한 술어 `at = (SELECT opened_at …)` 는 **0행을 지운다.** 신호의 `at` 은 `service/session.go:119` 가 git 파생 **전에** 잡은 `s.now()` 이고 `opened_at` 은 그 뒤 `store/session.go:85` 의 `nowStamp()` 라, 마이크로초 고정폭(`timeLayout`)에서 절대 같아질 수 없다. 실측(운영 DB, mcp 223건): 정확 일치 **0건** · `at < opened_at` 34건(간격 2.47~11.38ms) · `at > opened_at` 189건. 게다가 PK 가 `(session_id, kind)` 이고 `Beat` 가 단조 upsert 라 **세션당 mcp 행은 하나**이므로 어떤 술어도 한 행 안의 거짓분과 진짜분을 못 쪼갠다. 그리고 어떤 `DELETE FROM` 이든 `migrate_guard_test.go` 의 `destructiveOps` 에 걸리는데 거기엔 예외 기제가 아예 없어서, 예외 자리 신설 + `DESIGN.md` §7 + `store.go:361-374` 개정이 딸려 온다. 거짓 행의 수명은 창(기본 2시간)이다 — 그 대가를 치를 값이 아니다.
+- **옛 거짓 행 백필을 안 한다.** 원래 제안한 술어 `at = (SELECT opened_at …)` 는 **0행을 지운다.** 신호의 `at` 은 `service/session.go:119` 가 git 파생 **전에** 잡은 `s.now()` 이고 `opened_at` 은 그 뒤 `store/session.go:85` 의 `nowStamp()` 라, 마이크로초 고정폭(`timeLayout`)에서 절대 같아질 수 없다. 실측(운영 DB, mcp 223건): 정확 일치 **0건** · `at < opened_at` 34건(간격 2.47~11.38ms) · `at > opened_at` 189건. 게다가 PK 가 `(session_id, kind)` 이고 `Beat` 가 단조 upsert 라 **세션당 mcp 행은 하나**이므로 어떤 술어도 한 행 안의 거짓분과 진짜분을 못 쪼갠다. 그리고 어떤 `DELETE FROM` 이든 `migrate_guard_test.go` 의 `destructiveOps` 에 걸리는데 거기엔 예외 기제가 아예 없어서, 예외 자리 신설 + `DESIGN.md` §7 + `store.go:361-374` 개정이 딸려 온다. 거짓 행이 `ListLive` **소속 판정**에서 빠지는 데는 창(기본 2시간)이면 충분하다. 그 대가를 치를 값이 아니다.
+
+  ★ **다만 "2시간이면 알아서 낫는다"는 아니다.** 창을 안 거는 표면 셋이 그 행을 계속 읽는다 — `web/page.go` 의 `outsideClaimRow`(창 밖 선점자 카드가 `mcp 18시간` 을 영구히 찍는다) · `service/board.go` 의 `OldestOutside`(실측: 살아 있는 보드가 `창 밖 13건 (가장 오래된 신호 18시간 40분 전)` 을 냈다) · 랜딩 레인의 `LastSignalAt`. 즉 거짓 행은 **표시 계층에서 무기한 남는다.** 미루는 결론은 그대로지만(가드에 예외 기제가 없고 행 단위 분리가 원리적으로 불가능하다), 후속 `fd-migrate-command-unblocks-destructive-increments` 를 "저절로 낫는다"는 이유로 뒤로 미루면 안 된다.
 - **`mcp` 를 `activityKinds` 에 넣지 않는다.** 뺄 근거가 바뀔 뿐 사라지지 않는다(Task 4 참조).
 
 ## 이 변경이 실제로 잃는 것 — 계획서가 먼저 말한다
@@ -35,6 +37,10 @@
 이 대가를 받아들이는 근거: 그런 카드는 신호가 열림뿐이라 **지금도 아무 일을 안 했다는 것 말고는 말하는 바가 없었고**, 후속 항목 `fd-board-folds-open-only-cards` 가 정확히 그 카드를 접으려 한다. 다만 이 판단은 원장에 남겨야 한다 — Task 5 가 그것을 한다.
 
 부수 효과 하나 더: `SetState` 의 비트를 지우면 `blocked`/`paused` 를 선언한 카드의 창이 "전이 시각"이 아니라 "개시 시각" 기준으로 되돌아간다. 다만 `blocked` 판단을 `note` 로 남기면 `finish.go:426` 이 여전히 mcp 를 찍으므로 실무에서는 대개 보전된다.
+
+★ **살아남는 하트비트 하나 — `PreCompact`.** 위에서 훅 4종을 열거했지만 그중 `PreCompact` 는 여전히 `mcp` 를 찍는다: `cmd/fd/hook.go` 의 pre-compact 갈래가 `POST /api/v1/judgments` 로 자동 초안을 보내고, 그 문이 `service/finish.go` 의 `t.Beat(..., SignalMCP, now)` 를 지난다. 그래서 압축을 겪는 긴 세션은 그 시점마다 신호를 얻는다. 실제 손실은 이 절이 처음 적은 것보다 작다.
+
+★ **`SetState` 쪽 손실은 오늘 도달 불가능하다.** `Service.SetState` 의 유일한 호출자는 `internal/api/handlers_session.go` 의 `PATCH /api/v1/sessions/{id}` 이고, 이 저장소의 **어떤 CLI 명령·MCP 도구·웹 폼도 그 문을 안 두드린다.** 그래서 위에 적은 "blocked/paused 카드의 창이 개시 시각 기준으로 되돌아간다"는 오늘 재현할 클라이언트가 없다 — 그 문이 실제로 쓰이기 시작하면 그때 참이 된다. 다음 사람이 못 일어나는 회귀를 쫓지 않도록 적어 둔다.
 
 ---
 
