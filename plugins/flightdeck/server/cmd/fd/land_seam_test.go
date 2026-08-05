@@ -533,7 +533,7 @@ func TestLandIsNeverAnsweredFromCache(t *testing.T) {
 	}
 
 	// ★ 원장 단정 — 아웃박스에 한 줄도 안 쌓였다.
-	pend, err := newOutbox(ResolveStateDir(envOf(h.env), "")).List()
+	pend, err := newOutbox(envOf(h.env), h.home).List()
 	if err != nil {
 		t.Fatalf("아웃박스 조회 실패: %v", err)
 	}
