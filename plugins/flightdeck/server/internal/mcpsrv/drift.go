@@ -95,6 +95,17 @@ func DriftedTwins(mine LiveIdentity, live []LiveIdentity) []CoordinateTwin {
 	return out
 }
 
+// driftTwinLimit 은 배너가 **이름까지 적는** 갈린 카드 수다. 수 자체는 첫 줄이 전부 센다.
+//
+// ★ 왜 상한이 필요한가. 이 배너는 board 의 **고정분**에 들어간다 — 예산이 자르는 것은
+// 세션 카드뿐이므로(RenderBoard), 여기 한 줄이 늘면 카드가 한 장 밀려난다. 그런데 갈린
+// 카드 수는 대화가 /clear·compact·재개를 겪을 때마다 자라고 상한이 없었다.
+// 실측(2026-08-05): 쌍둥이 10건일 때 이 배너 혼자 533토큰 = 예산 1200 의 44%.
+//
+// 카드를 밀어내면서까지 id 를 전부 적을 값어치는 없다. 사람이 이 배너로 하는 일은
+// "내 카드가 갈렸구나"를 아는 것이고 그것은 첫 줄로 끝난다 — 전부가 필요하면 detail 이 낸다.
+const driftTwinLimit = 3
+
 // RenderDrift 는 표류 하나를 사람이 읽는 문구로 만든다. 순수 함수다.
 //
 // 표류가 없으면 **빈 문자열**이다 — 매 board 마다 빈 절이 붙으면 예산이 토큰인 화면이 상한다.
@@ -117,7 +128,12 @@ func RenderDrift(twins []CoordinateTwin, mineCC, why string) string {
 	s := "⚠ 이 워크트리에 cc_session_id 가 갈린 세션이 " +
 		itoa(len(twins)) + "건 더 있다 — 카드가 여러 장인 이유가 이것이다.\n" +
 		"  이 MCP 프로세스가 카드를 연 값: " + clip(mineCC, 64) + "\n"
-	for _, t := range twins {
+	for i, t := range twins {
+		if i >= driftTwinLimit {
+			s += "  갈린 카드 " + itoa(len(twins)-driftTwinLimit) +
+				"건 더 — 수는 위 첫 줄이 전부 센 값이다\n"
+			break
+		}
 		s += "  갈린 카드: " + clip(t.SessionID, 64) + " · cc=" + clip(t.CCSessionID, 64) + "\n"
 	}
 	s += "  같은 창의 카드라면 훅이 다음 SessionStart 에 합친다. " +

@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // REST 본문 타입 — **internal/api 의 요청 구조체와 필드 이름이 1:1 이어야 한다.**
 //
 // 그쪽 타입은 비공개라 여기서 다시 선언한다. 그래서 위험이 하나 생긴다:
@@ -104,6 +106,44 @@ type errBody struct {
 		Guidance  string `json:"guidance"`
 		RequestID string `json:"request_id"`
 	} `json:"error"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 랜딩 레인
+// ─────────────────────────────────────────────────────────────────────────────
+
+// landingPath 는 land 세 갈래가 **공유하는 한 경로**다.
+//
+// ★ 상수로 두는 이유: 이 경로를 부르는 자리가 둘이다(cmds.go 의 runLand · mcpbackend.go 의
+// Land·LandReport·LandLeave). 리터럴로 두 벌 적으면 한쪽만 고쳐진 날 MCP 는 404 를 받고
+// CLI 는 멀쩡한데, 그 비대칭은 "MCP 가 고장났다"로만 보여 원인에 못 닿는다.
+const landingPath = "/api/v1/landing"
+
+// laneReleasePath 는 줄 행 하나의 회수 표면이다. **대상이 세션이 아니라 줄 행 번호다** —
+// 죽은 세션 명의로는 아무 호출도 못 하므로(세션 정체가 3중키다) 번호가 유일한 손잡이다.
+func laneReleasePath(rowID int64) string {
+	return fmt.Sprintf("/api/v1/landing/rows/%d/release", rowID)
+}
+
+// landReq 는 POST /api/v1/landing 의 본문이다.
+//
+// ★ Mode 값은 지어내지 않고 **정본 표면의 상수**(api.LandModeAcquire 계열)를 쓴다.
+// 필드 이름은 그렇게 못 한다(그쪽 구조체가 비공개다) — 그 축은 land_seam_test.go 가
+// 실물 서버 왕복으로 잠근다. 이름이 어긋나면 서버가 오류 없이 0값을 받는데,
+// mode 는 서버가 필수로 두어 그 0값이 400 으로 드러난다.
+type landReq struct {
+	Project   string `json:"project"`
+	SessionID string `json:"session_id"`
+	Mode      string `json:"mode"`
+	Kind      string `json:"kind,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// laneReleaseReq 는 회수 본문이다. session_id 가 없는 이유는 위 laneReleasePath 주석에 있다.
+type laneReleaseReq struct {
+	Project string `json:"project"`
+	Actor   string `json:"actor,omitempty"`
+	Reason  string `json:"reason"`
 }
 
 // moveReq 는 POST /api/v1/items/{id}/move 의 본문이다.

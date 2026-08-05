@@ -187,6 +187,62 @@ func TestOverlapWithSelfIsNotReported(t *testing.T) {
 	}
 }
 
+// TestOverlapWithSiblingCardIsNotReported 는 **같은 대화의 다른 카드**를 겹침에서 뺀다.
+//
+// 정체가 3중키(머신·워크트리·cc)라 한 대화가 카드 여러 장이 될 수 있다 —
+// /clear·compact·재개로 cc 가 갈리거나, 하위 디렉토리에서 MCP 가 뜨거나. 그때 카드 id 는
+// 다르지만 대화는 같고, id 만 비교하면 화면이 **자기 자신과 조율하라**고 말한다.
+// 실측(2026-08-05): 이 머신의 살아 있는 카드 34장이 대화 11개였다.
+//
+// 처방 축은 이 판정을 이미 갖고 있었다(sameConversation). 이 시험은 그 판정이
+// **겹침 축에도** 적용됐는지를 잠근다 — 한쪽만 고치면 같은 화면이 두 말을 한다.
+func TestOverlapWithSiblingCardIsNotReported(t *testing.T) {
+	const mine = "cc-aaaa"
+	picked, _ := Eligible(EligibleInput{
+		Self: "S1", SelfCC: mine,
+		Candidates: []Candidate{{Item: openItem("t2-pipeline", 0, "pipeline/")}},
+		Live: []LiveSession{
+			// 카드 id 는 다르지만 **같은 대화**다. 겹침이 아니다.
+			{ID: "S9", Label: "내 형제 카드", Paths: []string{"pipeline/"}, CCSessionID: mine},
+			// 진짜 남 — 이건 반드시 나와야 한다. 안 나오면 이 시험은 겹침 축을
+			// 통째로 꺼 놓고 초록을 내는 것이 된다.
+			{ID: "S3", Label: "남", Paths: []string{"pipeline/"}, CCSessionID: "cc-zzzz"},
+		},
+	})
+	if picked == nil {
+		t.Fatal("추천이 없다")
+	}
+	if len(picked.Overlaps) != 1 {
+		t.Fatalf("겹침이 %d건이다 — 형제는 빠지고 남은 남아야 한다: %+v",
+			len(picked.Overlaps), picked.Overlaps)
+	}
+	if picked.Overlaps[0].SessionID != "S3" {
+		t.Fatalf("남은 겹침이 %q 다 — S3(진짜 남)이어야 한다", picked.Overlaps[0].SessionID)
+	}
+}
+
+// TestEmptyCCIsNotASibling 은 반대편을 못박는다.
+//
+// **못 읽은 cc 둘을 같은 대화로 접으면 안 된다.** 접으면 관측이 깨진 순간
+// 겹침 축이 조용히 전부 꺼지고, 꺼졌다는 사실조차 화면에 안 나온다 —
+// 이 저장소가 반복해서 겪은 실패 모양이다. 위 시험만 있으면
+// `a == b` 로 '정리'하는 변경이 초록으로 통과한다.
+func TestEmptyCCIsNotASibling(t *testing.T) {
+	picked, _ := Eligible(EligibleInput{
+		Self: "S1", SelfCC: "", // 내 cc 를 못 읽었다
+		Candidates: []Candidate{{Item: openItem("t2-pipeline", 0, "pipeline/")}},
+		Live: []LiveSession{
+			{ID: "S3", Label: "남", Paths: []string{"pipeline/"}, CCSessionID: ""}, // 저쪽도 못 읽었다
+		},
+	})
+	if picked == nil {
+		t.Fatal("추천이 없다")
+	}
+	if len(picked.Overlaps) != 1 {
+		t.Fatalf("빈 cc 둘을 형제로 접었다 — 관측 실패가 겹침 축을 끈다: %+v", picked.Overlaps)
+	}
+}
+
 // 겹침이 없다는 것과 이 축을 안 본다는 것이 구분돼야 한다.
 // 살아 있는 세션이 있는데도 겹침이 0건이면 그것은 "안 겹친다"라는 판정이다.
 func TestNoOverlapWhenPathsAreUnrelated(t *testing.T) {

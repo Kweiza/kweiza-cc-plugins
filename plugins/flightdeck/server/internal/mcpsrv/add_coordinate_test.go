@@ -58,17 +58,11 @@ func TestAddResponseNamesTheProjectAndTheWayBack(t *testing.T) {
 	}
 }
 
-// ★ 도구 수는 여섯 그대로다. 이 항목을 고치면서 늘리지 않았다는 것을 여기서 못박는다.
-//
-// 설계 §6 의 근거는 컨텍스트 예산이다 — 세션 시작에는 도구 이름과 300자 instructions 만
-// 실린다. 늘리려면 그 예산을 새로 정당화해야 하고, 그 판정은 이 항목의 것이 아니었다.
+// ★ 이 항목은 move 를 도구로 더하지 않고 응답 문구로 푸는 쪽으로 판정했다 — 그 판정이
+// 여기서 못박는 전부다. 도구 **개수**의 정본은 protocol_test.go 의 TestToolTableIsSeven
+// 하나여야 한다(정본이 둘이면 하나만 고쳐진 날 조용히 갈린다) — 그래서 개수는 여기서 안 잰다.
 func TestFixingMisregistrationDidNotGrowTheToolTable(t *testing.T) {
-	names := ToolNames()
-	if len(names) != 6 {
-		t.Errorf("도구가 %d개다(%v) — 설계 §6 은 여섯이고 그 근거는 컨텍스트 예산이다.\n"+
-			"늘리려면 §6 을 함께 고쳐라. 문서와 코드를 갈린 채로 두지 마라.", len(names), names)
-	}
-	for _, n := range names {
+	for _, n := range ToolNames() {
 		if n == "move" {
 			t.Error("move 가 도구 목록에 있다 — 이 항목은 응답 문구로 푸는 쪽으로 판정했다")
 		}

@@ -194,6 +194,50 @@ func TestPickReportsOverlapWithoutFilteringIt(t *testing.T) {
 	}
 }
 
+// TestPickDoesNotReportSiblingCardAsOverlap 은 **배선**을 잠근다.
+//
+// judge 쪽 판정(sameConversation)은 eligible_test 가 본다. 이 시험은 그 판정이
+// 실제 진입점으로 들어오는지를 본다 — `liveFor` 가 cc 를 안 채우거나 `selfCCOf` 가
+// 안 불리면 판정은 멀쩡한데 화면은 그대로 거짓말을 한다. 머신 축이 남긴 교훈이다:
+// 시험이 구조체를 직접 조립하면 "호출부가 정말 채우는가"를 원리적으로 못 본다.
+//
+// 재현하는 것은 실측된 그 모양이다 — 같은 대화(cc-1)가 워크트리 두 깊이로 갈려
+// 카드 두 장이 된 상태(2026-08-05: 카드 34장 = 대화 11개).
+func TestPickDoesNotReportSiblingCardAsOverlap(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	me := openSession(t, s, "p", repo, wt, "cc-1", "내 카드")
+	sibling := openSession(t, s, "p", repo, repo, "cc-1", "같은 대화의 다른 카드")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "진짜 남")
+
+	// 형제와 남이 **같은 경로**를 만진다. 판정이 안 돌면 둘 다 겹침으로 나온다.
+	for _, id := range []string{sibling.Session.ID, other.Session.ID} {
+		if err := s.Beat(ctx(), id, model.SignalTool,
+			[]string{filepath.Join(repo, "pipeline", "run.py")}); err != nil {
+			t.Fatalf("비트 실패: %v", err)
+		}
+	}
+	addItem(t, s, "p", "batch7", []string{"pipeline/"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "batch7"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+
+	// 형제 카드가 겹침으로 나오면 세션이 자기 자신과 조율하게 된다.
+	for _, ov := range res.Overlaps {
+		if ov.SessionID == sibling.Session.ID {
+			t.Fatalf("형제 카드가 겹침으로 나왔다 — 자기 자신과 조율하라는 화면이다: %+v", res.Overlaps)
+		}
+	}
+	// ★ 그리고 진짜 남은 **반드시 남아야 한다.** 이 단정이 없으면 겹침 축을 통째로
+	// 꺼 버리는 변경이 위 단정만 보고 초록으로 지나간다.
+	if len(res.Overlaps) != 1 || res.Overlaps[0].SessionID != other.Session.ID {
+		t.Fatalf("진짜 남과의 겹침이 사라졌다 — 형제를 빼면서 축을 통째로 껐다: %+v", res.Overlaps)
+	}
+}
+
 func TestPickRecommendationDoesNotClaim(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
@@ -531,8 +575,11 @@ func TestAddItemSaysWhichPathIsWrong(t *testing.T) {
 	if err == nil {
 		t.Fatal("통과시켰다")
 	}
-	if !strings.Contains(err.Error(), "2번째") {
-		t.Errorf("몇 번째 경로인지 안 말한다: %s", err.Error())
+	// ★ 틀린 것은 목록의 **세 번째**(`e\f.go`)다. 그러므로 "3번째"라고 말해야 한다 —
+	// 전에는 range 인덱스를 그대로 실어 "2번째"라고 했고, 그 말을 믿은 사람은
+	// 멀쩡한 `c/d.go` 를 고치러 갔다.
+	if !strings.Contains(err.Error(), "3번째") {
+		t.Errorf("몇 번째 경로인지 안 말한다(1-based 여야 한다): %s", err.Error())
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
-// `fd mcp` — **배선만 한다.** 프로토콜과 도구 6개는 internal/mcpsrv 에 있다.
+// `fd mcp` — **배선만 한다.** 프로토콜과 도구 7개는 internal/mcpsrv 에 있다.
 //
 // ★ 이 명령은 **DB 를 열지 않는다.** 다른 서브명령과 똑같이 FD_URL·FD_TOKEN 으로
 // 조정 서버에 붙는다(설계 원칙 ③: "정합성 경로는 REST, MCP 는 그 위의 얇은 껍데기").
@@ -18,7 +18,7 @@ import (
 // 앞선 판은 여기서 로컬 SQLite 를 열어 service 계층을 직접 꽂았다. 그러면 셋이 깨진다:
 //
 //  1. **알림이 통째로 안 뜬다.** SSE 허브는 internal/api 의 server 안에 있어
-//     그 밖에서 일어난 쓰기는 발행 지점을 지나가지 않는다. 도구 6개가 에이전트의
+//     그 밖에서 일어난 쓰기는 발행 지점을 지나가지 않는다. 도구 7개가 에이전트의
 //     유일한 쓰기 표면이므로(설계 §6) 실제 조정 트래픽의 대부분이 알림 축에서 사라졌다.
 //  2. **같은 파일에 프로세스가 줄을 선다.** 세션이 10개면 이 프로세스도 10개이고
 //     전부 `_txlock=immediate` 로 같은 DB 를 쓴다. 쓰기 주체를 서버 하나로 모으면 그 경합이 없다.
@@ -72,6 +72,10 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 	srv := mcpsrv.New(newMCPBackend(app), log,
 		mcpsrv.WithProject(app.proj.ID, app.proj.Path),
 		mcpsrv.WithMachine(app.machine),
+		// 워크트리도 여기서 넣는다. resolveProject 가 --show-toplevel 로 이미 푼 값이고,
+		// 이 한 줄이 없으면 MCP 는 자기 cwd 를 워크트리로 봐서 훅과 3중키가 갈린다 —
+		// 저장소 하위 디렉토리에서 연 창이 카드 두 장이 된다(TestHookAndMCPAgreeOnWorktreeFromSubdir).
+		mcpsrv.WithWorktree(app.proj.Worktree),
 		mcpsrv.WithBeaconDir(app.beaconDir))
 	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())

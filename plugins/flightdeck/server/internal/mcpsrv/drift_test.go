@@ -2,10 +2,12 @@ package mcpsrv
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
@@ -162,7 +164,41 @@ func TestRenderDriftNamesTheAxisAndWhyRepairDidNotHappen(t *testing.T) {
 	}
 }
 
-// why 가 비어도 문구가 잘 맺어지는지("because:" 만 남고 뒤가 없는 꼴이 아닌지) 본다.
+// TestRenderDriftCapsNamedTwins 는 배너가 이름을 적는 줄에 상한이 있는지 본다.
+//
+// 이 배너는 board 의 **고정분**이다 — 예산이 자르는 것은 카드뿐이라, 여기 한 줄이 늘면
+// 카드가 한 장 밀려난다. 그런데 갈린 카드 수는 /clear·compact 때마다 자라고 상한이 없었다.
+// 실측(2026-08-05): 쌍둥이 10건일 때 이 배너 혼자 예산 1200 의 44%.
+func TestRenderDriftCapsNamedTwins(t *testing.T) {
+	const n = 10
+	var tw []CoordinateTwin
+	for i := 0; i < n; i++ {
+		tw = append(tw, CoordinateTwin{
+			SessionID:   fmt.Sprintf("01KZ7CARD%013d", i),
+			CCSessionID: fmt.Sprintf("%08d-6ca4-4321-9912-f713e791f3fe", i),
+		})
+	}
+	got := RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+
+	if named := strings.Count(got, "갈린 카드: "); named > driftTwinLimit {
+		t.Fatalf("이름을 %d개 적었다 — 상한 %d\n%s", named, driftTwinLimit, got)
+	}
+	// 수는 첫 줄이 **참값**으로 낸다. 상한을 수에도 적용하면 배너가 거짓말을 한다.
+	if !strings.Contains(got, fmt.Sprintf("갈린 세션이 %d건 더", n)) {
+		t.Fatalf("첫 줄이 참 건수 %d 를 안 낸다:\n%s", n, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d건 더 —", n-driftTwinLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%s", got)
+	}
+
+	// 대조 — 상한 이하면 전부 이름이 나온다.
+	few := RenderDrift(tw[:2], "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+	if named := strings.Count(few, "갈린 카드: "); named != 2 {
+		t.Fatalf("쌍둥이 2건인데 이름이 %d개다:\n%s", named, few)
+	}
+}
+
+// why 가 비어도 문구가 잘 맺어지는지("사유:" 만 남고 뒤가 없는 꼴이 아닌지) 본다.
 func TestRenderDriftIsWellFormedWithoutAReason(t *testing.T) {
 	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "cc-new", "")
 	if got == "" {
@@ -170,6 +206,90 @@ func TestRenderDriftIsWellFormedWithoutAReason(t *testing.T) {
 	}
 	if strings.Contains(got, "사유:") {
 		t.Errorf("사유가 없는데 '사유:' 꼬리표만 남았다:\n%s", got)
+	}
+}
+
+// TestBoardTailDoesNotAccuseSiblingCardOfOverlap 은 **세 번째 호출부**를 잠근다.
+//
+// 형제 판정은 judge 가 하고(eligible_test), board.go·pick.go 배선은 service 가 본다
+// (pick_test). 여기 mcpsrv 의 liveOf 는 그 둘 어느 쪽도 안 지나는 별개 호출부다 —
+// 그 한 줄이 빠지면 판정도 멀쩡하고 다른 시험도 전부 초록인데 **이 화면만** 거짓말한다.
+// 같은 모양을 이 패키지가 머신 축에서 이미 겪었다.
+func TestBoardTailDoesNotAccuseSiblingCardOfOverlap(t *testing.T) {
+	repo := newRepo(t)
+	svc, _ := newSvc(t)
+	srv := newServer(t, svc, repo, fullEnv(repo))
+	project := filepath.Base(repo)
+	bg := context.Background()
+
+	// 내 카드는 첫 도구 호출에서 생긴다(ensureSession 이 게으르다).
+	serve(t, srv, call("board", map[string]any{}))
+	view, err := svc.Board(bg, project, service.BoardOptions{})
+	if err != nil {
+		t.Fatalf("보드 조회 실패: %v", err)
+	}
+	var mineID string
+	for _, c := range view.Sessions {
+		if c.View.Session.CCSessionID == "cc-session-uuid-1" {
+			mineID = c.View.Session.ID
+		}
+	}
+	if mineID == "" {
+		t.Fatal("전제 구성 실패 — 내 카드를 못 찾았다")
+	}
+
+	// 형제: **같은 대화**인데 3중키의 다른 성분이 갈려 카드가 따로 선 것.
+	//
+	// ★ 갈림 축으로 **머신**을 쓴다. 워크트리 축으로 가르면 카드의 경로가 그 워크트리
+	// 기준으로 상대화되지 않아(하위 디렉토리는 git 이 못 읽는다) 애초에 겹치지 않고,
+	// 그러면 "형제가 안 나왔다"가 판정 때문인지 경로가 애초에 안 겹쳐서인지 구분이 안 된다 —
+	// 실제로 그렇게 썼다가 변이 시험에서 **판정을 죽여도 초록**인 것을 확인했다.
+	// 머신 축은 이 저장소가 실제로 겪는 갈림이고(hostname 대 진입점의 안정 id,
+	// 이 응답의 경고가 그것을 말한다) 경로 상대화가 나와 같아 대조가 성립한다.
+	sib, err := svc.OpenSession(bg, service.OpenSessionInput{
+		Project: project, ProjectPath: repo,
+		MachineID: "othermachine", Hostname: "othermachine", Worktree: repo,
+		CCSessionID: "cc-session-uuid-1", Label: "형제카드",
+	})
+	if err != nil {
+		t.Fatalf("전제 구성 실패 — 형제 카드: %v", err)
+	}
+	// 진짜 남: 대화가 다르다.
+	other, err := svc.OpenSession(bg, service.OpenSessionInput{
+		Project: project, ProjectPath: repo,
+		MachineID: "testhost", Hostname: "testhost", Worktree: repo,
+		CCSessionID: "cc-other", Label: "진짜남",
+	})
+	if err != nil {
+		t.Fatalf("전제 구성 실패 — 남의 카드: %v", err)
+	}
+
+	// 셋이 **같은 경로**를 만진다. 판정이 안 돌면 형제도 남도 둘 다 겹침으로 나온다.
+	shared := filepath.Join(repo, "pipeline", "run.py")
+	for _, id := range []string{mineID, sib.Session.ID, other.Session.ID} {
+		if err := svc.Beat(bg, id, model.SignalTool, []string{shared}); err != nil {
+			t.Fatalf("전제 구성 실패 — 비트(%s): %v", id, err)
+		}
+	}
+
+	body, isErr := toolText(t, serve(t, srv, call("board", map[string]any{}))[0])
+	if isErr {
+		t.Fatalf("board 가 실패했다:\n%s", body)
+	}
+
+	// ★ 카드 id 로 단정하지 않는다. 세 카드가 같은 밀리초에 열려 ULID 앞 8자가 같고,
+	// 꼬리는 ShortID(8자)로 찍으므로 **셋이 화면에서 구분되지 않는다** — 실제로 그렇게
+	// 썼다가 이 시험이 자기 자신을 못 가르는 것을 확인했다. 꼬리표로 가른다.
+	tail := body[strings.Index(body, "── 꼬리 ──"):]
+	if strings.Contains(tail, "형제카드") {
+		t.Fatalf("형제 카드가 겹침으로 나왔다 — 자기 자신과 조율하라는 화면이다:\n%s", tail)
+	}
+	// ★ 대조 — 진짜 남은 반드시 남는다. 없으면 이 시험은 겹침 축을 통째로 꺼 놓고 초록이다.
+	if !strings.Contains(tail, "진짜남") {
+		t.Fatalf("진짜 남과의 겹침이 사라졌다 — 형제를 빼면서 축을 껐다:\n%s", tail)
+	}
+	if !strings.Contains(tail, "겹침 1건") {
+		t.Fatalf("겹침이 1건이 아니다 — 형제가 섞였거나 축이 꺼졌다:\n%s", tail)
 	}
 }
 

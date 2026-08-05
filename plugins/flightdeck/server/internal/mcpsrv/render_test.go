@@ -263,6 +263,180 @@ func TestRenderBoardBudget(t *testing.T) {
 	}
 }
 
+// heavyTail 은 **실제로 관측된 모양의** 무거운 고정분을 만든다 — 겹침 다수 + 표류 배너.
+//
+// ★ TestRenderBoardBudget 이 쓰는 꼬리는 알림 0·겹침 0·배너 없음이라 두 줄짜리다.
+// 그래서 그 시험은 "고정분이 크면 어떻게 되나"를 **원리적으로 못 본다.** 카드가 0장이 된
+// 2026-08-05 의 실제 응답이 초록으로 지나간 이유가 그것이다. 이 헬퍼가 그 구멍을 메운다.
+// countCards 는 렌더된 보드에 실제로 남은 카드 수다.
+// synthBoard 의 id 는 ShortID 로 "01SESSIO…" 까지만 찍히므로 그 접두로 센다.
+func countCards(rendered string) int { return strings.Count(rendered, "01SESSIO") }
+
+func heavyTail(overlaps, twins int) string {
+	var ol []judge.Overlap
+	for i := 0; i < overlaps; i++ {
+		ol = append(ol, judge.Overlap{
+			SessionID: fmt.Sprintf("01OTHER%04d", i),
+			Pairs: [][2]string{
+				{".superpowers/sdd/2026-08-05-x/progress.md", ".superpowers/sdd/2026-08-05-x/progress.md"},
+				{"plugins/flightdeck/server/internal/service/board.go", "plugins/flightdeck/server/internal/service/board.go"},
+				{"plugins/flightdeck/server/internal/mcpsrv/render.go", "plugins/flightdeck/server/internal/mcpsrv/render.go"},
+			},
+		})
+	}
+	var tw []CoordinateTwin
+	for i := 0; i < twins; i++ {
+		tw = append(tw, CoordinateTwin{
+			SessionID:   fmt.Sprintf("01KZ7CARD%013d", i),
+			CCSessionID: fmt.Sprintf("%08d-6ca4-4321-9912-f713e791f3fe", i),
+		})
+	}
+	return RenderTail(TailInput{
+		Now: t0, NotesObserved: true, OverlapsObserved: true, Overlaps: ol,
+		Banner: RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", ""),
+	})
+}
+
+// TestRenderBoardKeepsCardFloorWhenFixedPartIsHuge 는 **카드 0장인 보드를 금지한다.**
+//
+// 2026-08-05 01:12 UTC 실측: 살아 있는 세션 34건인데 카드 0장, "34건을 접었다" 한 줄만.
+// 고정분(머리·발·꼬리·배너)이 예산 1200 을 156% 먹어서 예산 루프가 첫 블록에서 즉시
+// break 했다. 그 출력은 예산도 못 지키고(고정분이 이미 넘었다) 본체도 100% 잃는다.
+func TestRenderBoardKeepsCardFloorWhenFixedPartIsHuge(t *testing.T) {
+	// ── ① 실측된 그 모양 ── 2026-08-05 01:12 의 응답(세션 34건·겹침 16건·쌍둥이 10건)이
+	// 이제 카드를 낸다. **예산 안이라고는 단정하지 않는다** — 고정분이 그만큼 크면 예산을
+	// 넘기는 것이 설계된 거동이고(바닥이 예산을 이긴다), 그때 넘겼다고 말하는지를 대신 본다.
+	observed := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0, Tail: heavyTail(16, 10)})
+	if cards := countCards(observed); cards < 1 {
+		t.Fatalf("실측된 그 입력에서 카드가 0장이다 — 카드 0장인 보드는 보드가 아니다:\n%s", observed)
+	}
+	// 상한 둘이 실제로 걸렸는지 — 이 두 단정이 drift·꼬리 상한의 회귀 가드다.
+	if !strings.Contains(observed, "11건 더") {
+		t.Fatalf("겹침 16건인데 꼬리 상한이 안 걸렸다:\n%s", observed)
+	}
+	if !strings.Contains(observed, "7건 더") {
+		t.Fatalf("쌍둥이 10건인데 배너 상한이 안 걸렸다:\n%s", observed)
+	}
+
+	// ── ② 바닥 자체 ── 고정분이 예산을 넘기는 갈래를 직접 지난다.
+	// 상한 둘이 붙은 뒤로는 현실적인 꼬리로 예산을 못 넘기므로(그것이 상한의 목적이다)
+	// 예산을 좁혀서 그 갈래를 만든다 — 바닥은 예산 값과 무관한 성질이어야 한다.
+	tail := heavyTail(16, 10)
+	const tight = 400
+
+	// 대조 먼저: 고정분만으로 이 예산을 넘겨야 바닥이 발동하는 갈래를 실제로 지난다.
+	empty := RenderBoard(service.BoardView{
+		Project: model.Project{ID: "sample-platform", DefaultBranch: "main"},
+		At:      t0, Window: 8 * time.Hour,
+	}, BoardRenderOptions{Now: t0, Tail: tail, Budget: tight})
+	if got := EstimateTokens(empty); got <= tight {
+		t.Fatalf("대조가 성립하지 않았다: 카드 0장인 고정분이 %d토큰이라 예산 %d 를 안 넘는다 — "+
+			"이 입력으로는 바닥이 발동하는 갈래가 안 돈다", got, tight)
+	}
+
+	got := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0, Tail: tail, Budget: tight})
+
+	// ★ **깨질 수 없는 계약을 리터럴로 단정한다.** 여기를 `cards < boardCardFloor` 로 쓰면
+	// 시험이 자기가 지켜야 할 상수를 자기 기준으로 재게 되어, 바닥을 0 으로 만드는 변이가
+	// `0 < 0`(거짓)으로 **초록을 낸다** — 실제로 그렇게 썼다가 변이 시험에서 잡혔다.
+	// 계약은 "0장이면 안 된다"이고 3은 조율값이다. 둘을 따로 단정한다.
+	cards := countCards(got)
+	if cards < 1 {
+		t.Fatalf("카드가 0장이다 — 카드 0장인 보드는 보드가 아니다:\n%s", got)
+	}
+	if cards < boardCardFloor {
+		t.Fatalf("카드가 %d장이다 — 바닥 %d장을 못 지켰다:\n%s", cards, boardCardFloor, got)
+	}
+	// 예산을 넘겼다는 사실과 **넘긴 주체**를 말한다. 조용히 넘기면 계약이 거짓이 된다.
+	if !strings.Contains(got, "고정분") {
+		t.Fatalf("예산을 넘겼는데 무엇이 넘겼는지 안 말한다:\n%s", got)
+	}
+	// 접은 사실은 여전히 따로 말한다 — 원인이 둘이라 뭉치면 손댈 자리를 못 찾는다.
+	if !strings.Contains(got, "접었다") {
+		t.Fatalf("접었는데 접었다는 사실이 없다:\n%s", got)
+	}
+
+	// ── ③ 바닥은 예산이 넉넉할 때 **아무것도 안 바꾼다.** 상시 발동하면 판별력이 0이 된다.
+	light := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0,
+		Tail: RenderTail(TailInput{Now: t0, NotesObserved: true, OverlapsObserved: true})})
+	if strings.Contains(light, "고정분") {
+		t.Fatalf("가벼운 꼬리인데 예산 초과를 말한다 — 바닥이 상시 발동한다:\n%s", light)
+	}
+	if got := EstimateTokens(light); got > BoardTokenBudget {
+		t.Fatalf("가벼운 꼬리인데 기본 출력이 %d토큰이다 — 상한 %d", got, BoardTokenBudget)
+	}
+}
+
+// TestCardCapsItsOwnNoteLines 는 **카드 바닥의 비용**에 상한이 있는지 본다.
+//
+// boardCardFloor 는 예산을 이기고 카드를 남긴다. 그 카드 한 장의 크기에 상한이 없으면
+// 바닥이 예산을 얼마나 넘길지도 상한이 없다 — 실측(2026-08-05): 남은 카드 3장에
+// 사건 줄이 8개 붙어 예산을 531토큰 넘겼고 그 줄들이 초과분의 대부분이었다.
+func TestCardCapsItsOwnNoteLines(t *testing.T) {
+	const n = 6
+	var asks []model.Judgment
+	for i := 0; i < n; i++ {
+		asks = append(asks, model.Judgment{
+			Kind: model.JudgmentAsk, SessionID: "01SESSION0000", At: t0.Add(-time.Duration(i) * time.Minute),
+			Title: fmt.Sprintf("요청 %d — 만질 자리 전부를 낸다", i)})
+	}
+	got := noteLines("01SESSION0000", asks, nil, t0)
+
+	shown := 0
+	for _, l := range got {
+		if strings.Contains(l, "[ask ") {
+			shown++
+		}
+	}
+	if shown > cardNoteLimit {
+		t.Fatalf("사건 줄이 %d개다 — 상한 %d\n%v", shown, cardNoteLimit, got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), fmt.Sprintf("%d건 더", n-cardNoteLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%v", got)
+	}
+
+	// 대조 — 상한 이하면 전부 나오고 "더" 줄이 안 붙는다.
+	few := noteLines("01SESSION0000", asks[:1], nil, t0)
+	if len(few) != 1 {
+		t.Fatalf("사건 1건인데 줄이 %d개다:\n%v", len(few), few)
+	}
+	// 남의 사건은 애초에 안 센다 — 상한이 그 판정을 바꾸면 안 된다.
+	if other := noteLines("01OTHER", asks, nil, t0); len(other) != 0 {
+		t.Fatalf("남의 사건이 내 카드에 실렸다:\n%v", other)
+	}
+}
+
+// TestRenderTailCapsOverlapLines 는 꼬리의 **바깥 차원**에 상한이 있는지 본다.
+//
+// 안쪽 차원(겹침 한 건 안의 경로쌍)은 원래 4개로 잘렸는데 겹침 **건수**는 안 잘렸다.
+// 꼬리는 모든 응답에 붙고 board 에서는 고정분이라, 그 축이 세션 수에 O(N) 으로 자랐다.
+func TestRenderTailCapsOverlapLines(t *testing.T) {
+	const n = 16
+	got := heavyTail(n, 0)
+
+	lines := strings.Count(got, "  · 01OTHER")
+	if lines > tailOverlapLimit {
+		t.Fatalf("겹침 줄이 %d개다 — 상한 %d\n%s", lines, tailOverlapLimit, got)
+	}
+	// 자른 것을 조용히 하지 않는다. 그리고 **건수는 참값**이 나와야 한다 —
+	// 상한을 건수에도 적용하면 화면이 "겹침 5건"이라 거짓말을 한다.
+	if !strings.Contains(got, fmt.Sprintf("겹침 %d건", n)) {
+		t.Fatalf("머리줄이 참 건수 %d 를 안 낸다:\n%s", n, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d건 더", n-tailOverlapLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%s", got)
+	}
+
+	// 대조 — 상한 이하면 전부 낸다.
+	few := heavyTail(2, 0)
+	if strings.Contains(few, "건 더") {
+		t.Fatalf("겹침 2건인데 잘랐다:\n%s", few)
+	}
+	if c := strings.Count(few, "  · 01OTHER"); c != 2 {
+		t.Fatalf("겹침 2건인데 줄이 %d개다:\n%s", c, few)
+	}
+}
+
 // TestRenderBoardKeepsUnknownApartFromZero 는 0값과 "못 읽었다"를 화면에서 가른다.
 func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	v := synthBoard(1)
@@ -516,5 +690,211 @@ func TestRenderPickOmitsPathAxisWhenThereIsNoItem(t *testing.T) {
 
 	if strings.Contains(got, "경로 실재:") {
 		t.Fatalf("항목이 없는데 경로 축 줄이 나왔다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneNilStaysSilent 는 v.Lane == nil(안 읽었다)일 때 레인 절 자체가
+// 안 나온다는 것을 잠근다. **찍을 말이 없으면 아예 안 찍는다** — "0건"으로 지어내면
+// "안 읽었다"와 "질의는 돌았는데 0건이다"가 같은 문구가 된다.
+func TestRenderBoardLaneNilStaysSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 nil 인데 레인 절이 찍혔다 — '안 읽었다'와 '0건'이 같은 문구가 됐다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneEmptySaysTheQueryRan 은 브리프의 핵심 요구다: Lane 이 있지만
+// Entries 가 빈 것과 Lane 자체가 nil 인 것을 렌더가 **다른 문장**으로 낸다.
+// 0건 문장은 "질의는 돌았다"를 반드시 말해야 한다 — 안 그러면 위 시험과 이 시험의
+// 두 출력이 우연히 같아질 수 있고, 그러면 화면에서 둘이 구분 안 된다.
+func TestRenderBoardLaneEmptySaysTheQueryRan(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane:     &service.LaneView{Entries: []service.LaneEntry{}},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 비었을 뿐 nil 이 아닌데 레인 절이 안 찍혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "질의는 돌았다") {
+		t.Fatalf("0건 문구가 '질의는 돌았다'를 안 말한다 — nil 과 구분이 안 된다:\n%s", got)
+	}
+
+	// 대조군: nil 일 때와 정확히 갈라야 한다.
+	nilGot := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+	if got == nilGot {
+		t.Fatalf("Lane==nil 출력과 Lane 빈 슬라이스 출력이 똑같다 — 두 상태가 화면에서 안 갈린다")
+	}
+}
+
+// laneEntrySegment 는 렌더된 레인 절에서 세션 하나에 해당하는 항목 조각만 잘라낸다
+// (`N.<세션>(행R·대기AGE전MARK)` 모양이라, marker 부터 그 항목을 닫는 `)` 까지가 경계다).
+//
+// 시험이 문자열 전체에 "점유" 가 있는지만 보면 그 표시가 **엉뚱한 항목에 붙어도** 통과한다 —
+// 그 조각만 떼어 봐야 표시가 뒤바뀐 버그를 잡는다.
+func laneEntrySegment(t *testing.T, s, marker string) string {
+	t.Helper()
+	i := strings.Index(s, marker)
+	if i < 0 {
+		t.Fatalf("표시 %q 를 렌더 결과에서 못 찾았다:\n%s", marker, s)
+	}
+	rest := s[i:]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		t.Fatalf("표시 %q 의 항목이 ')' 로 안 닫힌다:\n%s", marker, s)
+	}
+	return rest[:end+1]
+}
+
+// TestRenderBoardLaneListsEntriesAndMarksTheHolder 는 줄 항목이 실제로 나오는지,
+// 그리고 지금 점유자가 어느 항목인지 표시가 갈리는지를 본다.
+//
+// ★ 단정을 **그 항목의 조각에** 붙인다(laneEntrySegment). 문자열 전체에 "점유" 가 있는지만
+// 보면 그 표시가 대기자 쪽에 잘못 붙어도(뒤바뀐 버그) 통과한다 — 실제로 앞선 판이 그 모양의
+// 시험이었다.
+func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
+	enq := t0.Add(-90 * time.Second)
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-1 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: enq},
+				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인 2건") {
+		t.Fatalf("레인 항목 수(2건)가 안 나온다:\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01HOLDERSESSION")) || !strings.Contains(got, ShortID("01WAITERSESSION")) {
+		t.Fatalf("줄에 선 세션 둘이 다 안 보인다:\n%s", got)
+	}
+
+	holderSeg := laneEntrySegment(t, got, ShortID("01HOLDERSESSION"))
+	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
+
+	// 점유자 쪽 조각에만 표시가 붙어야 한다 — 대기자 조각에 있으면 표시가 뒤바뀐 것이다.
+	if !strings.Contains(holderSeg, "점유") {
+		t.Fatalf("지금 점유자 조각에 '점유' 표시가 없다: %q\n전체:\n%s", holderSeg, got)
+	}
+	if strings.Contains(waiterSeg, "점유") {
+		t.Fatalf("대기자 조각에 '점유' 표시가 붙었다 — 점유자·대기자 표시가 뒤바뀌었다: %q\n전체:\n%s", waiterSeg, got)
+	}
+}
+
+// TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent — Entries 가 완전히 비었는데 Holder 가
+// 있는 상태는 이 레포에서 가장 위험한 불변식 위반이다: landing.go 의 "살아 있는 랜딩 점유에는
+// 반드시 대응하는 살아 있는 줄 행이 있다"가 깨졌다는 뜻이고, 그 축은
+// TestLiveLandingHoldAlwaysHasALiveQueueRow(internal/service/landing_test.go)가 동작으로 잠근다.
+//
+// 0건 분기가 Holder 유무를 안 가르면 이 상태가 "비어 있음(질의는 돌았다)"으로 조용히 접힌다 —
+// 정확히 이 상태에서 경고가 필요한데 그 경고 분기(l.Holder != nil && !laneHolderIsQueued(l))에
+// 영원히 안 닿는다(len(l.Entries)==0 조기 반환이 앞을 막는다). 이 시험은 그 도달성을 잠근다.
+func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Entries: []service.LaneEntry{},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "비어 있음") {
+		t.Fatalf("점유자가 있는데 '비어 있음'으로 찍혔다 — 가장 위험한 불변식 위반이 조용히 접혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠") {
+		t.Fatalf("정합 어긋남 경고가 안 찍혔다(불변식 위반인데 화면이 침묵한다):\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
+		t.Fatalf("어느 세션이 점유했는지가 안 보인다 — 경고는 있는데 누구 것인지 답을 못한다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent — **같은 불변식의 부분
+// 어긋남 갈래**다: 줄에 사람은 있는데 그중 아무도 점유자가 아니다.
+//
+// 0건 갈래(위 시험)만 잠그고 이쪽을 비워 두면 그 비대칭이 다음 리팩터에서 잠기지 않은 쪽을
+// 조용히 지운다 — 실제로 이 분기(render.go 의 `l.Holder != nil && !laneHolderIsQueued(l)`)는
+// 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
+// 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
+func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "⚠") {
+		t.Fatalf("점유자가 줄 목록에 없는데 경고가 없다 — 줄만 보면 정상으로 읽히고 레인은 아무도 못 잡는다:\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
+		t.Fatalf("경고가 어느 세션의 점유인지 말하지 않는다 — 누구를 회수해야 하는지 답이 없다:\n%s", got)
+	}
+	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
+	ok := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+	if strings.Contains(ok, "⚠") {
+		t.Fatalf("정합이 맞는데 어긋남 경고가 찍혔다 — 경고가 흔해지면 판별력이 0이 된다:\n%s", ok)
+	}
+}
+
+// TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy — 설계 §9 ① 이 요구하는 두 숫자:
+// 점유자의 **획득 경과**와 항목마다의 **마지막 신호 나이**.
+//
+// ★ 이 기능은 자동 만료를 안 만들었고 그 근거가 "사람이 나이를 보고 판정한다"다. 그런데
+// 판정하는 사람은 대기자가 아니라 **보드를 보는 사람**이라, 이 두 축이 보드에서 빠지면
+// 그 근거가 통째로 빈다. LaneEntry.LastSignalAt 은 service 가 항목마다 질의(N+1)로
+// 계산해 놓고도 보드 경로에서 읽는 쪽이 0건이었다 — 계산만 되고 안 읽히는 필드는
+// 나중에 "그 축은 이미 있다"의 거짓 근거가 된다(session_workspace 함정의 필드 판).
+func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
+	holderSignal := t0.Add(-4 * time.Minute)
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{
+				SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-2 * time.Hour),
+				LastSignalAt: &holderSignal,
+			},
+			Entries: []service.LaneEntry{
+				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: t0.Add(-3 * time.Hour), LastSignalAt: &holderSignal},
+				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	// ① 점유자의 획득 경과 — 레인 줄 머리에 있다.
+	if !strings.Contains(got, "획득") || !strings.Contains(got, "2시간") {
+		t.Fatalf("점유자의 획득 경과가 안 보인다 — 회수를 판정할 첫 숫자가 화면에 없다:\n%s", got)
+	}
+
+	// ② 마지막 신호 나이 — **그 항목의 조각에** 붙어 있어야 한다. 문자열 전체에 있는지만
+	//    보면 나이가 엉뚱한 항목에 붙어도 통과한다.
+	holderSeg := laneEntrySegment(t, got, ShortID("01HOLDERSESSION"))
+	if !strings.Contains(holderSeg, "신호 4분전") {
+		t.Fatalf("점유자 항목에 마지막 신호 나이가 없다: %q\n전체:\n%s", holderSeg, got)
+	}
+
+	// 신호가 없는 세션은 침묵이 아니라 "없음"으로 낸다(못 읽음/없음을 가르는 규율).
+	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
+	if !strings.Contains(waiterSeg, "신호 없음") {
+		t.Fatalf("신호가 없는 대기자의 그 사실이 안 보인다: %q\n전체:\n%s", waiterSeg, got)
 	}
 }

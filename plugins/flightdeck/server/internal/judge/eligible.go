@@ -63,10 +63,23 @@ type LiveSession struct {
 	ID    string
 	Label string
 	Paths []string
+	// CCSessionID 는 이 카드가 속한 **대화**의 id 다.
+	//
+	// ★ 카드 id 로는 "이게 나인가"를 못 가른다. 정체가 3중키(머신·워크트리·cc)라
+	// 한 대화가 카드 여러 장이 될 수 있고(cc 표류·워크트리 갈림), 그때 카드 id 는 다르지만
+	// 대화는 같다. 그 상태에서 카드 id 만 비교하면 **세션이 자기 자신과 조율하라는 처방**이 뜬다.
+	// 실측(2026-08-05): overlap 발화 32건 중 5건이 그것이었다.
+	//
+	// 비어 있을 수 있다(관측이 실패한 카드). 빈 값끼리는 **같다고 보지 않는다** —
+	// 못 읽은 둘을 같은 대화로 접으면 진짜 겹침이 조용히 사라진다.
+	CCSessionID string
 }
 
 type EligibleInput struct {
-	Self          string // 판정을 요청한 세션 id
+	Self string // 판정을 요청한 세션 id
+	// SelfCC 는 그 세션이 속한 **대화** id 다. 형제 카드를 겹침에서 빼는 데 쓴다 —
+	// 자세한 이유는 OverlapsWithLive 를 보라. 비어도 된다(그러면 형제 판정이 안 돈다).
+	SelfCC        string
 	Candidates    []Candidate
 	Live          []LiveSession
 	Facts         AfterFacts
@@ -108,7 +121,7 @@ func Eligible(in EligibleInput) (picked *Candidate, rejected []model.Rejection) 
 	// 값 복사본을 만들어 겹침을 채운다. 입력 슬라이스를 건드리지 않는다 —
 	// 순수 함수가 인자를 고치면 시험이 보는 것과 호출자가 보는 것이 갈라진다.
 	best := fit[0]
-	best.Overlaps = OverlapsWithLive(best.Item.Paths, in.Live, in.Self)
+	best.Overlaps = OverlapsWithLive(best.Item.Paths, in.Live, in.Self, in.SelfCC)
 	return &best, rejected
 }
 
@@ -190,10 +203,19 @@ func lessCandidate(a, b Candidate) bool {
 // self 는 건너뛴다 — 자기 발자국과 겹치는 것은 알림거리가 아니다.
 // 알림거리로 세면 착수 직후(자기 footprint 가 이미 그 경로를 담은 시점)마다
 // 자기 자신과 겹친다는 경고가 나오고, 상시 점등된 경고는 판별력이 0이 된다.
-func OverlapsWithLive(paths []string, live []LiveSession, self string) []Overlap {
+//
+// ★ selfCC 는 **형제 카드**를 같은 이유로 건너뛰기 위한 것이다. 정체가 3중키라
+// 한 대화가 카드 여러 장이 될 수 있고(cc 표류·워크트리 갈림), 그때 카드 id 는 다르지만
+// 대화는 같다. id 만 비교하면 **세션이 자기 자신과 조율하라는 경고**가 나온다.
+// 이 판정은 처방 축이 이미 같은 사고를 겪고 sameConversation 으로 고쳤다 —
+// 그 판정을 여기 두 번째 호출부에 그대로 적용한다(규칙을 두 벌로 만들지 않는다).
+//
+// 빈 cc 둘은 형제가 아니다(sameConversation 이 그렇게 정의돼 있다). 관측이 깨진 순간
+// 겹침 축이 통째로 꺼지는 것보다 오탐 쪽이 싸다.
+func OverlapsWithLive(paths []string, live []LiveSession, self, selfCC string) []Overlap {
 	var out []Overlap
 	for _, s := range live {
-		if s.ID == self {
+		if s.ID == self || sameConversation(selfCC, s.CCSessionID) {
 			continue
 		}
 		pairs := OverlapPairs(paths, s.Paths)

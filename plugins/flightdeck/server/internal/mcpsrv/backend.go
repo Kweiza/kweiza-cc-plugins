@@ -18,12 +18,12 @@ import (
 // 앞선 판은 여기에 *service.Service 를 직접 꽂아 **로컬 SQLite 에 직접 썼다.** 결과가 둘이었다:
 //
 //  1. SSE 허브는 internal/api 의 server 안에 있으므로 MCP 가 만든 변화는 **알림에 한 줄도 안 떴다.**
-//     도구 6개가 에이전트의 유일한 쓰기 표면이라(설계 §6) 조정 트래픽의 대부분이 알림 축에서
-//     통째로 사라졌고, 그러면 "아무 일도 없다"와 "이 경로는 알림을 안 낸다"가 구분되지 않는다.
+//     도구 전부가 에이전트의 유일한 쓰기 표면이라(설계 §6) 조정 트래픽의 대부분이 알림 축에서
+//     통째로 사라졌고, 그러면 "아무 일도 없다"와 "이 경로는 안 낸다"가 구분되지 않는다.
 //  2. 세션이 10개면 이 프로세스도 10개이고 전부 같은 파일에 `_txlock=immediate` 로 썼다.
 //     쓰기 주체를 서버 하나로 모으면 그 경합이 사라진다.
 //
-// **넓히지 않는다.** 여기 있는 것은 도구 6개와 세션 귀속이 실제로 부르는 메서드뿐이다.
+// **넓히지 않는다.** 여기 있는 것은 도구 7개와 세션 귀속이 실제로 부르는 메서드뿐이다.
 
 // Backend 는 조정 서버 한 대에 붙는 통로다.
 //
@@ -38,6 +38,13 @@ type Backend interface {
 	AddItem(ctx context.Context, in service.AddItemInput) (model.Item, error)
 	Finish(ctx context.Context, in service.FinishInput) (service.FinishResult, error)
 	Alloc(ctx context.Context, project, counter string) (int64, error)
+
+	// 랜딩 레인 셋 — land 도구 하나가 인자에 따라 이 셋 중 하나를 부른다.
+	// LandingLane 은 여기 없다: 보드가 레인 절을 낼 때 쓸 통로이지 land 도구가 직접 쓰지 않는다
+	// (레인 전체를 낸다는 것과 "내 자리"를 묻는 것은 다른 조회다 — Task 8 이 그 자리를 잇는다).
+	Land(ctx context.Context, in service.LandInput) (service.LandResult, error)
+	LandReport(ctx context.Context, in service.LandReportInput) (service.LandResult, error)
+	LandLeave(ctx context.Context, in service.LandLeaveInput) (service.LandResult, error)
 
 	// RecentNotes 는 응답 꼬리에 실을 최근 ask·blocked 다. **거르지 않은 것**을 낸다 —
 	// 자기 것을 빼는 판정은 표시 계층(FilterNotes)이 한다.
