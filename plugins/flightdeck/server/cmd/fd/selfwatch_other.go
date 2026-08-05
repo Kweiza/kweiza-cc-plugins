@@ -21,3 +21,9 @@ func exeIDOfPath(path string) (ExeID, error) {
 
 // selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
 func selfWatchSupported() bool { return false }
+
+// ★ 비유닉스에는 syscall.Exec 이 없다. **빈 성공을 돌려주면 안 된다** —
+// 호출부가 드레인까지 마친 뒤 "재기동했다"로 읽고 서버는 내려간 채로 남는다.
+func execSelf(exe string, argv, env []string) error {
+	return fmt.Errorf("%w (exe=%q)", errSelfWatchUnsupported, exe)
+}
