@@ -219,6 +219,7 @@ func (s *server) routes() *http.ServeMux {
 
 	// 세션 — D 계층. 사람이 branch·head·sha 를 적을 자리가 **없다**(설계 §5).
 	mux.HandleFunc("POST /api/v1/sessions", s.handleOpenSession)
+	mux.HandleFunc("GET /api/v1/sessions", s.handleFindSession)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", s.handlePatchSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/signals", s.handleSignal)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/workspaces", s.handleWorkspace)

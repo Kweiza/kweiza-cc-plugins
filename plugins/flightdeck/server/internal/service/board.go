@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,12 +46,47 @@ type SessionCard struct {
 	IsSelf      bool              `json:"is_self"`
 }
 
+// splitCardsOf 는 카드에서 갈림 탐지 입력을 뽑는다.
+//
+// judge 가 SessionCard 를 직접 받지 않는 이유: 그러면 판정 계층이 표시 계층의
+// 구조체에 묶이고, SessionCard 에 필드를 더할 때마다 judge 가 다시 컴파일된다.
+func splitCardsOf(cards []SessionCard) []judge.SplitCard {
+	out := make([]judge.SplitCard, 0, len(cards))
+	for _, c := range cards {
+		out = append(out, judge.SplitCard{
+			SessionID:   c.View.Session.ID,
+			MachineID:   c.View.Session.MachineID,
+			Worktree:    c.View.Session.Worktree,
+			CCSessionID: c.View.Session.CCSessionID,
+		})
+	}
+	return out
+}
+
+// AckReach 는 처방 확인율이 지금 무엇을 재고 있는지다.
+// Emitted 와 Reachable 이 크게 다르면 그 차이가 곧 카드 갈림이다.
+type AckReach struct {
+	Emitted   int `json:"emitted"`
+	Reachable int `json:"reachable"`
+	Acked     int `json:"acked"`
+}
+
 // BoardView 는 보드 한 장이다.
 type BoardView struct {
-	Project   model.Project        `json:"project"`
-	At        time.Time            `json:"at"`
-	Window    time.Duration        `json:"window"`
-	Sessions  []SessionCard        `json:"sessions"`
+	Project  model.Project `json:"project"`
+	At       time.Time     `json:"at"`
+	Window   time.Duration `json:"window"`
+	Sessions []SessionCard `json:"sessions"`
+	// Splits 는 워크트리 정규화가 안 돈 흔적이다. **비어 있는 것이 정상**이고,
+	// 하나라도 있으면 그 카드를 연 클라이언트가 4de4b21 이전 판이라는 뜻이다.
+	//
+	// ★ git 을 못 읽어도 이 축이 **완전히 죽지는 않는다** — judge 가 카드 경로에서
+	//   관례 루트(.flightdeck/worktrees/<이름>)를 되읽기 때문이다. 다만 근거가 그것뿐이라
+	//   판정 범위가 좁아지고, 그 사실은 Failures 의 `split-detect` 축에 남는다.
+	//   침묵과 "갈림 없음"을 구분해야 한다.
+	Splits []judge.SplitReport `json:"splits,omitempty"`
+	// AckReach 는 detail 꼬리 전용이다. nil 이면 이 조회가 안 돌았다는 뜻이다.
+	AckReach  *AckReach            `json:"ack_reach,omitempty"`
 	OpenItems []model.Item         `json:"open_items,omitempty"`
 	Blocked   []model.Judgment     `json:"blocked,omitempty"`
 	Asks      []model.Judgment     `json:"asks,omitempty"`
@@ -96,12 +133,32 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	if window <= 0 {
 		window = s.window
 	}
-	cards, err := s.sessionCards(ctx, proj, s.cut(now, window), opt.Self, d)
+	cards, roots, err := s.sessionCardsAndRoots(ctx, proj, s.cut(now, window), opt.Self, d)
 	if err != nil {
 		return BoardView{}, err
 	}
 
 	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
+	// ★ 침묵하지 않는다. 루트를 못 읽었거나 어느 트리에도 못 붙인 카드가 있으면
+	//   그 사실을 파생 기록에 남긴다 — 안 남기면 "갈림 없음"과 "판정을 못 했다"가
+	//   화면에서 같아진다.
+	if len(roots) == 0 {
+		d.note("split-detect", "워크트리 루트를 못 읽었다 — 갈림 탐지의 근거가 관례 복원뿐이다")
+	}
+	var unattributed int
+	view.Splits, unattributed = judge.DetectUnnormalizedSplit(splitCardsOf(cards), roots)
+	if unattributed > 0 {
+		d.note("split-detect", fmt.Sprintf(
+			"카드 %d장은 어느 워크트리에도 못 붙여 갈림 판정에서 빠졌다", unattributed))
+	}
+
+	// ★ 실패해도 보드를 죽이지 않는다 — 파생이 통째로 실패해도 응답을 내는 것이
+	//   이 도구의 존재 이유다. 다만 침묵하지 않고 파생 실패로 남긴다.
+	if em, re, ak, aerr := s.st.AckReach(ctx, project); aerr != nil {
+		d.fail("ack-reach", aerr)
+	} else {
+		view.AckReach = &AckReach{Emitted: em, Reachable: re, Acked: ak}
+	}
 
 	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).
 	listAll := s.outOfWindowLister
@@ -254,11 +311,16 @@ func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([
 	return out, nil
 }
 
-// sessionCards 는 살아 있는 세션 각각에 파생 사실을 붙인다.
+// sessionCardsAndRoots 는 sessionCards 에 **git 이 아는 워크트리 루트 목록**을 더해 낸다.
+//
+// 갈림 탐지가 그것 없이는 못 돌고(judge.DetectUnnormalizedSplit), 여기서 이미
+// `git worktree list` 를 한 번 돌렸으므로 호출부가 다시 부르면 이 서버에서 가장 비싼
+// 일이 두 배가 된다. git 을 못 읽었으면 nil 이다 — 빈 것과 못 읽은 것을 호출부가
+// 가를 수 있어야 한다.
 //
 // 붙이는 것은 셋이다 — 브랜치·HEAD(워크트리 목록) · ahead(기본 브랜치 대비) ·
 // 경로(footprint ∪ change_set ∪ 미커밋). 셋 다 실패해도 세션 행은 남는다.
-func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
+func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
 	// ★ 이 함수가 이 서버에서 가장 비싼 일이다 — `git worktree list` 한 번 + 살아 있는
 	//   세션마다 ChangedPaths·UncommittedPaths. 그 비용을 세는 자리를 여기 둔다.
 	//   호출부에 두면 호출부가 늘 때마다 계측이 조용히 빠진다(실제로 그 모양으로
@@ -271,18 +333,24 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 
 	live, err := s.st.ListLive(ctx, proj.ID, cut)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.deriveCards.Add(uint64(len(live)))
 
 	var g GitReader
 	var wts map[string]string // 워크트리 경로 → 브랜치
 	var heads map[string]string
+	var roots []string
 	if strings.TrimSpace(proj.Path) == "" {
 		d.note("project-path", "프로젝트 경로가 비어 있다 — git 파생을 아예 시도하지 않았다")
 	} else {
 		g = s.git(proj.Path)
 		wts, heads = s.worktreeIndex(ctx, g, d)
+		roots = make([]string, 0, len(wts))
+		for wt := range wts {
+			roots = append(roots, wt)
+		}
+		sort.Strings(roots) // 파생 결과가 맵 순회 순서에 안 새게
 		// 기본 브랜치의 tip 은 신선도·ref_state 용으로만 읽는다. 변경집합의 base 로는 안 쓴다 —
 		// 그 자리는 갈래 지점이다(아래 MergeBase 참조).
 		if r, err := g.Ref(ctx, proj.DefaultBranch); err != nil {
@@ -353,7 +421,7 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 		card.View.HasFootprint = len(card.View.Paths) > 0
 
 		if note, err := s.lastNote(ctx, v.Session.ID); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if note != nil {
 			card.View.LastNote = note
 		}
@@ -361,7 +429,17 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 		card.DeriveError = strings.Join(fails, " · ")
 		cards = append(cards, card)
 	}
-	return cards, nil
+	return cards, roots, nil
+}
+
+// sessionCards 는 루트가 필요 없는 호출부를 위한 껍데기다(finish.go · pick.go).
+//
+// ★ 그 둘의 시그니처를 안 바꾸려고 이 껍데기를 둔다 — 이 브랜치는 그 파일들을 안 연다
+//
+//	(다른 세션이 미랜딩으로 잡고 있다). 로직은 sessionCardsAndRoots 하나뿐이다.
+func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
+	cards, _, err := s.sessionCardsAndRoots(ctx, proj, cut, self, d)
+	return cards, err
 }
 
 // worktreeIndex 는 워크트리 경로 → 브랜치·HEAD 두 색인을 만든다.
