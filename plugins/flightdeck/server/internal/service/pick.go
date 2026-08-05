@@ -517,37 +517,11 @@ func (s *Service) heldResources(ctx context.Context, project string) (map[string
 
 // linkedJudgments 는 항목 하나에 연결된 판단 전문이다.
 //
-// ★ 저장 계층에 "링크 대상으로 찾기" 조회가 없어서 **종류별로 훑어 링크로 거른다**.
-// 인덱스(judgment_link_by_target)는 있으나 접근자가 없고, 그 접근자를 만드는 것은
-// 이 계층의 담당이 아니다. 종류 수가 고정(9)이라 질의 수는 항목 수와 무관하다.
+// 앞 판은 저장 계층에 "링크 대상으로 찾기" 조회가 없어 **종류 9개를 훑어 링크로 걸렀다**.
+// 항목 하나에 질의 9회였고, 묶음이 들어오면서 N×9 가 됐다.
+// 접근자(store.JudgmentsForItem)를 만들어 항목당 1회로 줄인다.
 func (s *Service) linkedJudgments(ctx context.Context, project, itemID string) ([]model.Judgment, error) {
-	kinds := []model.JudgmentKind{
-		model.JudgmentHandoff, model.JudgmentDecision, model.JudgmentBlocked,
-		model.JudgmentAsk, model.JudgmentNow, model.JudgmentRejected,
-		model.JudgmentNotDone, model.JudgmentVerified, model.JudgmentDraft,
-	}
-	var out []model.Judgment
-	for _, k := range kinds {
-		js, err := s.st.ListJudgmentsByKind(ctx, project, k, 50)
-		if err != nil {
-			return nil, err
-		}
-		for _, j := range js {
-			for _, l := range j.Links {
-				if l.TargetKind == "item" && l.TargetID == itemID {
-					out = append(out, j)
-					break
-				}
-			}
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].At.Equal(out[j].At) {
-			return out[i].At.After(out[j].At) // 최신이 먼저
-		}
-		return out[i].ID > out[j].ID
-	})
-	return out, nil
+	return s.st.JudgmentsForItem(ctx, project, itemID)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
