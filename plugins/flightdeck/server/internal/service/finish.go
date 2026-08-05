@@ -262,8 +262,44 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				var held *store.ResourceHeldError
 				if errors.Is(err, store.ErrNotFound) || errors.As(err, &held) {
 					// ★ 남이 이미 반납했거나 강제로 회수했다. 그것은 finish 를 실패시킬
-					//   이유가 아니다 — 원장에만 남기고 Released 에서 뺀다
-					//   (item.go 의 ReleaseClaim 과 같은 규율).
+					//   이유가 아니다 — 원장에만 남기고 Released 에서 뺀다.
+					//
+					// ★ **개정 — 인용이 두 갈래 중 하나에서만 맞았다.** 원래 이 자리는 위 두 줄
+					//   뒤에 "(item.go 의 ReleaseClaim 과 같은 규율)" 한 마디로 두 갈래를 함께
+					//   인용했다. 갈래마다 선례가 갈린다:
+					//
+					//   ⓐ ErrNotFound — 선례가 **맞다.** 여기서 뜨는 ErrNotFound 는 바로 위
+					//     ListHeld 가 살아 있는 행으로 내준 뒤 사라진 것이므로 "이미 반납됐다"
+					//     하나뿐이고, ReleaseClaim 도 그 상황을 `return nil` 로 삼킨다(item.go 의
+					//     "이미 반납됐다. 멱등하게 통과시킨다"). 계층만 다르다 — 그쪽은 저장층
+					//     안에서 삼키고, 이쪽은 heldBy 가 `released_at IS NULL` 만 보므로 같은
+					//     상황이 ErrNotFound 로 올라와 호출자인 여기가 삼킨다.
+					//     같은 문장이 service/landing.go 의 이탈 갈래에도 있는데 **그쪽은 옳다** —
+					//     거기 갈래는 이 ⓐ 하나뿐이라 통째로 인용해도 어긋날 데가 없다.
+					//
+					//   ⓑ ResourceHeldError — 선례가 **정반대다.** ReleaseClaim 은 바로 그 상황
+					//     (남이 쥐고 있다)에서 ClaimHeldError 를 **올린다.** 이 흡수는 선례를 못
+					//     빌리고, 빌리지 않고 서는 근거가 셋이다:
+					//     · 배타를 하나도 안 약화시킨다 — ReleaseResource 는 점유자가 다르면
+					//       UPDATE 를 아예 안 친다(store/resource.go). 남의 점유는 그대로 남는다.
+					//     · 여기는 **지목 반납이 아니라 쓸어담기다.** ReleaseClaim 은 호출자가
+					//       항목을 지목해 명령한 자리라 "그건 남의 것이다"를 반드시 알려야 하지만,
+					//       이 루프는 ListHeld 를 훑어 자기 것만 걷는 청소라 걷을 것이 이미
+					//       사라졌다는 사실이 명령 실패가 아니다. 같은 함수의 ③(FinishItem)이
+					//       ClaimHeldError 를 그대로 올리는 것(TestFinishRefusesSomeoneElsesItem)과
+					//       여기가 갈리는 이유가 그 구분이다.
+					//     · 롤백 대가가 비대칭이다 — 오류를 올리면 ① 의 판단이 함께 사라지고,
+					//       넷 중 그것만이 원리적으로 파생 불가하다.
+					//
+					// ★ **두 갈래 다 지금은 안 밟힌다. 단 그것은 바로 위 전제에 달려 있다** —
+					//   holds 를 트랜잭션 **안에서** 읽는 한 ListHeld 와 ReleaseResource 사이에
+					//   남이 못 끼어들어 어느 쪽도 안 뜬다. 그 읽기를 트랜잭션 밖으로 되돌리면
+					//   둘 다 살아나므로 이 분기는 지우지 않는다. 전제를 잠근 것은
+					//   TestFinishSurvivesAForcedReleaseRacingIt 이고, 그 시험이 단정하는 값이
+					//   바로 아래 lane.release_skipped 가 **0건**이라는 것이다.
+					//
+					// ★ 아래 사유 문자열은 두 갈래를 한 문장으로 적는다. **일부러 안 갈랐다** —
+					//   가르려면 코드가 늘고, 늘어난 그 코드를 밟는 시험은 위 전제 때문에 쓸 수 없다.
 					t.LogEvent("lane.release_skipped", in.Project, in.SessionID,
 						map[string]any{"resource": h.Resource, "why": "이미 반납되었거나 남이 회수했다"})
 					continue

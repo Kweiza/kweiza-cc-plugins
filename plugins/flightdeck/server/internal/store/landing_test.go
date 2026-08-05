@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
-// landing_queue 저장층. 여덟 시험이 잠그는 것은 파일 위쪽 주석과 각 함수 docstring 에 있다.
+// landing_queue 저장층. 각 시험이 무엇을 잠그는지는 그 시험의 docstring 에 있다.
+//
+// ★ 시험 **개수**를 여기 적지 않는다. 세어 두면 하나 붙일 때마다 이 줄이 조용히 거짓이
+// 되는데, 산문은 빨개지지 않으므로 아무도 모른다 — 실제로 "여덟"이라고 적힌 채 열셋까지
+// 자라 있었다. 수는 grep 이 세면 되고, 여기엔 세지 않아도 되는 문장만 둔다.
 
 // mustEnqueue 는 EnqueueLanding 을 단발 트랜잭션으로 감싼 시험 전용 헬퍼다.
 //
@@ -105,6 +110,54 @@ func TestEnqueueLandingReentryDoesNotPoisonTheTransaction(t *testing.T) {
 	if _, err := s.LiveLandingRow(ctx, "p", b.ID); err != nil {
 		t.Errorf("b 의 살아 있는 줄 행이 없다: %v", err)
 	}
+}
+
+// TestEnqueueLandingRefusesEmptyCoordsWithItsOwnWords — 빈 좌표를 **FK 보다 먼저** 거절한다.
+//
+// ★ "오류가 났다"만 보면 이 시험은 가드를 하나도 안 잠근다. project·session 이 둘 다
+// REFERENCES 라, EnqueueLanding 머리의 네 줄을 통째로 지워도 삽입은 어차피 FK(787)로
+// 막히기 때문이다 — 실제로 지우고 돌리면 err != nil 은 그대로이고 문구만
+// "landing_queue 제약 위반(missing_ref … 787)" 로 바뀐다. 그 번호를 받은 사람은
+// **무엇이 비었는지** 모른다. 그래서 여기서는 문구를 단정한다: DB 제약은 최종 방어이지
+// 1차 방어가 아니라는 이 레포의 규율(ValidateLandingLeave·left_kind CHECK 와 같은 축)을
+// 지키는 유일한 관문이 문구다.
+//
+// 오류 문구를 바꾸면 이 시험이 빨개진다. 그것이 의도다 — 가드가 살아 있다는 것을
+// 가드 **자신의 말**로만 구분할 수 있다.
+func TestEnqueueLandingRefusesEmptyCoordsWithItsOwnWords(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	// mustEnqueue 는 실패를 Fatal 로 삼키므로 거절 갈래엔 못 쓴다 —
+	// TestEnqueueLandingReentryDoesNotPoisonTheTransaction 처럼 s.Tx 를 직접 연다.
+	for _, c := range []struct{ name, project, sessionID string }{
+		{"project 가 비었다", "", a.ID},
+		{"session 이 비었다", "p", ""},
+		{"둘 다 비었다", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := s.Tx(ctx, func(tx *Tx) error {
+				_, e := tx.EnqueueLanding(c.project, c.sessionID)
+				return e
+			})
+			if err == nil {
+				t.Fatal("빈 좌표가 통과했다")
+			}
+			if !strings.Contains(err.Error(), "랜딩 줄 좌표가 비었다") {
+				t.Errorf("가드가 아니라 다른 것이 막았다(FK 였을 것이다): %v", err)
+			}
+		})
+	}
+
+	// 거절이 절반만 적용되지 않았는지 — 행이 남았다면 가드가 삽입 **뒤에** 섰다는 뜻이다.
+	if _, err := s.LiveLandingRow(ctx, "p", a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("거절 뒤에 줄 행이 남았다: %v", err)
+	}
+	// ── 대조 전제: 채운 좌표는 **같은 경로로** 통과한다 ──
+	// 없으면 "가드가 막았다"와 "이 판에서는 EnqueueLanding 이 늘 실패한다"가 안 갈린다.
+	mustEnqueue(t, s, "p", a.ID)
 }
 
 // TestValidateLandingLeave — ok·finish 는 사유 면제, fail·leave·force 는 사유 필수, 모르는 종류는 거절.

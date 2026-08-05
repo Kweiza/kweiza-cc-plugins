@@ -5,9 +5,35 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kweiza/flightdeck/internal/api"
 )
+
+// drainProbe 는 api.Handler 를 만족하는 시험용 표면이다.
+//
+// ★ 이 타입이 필요한 것 자체가 이 축의 계약이다 — api.Serve 는 종료를 통지받을 수 있는
+// 핸들러만 받는다. 맨 *http.ServeMux 를 넘기던 앞선 판은 통지 경로가 빠진 채로 돌았고,
+// 컴파일러가 그것을 못 잡았다.
+type drainProbe struct {
+	http.Handler
+	drained chan struct{}
+	once    sync.Once
+}
+
+func newDrainProbe(h http.Handler) *drainProbe {
+	if h == nil {
+		h = http.NewServeMux()
+	}
+	return &drainProbe{Handler: h, drained: make(chan struct{})}
+}
+
+func (d *drainProbe) Drain() { d.once.Do(func() { close(d.drained) }) }
+
+var _ api.Handler = (*drainProbe)(nil)
 
 // TestServeWithWatcherJoinsWatcherBeforeReturning 은 Critical 리뷰 회귀 시험이다.
 //
@@ -38,7 +64,7 @@ func TestServeWithWatcherJoinsWatcherBeforeReturning(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- serveWithWatcher(context.Background(), "127.0.0.1:0", http.NewServeMux(), log, w)
+		done <- serveWithWatcher(context.Background(), "127.0.0.1:0", newDrainProbe(nil), log, w)
 	}()
 
 	select {
@@ -87,8 +113,49 @@ func TestServeWithWatcherReturnsFailWhenExecFails(t *testing.T) {
 		return errors.New("가짜 exec 실패")
 	}
 
-	got := serveWithWatcher(context.Background(), "127.0.0.1:0", http.NewServeMux(), log, w)
+	got := serveWithWatcher(context.Background(), "127.0.0.1:0", newDrainProbe(nil), log, w)
 	if got != 1 {
 		t.Fatalf("exec 가 실패했는데 종료코드가 %d 다", got)
+	}
+}
+
+// TestServeDrainsHandlerBeforeExec 는 조합 축(감시기 ↔ api.Serve ↔ 핸들러)을 붙든다.
+//
+// ★ **exec 시점에 종료 통지가 이미 가 있어야 한다.** 안 그러면 수명이 정해지지 않은
+// 응답이 매달린 채로 프로세스가 갈아치워지고, 그 사이 셧다운 유예가 통째로 쓰인다.
+// 이 순서는 api.Serve 안에 있어(Drain → Shutdown → 반환 → close(served) → exec)
+// 여기서는 인과로만 확인한다 — sleep 도 시계 단정도 없다.
+//
+// 이 시험이 `serve.go` 의 옛 "우아한 마무리가 아니다" 주석을 실제로 뒤집는 자리다.
+func TestServeDrainsHandlerBeforeExec(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	w := newSelfWatcher(log, "/tmp/does-not-matter.db")
+	w.watching = true
+	w.reason = ""
+	w.exePath = "/fake/fd"
+	w.start = id(10, 1000)
+	w.interval = 10 * time.Millisecond
+
+	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
+	w.verify = func(context.Context, string, string) (string, error) {
+		return "1d044b2 · test", nil
+	}
+
+	probe := newDrainProbe(nil)
+	var drainedAtExec atomic.Bool
+	w.execSelf = func(string, []string, []string) error {
+		select {
+		case <-probe.drained:
+			drainedAtExec.Store(true)
+		default:
+		}
+		return nil
+	}
+
+	if got := serveWithWatcher(context.Background(), "127.0.0.1:0", probe, log, w); got != 0 {
+		t.Fatalf("종료코드 %d 다", got)
+	}
+	if !drainedAtExec.Load() {
+		t.Fatal("exec 시점에 종료 통지가 아직 안 갔다 — 스트림이 매달린 채로 프로세스가 갈아치워진다")
 	}
 }

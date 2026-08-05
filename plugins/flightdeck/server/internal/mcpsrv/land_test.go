@@ -110,22 +110,54 @@ func TestRenderLandReleasedAndLeft(t *testing.T) {
 	}
 }
 
-// TestRenderLandNeverMentionsLaneTurn — 브리프의 핵심 금지: 아직 없는 통로(lane-turn 처방,
-// 설계 단계 ③)를 가리키는 문구를 내면 안 된다. 다섯 갈래 전부를 훑는다.
-func TestRenderLandNeverMentionsLaneTurn(t *testing.T) {
+// TestRenderLandWaitingPointsAtLaneTurn — **옛 단정이 만료돼 뒤집힌 시험이다.**
+// 이 함수는 TestRenderLandNeverMentionsLaneTurn 이었고, 다섯 갈래 **전부**에서 리터럴
+// "lane-turn" 이 없음을 단정했다. 근거는 "그 통로가 아직 없다(설계 단계 ③)"였는데,
+// judge.PrescribeLaneTurn 이 들어오면서 근거가 사라졌다 — 그리고 그 순간 waiting 꼬리에
+// 있던 "차례는 서버가 밀어주지 않는다"가 오히려 **거짓 문장**이 됐다. 그래서 금지를 통째로
+// 버리는 대신 **갈림으로 바꾼다.**
+//
+// waiting 은 반드시 키를 가리킨다 — 세션이 실제로 받는 처방 키(lane-turn:<줄 행>)와 이
+// 문장을 이어 읽을 수 있어야 한다. 한글 문장만 넣고 키 이름을 빼면 이 시험은 초록인 채
+// 아무것도 안 잠근다.
+//
+// ★ 그리고 waiting 은 "**한 번뿐**"과 "그래서 다시 물어도 된다"를 함께 말해야 한다.
+// 처방은 (세션 × 키) 1회라 흘리면 같은 줄 행에는 다시 안 오는데, 그 사실을 뺀 문장은
+// "서버가 알려주니 가만히 있으면 된다"로 읽힌다 — 이 항목이 고치는 결함("산문이 사실보다
+// 넓게 말한다")의 재발이고, 그렇게 서 있는 세션 뒤로 줄 전원이 선다.
+func TestRenderLandWaitingPointsAtLaneTurn(t *testing.T) {
 	signal := t0.Add(-1 * time.Minute)
-	cases := []service.LandResult{
-		{State: "turn", RowID: 1},
+	waiting := []service.LandResult{
 		{State: "waiting", RowID: 2, Position: 2, Holder: &service.LaneHolder{SessionID: "s", AcquiredAt: t0, LastSignalAt: &signal}},
 		{State: "waiting", RowID: 3, Position: 1},
+	}
+	for _, c := range waiting {
+		got := RenderLand(c, t0)
+		if !strings.Contains(got, "lane-turn") {
+			t.Errorf("대기 응답이 처방 키 lane-turn 을 안 가리킨다 — 세션이 받은 처방과 이 화면이 안 이어진다(줄 행 %d):\n%s",
+				c.RowID, got)
+		}
+		// 밀어 온다는 사실만 적고 1회라는 사실을 빼면 폴링이 닫힌 것처럼 읽힌다.
+		for _, want := range []string{"한 번", "다시 안 온다", "land 를 다시"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("대기 응답에 %q 가 없다 — 처방이 (세션 × 키) 1회라는 사실이 빠지면 화면이 사실보다 넓게 말한다(줄 행 %d):\n%s",
+					want, c.RowID, got)
+			}
+		}
+	}
+
+	// 나머지 네 갈래는 금지 유지 — 근거가 "통로가 없다"에서 "그 자리에서 할 말이 아니다"로
+	// 바뀌었을 뿐이다(RenderLand 독스트링의 개정 블록).
+	silent := []service.LandResult{
+		{State: "turn", RowID: 1},
 		{State: "released", RowID: 4},
 		{State: "left", RowID: 5},
 		{State: "reclaimed", RowID: 6, Reason: "사유"},
 	}
-	for _, c := range cases {
+	for _, c := range silent {
 		got := RenderLand(c, t0)
 		if strings.Contains(got, "lane-turn") {
-			t.Errorf("state=%s 응답이 아직 없는 처방 lane-turn 을 가리킨다:\n%s", c.State, got)
+			t.Errorf("state=%s 응답이 lane-turn 을 가리킨다 — 차례를 기다리는 갈래가 아니다:\n%s", c.State, got)
 		}
 	}
 }
@@ -296,5 +328,77 @@ func TestLandWaitingShowsTheFrontRunner(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("대기 응답에 %q 가 없다:\n%s", want, body)
 		}
+	}
+}
+
+// TestMCPReportWithoutTheLaneNeverClaimsItReleasedIt — 대기 중인 세션이 result=ok 로
+// 보고했을 때 **반납을 말하지 않는다.**
+//
+// ★ 이 조합(toolLand 의 report 디스패치 × reclaimed)은 왕복 시험이 0건이었다. 위 파일의
+// RenderLand 시험들은 사유 문자열을 **손으로 넣어** 보는 것이라 service 가 실제로 무엇을
+// 내는지는 못 지킨다. 여기서 "반납했다"가 나가면 에이전트는 레인을 놓았다고 믿고 그대로
+// 랜딩한다 — 실제로는 앞사람이 쥔 채다.
+//
+// ★ isErr 는 **false** 여야 한다. 이 갈래는 오류가 아니라 사실이다(service.laneNotMine).
+// 오류로 접으면 에이전트가 무엇이 잘못됐는지 모른 채 재시도 루프를 돈다.
+//
+// 앞사람을 세우는 수법은 바로 위 시험과 같다 — MCP 서버 하나는 환경 하나에 묶여 있어
+// 같은 서버로 다른 세션을 흉내 낼 수 없다(설계 §13).
+func TestMCPReportWithoutTheLaneNeverClaimsItReleasedIt(t *testing.T) {
+	repo := newRepo(t)
+	svc, _ := newSvc(t)
+	project := filepath.Base(repo)
+
+	other, err := svc.OpenSession(context.Background(), service.OpenSessionInput{
+		Project: project, ProjectPath: repo, MachineID: "other-machine",
+		Hostname: "other-machine", Worktree: repo, CCSessionID: "cc-other",
+	})
+	if err != nil {
+		t.Fatalf("앞사람 세션을 못 열었다: %v", err)
+	}
+	if _, err := svc.Land(context.Background(), service.LandInput{
+		Project: project, SessionID: other.Session.ID,
+	}); err != nil {
+		t.Fatalf("앞사람이 레인을 못 잡았다: %v", err)
+	}
+
+	srv := newServer(t, svc, repo, fullEnv(repo))
+	frames := serve(t, srv,
+		call("land", map[string]any{}),
+		call("land", map[string]any{"result": "ok"}),
+	)
+	if len(frames) != 2 {
+		t.Fatalf("응답이 %d개다", len(frames))
+	}
+	if joined, isErr := toolText(t, frames[0]); isErr || !strings.Contains(joined, "2번째") {
+		t.Fatalf("전제가 깨졌다 — 줄을 안 섰다(isErr=%v):\n%s", isErr, joined)
+	}
+
+	body, isErr := toolText(t, frames[1])
+	if isErr {
+		t.Fatalf("남의 레인에 보고한 것이 오류로 났다 — 이 갈래는 오류가 아니라 사실이다:\n%s", body)
+	}
+	if !strings.Contains(body, "네 것이 아니다") {
+		t.Errorf("보고 응답이 레인이 남의 것이라는 사실을 안 말한다:\n%s", body)
+	}
+	if strings.Contains(body, "반납했다") {
+		t.Fatalf("쥔 적 없는 레인을 반납했다고 답했다 — 에이전트는 그대로 랜딩한다:\n%s", body)
+	}
+	// 처방 절반이 이 표면까지 온다. 없으면 에이전트가 할 수 있는 것은 폴링뿐이다.
+	if !strings.Contains(body, "차례를 확인") {
+		t.Errorf("무엇을 하면 되는지가 응답에 없다:\n%s", body)
+	}
+
+	// 원장 축 — 잘못된 보고가 앞사람의 점유도, 자기 줄 행도 안 건드렸다.
+	lane, err := svc.LandingLane(context.Background(), project)
+	if err != nil {
+		t.Fatalf("레인 조회 실패: %v", err)
+	}
+	if lane.Holder == nil || lane.Holder.SessionID != other.Session.ID {
+		t.Fatalf("보고가 앞사람의 점유를 건드렸다: %+v", lane.Holder)
+	}
+	if len(lane.Entries) != 2 {
+		t.Fatalf("보고 뒤 줄이 %d행이다(기대 2) — 오타 한 번이 순번을 날렸다: %+v",
+			len(lane.Entries), lane.Entries)
 	}
 }

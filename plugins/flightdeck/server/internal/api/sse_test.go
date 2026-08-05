@@ -104,7 +104,11 @@ func TestSSEDeliversEventAndCleansUpOnDisconnect(t *testing.T) {
 	// 쓰기 하나가 이벤트가 되어 전 구독자에게 간다.
 	sess := e.openSession("cc-sse")
 	for i, br := range readers {
-		frame := readFrame(t, br)
+		// ★ 하트비트를 건너뛴다. 이 시험은 Heartbeat=50ms 로 돌고, 위 waitFor(구독자 5명)가
+		// 그보다 오래 걸리면 **이벤트보다 하트비트가 먼저 큐에 있다** — 그러면 이 단언이
+		// 내용과 무관하게 실패한다. main 에서 12회 중 4회 재현했다(2026-08-05).
+		// 이 시험이 재려는 것은 "이벤트가 전 구독자에게 간다"이지 프레임 순서가 아니다.
+		frame := readEventFrame(t, br)
 		if !strings.Contains(frame, `"kind":"session.open"`) {
 			t.Fatalf("%d번 구독자가 받은 프레임이 다르다:\n%s", i, frame)
 		}
@@ -156,6 +160,23 @@ func readFrame(t *testing.T, br *bufio.Reader) string {
 		}
 		b.WriteString(line)
 	}
+}
+
+// readEventFrame 은 다음 **이벤트** 프레임을 읽는다 — 주석 줄(하트비트·`: bye` 등)은 건너뛴다.
+//
+// ★ 하트비트는 티커가 내므로 도착 시점이 시험의 통제 밖이다. 그것을 이벤트 자리에서 받으면
+// 시험이 내용이 아니라 **스케줄러를 재게 된다.** 주석 줄을 단정해야 하는 시험은
+// readFrame 을 그대로 쓴다.
+func readEventFrame(t *testing.T, br *bufio.Reader) string {
+	t.Helper()
+	for i := 0; i < 64; i++ {
+		frame := readFrame(t, br)
+		if !strings.HasPrefix(frame, ":") {
+			return frame
+		}
+	}
+	t.Fatal("주석 줄만 64개가 왔다 — 이벤트가 아예 안 온다")
+	return ""
 }
 
 func TestSSEProjectFilterDoesNotHideGlobalEvents(t *testing.T) {
