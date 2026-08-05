@@ -1,8 +1,10 @@
 package judge
 
 import (
+	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -136,4 +138,136 @@ func LinkOf(lead, other Candidate, sib SiblingIndex) *Link {
 	}
 	l.Detail = strings.Join(why, " · ")
 	return &l
+}
+
+// Bundle 은 pick 한 번이 제안하는 집합이다. **저장되지 않는다** —
+// 테이블도 id 도 상태도 없다. 저장하면 개념이 하나 늘고,
+// 그 순간 "묶음이 깨졌다"·"묶음을 해체한다" 같은 상태 전이가 따라온다.
+type Bundle struct {
+	Lead    Candidate
+	Members []Candidate // 선두 제외. lessCandidate 로 정렬
+	Links   []Link      // Members 와 같은 순서·같은 길이
+	// Dependents 는 구성원 전부의 합이다. 이걸 풀어야 남이 움직이는 정도.
+	Dependents int
+	// Oldest 는 가장 오래된 구성원의 생성 시각이다.
+	Oldest time.Time
+	// Reason 은 네 키의 **실제 값**이다. 감추면 "왜 하필 이 브랜치 이름인가"에
+	// 답할 수 없고, 답 못 하는 자동 선택은 두 번째 세션부터 무시된다.
+	Reason string
+}
+
+// EligibleBundle 은 Eligible 위에 얹는다.
+//
+// 적격 후보 **각각을 선두로** 놓고 방사형으로 이웃을 붙인 뒤 §2.4 의 키 넷으로 정렬해
+// 1순위를 낸다. **전이하지 않는다** — 이웃의 이웃은 안 들어온다.
+//
+// Eligible 을 안 고치고 그 위에 얹는 이유는, 시험이 단일 추천 규칙을 독립으로
+// 계속 부를 수 있어야 하기 때문이다. 묶음 판정이 그 규칙의 사본을 만들면
+// 두 규칙이 조용히 표류한다.
+func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Rejection) {
+	var fit []Candidate
+	var rejected []model.Rejection
+	for _, c := range in.Candidates {
+		rs := rejectionsFor(c, in)
+		if len(rs) == 0 {
+			fit = append(fit, c)
+			continue
+		}
+		rejected = append(rejected, rs...)
+	}
+	if len(fit) == 0 {
+		return nil, rejected
+	}
+	sort.SliceStable(fit, func(i, j int) bool { return lessCandidate(fit[i], fit[j]) })
+
+	bundles := make([]Bundle, 0, len(fit))
+	for _, lead := range fit {
+		bundles = append(bundles, bundleAround(lead, fit, sib))
+	}
+	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
+
+	best := bundles[0]
+	best.Lead.Overlaps = OverlapsWithLive(bundlePaths(best), in.Live, in.Self)
+
+	// 적격이었으나 이 묶음에 못 든 것도 원장에 남긴다. 안 남기면
+	// pick_eval 어디에도 없어 "왜 저것이 아니라 이것인가"에 답할 수 없다.
+	picked := map[string]bool{best.Lead.Item.ID: true}
+	for _, m := range best.Members {
+		picked[m.Item.ID] = true
+	}
+	for _, c := range fit {
+		if picked[c.Item.ID] {
+			continue
+		}
+		rejected = append(rejected, model.Rejection{Item: c.Item.ID, Reason: RejectNotTop,
+			Detail: fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
+				best.Lead.Item.ID, len(best.Members)+1)})
+	}
+	return &best, rejected
+}
+
+// bundleAround 는 선두 하나를 중심으로 직접 이웃만 모은다.
+func bundleAround(lead Candidate, fit []Candidate, sib SiblingIndex) Bundle {
+	b := Bundle{Lead: lead, Dependents: lead.Dependents, Oldest: lead.Item.CreatedAt}
+	for _, c := range fit {
+		if c.Item.ID == lead.Item.ID {
+			continue
+		}
+		l := LinkOf(lead, c, sib)
+		if l == nil {
+			continue
+		}
+		b.Members = append(b.Members, c)
+		b.Links = append(b.Links, *l)
+		b.Dependents += c.Dependents
+		if c.Item.CreatedAt.Before(b.Oldest) {
+			b.Oldest = c.Item.CreatedAt
+		}
+	}
+	// fit 이 이미 lessCandidate 로 정렬돼 있어 Members·Links 도 그 순서를 물려받는다.
+	b.Reason = fmt.Sprintf("의존자 합 %d · 묶음 %d건 · 최고령 %s · 선두 %s",
+		b.Dependents, len(b.Members)+1, b.Oldest.UTC().Format("2006-01-02 15:04"), lead.Item.ID)
+	return b
+}
+
+// lessBundle 은 추천 순서다. 조정할 상수가 하나도 없다.
+//
+//	① 의존자 수 합 ↓ — 이걸 풀어야 남이 움직이는 정도
+//	② 묶음 크기   ↓ — 한 번에 더 많이 푸는 쪽이 이긴다
+//	③ 최고령      ↑ — 오래 방치된 것을 먼저
+//	④ 선두 id     사전순 — 동점 처리. 없으면 같은 입력에 다른 답이 나온다
+//
+// ★ ②가 없으면 이 기능이 **발화하지 않는다.** 실측에서 열린 16건 전부 의존자 0이라
+// ①이 상수이고, 그 상태에서 ③이 실질 1차 키가 되는데 최고령이 단독이었다(설계 §0.2).
+func lessBundle(a, b Bundle) bool {
+	if a.Dependents != b.Dependents {
+		return a.Dependents > b.Dependents
+	}
+	if len(a.Members) != len(b.Members) {
+		return len(a.Members) > len(b.Members)
+	}
+	if !a.Oldest.Equal(b.Oldest) {
+		return a.Oldest.Before(b.Oldest)
+	}
+	return a.Lead.Item.ID < b.Lead.Item.ID
+}
+
+// bundlePaths 는 묶음 전체가 만지는 경로다.
+// 겹침("남과 부딪히나")은 묶음 단위 질문이므로 합집합으로 본다.
+func bundlePaths(b Bundle) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(ps []string) {
+		for _, p := range ps {
+			if n := normPath(p); n != "" && !seen[n] {
+				seen[n] = true
+				out = append(out, p)
+			}
+		}
+	}
+	add(b.Lead.Item.Paths)
+	for _, m := range b.Members {
+		add(m.Item.Paths)
+	}
+	return out
 }
