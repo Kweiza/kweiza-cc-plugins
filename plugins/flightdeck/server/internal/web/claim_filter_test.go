@@ -71,7 +71,7 @@ func TestClaimedCardCarriesActivityBadge(t *testing.T) {
 	ctx := context.Background()
 
 	quiet := f.openSession("cc-quiet", "조용")
-	f.claimOne(quiet.ID, "it-quiet") // pick 은 mcp 신호를 남기지만 활동은 아니다
+	f.claimOne(quiet.ID, "it-quiet") // 선점만 있고 신호는 0건이다 — pick 은 신호를 안 남긴다
 
 	busy := f.openSession("cc-busy", "바쁨")
 	f.claimOne(busy.ID, "it-busy")
