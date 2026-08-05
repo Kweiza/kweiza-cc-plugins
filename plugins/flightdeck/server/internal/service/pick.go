@@ -80,6 +80,9 @@ type PickResult struct {
 	// SkewBanner 는 api_version 문자열만 보므로 필드 추가로는 안 뜬다.
 	//
 	// nil = 이 응답은 묶음 축을 안 읽었다 · 구성원 0건 = 묶을 게 없어 단독이다.
+	//
+	// 적격 0건(PickNone)에도 nil 이다 — PathCheck 와 같은 이유로, 선두가 없으면
+	// 방사형으로 붙일 이웃도 애초에 없다(관측할 대상이 없다).
 	Bundle *BundleInfo `json:"bundle,omitempty"`
 
 	Derived
@@ -89,7 +92,7 @@ type PickResult struct {
 type BundleInfo struct {
 	Members []BundleMember `json:"members"` // 선두 제외
 	Reason  string         `json:"reason"`  // 정렬 네 키의 실제 값
-	Scope   string         `json:"scope"`   // 무엇을 이웃 후보로 봤나
+	Scope   string         `json:"scope"`   // 무엇을 이웃 후보로 봤나 — 형제 축을 못 읽었으면 그 사실도 여기 남는다
 }
 
 // BundleMember 는 묶음 구성원 하나다.
@@ -98,8 +101,17 @@ type BundleMember struct {
 	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
 	Notes     []model.Judgment       `json:"notes,omitempty"` // 집었을 때만 전문
-	Claimed   bool                   `json:"claimed"`
-	Rejection *model.Rejection       `json:"rejection,omitempty"` // 못 집었으면 사유
+	// Claimed 는 이 구성원이 실제로 선점됐는가다.
+	//
+	// ★ 지금(추천 경로)은 이 응답을 만드는 코드 경로가 하나뿐이라 값이 항상 false
+	// 이고, "false=안 집음"과 "false=이 경로가 이 축을 아예 안 봄"이 갈릴 자리가
+	// 없다 — 그래서 지금은 bool 로 둔다(PathCheck·Bundle 처럼 포인터로 만들 이유가
+	// 아직 없다). 태스크 8이 묶음 채택(claim) 경로를 들여 "채택 시도했지만 실패"
+	// 같은 세 번째 상태가 생기면, 그 순간 이 필드도 포인터로 승격해야 한다 —
+	// 미리 승격하지 않는 이유는 존재하지 않는 세 번째 상태를 미리 코드로 못 박으면
+	// 그 모양이 그대로 굳어 실제 세 번째 상태와 안 맞을 위험이 더 크기 때문이다.
+	Claimed   bool             `json:"claimed"`
+	Rejection *model.Rejection `json:"rejection,omitempty"` // 못 집었으면 사유
 }
 
 // ValidateItemID 는 항목 id 가 브랜치 이름·디렉토리 이름으로 쓰여도 안전한지 본다. 순수 함수다.
@@ -337,9 +349,13 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 // siblingIndex 는 후보들에 걸린 판단 링크를 모아 judge 가 쓸 색인으로 만든다.
 //
 // 실패해도 pick 을 실패시키지 않는다 — 형제 축 하나 때문에 추천을 잃는 것이 더 나쁘고,
-// 빈 색인이면 나머지 두 축이 그대로 돈다. 못 읽은 사실은 derive 가 아니라
-// 로그에 남긴다(derive 에 넣으면 FreshnessOf 가 git 축을 낡음으로 접는다).
-func (s *Service) siblingIndex(ctx context.Context, project string, cands []judge.Candidate) judge.SiblingIndex {
+// 빈 색인이면 나머지 두 축이 그대로 돈다. 못 읽은 사실은 derive 에 안 넣는다
+// (derive 에 넣으면 FreshnessOf 가 git 축을 낡음으로 접는다). 대신 로그에 남기고,
+// **두 번째 반환값**으로 호출부에 그대로 넘긴다 — 호출부가 그걸 Bundle.Scope
+// 문장에 적어야 "구성원 0건"(형제가 실제로 없다)과 "형제 축을 아예 못 읽었다"가
+// 같은 값(빈 색인)으로 접히지 않는다. 이건 error 가 아니다: pick 을 실패시키지
+// 않는다는 계약은 그대로다 — 이 값을 무시해도 판정 자체는 여전히 옳게 돈다.
+func (s *Service) siblingIndex(ctx context.Context, project string, cands []judge.Candidate) (judge.SiblingIndex, bool) {
 	ids := make([]string, 0, len(cands))
 	for _, c := range cands {
 		ids = append(ids, c.Item.ID)
@@ -348,9 +364,30 @@ func (s *Service) siblingIndex(ctx context.Context, project string, cands []judg
 	if err != nil {
 		s.log.WarnContext(ctx, "형제 색인 조회 실패 — 형제 축 없이 판정한다",
 			"project", clip(project, 64), "count", len(ids), "error", err.Error())
-		return judge.SiblingIndex{}
+		return judge.SiblingIndex{}, false
 	}
-	return judge.SiblingIndex(links)
+	return judge.SiblingIndex(links), true
+}
+
+// bundleScope 는 Bundle.Scope 문장을 만든다. 순수 함수다 — 시험이 DB 없이 문구를 고정한다.
+//
+// ★ total 은 **적격 여부와 무관하게 후보 전부를 센 수**(len(cands))다. EligibleBundle
+// 내부에서 실제로 이웃 후보가 된 집합(fit·absorbable)의 크기는 Bundle 구조체가 안
+// 돌려준다. 그 수를 "적격 항목" 이라고 잘못 부르면(실측: 후보 5·적격 3인데
+// "이웃 후보는 적격 항목 5건이다") 관측한 적 없는 사실을 단정하는 것이 된다.
+// 그래서 total 은 "관찰한 후보"라고만 부른다 — len(cands) 에 대해 참인 문장이다.
+//
+// sibRead 가 false 면 형제 축을 못 읽었다는 사실을 문장에 남긴다. 키 부재를 값으로
+// 접지 않는다는 전역 규율이 이 한 줄에서도 지켜져야 한다 — 안 남기면 이 묶음이
+// "형제가 진짜로 없다"인지 "형제 축을 아예 못 봤다"인지 응답만으로 못 가른다.
+func bundleScope(total int, sibRead bool) string {
+	sc := fmt.Sprintf("관찰한 후보는 전체 %d건이다(적격 여부와 무관하게 센 수다). "+
+		"그 중 선두와 형제·선행 축으로 **직접** 이어진 것만 묶었다(전이 없음)", total)
+	if !sibRead {
+		sc += " · 형제 축(같은 판단에 함께 걸린 형제)은 이번에 못 읽었다 — " +
+			"이 묶음은 선행·경로 축만 보고 나온 결과다"
+	}
+	return sc
 }
 
 // pickRecommend 는 적격 항목 하나를 고르고 탈락 사유 전부를 남긴다.
@@ -367,7 +404,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 		return PickResult{}, err
 	}
 
-	sib := s.siblingIndex(ctx, proj.ID, cands)
+	sib, sibRead := s.siblingIndex(ctx, proj.ID, cands)
 	best, rejected := judge.EligibleBundle(judge.EligibleInput{
 		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
 	}, sib)
@@ -421,8 +458,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	// id 를 가리키게 된다(경로 겹침·부재는 항목 단위 사실이다).
 	res.Bundle = &BundleInfo{
 		Reason: best.Reason,
-		Scope: fmt.Sprintf("이웃 후보는 적격 항목 %d건이다. 선두와 **직접** 이어진 것만 붙였다(전이 없음)",
-			len(cands)),
+		Scope:  bundleScope(len(cands), sibRead),
 	}
 	for i, m := range best.Members {
 		res.Bundle.Members = append(res.Bundle.Members, BundleMember{
@@ -432,9 +468,13 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
 		})
 	}
+	// ★ item_ids 는 아직 없다(태스크 9에서 온다) — mcpsrv 의 pick 도구는 지금
+	// item_id 하나만 받고 additionalProperties:false·DisallowUnknownFields 로
+	// 모르는 필드를 거절한다. item_ids 를 처방하면 이 응답의 유일한 실행 가능 줄이
+	// "json: unknown field \"item_ids\"" 로 죽는다 — 지금 통하는 선두의 item_id 를 써라.
 	res.Reason = fmt.Sprintf("%s · 후보 %d건 중 1순위다. "+
-		"아직 선점하지 않았다 — 집으려면 item_ids 에 선두부터 순서대로 주고 다시 불러라",
-		best.Reason, len(cands))
+		"아직 선점하지 않았다 — 집으려면 item_id 에 %s 를 주고 다시 불러라",
+		best.Reason, len(cands), item.ID)
 	if notes, err := s.linkedJudgments(ctx, proj.ID, item.ID); err != nil {
 		return PickResult{}, err
 	} else {
