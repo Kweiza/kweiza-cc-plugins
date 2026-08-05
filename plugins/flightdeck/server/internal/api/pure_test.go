@@ -330,7 +330,7 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 		DBPath:    "/home/user/.flightdeck/fd.db",
 		DBError:   "unable to open database file /home/user/.flightdeck/fd.db",
 		DiskError: "statfs /home/user/.flightdeck: no such file",
-	}, true, true, buildinfo.Coord{})
+	}, true, true, buildinfo.Coord{}, SelfUpdateStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -343,6 +343,109 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 	}
 	if body.DBError == "" {
 		t.Fatal("DB 가 죽었는데 그 사실이 응답에 없다 — 침묵하면 배너가 정상으로 읽힌다")
+	}
+}
+
+// ★ 문자열 포함만 보면 태그 오타(예: outcome → outcomeX)가 안 잡힌다 — 그 오타가 나도
+// 값은 여전히 응답 어딘가에 있으므로 strings.Contains(raw, "refused") 는 그대로 통과한다.
+// 그래서 **키:값 쌍**으로 단언한다. `"outcome":"refused"` 는 태그가 정확히 outcome 일 때만 나온다.
+func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
+	at := time.Date(2026, 8, 5, 0, 31, 2, 0, time.UTC)
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, LastAt: &at,
+			From: "07e5df4", To: "1d044b2",
+			Outcome: "refused", Detail: "selfcheck exit 1 — 증분 계획이 거절된다",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{
+		`"self_update":`,
+		`"watching":true`,
+		`"outcome":"refused"`,
+		`"from":"07e5df4"`,
+		`"to":"1d044b2"`,
+		`"detail":`,
+		`"last_at":`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ **보고는 있는데 못 재는** 상태가 선을 넘어가야 한다. 이것이 안 실리면 클라이언트는
+// watching=true 만 보고 "따라가는 중"이라 찍는다 — 지워진 바이너리를 감시하는 서버가
+// 화면에서는 정상으로 보인다. 여기서도 키:값 쌍으로 단언한다(태그 오타를 잡으려면 그래야 한다).
+func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true,
+			Stalled:  "실행 파일을 못 쟀다: no such file or directory",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if !strings.Contains(string(raw), `"stalled":"실행 파일을 못 쟀다`) {
+		t.Fatalf("막힌 사실이 선을 안 넘었다: %s", raw)
+	}
+	// 아무 일도 없을 때는 안 나가야 한다 — 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
+	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(quiet), `"stalled"`) {
+		t.Fatalf("막히지 않았는데 stalled 가 실렸다: %s", quiet)
+	}
+}
+
+// ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
+// json.Marshal 을 거쳐 **실제 바이트**로 확인한다 — 구조체 필드만 보면 태그 오타를
+// 원리적으로 못 잡는다(Go 필드 값은 태그와 무관하게 그대로 있으므로).
+func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: false, Reason: "이 플랫폼은 자기 재기동을 지원하지 않는다",
+		})
+	if body.SelfUpdate.Watching {
+		t.Fatal("watching 이 참이다")
+	}
+	if strings.TrimSpace(body.SelfUpdate.Reason) == "" {
+		t.Fatal("왜 안 보는지가 비었다")
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{`"watching":false`, `"reason":`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ 시도가 없었으면 last_at 은 응답에서 아예 **빠져야** 한다(omitempty). 제로 시각을
+// null 로 찍으면 "시도가 있었는데 시각을 모른다"로 읽힐 수 있다 — 부재와 null 은 다른 말이다.
+// serve.go 의 LastAt.IsZero() 변환(time.Time 제로값 → nil *time.Time)이 이 축의 유일한
+// 방어이고, 그 변환이 깨지면(예: 항상 &at 를 채우면) 이 시험이 잡는다.
+func TestHealthzOmitsLastAtWhenNoAttemptEver(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, // 감시 중이지만 아직 교체를 한 번도 안 봤다 — LastAt 이 nil
+		})
+	if body.SelfUpdate.LastAt != nil {
+		t.Fatalf("시도가 없었는데 LastAt 이 채워졌다: %v", body.SelfUpdate.LastAt)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(raw), `"last_at"`) {
+		t.Fatalf("last_at 이 omitempty 로 안 빠졌다: %s", raw)
 	}
 }
 
