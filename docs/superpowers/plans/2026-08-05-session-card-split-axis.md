@@ -8,6 +8,24 @@
 
 **Tech Stack:** Go 1.x (표준 라이브러리만) · SQLite(`database/sql`, 드라이버는 기존 것) · 시험은 `testing` 표 시험 + 운영 진입점 배선 시험.
 
+> ★ 개정(2026-08-05) — 위 **Goal** 의 "이미 갈린 것을 표시에서 접고"와 **Architecture** 의
+> "`service` 가 카드를 대화 단위로 접고"는 Task 2·4(카드 접기)를 가리키는데, 그 접기는
+> **구현됐다가 되돌려졌다**(병합 커밋 `8518198`, 첫 부모 `45b116a` 에 되돌린 코드가
+> 온전히 남아 있다). main 이 보드의 조직 원리를 "살아 있는 세션 N건"에서 "잡혀 있는
+> 작업 N건"(선점 있는 카드만)으로 바꾸면서 접기가 막으려던 형제 중복이 22% → 0%로
+> 저절로 없어졌다. 재개방 항목: `fd-fold-cards-under-claim-based-board`.
+>
+> 실제로 랜딩하는 것은 넷 중 접기를 뺀 셋이다:
+>
+> - **축 1 갈림 탐지** — `judge/split.go` 의 순수 함수 + 보드 머리 배너. 원장만으로
+>   판정하고 거짓 양성 0(실물 원장 243카드·7프로젝트 검증). 원인 코드(`resolveProject`)는
+>   이미 옳아 안 고쳤다.
+> - **축 2 카드를 안 만드는 조회** — `GET /api/v1/sessions` + 훅 복구 갈래 교체.
+> - **축 3 확인율 분모** — `Store.AckReach` + 보드 `detail` 꼬리. 실측 세 프로젝트에서
+>   닿을 수 있었던 카드는 어디서도 전부 ack 했다.
+> - **(되돌림) 축 4 대화 단위 접기** — Task 2·4. 코드는 `45b116a` 에 남아, 재개방 항목이
+>   새 보드 모델 위에서 다시 판단한다.
+
 ## Global Constraints
 
 스펙 `docs/superpowers/specs/2026-08-05-session-card-split-axis-design.md` 의 §7 이 전 과제에 걸린다. 값 그대로 옮긴다.
@@ -699,6 +717,11 @@ git commit -m "feat(flightdeck): 정규화가 안 돈 흔적을 원장만으로 
 ---
 
 ### Task 2: `service` — 카드를 대화 단위로 접는다
+
+> ★ 개정(2026-08-05) — 이 과제는 구현됐다가 병합 `8518198` 에서 되돌려졌다(사유:
+> 문서 머리 개정 블록 참고). 코드는 `45b116a` 에 남아 있고, 재개방 항목
+> `fd-fold-cards-under-claim-based-board` 가 새 보드 모델 위에서 다시 판단한다.
+> 전문은 그 되살릴 때 쓰도록 그대로 둔다.
 
 **Files:**
 - Modify: `plugins/flightdeck/server/internal/service/board.go` (`BoardView` 구조체 · `Board` 함수의 `view := BoardView{...}` 직후)
@@ -1395,6 +1418,11 @@ git commit -m "feat(flightdeck): 보드가 갈림 흔적을 함께 낸다 — �
 ---
 
 ### Task 4: `render` — 대화 수 머리줄 · 묶음 카드 · 갈림 배너
+
+> ★ 개정(2026-08-05) — 이 과제도 Task 2 와 함께 되돌려졌다(병합 `8518198`, 코드는
+> `45b116a`). 랜딩판 머리줄은 "대화 수"가 아니라 그대로 "잡혀 있는 작업 N건"(카드
+> 수)이고, `splitBanner`(축 1) 만 랜딩했다. 전문은 재개방 항목이 되살릴 때 쓰도록
+> 그대로 둔다.
 
 **Files:**
 - Modify: `plugins/flightdeck/server/internal/mcpsrv/render.go` (`RenderBoard` 의 `head`·카드 루프 · `rankCards`)
