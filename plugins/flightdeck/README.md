@@ -67,7 +67,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
 | MCP 도구 7개 | `board` `pick` `note` `add` `finish` `alloc` `land` |
-| 스킬 3개 | `fd-pickup` · `fd-handoff` · `fd-setup` |
+| 스킬 4개 | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 `bin/fd` 는 셸 런처다. 첫 훅이 `server/` 를 빌드해 `${CLAUDE_PLUGIN_DATA}` 에 캐시한다.
 **Go 가 없으면 안내만 내고 세션은 그대로 진행된다**(훅은 세션을 막지 않는다).
