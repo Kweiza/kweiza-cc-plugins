@@ -21,7 +21,7 @@ import (
 //
 // 앞선 판에서 MCP 는 service 계층을 직접 받아 **로컬 SQLite 에 직접 썼다.** SSE 허브는
 // internal/api 의 server 안에 있으므로 그 쓰기는 발행 지점을 지나가지 않았고,
-// 도구 6개가 에이전트의 유일한 쓰기 표면이라 실제 조정 트래픽의 대부분이
+// 도구 일곱이 에이전트의 유일한 쓰기 표면이라 실제 조정 트래픽의 대부분이
 // 알림에서 통째로 사라졌다 — 그리고 그 상태에서 mcpsrv 시험은 전부 초록이었다.
 // 그쪽 시험은 **자기 store 에 무엇이 써졌나**를 보고, SSE 시험은 REST 로 이벤트를 만들어 본다.
 // 두 반쪽을 각자 고정하는 시험은 그 사이의 틈을 원리적으로 못 본다.
@@ -237,7 +237,12 @@ func containsStr(xs []string, s string) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ② 서버 미도달 — 도구 6개가 각각 무엇을 하는가. **조용히 성공하지 않는다**
+// ② 서버 미도달 — 도구 일곱이 각각 무엇을 하는가. **조용히 성공하지 않는다**
+//
+// ★ 표는 도구 일곱을 다 덮지만 **갈래를 다 덮지는 않는다.** pick 은 인자에 따라 두 축이라
+//   두 행이고, land 는 인자 없는 취득 한 갈래만 여기 있다 — 보고·이탈·회수의 사유는
+//   land_seam_test.go 의 TestLandDegradeReasonsAreDistinct 가 순수 함수 쪽에서 가른다.
+//   여기서 재는 것은 그 판정이 **MCP 응답까지 건너오는가**이지 판정 자체가 아니다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
@@ -286,6 +291,11 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 			"한 트랜잭션", "하지 않았다"},
 		{"alloc", map[string]any{"counter_name": "rev"}, true,
 			"원자 카운터", "하지 않았다"},
+		// 인자 없는 land 는 레인 **취득**이다(mcpbackend.Land → CmdLandAcquire).
+		// 사유가 "배타의 정본이 서버의 DB 제약"인 것이 이 행의 요점이다 —
+		// 오프라인에서 '내 차례'를 만들면 두 세션이 동시에 랜딩한다(offline.go 의 그 갈래).
+		{"land", map[string]any{}, true,
+			"배타의 정본이 서버의 DB 제약", "하지 않았다"},
 	}
 	for _, c := range cases {
 		frames := mcpServe(t, rig, mcpCall(c.tool, c.args))
@@ -293,7 +303,9 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 			t.Fatalf("%s: 응답이 %d개다", c.tool, len(frames))
 		}
 		text, isErr := mcpText(t, frames[0])
-		// ★ 조용한 성공이 없다 — 여섯 전부가 서버에 못 닿았다는 것을 **본문으로** 말한다.
+		// ★ 조용한 성공이 없다 — 표의 모든 행이 서버에 못 닿았다는 것을 **본문으로** 말한다.
+		//   (수를 안 적는다: 이 표는 도구 하나가 인자에 따라 두 행이라 행 수와 도구 수가 다르고,
+		//    앞선 판의 "여섯 전부"는 그 둘 중 어느 쪽도 아니게 됐다.)
 		if !strings.Contains(text, "조정 서버 미도달") {
 			t.Errorf("%s: 서버가 죽었는데 응답이 그 사실을 말하지 않는다:\n%s", c.tool, text)
 			continue
