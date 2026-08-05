@@ -213,11 +213,11 @@ func TestEligibleBundleDoesNotTransit(t *testing.T) {
 	sib := SiblingIndex{"A": {"J1"}, "B": {"J1", "J2"}, "C": {"J2"}}
 	fit := []Candidate{cand("A", 0, nil), cand("B", 1, nil), cand("C", 2, nil)}
 
-	a := bundleAround(fit[0], fit, sib)
+	a := bundleAround(fit[0], fit, map[string]Candidate{}, sib)
 	if got := memberIDs(&a); len(got) != 1 || got[0] != "B" {
 		t.Fatalf("A 선두 묶음이 B 를 거쳐 C 로 전이했다 — 구성원 %v", got)
 	}
-	c := bundleAround(fit[2], fit, sib)
+	c := bundleAround(fit[2], fit, map[string]Candidate{}, sib)
 	if got := memberIDs(&c); len(got) != 1 || got[0] != "B" {
 		t.Fatalf("C 선두 묶음이 B 를 거쳐 A 로 전이했다 — 구성원 %v", got)
 	}
@@ -333,7 +333,7 @@ func TestBundleAroundReasonDistinguishesCloseOldest(t *testing.T) {
 		it := openItem("solo", 0)
 		it.CreatedAt = t0.Add(offset)
 		lead := Candidate{Item: it}
-		return bundleAround(lead, []Candidate{lead}, SiblingIndex{})
+		return bundleAround(lead, []Candidate{lead}, map[string]Candidate{}, SiblingIndex{})
 	}
 	a := mk(0)
 	b := mk(30 * time.Second)
@@ -429,5 +429,182 @@ func TestEligibleBundleCarriesReason(t *testing.T) {
 		if !strings.Contains(b.Reason, want) {
 			t.Fatalf("사유에 실제 값 %q 가 없다: %q", want, b.Reason)
 		}
+	}
+}
+
+// 흡수의 유일한 경우. A 의 선행이 B 이고 B 가 선두면 한 브랜치에서 B→A 로 하면
+// 랜딩을 안 기다린다.
+func TestEligibleBundleAbsorbsBlockedItemWhenBlockerIsLead(t *testing.T) {
+	blocker := cand("B-blocker", 0, nil)
+	blocked := cand("A-blocked", 1, nil, afterItem("B-blocker"))
+	in := EligibleInput{
+		Self:       "S1",
+		Candidates: []Candidate{blocker, blocked},
+		Facts:      AfterFacts{ItemStates: map[string]model.ItemState{"B-blocker": model.ItemOpen}},
+	}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if b == nil {
+		t.Fatalf("묶음이 nil 이다 (탈락 %v)", rej)
+	}
+	if b.Lead.Item.ID != "B-blocker" {
+		t.Fatalf("선행이 선두여야 한다 — 선두가 %q 다", b.Lead.Item.ID)
+	}
+	if !contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("막힌 항목이 흡수되지 않았다 — 구성원 %v", memberIDs(b))
+	}
+	// 흡수된 항목은 picked 이므로 원장에서 빠져야 한다. 두 번 세면 불변식이 깨진다.
+	if itemIDs(rej)["A-blocked"] {
+		t.Fatalf("흡수된 항목이 탈락 원장에도 있다: %v", rej)
+	}
+	// 그런데 왜 들어왔는지는 남아야 한다.
+	for i, m := range b.Members {
+		if m.Item.ID == "A-blocked" && !strings.Contains(b.Links[i].Detail, "B-blocker") {
+			t.Fatalf("흡수 근거에 선행 좌표가 없다: %q", b.Links[i].Detail)
+		}
+	}
+}
+
+// 선행이 묶음 밖이면 흡수하지 않는다. 밖의 것을 기다려야 하는 사실이 안 바뀐다.
+func TestEligibleBundleDoesNotAbsorbWhenBlockerIsNotInBundle(t *testing.T) {
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("A-blocked", 0, nil, afterItem("outside")),
+			cand("Z-unrelated", 1, nil),
+		},
+		Facts: AfterFacts{ItemStates: map[string]model.ItemState{"outside": model.ItemOpen}},
+	}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("묶음 밖 선행인데 흡수했다 — 구성원 %v", memberIDs(b))
+	}
+	if !contains(codesFor(rej, "A-blocked"), AfterUnmetItem) {
+		t.Fatalf("막힌 항목의 사유가 원장에 없다: %v", codesFor(rej, "A-blocked"))
+	}
+}
+
+// 선행이 둘인데 하나만 묶음 안이면 흡수하지 않는다.
+func TestEligibleBundleNeedsEveryBlockerInBundle(t *testing.T) {
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("B-blocker", 0, nil),
+			cand("A-blocked", 1, nil, afterItem("B-blocker"), afterItem("outside")),
+		},
+		Facts: AfterFacts{ItemStates: map[string]model.ItemState{
+			"B-blocker": model.ItemOpen, "outside": model.ItemOpen,
+		}},
+	}
+	b, _ := EligibleBundle(in, SiblingIndex{})
+	if contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("선행 하나가 묶음 밖인데 흡수했다 — 구성원 %v", memberIDs(b))
+	}
+}
+
+// ★ 이 시험이 이 태스크의 핵심이다.
+// 아홉 코드 중 흡수 가능한 것은 after-unmet-item 하나뿐이다.
+// 나머지를 흡수하면 "모르는 것"이나 "영영 안 풀리는 것"이 충족으로 접힌다.
+func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
+	cases := []struct {
+		name  string
+		facts AfterFacts
+		code  string
+	}{
+		{"폐기된 선행은 흡수 불가 — 영영 안 풀린다",
+			AfterFacts{ItemStates: map[string]model.ItemState{"B-blocker": model.ItemDropped}},
+			AfterDroppedDep},
+		{"조회 못 한 선행은 흡수 불가 — 판정 자체를 안 했다",
+			AfterFacts{ItemStates: map[string]model.ItemState{}}, // 키 부재 = after-unknown
+			AfterUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := EligibleInput{
+				Self: "S1",
+				Candidates: []Candidate{
+					cand("B-blocker", 0, nil),
+					cand("A-blocked", 1, nil, afterItem("B-blocker")),
+				},
+				Facts: tc.facts,
+			}
+			b, rej := EligibleBundle(in, SiblingIndex{})
+			if contains(memberIDs(b), "A-blocked") {
+				t.Fatalf("%s 인데 흡수했다 — 구성원 %v", tc.code, memberIDs(b))
+			}
+			if !contains(codesFor(rej, "A-blocked"), tc.code) {
+				t.Fatalf("사유 코드 %q 가 원장에 없다: %v", tc.code, codesFor(rej, "A-blocked"))
+			}
+		})
+	}
+}
+
+// sha 선행은 흡수 대상이 아니다 — 이 세션이 만들 수 없는 사실을 기다린다.
+func TestEligibleBundleDoesNotAbsorbSHABlocked(t *testing.T) {
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("B-lead", 0, nil),
+			cand("A-blocked", 1, nil, afterSHA("deadbee")),
+		},
+		Facts: AfterFacts{SHAAncestry: map[string]AncestryResult{}},
+	}
+	b, _ := EligibleBundle(in, SiblingIndex{})
+	if contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("sha 선행을 흡수했다 — 구성원 %v", memberIDs(b))
+	}
+}
+
+// flatten 은 항목별 사유를 입력 순서대로 편다. 맵을 그대로 순회하면
+// 같은 입력에도 사유 순서가 흔들리고, 그러면 pick_eval 로 쌓인 분포를
+// 시점 간에 비교할 수 없다 — 이 패키지가 이미 지키는 결정성 규율
+// (TestLinkOfPicksSharedJudgmentDeterministically)을 flatten 에도 적용한다.
+func TestFlattenPreservesCandidateInputOrder(t *testing.T) {
+	order := []string{"z-item", "a-item", "m-item"}
+	byItem := map[string][]model.Rejection{
+		"z-item": {{Item: "z-item", Reason: "r1"}},
+		"a-item": {{Item: "a-item", Reason: "r2"}},
+		"m-item": {{Item: "m-item", Reason: "r3"}},
+	}
+	first := flatten(order, byItem)
+	for i := 0; i < 50; i++ {
+		got := flatten(order, byItem)
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("같은 입력에 다른 순서가 나왔다(%d회차): %v vs %v", i, got, first)
+		}
+	}
+	var gotOrder []string
+	for _, r := range first {
+		gotOrder = append(gotOrder, r.Item)
+	}
+	want := []string{"z-item", "a-item", "m-item"}
+	if !reflect.DeepEqual(gotOrder, want) {
+		t.Fatalf("flatten 이 입력 순서를 안 지켰다 — %v, 기대 %v", gotOrder, want)
+	}
+}
+
+// sortedCands 는 흡수 후보 맵을 id 사전순으로 편다. 맵 순회를 그대로 쓰면
+// 같은 입력에서도 흡수 링크의 부착 순서가 흔들린다.
+func TestSortedCandsWalksIDOrderDeterministically(t *testing.T) {
+	m := map[string]Candidate{
+		"z-item": cand("z-item", 0, nil),
+		"a-item": cand("a-item", 1, nil),
+		"m-item": cand("m-item", 2, nil),
+	}
+	idsOf := func(cs []Candidate) []string {
+		out := make([]string, 0, len(cs))
+		for _, c := range cs {
+			out = append(out, c.Item.ID)
+		}
+		return out
+	}
+	first := idsOf(sortedCands(m))
+	for i := 0; i < 50; i++ {
+		if got := idsOf(sortedCands(m)); !reflect.DeepEqual(got, first) {
+			t.Fatalf("같은 입력에 다른 순서가 나왔다(%d회차): %v vs %v", i, got, first)
+		}
+	}
+	want := []string{"a-item", "m-item", "z-item"}
+	if !reflect.DeepEqual(first, want) {
+		t.Fatalf("sortedCands 가 id 사전순이 아니다 — %v, 기대 %v", first, want)
 	}
 }
