@@ -59,11 +59,11 @@ func TestInstructionsBudget(t *testing.T) {
 	}
 }
 
-func TestToolTableIsSix(t *testing.T) {
+func TestToolTableIsSeven(t *testing.T) {
 	got := ToolNames()
-	want := []string{"board", "pick", "note", "add", "finish", "alloc"}
+	want := []string{"board", "pick", "note", "add", "finish", "alloc", "land"}
 	if len(got) != len(want) {
-		t.Fatalf("도구가 %d개다(%v) — 설계 §6 은 6개다", len(got), got)
+		t.Fatalf("도구가 %d개다(%v) — 랜딩 순서 큐가 land 를 더해 7개다", len(got), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {

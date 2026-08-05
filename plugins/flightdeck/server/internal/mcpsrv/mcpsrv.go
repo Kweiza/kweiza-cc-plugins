@@ -8,7 +8,7 @@
 //     CLAUDE_PROJECT_DIR)과 cwd 에서 온다(설계 §13 실측). 파생 가능한 값에 파라미터를
 //     두면 틀린 값이 들어오고, 그 틀린 값은 검사로 막히지 않는다 — 우회할 필드가 있으면 우회된다.
 //  2. **못 읽으면 조용히 익명으로 진행하지 않는다.** 결손 축을 이름으로 배너에 싣고
-//     세션 귀속이 필요한 도구(pick·note·add·finish)를 거절한다.
+//     세션 귀속이 필요한 도구(pick·note·add·finish·land)를 거절한다.
 //  3. **규율은 도구 설명이 아니라 응답에 싣는다.** 세션 시작에 실리는 것은 도구 이름과
 //     300자 instructions 뿐이고, 무엇을 적어야 하는지는 finish 를 body 없이 부른
 //     **그 자리에서** 온다(설계 §6).
@@ -444,6 +444,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		res = s.toolFinish(ctx, sessionID, args)
 	case "alloc":
 		res = s.toolAlloc(ctx, sessionID, args)
+	case "land":
+		res = s.toolLand(ctx, sessionID, args)
 	default:
 		// KnownTool 을 통과했는데 여기 오면 도구 표와 디스패치가 어긋난 것이다.
 		res = textResult(fmt.Sprintf("도구 %q 가 표에는 있는데 디스패치에 없다 — 서버 결함이다", clip(name, 64)), true)
@@ -846,6 +848,57 @@ func (s *Server) toolAlloc(ctx context.Context, sessionID string, raw json.RawMe
 	}
 	_ = sessionID // 발번의 원장 행은 프로젝트 귀속이다(service 가 그렇게 남긴다)
 	return textResult(s.withTail(ctx, RenderAlloc(name, n), tailOpts{}), false)
+}
+
+// toolLand 는 랜딩 줄 하나를 다룬다 — 인자가 무엇을 채웠는지로 동작을 고른다
+// (줄 서기/내 자리 · result=보고+반납 · leave=이탈). release 는 동작이 아니라 거절 사유다.
+func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
+	var a landArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
+	}
+
+	// ★ 회수는 이 서버가 하지 않는다 — pick 의 steal_reason 거절과 **같은 판정, 같은 문장 틀**이다.
+	//   한 서버가 선점 회수는 거절하고 레인 회수는 허용하면 그 거절 문구가 화면에서 거짓이 된다.
+	if strings.TrimSpace(a.Release) != "" {
+		return textResult(s.withTail(ctx, RenderRefusal("land",
+			"release 가 왔지만 이 서버는 레인을 회수하지 않는다",
+			"회수는 사람만 한다 — 마지막 신호 종류·나이, 발자국 경로 수, 원격 마지막 커밋 시각, "+
+				"미푸시 커밋 수, 마지막 판단 다섯 축을 나란히 본 뒤에야 한다(설계 §4). "+
+				"지금 할 수 있는 것: note(kind=ask) 로 점유자에게 묻거나, "+
+				"`fd lane release --row <id> --reason \"...\"` 를 쓴다."), tailOpts{}), true)
+	}
+
+	result := strings.TrimSpace(a.Result)
+	leave := strings.TrimSpace(a.Leave)
+
+	var res service.LandResult
+	var err error
+	switch {
+	case result != "" && leave != "":
+		// 둘 다 채운 것은 서버가 조용히 하나를 고를 일이 아니다 — 보고와 이탈은 다른 원장 결과다.
+		return textResult(s.withTail(ctx, RenderRefusal("land",
+			"result 와 leave 를 함께 줬다 — 보고와 이탈은 다른 동작이다",
+			"한 번에 하나만 해라: 레인을 반납하려면 result, 줄에서 완전히 빠지려면 leave."), tailOpts{}), true)
+	case result != "":
+		res, err = s.be.LandReport(ctx, service.LandReportInput{
+			Project: s.id.ProjectID, SessionID: sessionID,
+			Kind: model.LandingLeftKind(result), Detail: a.Detail,
+		})
+	case leave != "":
+		res, err = s.be.LandLeave(ctx, service.LandLeaveInput{
+			Project: s.id.ProjectID, SessionID: sessionID, Detail: leave,
+		})
+	default:
+		res, err = s.be.Land(ctx, service.LandInput{Project: s.id.ProjectID, SessionID: sessionID})
+	}
+	if err != nil {
+		if r, ok := s.degradedResult(ctx, "land", err); ok {
+			return r
+		}
+		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
+	}
+	return textResult(s.withTail(ctx, RenderLand(res, s.now()), tailOpts{}), false)
 }
 
 // toAfter 는 인자의 선행 조건을 도메인 타입으로 옮긴다.
