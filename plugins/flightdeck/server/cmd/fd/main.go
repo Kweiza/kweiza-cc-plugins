@@ -63,6 +63,10 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 	switch args[0] {
 	case "serve":
 		return runServe(args[1:], env, log)
+	case "selfcheck":
+		// ★ App 을 만들지 않는다. 이 명령은 재기동 검증의 피험자라, 서버 도달·세션 열기
+		// 같은 축이 끼면 그 축의 실패가 "새 판이 고장났다"로 오독된다.
+		return runSelfcheck(args[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
