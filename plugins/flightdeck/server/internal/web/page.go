@@ -49,6 +49,15 @@ type SessionRow struct {
 	DeriveError string
 	IsSelf      bool
 	OpenedAge   string
+
+	// HasActivity·Activity 는 활동 배지다(ActivityOf). 불리언과 사유를 함께 든다 —
+	// 불리언만 두면 화면이 "왜"를 못 말하고, 사람은 그 "왜"로 회수를 판단한다.
+	HasActivity bool
+	Activity    string
+	// Derived 가 false 면 git 파생(브랜치·ahead·미커밋)을 **안 읽은** 행이다.
+	// 창 밖 선점자 줄이 그렇다 — 파생은 카드당 git 호출 1~4회라 창 밖까지 안 돈다.
+	// 0값과 "안 읽었다"를 가르는 축이라, 화면이 이 사실을 말해야 한다.
+	Derived bool
 }
 
 // LivePanel 은 섹션 ① 이다.
@@ -63,6 +72,17 @@ type LivePanel struct {
 	// 0건이면 빈 문자열이다 — **화면이 반드시 말한다**, MCP board 와 같은 이유다.
 	// 침묵하면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다(설계 §4).
 	OutOfWindow string
+
+	// Folded 는 **선점이 없어 안 낸** 세션이 있다는 사실이다. 0건이면 빈 문자열이다.
+	//
+	// ★ OutOfWindow 와 따로 두는 이유: 접힌 사유가 둘이고 처방이 다르다.
+	// 창 밖은 "오래 조용하다"이고 선점 없음은 "큐 밖에서 일한다"다. 한 줄로 뭉치면
+	// 읽는 사람이 손댈 자리를 못 찾는다.
+	//
+	// ★ 그리고 **조율에서 빠진 것이 아니라는 사실을 함께 말한다.** 겹침 처방은
+	// 그 세션들도 그대로 본다(prescribe.go 가 ListLive 를 직접 읽는다) — 안 그러면
+	// 사람이 "저 세션은 아무도 안 본다"고 잘못 읽는다.
+	Folded string
 }
 
 // ClaimTarget 은 회수 가능한 선점 하나다. **근거를 함께 낸다**(설계 §4 의 다섯 축 중 표시분).
@@ -389,7 +409,10 @@ func healthLine(hz service.Health) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ① 지금 — 살아 있는 세션만
+// ① 지금 — 잡혀 있는 작업(선점을 든 카드만)
+//
+// ★ 이 섹션은 "누가 살아 있나"에 **답하지 않는다.** "어느 작업이 잡혀 있나"에 답한다.
+// 선점이 필터고 창은 아니다 — 창을 함께 걸면 회수가 가장 필요한 카드가 먼저 사라진다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *handler) livePanel(now time.Time, board service.BoardView, boardErr error, label string) LivePanel {
@@ -400,14 +423,36 @@ func (h *handler) livePanel(now time.Time, board service.BoardView, boardErr err
 		pan.Empty = "세션 표를 못 만들었다 — 위 사유를 보라. 빈 표가 아니라 실패다."
 		return pan
 	}
+	// ★★ 선점 필터. 이 섹션이 답하는 질문은 "누가 살아 있나"가 아니라
+	// **"어느 작업이 잡혀 있나"** 다. 선점 없는 카드는 안 낸다 — 자기 카드도 예외가 없다.
+	//
+	// ★ 필터가 **여기**여야 하는 이유. board.Sessions 를 줄이면 같은 슬라이스를 먹는
+	// 겹침 꼬리(judge.OverlapsWithLive)·cc 표류 배너(DriftedTwins)·⑤ 막힘 패널·
+	// 회수 폼 대상·dashboard.json 이 함께 죽는다. 그중 겹침은 **선점 없이 편집하는
+	// 세션**을 잡는 축이라, 정확히 이번에 숨기려는 그 세션이 남의 화면에서도 사라진다 —
+	// 조용한 오탐이 아니라 조용한 미탐이다. sessionRow 도 ⑤가 함께 쓰므로 거기도 아니다.
+	folded := 0
 	for _, c := range board.Sessions {
+		if len(c.View.Claims) == 0 {
+			folded++
+			continue
+		}
 		pan.Sessions = append(pan.Sessions, sessionRow(now, c))
 	}
+	// ★ 창 밖인데 항목을 쥔 세션. **창을 이 섹션에 걸지 않는다** — 걸면 회수가 가장
+	// 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
+	// 이 줄들은 git 파생을 안 읽었다(Derived=false) — 창 밖까지 파생하면 세션 수만큼 터진다.
+	for _, v := range board.OutsideClaims {
+		pan.Sessions = append(pan.Sessions, outsideClaimRow(now, v))
+	}
 	if len(pan.Sessions) == 0 {
-		// ★ 0건을 빈칸으로 두지 않는다. 창을 함께 말해야 "아무도 없다"와
-		//   "창이 좁아 안 보인다"가 구분된다.
-		pan.Empty = fmt.Sprintf("살아 있는 세션 0건 — 최근 %s 안에 신호가 있거나 그 뒤에 열린 세션이 없다.",
-			span(board.Window))
+		// ★ 0건을 빈칸으로 두지 않는다. **그리고 이제 0건은 정상 상태다** —
+		//   아무도 항목을 안 쥐고 있다는 뜻이지 서버가 죽었다는 뜻이 아니다.
+		pan.Empty = "잡혀 있는 작업 0건 — 지금 아무 세션도 큐 항목을 쥐고 있지 않다. 서버 장애가 아니다."
+	}
+	if folded > 0 {
+		pan.Folded = fmt.Sprintf(
+			"선점 없는 세션 %d건은 안 낸다 — 겹침 처방은 그 세션들도 그대로 본다.", folded)
 	}
 	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
 	// MCP board 는 이미 말하는데 이 화면만 빠뜨리면 같은 사실이 표면마다 다르게 읽힌다.
@@ -432,6 +477,7 @@ func sessionRow(now time.Time, c service.SessionCard) SessionRow {
 		Worktree:    v.Session.Worktree,
 		Signals:     SignalAges(now, v.Signals),
 		Claims:      v.Claims,
+		Derived:     true,
 		DeriveError: c.DeriveError,
 		IsSelf:      c.IsSelf,
 		HasPaths:    v.HasFootprint,
@@ -469,6 +515,38 @@ func sessionRow(now time.Time, c service.SessionCard) SessionRow {
 		n := noteRow(now, *v.LastNote)
 		r.LastNote = &n
 	}
+	r.HasActivity, r.Activity = ActivityOf(now, v.Signals)
+	return r
+}
+
+// outsideClaimRow 는 **창 밖인데 항목을 쥔 세션** 한 줄이다.
+//
+// ★ 카드가 아니라 줄이다. git 파생(브랜치·ahead·미커밋)이 없다 — 창 밖까지 파생하면
+// 카드당 git 호출 1~4회가 세션 수만큼 터진다(gitreader 에 캐시가 없다). 그래서
+// Derived=false 로 두고 **화면이 "이 축은 안 읽었다"를 말한다.** 0값과 미관측을
+// 뭉개지 않는 것이 이 패키지의 규율이다.
+//
+// 그래도 반드시 낸다: 이 줄이 없으면 회수가 가장 필요한 카드가 정확히 창 때문에
+// 사라진다(실측: 활동 709분 전 세션이 항목 하나를 12시간째 쥐고 있었다).
+func outsideClaimRow(now time.Time, v model.SessionView) SessionRow {
+	r := SessionRow{
+		ID:         v.Session.ID,
+		Short:      short(v.Session.ID),
+		Label:      v.Session.Label,
+		State:      string(v.Session.State),
+		BlockedWhy: v.Session.BlockedWhy,
+		Worktree:   v.Session.Worktree,
+		Signals:    SignalAges(now, v.Signals),
+		Claims:     v.Claims,
+		BranchNote: "창 밖이라 파생을 안 읽었다",
+		AheadNote:  "안 읽음",
+		Footprint:  "안 읽음(창 밖)",
+		Derived:    false,
+	}
+	if !v.Session.OpenedAt.IsZero() {
+		r.OpenedAge = Age(now.Sub(v.Session.OpenedAt))
+	}
+	r.HasActivity, r.Activity = ActivityOf(now, v.Signals)
 	return r
 }
 
