@@ -1025,6 +1025,100 @@ func TestAcquireResourceRaceOnlyOneWins(t *testing.T) {
 	}
 }
 
+// TestListHeldOrdersByAcquisitionThenResource — 점유 목록의 정렬을 잠근다.
+//
+// ★ ListHeld 의 godoc 이 "획득이 오래된 순, 같은 시각이면 자원 이름순"이라고 말하는데
+// 그 산문을 잠그는 시험이 레포에 하나도 없었다 — ORDER BY 를 DESC 로 뒤집어도
+// store·service·mcpsrv·web·api 다섯 패키지가 전부 초록이었다. 코드로 이 순서에
+// **분기하는** 호출자가 없기 때문이다(pick 은 자원→점유자 맵으로 접고, finish 는 자기
+// 세션 것만 걸러 반납한다). 그런데 이 슬라이스는 재정렬 없이 사람에게 나간다(보드의 막힘
+// 절 · MCP 꼬리의 자원 점유 줄). 즉 순서를 바꾸면 시험이 아니라 **화면이** 조용히 바뀐다.
+// 산문에 정렬을 적는 순간 그것을 잠그는 시험이 있어야 한다는 규율(ListSessionEvents 의
+// "오래된 순"을 event_session_test.go 가 잠그는 자리)을 여기서 갚는다.
+//
+// acquired_at 은 raw INSERT 로 직접 넣는다 — AcquireResource 를 연달아 부르면 시각이
+// 마이크로초 단위로 갈려 **동률 갈래를 원리적으로 못 만든다**. 넣는 순서(rowid)는 시간순과도
+// 이름순과도 다르게 뒀다.
+//
+// ★ 이 시험이 **무엇을 못 잠그는지**까지 적는다(그것을 안 적는 것이 이 브랜치가 고치는
+// 결함이다). 넣어 본 변이 넷의 실측:
+//   - `acquired_at DESC, resource DESC`  → 빨강(여섯 줄이 통째로 뒤집힌다)
+//   - `acquired_at, resource DESC`       → 빨강(tie-a·tie-z 만 뒤집힌다 = 둘째 키의 **방향**은 잠긴다)
+//   - `ORDER BY` 통째 삭제                → 빨강(시간축이 사라지고 이름순만 남는다)
+//   - `, resource` 만 삭제               → **초록. 못 잡는다.**
+//
+// 마지막 갈래의 이유는 질의 계획이다: `WHERE project = ? AND released_at IS NULL` 이
+// 부분 유니크 인덱스 resource_one_holder(project, resource) 를 타서 행이 이미 이름순으로
+// 나오고, ORDER BY 의 임시 B-tree 정렬이 그 순서를 동률에서 그대로 보존한다
+// (EXPLAIN QUERY PLAN: SEARCH … USING INDEX resource_one_holder / USE TEMP B-TREE FOR ORDER BY).
+// 즉 둘째 키는 지금 **인덱스와 겹쳐서 없어도 티가 안 난다** — 그래도 질의에 남겨 두는 편이
+// 옳다. 인덱스가 바뀌면 그때부터 값이 달라지는데, 이 시험은 그 변화를 못 알린다.
+func TestListHeldOrdersByAcquisitionThenResource(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	// 전부 과거로 둔다 — 아래에서 **진짜 경로**로 하나 더 잡아 맨 뒤에 오는지 볼 것이다.
+	base := nowStamp().Add(-time.Hour)
+	fixture := []struct {
+		resource string
+		at       time.Time
+	}{
+		{"prod", base.Add(2 * time.Minute)},
+		{"staging", base},
+		{"docs", base.Add(time.Minute)},
+		// 동률 둘 — 이름 **역순**으로 넣는다. 넣은 순서와 이름순을 갈라 둬야 둘째 키가
+		// 하는 일이 보인다. 다만 이 두 줄이 실제로 잠그는 것은 그 키의 **방향**이지
+		// 존재가 아니다 — 위 실측 표 참고.
+		{"tie-z", base.Add(3 * time.Minute)},
+		{"tie-a", base.Add(3 * time.Minute)},
+	}
+	for _, f := range fixture {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO resource_hold(project, resource, session_id, job_id, acquired_at, released_at)
+			VALUES (?, ?, ?, NULL, ?, NULL)`, "p", f.resource, a.ID, fmtTime(f.at)); err != nil {
+			t.Fatalf("점유 삽입 실패(%s): %v", f.resource, err)
+		}
+	}
+	// 대조 전제 — raw 로 넣은 시각이 진짜 경로가 만드는 시각과 같은 축 위에 있는지.
+	// 없으면 위 다섯 줄이 정렬 규칙이 아니라 **시험 전용 표기**만 잠글 수 있다.
+	if _, err := s.AcquireResource(ctx, "p", "방금-잡은-것", Holder{SessionID: a.ID}); err != nil {
+		t.Fatalf("전제가 깨졌다 — 진짜 경로의 획득이 실패했다: %v", err)
+	}
+
+	want := []string{"staging", "docs", "prod", "tie-a", "tie-z", "방금-잡은-것"}
+	names := func(hs []model.ResourceHold) []string {
+		out := make([]string, 0, len(hs))
+		for _, h := range hs {
+			out = append(out, h.Resource)
+		}
+		return out
+	}
+
+	held, err := s.ListHeld(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(held); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("정렬이 다르다(획득이 오래된 순, 같은 시각이면 자원 이름순):\n got  %v\n want %v", got, want)
+	}
+
+	// Tx 짝도 같은 순서여야 한다 — godoc 이 "질의를 공유하므로 갈릴 자리가 없다"고
+	// 말하므로, 그 문장도 여기서 함께 잠근다.
+	var inTx []string
+	if err := s.Tx(ctx, func(t *Tx) error {
+		h, err := t.ListHeld("p")
+		inTx = names(h)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(inTx, ",") != strings.Join(want, ",") {
+		t.Errorf("Tx 짝의 정렬이 Store 짝과 다르다:\n got  %v\n want %v", inTx, want)
+	}
+}
+
 func TestReleaseResourceOnlyByHolder(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
