@@ -325,6 +325,10 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 // ★ Entries 는 **절대 nil 이 아니다.** 0건은 빈 슬라이스여야 하고, "안 읽었다"는
 // 호출부가 *LaneView 를 nil 로 두어 표현한다. 여기서 접으면 화면이 둘을 구분 못 한다.
 //
+// ★ 두 질의(줄·점유자)는 별개 스냅숏이라 그 사이의 land 커밋이 **거짓 정합 어긋남**을
+// 만들 수 있다. 어긋나 보일 때만 줄을 한 번 더 읽어 재확인한다 — 아래 본문 주석에
+// 왜 트랜잭션이 아니라 재확인인지가 있다.
+//
 // ★ 줄 길이만큼 LastSignal 을 부른다(N+1). 줄 길이는 그 프로젝트의 동시 세션 수라
 // 실무상 한 자릿수이므로 지금은 이대로 둔다 — 여기가 느려지면 신호 MAX 를 세션 목록으로
 // 한 번에 읽는 질의를 store 에 더하면 된다. 나중에 "왜 느리지"를 묻는 사람이
@@ -337,7 +341,43 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 	if err != nil {
 		return LaneView{}, err
 	}
-	out := LaneView{Entries: make([]LaneEntry, 0, len(rows))}
+
+	var holder *LaneHolder
+	hold, herr := s.st.HeldBy(ctx, project, LaneResource)
+	switch {
+	case herr == nil:
+		holder = &LaneHolder{SessionID: hold.SessionID, AcquiredAt: hold.AcquiredAt}
+	case errors.Is(herr, store.ErrNotFound):
+		// 아무도 안 쥐었다. Holder 는 nil 이고 그것이 곧 "레인이 비었다"다.
+	default:
+		return LaneView{}, herr
+	}
+
+	// ★ **어긋나 보일 때만 줄을 한 번 더 읽는다.** 위 두 질의는 트랜잭션 밖의 별개 질의라
+	//   각각 자기 읽기 스냅숏을 가진다(WAL + database/sql 커넥션 풀). 사이에 세션 하나가
+	//   land(줄 서기+취득을 한 트랜잭션으로 한다)를 커밋하면 줄은 **비어 있게**, 점유자는
+	//   **있게** 읽혀서 화면이 "점유자는 있는데 줄 행이 없다"는 정합 어긋남 경고
+	//   (mcpsrv/render.go)를 거짓으로 낸다. 그 경고는 이 화면에서 가장 시끄러운 문장이고,
+	//   흔해지면 설계 §4 가 말한 "판별력 0"이 여기서 시작된다.
+	//
+	//   **트랜잭션으로 묶지 않는다** — DSN 이 _txlock=immediate 라 읽기 하나에 쓰기 잠금을
+	//   잡고, 그러면 보드를 볼 때마다 그 프로젝트의 land 전부가 선다. 이 함수 머리의
+	//   "읽기 전용이라 트랜잭션을 안 거친다"는 판정과 정합하는 쪽이 재확인이다.
+	//
+	//   줄을 **점유자 조회 뒤에** 다시 읽으므로 두 번째 스냅숏은 점유자 조회보다 새것이고,
+	//   끼어든 land 의 줄 행이 반드시 보인다. 정상 경로 비용은 0이다(어긋나 보일 때만 돈다).
+	//   남는 창은 반대 방향 하나다 — 점유자가 그 사이에 반납한 경우. 그때는 다음 조회에서
+	//   점유도 함께 사라져 "비어 있음"으로 스스로 아문다. 진짜 어긋남은 조회를 다시 해도
+	//   그대로 남는다는 점이 둘을 가른다.
+	if holder != nil && !rowsHaveSession(rows, holder.SessionID) {
+		fresh, ferr := s.st.ListLandingQueue(ctx, project)
+		if ferr != nil {
+			return LaneView{}, ferr
+		}
+		rows = fresh
+	}
+
+	out := LaneView{Entries: make([]LaneEntry, 0, len(rows)), Holder: holder}
 	for _, r := range rows {
 		// 관측 실패와 "신호 없음"은 화면에서 둘 다 빈칸이다 — 사람이 다시 물으면 되고,
 		// 실패 사유는 WARN 에 남는다. 이 축을 반드시 봐야 하는 곳은 불변으로 남는
@@ -348,20 +388,20 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 			LastSignalAt: at,
 		})
 	}
-
-	hold, herr := s.st.HeldBy(ctx, project, LaneResource)
-	switch {
-	case herr == nil:
-		at, _ := s.lastSignal(ctx, hold.SessionID)
-		out.Holder = &LaneHolder{
-			SessionID: hold.SessionID, AcquiredAt: hold.AcquiredAt, LastSignalAt: at,
-		}
-	case errors.Is(herr, store.ErrNotFound):
-		// 아무도 안 쥐었다. Holder 는 nil 이고 그것이 곧 "레인이 비었다"다.
-	default:
-		return LaneView{}, herr
+	if out.Holder != nil {
+		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
 	}
 	return out, nil
+}
+
+// rowsHaveSession 은 줄 목록에 그 세션의 행이 있는지다. 순수 함수다.
+func rowsHaveSession(rows []model.LandingRow, sessionID string) bool {
+	for _, r := range rows {
+		if r.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 // ReleaseLaneRow 는 사람이 줄 행 하나를 회수한다. **대상은 레인이 아니라 줄 행이다** —

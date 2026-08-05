@@ -594,3 +594,137 @@ func TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead(t *testing.T) {
 		t.Fatalf("관측 실패를 판단에 안 적었다 — 나중에 이 회수가 무엇을 보고 한 것인지 알 수 없다:\n%s", j.Body)
 	}
 }
+
+// TestLandingLaneStillReportsRealDivergenceAfterTheRecheck — 재확인이 **진짜 어긋남을
+// 숨기지 않는다.**
+//
+// LandingLane 은 줄과 점유자를 트랜잭션 밖 별개 질의로 읽어서, 사이에 land 가 커밋되면
+// "점유자는 있는데 줄 행이 없다"를 거짓으로 낼 수 있다. 그래서 어긋나 보일 때 줄을 한 번
+// 더 읽어 재확인하는데 — 그 재확인이 과하면 정반대의 사고가 된다: 진짜 어긋남
+// (레인은 영영 잡혀 있고 줄은 비어 보이는 상태)이 조용히 "비어 있음"으로 접히고,
+// 그러면 그 프로젝트의 랜딩이 전원 정지한 사실을 아무도 못 본다.
+//
+// 여기서는 점유는 그대로 둔 채 줄 행만 저장층으로 직접 닫아 그 상태를 실제로 만든다.
+func TestLandingLaneStillReportsRealDivergenceAfterTheRecheck(t *testing.T) {
+	s, st := newSvc(t)
+	a, _ := twoSessions(t, s)
+
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a}); err != nil {
+		t.Fatal(err)
+	}
+	// 점유는 안 건드리고 줄 행만 닫는다 — 이것이 정확히 그 어긋난 모양이다.
+	if err := st.CloseLandingRowBySession(ctx(), "p", a, model.LandingLeftFinish, ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := divergentHolds(t, st); n != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 어긋난 점유가 %d건이다(기대 1)", n)
+	}
+
+	lane, err := s.LandingLane(ctx(), "p")
+	if err != nil {
+		t.Fatalf("어긋난 상태에서 레인 조회가 실패했다 — 그러면 그 상태를 볼 유일한 창이 닫힌다: %v", err)
+	}
+	if lane.Holder == nil {
+		t.Fatalf("재확인이 진짜 어긋남을 삼켰다 — 점유자를 nil 로 접으면 화면이 \"비어 있음\"을 " +
+			"내고 랜딩 전원 정지가 안 보인다")
+	}
+	if lane.Holder.SessionID != a {
+		t.Errorf("점유자가 %q 다(기대 %q)", lane.Holder.SessionID, a)
+	}
+	if lane.Entries == nil {
+		t.Fatalf("0건이 nil 로 나왔다 — \"안 읽었다\"와 구분되지 않는다")
+	}
+	if len(lane.Entries) != 0 {
+		t.Errorf("줄 행을 다 닫았는데 항목이 %d건 보인다: %+v", len(lane.Entries), lane.Entries)
+	}
+}
+
+// TestWaitingSessionsReportIsToldItNeverHeldTheLane — **아직 대기 중인** 세션이 보고하면
+// state 는 reclaimed 지만 사유는 "회수됐다"가 아니라 "쥔 적이 없다"여야 한다.
+//
+// ★ laneNotMine 이 "내가 점유자가 아니다" 전부를 reclaimed 한 낱말로 접는다 — 도달 갈래가
+// 셋이고 이것이 그중 둘째다. 사유가 회수를 말하는 순간 그 문장은 거짓이 되고, 대기자는
+// 자기 줄 행이 아직 살아 있는데도 회수됐다고 믿고 줄을 떠난다.
+//
+// ★ 그리고 **줄 행을 건드리면 안 된다.** 남의 레인에 보고했다고 자기 자리를 잃으면
+// 오타 한 번이 순번을 통째로 날린다.
+func TestWaitingSessionsReportIsToldItNeverHeldTheLane(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a}); err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.State != "waiting" {
+		t.Fatalf("사전 조건이 깨졌다 — 둘째 세션이 %q 다(기대 waiting): %+v", waiting.State, waiting)
+	}
+
+	rep, err := s.LandReport(ctx(), LandReportInput{
+		Project: "p", SessionID: b, Kind: model.LandingLeftFail, Detail: "검증 실패",
+	})
+	if err != nil {
+		t.Fatalf("대기 중 세션의 보고가 오류가 됐다 — 사실을 그대로 답해야 한다: %v", err)
+	}
+	if rep.State != "reclaimed" {
+		t.Fatalf("대기 중 세션에게 %q 라고 답했다(기대 reclaimed): %+v", rep.State, rep)
+	}
+	if !strings.Contains(rep.Reason, "쥔 적이 없다") {
+		t.Errorf("대기 중 세션의 사유가 %q 다 — 아직 살아 있는 줄 행인데 회수를 말하면 거짓이다", rep.Reason)
+	}
+	if strings.Contains(rep.Reason, "회수") {
+		t.Errorf("한 번도 쥔 적 없는 세션에게 회수를 말했다: %q", rep.Reason)
+	}
+	if rep.RowID != waiting.RowID {
+		t.Errorf("응답이 다른 줄 행을 가리킨다: %d(기대 %d)", rep.RowID, waiting.RowID)
+	}
+
+	// 줄 행은 그대로 살아 있어야 한다 — 남의 레인에 보고한 것이 자기 자리를 못 없앤다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_at IS NULL`, waiting.RowID); n != 1 {
+		t.Errorf("대기 중 세션의 보고가 자기 줄 행을 닫았다(id=%d) — 오타 한 번이 순번을 날린다", waiting.RowID)
+	}
+	// 앞사람의 점유도 그대로여야 한다.
+	if n := laneHolders(t, st, a); n != 1 {
+		t.Errorf("대기자의 보고가 점유자의 레인을 건드렸다(점유 %d건)", n)
+	}
+}
+
+// TestReportFromASessionThatNeverQueuedSaysExactlyThat — 줄에 **선 적이 없는** 세션이
+// 보고하면 사유는 "줄에 선 기록이 없다"다. reclaimed 의 셋째 갈래다.
+//
+// ★ 여기서 회수를 말하면 그 세션은 자기가 레인을 잃었다고 믿고 land 를 다시 부르는 대신
+// 물러난다 — 실제로 해야 할 일(먼저 줄을 서라)과 정반대다.
+func TestReportFromASessionThatNeverQueuedSaysExactlyThat(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a}); err != nil {
+		t.Fatal(err)
+	}
+	// b 는 land 를 한 번도 안 불렀다.
+	rep, err := s.LandReport(ctx(), LandReportInput{
+		Project: "p", SessionID: b, Kind: model.LandingLeftOK,
+	})
+	if err != nil {
+		t.Fatalf("줄에 선 적 없는 세션의 보고가 오류가 됐다: %v", err)
+	}
+	if rep.State != "reclaimed" {
+		t.Fatalf("state 가 %q 다(기대 reclaimed): %+v", rep.State, rep)
+	}
+	if !strings.Contains(rep.Reason, "줄에 선 기록이 없다") {
+		t.Errorf("사유가 %q 다 — 줄에 선 적조차 없는 세션에게 그 사실을 말해야 한다", rep.Reason)
+	}
+	if strings.Contains(rep.Reason, "회수") {
+		t.Errorf("줄에 선 적 없는 세션에게 회수를 말했다: %q", rep.Reason)
+	}
+	if rep.RowID != 0 {
+		t.Errorf("줄 행이 없는데 행 번호 %d 를 지어냈다", rep.RowID)
+	}
+	if n := liveQueue(t, st); n != 1 {
+		t.Errorf("보고가 남의 줄 행을 건드렸다(살아 있는 행 %d개, 기대 1)", n)
+	}
+}

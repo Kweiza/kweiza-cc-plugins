@@ -235,7 +235,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		// 바뀔 때마다(0113b35 처럼) 조용히 낡는다. 그리고 "이렇게 본다"에서 멈춘다 —
 		// "window=Nh 로 본다"처럼 손잡이를 돌리라는 투로 쓰지 않는다. MCP board 도구는
 		// window 인자를 받지 않고(tools.go), 그 인자를 새로 만들지도 않는다(설계가
-		// 도구 수를 6개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
+		// 도구 수를 7개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
 		// 웹 패널(internal/web/page.go)이 이미 이렇게 한다: 사실만 말하고 지시하지 않는다.
 		foot = append(foot, fmt.Sprintf(
 			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
@@ -564,6 +564,10 @@ func boardDetailFoot(v service.BoardView) []string {
 
 // renderLane 은 보드의 레인 절 한 줄이다. 순수 함수다.
 //
+// 설계 §9 ① 이 요구하는 축을 전부 낸다: **점유자의 획득 경과**(머리) · 대기 줄 전체
+// (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
+// 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
+//
 // ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
 // 이상 질의는 이미 돈 것이고, Entries 가 비었어도 그 사실("질의는 돌았다")을 문장에
 // 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Entries)가
@@ -588,10 +592,30 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		if l.Holder != nil && l.Holder.SessionID == e.SessionID {
 			mark = "◀점유"
 		}
-		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전%s)",
-			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), mark))
+		// ★ **신호 나이를 낸다**(설계 §9 ①). 자동 만료를 안 만든 근거가 "사람이 나이를 보고
+		// 판정한다"인데, 그 판정을 내리는 사람은 대기자가 아니라 보드를 보는 사람이다.
+		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
+		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
+		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		sig := "신호 없음"
+		if e.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
+		}
+		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전·%s%s)",
+			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), sig, mark))
 	}
-	line := fmt.Sprintf("랜딩 레인 %d건: %s", len(l.Entries), strings.Join(parts, " "))
+	// ★ 머리에 **점유자의 획득 경과**를 낸다(설계 §9 ①). 회수를 판정하는 사람이 봐야 할
+	// 두 숫자가 획득 경과와 신호 나이인데, 앞엣것은 LaneHolder.AcquiredAt 에 채워져 있으면서
+	// 이 함수가 안 읽어 화면에 없었다.
+	//
+	// ★ 점유자의 ShortID 를 머리에 **다시 적지 않는다.** 누가 쥐었나는 항목의 ◀점유 표시가
+	// 이미 답하고, 머리에 `<세션>(…)` 모양을 하나 더 두면 항목 조각을 잘라 보는 시험
+	// (laneEntrySegment)이 머리 쪽을 먼저 집어 표시 뒤바뀜을 못 잡게 된다.
+	head := fmt.Sprintf("랜딩 레인 %d건", len(l.Entries))
+	if l.Holder != nil {
+		head += fmt.Sprintf("(점유 획득 %s전)", FormatAge(now.Sub(l.Holder.AcquiredAt)))
+	}
+	line := head + ": " + strings.Join(parts, " ")
 	if l.Holder != nil && !laneHolderIsQueued(l) {
 		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
 		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
@@ -815,7 +839,7 @@ func RenderAdd(it model.Item) string {
 	// 않는 경로를 가리켰고, 그중 하나(fd-item-move)는 폐기됐는데 **id 가 전역 유일이라
 	// 회수되지 않아 그 이름이 영구히 죽었다.**
 	//
-	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 여섯으로
+	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 일곱으로
 	// 눌러 잡는다 — 컨텍스트 예산), 대신 §6 이 정한 방식이 이것이다:
 	// **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
 	fmt.Fprintf(&b, "add · %s 를 **프로젝트 %s** 의 큐에 넣었다 [%s]\n", it.ID, it.Project, it.State)
@@ -997,8 +1021,8 @@ func RenderRefusal(what, reason, guidance string) string {
 // RenderLand 는 land 한 번의 결과다. 순수 함수다.
 //
 // 세 갈래가 뼈대다: **네 차례다**(turn) · **너는 N번째다**(waiting — 앞사람 세션·획득 경과·
-// 마지막 신호 나이) · **네 레인은 회수됐다**(reclaimed — 사유). report·leave 의 확인(released·left)은
-// 그보다 단순해서 한 줄이다.
+// 마지막 신호 나이) · **이 레인은 네 것이 아니다**(reclaimed — 사유가 무엇이 일어났는지 말한다).
+// report·leave 의 확인(released·left)은 그보다 단순해서 한 줄이다.
 //
 // ★ **lane-turn 처방을 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다
 // (설계 단계 ③ 이 그것을 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는
@@ -1032,7 +1056,15 @@ func RenderLand(r service.LandResult, now time.Time) string {
 		fmt.Fprintf(&b, "land · 줄에서 빠졌다 (줄 행 %d)\n", r.RowID)
 
 	case "reclaimed":
-		fmt.Fprintf(&b, "land · 네 레인은 회수됐다 — %s\n", r.Reason)
+		// ★ 머리글이 사유를 앞지르지 않는다. service.laneNotMine 은 "내가 점유자가 아니다"
+		// **전부**를 이 한 낱말로 접는데 도달 갈래가 셋이다: 진짜 회수됨(left_detail) ·
+		// 아직 대기 중인 세션의 보고("레인을 쥔 적이 없다 …") · 줄에 선 적조차 없는 세션
+		// ("이 프로젝트 줄에 선 기록이 없다"). 머리글에 "회수됐다"를 박으면 뒤의 둘에서
+		// **한 문장 안에서 회수됐다와 쥔 적이 없다가 정면 충돌한다** — 사용자에게 나가는
+		// 거짓 문장이다. 그래서 머리글은 세 갈래 모두에 참인 것만 말하고(네 것이 아니다)
+		// **무엇이 일어났나는 사유가 말한다**(laneLeftReason 이 절대 빈 문자열을 안 내므로
+		// 이 자리가 비는 경우는 없다). State 어휘 다섯과 LandExitCode 표는 그대로다.
+		fmt.Fprintf(&b, "land · 이 레인은 네 것이 아니다 — %s\n", r.Reason)
 
 	default:
 		// KnownTool 이 표와 디스패치를 지키듯, 여기는 service.LandResult.State 다섯 낱말과
