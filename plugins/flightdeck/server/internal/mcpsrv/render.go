@@ -672,11 +672,32 @@ func firstLine(title, body string) string {
 func RenderPick(r service.PickResult, now time.Time) string {
 	var b strings.Builder
 
+	// 묶음 구성원 수(선두 포함)를 헤더 줄에 반영한다. Bundle 이 nil 이면 이 응답이
+	// 그 축을 안 읽은 것이므로 n=1(단독 문구)로 둔다 — renderBundle 이 그 부재를
+	// 따로 말하고, 여기서 흉내 내지 않는다.
+	n := 1
+	if r.Bundle != nil {
+		n = len(r.Bundle.Members) + 1
+	}
 	switch r.Mode {
 	case service.PickRecommended:
-		b.WriteString("pick · 추천 1건 — **아직 선점하지 않았다**\n")
+		if n > 1 {
+			fmt.Fprintf(&b, "pick · 추천 묶음 %d건 — **아직 선점하지 않았다**\n", n)
+		} else {
+			b.WriteString("pick · 추천 1건 — **아직 선점하지 않았다**\n")
+		}
 	case service.PickClaimed:
-		b.WriteString("pick · 선점했다\n")
+		if n > 1 {
+			claimed := 1 // 선두는 이미 집었다
+			for _, m := range r.Bundle.Members {
+				if m.Claimed {
+					claimed++
+				}
+			}
+			fmt.Fprintf(&b, "pick · 선점했다 — 묶음 %d건 중 %d건\n", n, claimed)
+		} else {
+			b.WriteString("pick · 선점했다\n")
+		}
 	case service.PickResumed:
 		b.WriteString("pick · 재개 — 이미 내 선점이다(선점 시각은 그대로 둔다)\n")
 	default:
@@ -713,6 +734,17 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		}
 	}
 
+	// 묶음 절. renderBundle 이 세 갈래(부재·단독·구성원 목록)를 전부 말한다 —
+	// 이 위치는 항목 블록 뒤·브랜치 줄 앞이다.
+	b.WriteString(renderBundle(r.Bundle))
+	if r.Bundle != nil && len(r.Bundle.Members) > 0 {
+		// 겹침이 묶음 전체 경로의 합집합으로 계산됐다는 사실을 여기서 말한다.
+		// 이 줄이 없으면 꼬리의 "겹침:" 줄이 선두 경로만 본 결과로 읽힌다 —
+		// RenderTail 은 모든 도구가 쓰고 묶음을 모르므로 이 자리가 유일한 발화처다.
+		fmt.Fprintf(&b, "겹침 판정 범위: 묶음 %d건의 경로를 전부 합쳐서 봤다 — "+
+			"남과 부딪히는지는 묶음 단위 질문이다.\n", len(r.Bundle.Members)+1)
+	}
+
 	if r.Claim != nil {
 		fmt.Fprintf(&b, "선점 시각: %s (%s 전)\n",
 			r.Claim.At.UTC().Format("2006-01-02 15:04 UTC"), FormatAge(now.Sub(r.Claim.At)))
@@ -720,6 +752,13 @@ func RenderPick(r service.PickResult, now time.Time) string {
 
 	if r.Branch != "" {
 		fmt.Fprintf(&b, "\n브랜치: %s\n", r.Branch)
+		if r.Bundle != nil && len(r.Bundle.Members) > 0 {
+			// 브랜치는 선두 하나뿐이다 — 구성원은 같은 워크트리에 얹혀 갈 뿐 각자
+			// 브랜치를 갖지 않는다. 이 사실을 안 말하면 "브랜치가 구성원마다
+			// 따로 있나"로 읽힐 여지가 남는다.
+			fmt.Fprintf(&b, "  묶음 선두의 id 다. %d건을 이 워크트리에서 함께 한다.\n",
+				len(r.Bundle.Members)+1)
+		}
 		if len(r.Setup) > 0 {
 			b.WriteString("워크트리 준비:\n")
 			for _, c := range r.Setup {
@@ -756,6 +795,70 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
 	}
 	fmt.Fprintf(&b, "\n%s", FormatFreshness(r.Derived))
+	return b.String()
+}
+
+// renderBundle 은 묶음 절이다. 순수 함수다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다.** 셋을 다 말한다:
+// 축을 안 읽었다 · 묶을 게 없어 단독이다 · 이런 것들과 묶였다.
+// 침묵하면 "묶을 게 없다"와 "이 축을 안 봤다"가 같은 화면이 되고,
+// 그러면 판정이 통째로 실패한 날에도 pick 은 평소와 똑같아 보인다.
+// renderPathCheck 이 같은 이유로 이상이 없어도 한 줄을 찍는다.
+func renderBundle(bi *service.BundleInfo) string {
+	if bi == nil {
+		return "\n묶음: 이 응답은 그 축을 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
+	}
+	var b strings.Builder
+	if len(bi.Members) == 0 {
+		b.WriteString("\n묶음: 함께 갈 항목이 없다 — 단독이다.\n")
+		if bi.Reason != "" {
+			fmt.Fprintf(&b, "  %s\n", bi.Reason)
+		}
+		return b.String()
+	}
+	fmt.Fprintf(&b, "\n묶음 구성원 %d건 (선두는 위의 항목이다):\n", len(bi.Members))
+	for _, m := range bi.Members {
+		mark := "+"
+		if m.Rejection != nil || !m.Claimed {
+			mark = "✗"
+		}
+		fmt.Fprintf(&b, "\n  %s %s — %s [%s]\n", mark, m.Item.ID, m.Item.Title, m.Item.State)
+		if m.Rejection != nil {
+			fmt.Fprintf(&b, "    못 집었다: %-16s %s\n",
+				m.Rejection.Reason, clip(m.Rejection.Detail, 160))
+			b.WriteString("    이 항목 없이 나머지를 진행한다. " +
+				"필요하면 그 세션에게 note(kind:\"ask\") 로 알려라\n")
+			continue
+		}
+		if len(m.Link.Axes) > 0 {
+			axes := make([]string, 0, len(m.Link.Axes))
+			for _, a := range m.Link.Axes {
+				axes = append(axes, string(a))
+			}
+			fmt.Fprintf(&b, "    묶은 근거: [%s] %s\n", strings.Join(axes, " + "), m.Link.Detail)
+		}
+		if len(m.Item.Paths) > 0 {
+			fmt.Fprintf(&b, "    경로: %s\n", strings.Join(m.Item.Paths, ", "))
+		}
+		b.WriteString(indent(strings.TrimRight(renderPathCheck(m.PathCheck, m.Item.ID), "\n"), "    ") + "\n")
+		if len(m.Notes) > 0 {
+			fmt.Fprintf(&b, "    연결된 판단 %d건 (전문):\n", len(m.Notes))
+			for _, j := range m.Notes {
+				fmt.Fprintf(&b, "      [%s] %s · %s\n", j.Kind,
+					j.At.UTC().Format("2006-01-02 15:04"), clip(firstLine(j.Title, j.Body), 100))
+				if strings.TrimSpace(j.Body) != "" {
+					b.WriteString(indent(clip(j.Body, 4000), "        ") + "\n")
+				}
+			}
+		}
+	}
+	if bi.Reason != "" {
+		fmt.Fprintf(&b, "\n왜 이 묶음인가: %s\n", bi.Reason)
+	}
+	if bi.Scope != "" {
+		fmt.Fprintf(&b, "묶음 범위: %s\n", bi.Scope)
+	}
 	return b.String()
 }
 

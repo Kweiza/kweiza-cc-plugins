@@ -187,6 +187,78 @@ func TestRenderPickPrintsAGenuineZero(t *testing.T) {
 	}
 }
 
+// ★ 이 시험이 이 태스크에서 가장 중요하다.
+// 묶음 축이 없는 응답(구서버·옛 캐시)이 "묶을 게 없다"로 읽히면 안 된다.
+func TestRenderPickNeverCallsAnAbsentBundleSolo(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다", Bundle: nil,
+	}, t0)
+	if !strings.Contains(got, "이 응답은 그 축을 읽지 않았다") {
+		t.Fatalf("묶음 축 부재를 안 말한다:\n%s", got)
+	}
+	if strings.Contains(got, "묶을 게 없어 단독이다") {
+		t.Fatalf("안 읽은 축을 '단독'으로 단정했다:\n%s", got)
+	}
+}
+
+// 구성원 0건이면 단독이라고 **말한다**. 침묵하면 부재와 같은 화면이 된다.
+func TestRenderPickSaysSoloWhenBundleIsEmpty(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Bundle: &service.BundleInfo{Reason: "의존자 합 0 · 묶음 1건"},
+	}, t0)
+	if !strings.Contains(got, "단독") {
+		t.Fatalf("단독임을 안 말한다:\n%s", got)
+	}
+}
+
+func TestRenderPickShowsWhyEachMemberIsBundled(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item:   &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+		Branch: "lead",
+		Bundle: &service.BundleInfo{
+			Reason: "의존자 합 0 · 묶음 2건 · 최고령 2026-08-04 23:50 · 선두 lead",
+			Members: []service.BundleMember{{
+				Item: model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen,
+					Paths: []string{"x.go"}, CreatedAt: t0},
+				Link: judge.Link{Item: "mem",
+					Axes:   []judge.BundleAxis{judge.AxisSibling, judge.AxisAfter},
+					Detail: "판단 J1 가 둘을 함께 가리킨다 · 선행이 같다(sha:47421b4)"},
+			}},
+		},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{"mem", "묶은 근거", "sibling", "after", "J1", "47421b4"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다:\n%s", want, got)
+		}
+	}
+	// 브랜치는 선두 하나다.
+	if strings.Count(got, "브랜치: ") != 1 {
+		t.Fatalf("브랜치 줄이 하나가 아니다:\n%s", got)
+	}
+}
+
+// 못 집은 구성원은 사유 코드 그대로 보인다.
+func TestRenderPickShowsUnclaimedMemberReason(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선두를 선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:      model.Item{ID: "blocked", Title: "막힘", CreatedAt: t0},
+			Claimed:   false,
+			Rejection: &model.Rejection{Item: "blocked", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"},
+		}}},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{"못 집었다", judge.RejectClaimed, "S2"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다:\n%s", want, got)
+		}
+	}
+}
+
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{
