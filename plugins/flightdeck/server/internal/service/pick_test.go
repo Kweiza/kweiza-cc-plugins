@@ -692,6 +692,11 @@ func TestPickRecommendDoesNotLoadMemberNotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pick 실패: %v", err)
 	}
+	// ★ 사전 조건. 이게 없으면 "형제 축이 아예 안 붙어 구성원이 0건"인 회귀에서도
+	// 아래 루프가 0번 돌아 이 시험이 그린으로 남는다 — 아무것도 확인하지 않은 채.
+	if res.Bundle == nil || len(res.Bundle.Members) == 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 있어야 이 시험이 뭔가를 확인한다: %+v", res.Bundle)
+	}
 	for _, m := range res.Bundle.Members {
 		if len(m.Notes) != 0 {
 			t.Fatalf("추천인데 구성원 %q 의 판단 전문을 실었다(%d건)", m.Item.ID, len(m.Notes))
@@ -742,8 +747,11 @@ func TestSiblingIndexReturnsEmptyOnQueryFailure(t *testing.T) {
 	f2 := addItem(t, s, "p", "f2-sib", []string{"services/b.go"}, nil)
 	makeSiblings(t, st, "p", "f1-sib", "f2-sib")
 
-	// 사전 조건: 표가 멀쩡할 때는 색인이 실제로 채워진다.
-	sib := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	// 사전 조건: 표가 멀쩡할 때는 색인이 실제로 채워지고 두 번째 값은 true 다.
+	sib, ok := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	if !ok {
+		t.Fatal("사전 조건이 깨졌다 — 표가 멀쩡한데 읽기 실패로 나왔다")
+	}
 	if len(sib) == 0 {
 		t.Fatalf("사전 조건이 깨졌다 — 표가 멀쩡한데 색인이 비었다: %v", sib)
 	}
@@ -753,11 +761,151 @@ func TestSiblingIndexReturnsEmptyOnQueryFailure(t *testing.T) {
 		t.Fatalf("형제 색인 조회를 실패시키지 못했다: %v", err)
 	}
 
-	got := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	got, ok2 := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	if ok2 {
+		t.Fatal("조회가 실패했는데 두 번째 값이 true 다 — 호출부가 못 읽은 사실을 놓친다")
+	}
 	if got == nil {
 		t.Fatal("조회가 실패했는데 nil 색인을 냈다 — 빈 맵이어야 나머지 두 축이 판정에서 계속 돈다")
 	}
 	if len(got) != 0 {
 		t.Fatalf("조회가 실패했는데 색인에 값이 남았다: %v", got)
+	}
+}
+
+// bundleScope 는 순수 함수다 — total 을 "적격 항목"이라고 부르면 안 된다(len(cands) 는
+// 적격 여부와 무관하게 후보 전부를 센 수다). 리뷰 라운드 1 finding 2: 실측에서
+// 후보 5·적격 3 인데 "이웃 후보는 적격 항목 5건이다"라고 낸 적이 있다.
+func TestBundleScopeDoesNotClaimEligibleCount(t *testing.T) {
+	got := bundleScope(5, true)
+	if strings.Contains(got, "적격 항목") {
+		t.Fatalf("적격 여부와 무관한 수인데 '적격 항목'이라고 주장한다: %q", got)
+	}
+	if !strings.Contains(got, "5건") {
+		t.Fatalf("total 값 5가 문장에 없다: %q", got)
+	}
+}
+
+// bundleScope 는 형제 축을 못 읽었다는 사실을 문장에 남긴다 — 리뷰 라운드 1 finding 3.
+// 안 남기면 "구성원 0건"(형제가 진짜로 없다)과 "형제 축을 아예 못 읽었다"가 응답에서
+// 같은 값으로 접힌다. 키 부재를 값으로 접지 않는다는 전역 규율이 이 문장에도 적용된다.
+func TestBundleScopeNamesUnreadSiblingAxis(t *testing.T) {
+	read := bundleScope(5, true)
+	if strings.Contains(read, "못 읽") {
+		t.Fatalf("다 읽었는데 못 읽었다고 말한다: %q", read)
+	}
+	unread := bundleScope(5, false)
+	if !strings.Contains(unread, "못 읽") {
+		t.Fatalf("형제 축을 못 읽었다는 사실이 문장에 없다: %q", unread)
+	}
+}
+
+// Bundle.Scope 는 실제 pick 호출을 거쳐도 "적격 항목"을 주장하지 않는다 — 후보 중
+// 하나가 남에게 선점돼 적격에서 빠지는 실제 시나리오로 후보 수(len(cands))와
+// 적격 수가 갈리게 만들고, 그 응답을 확인한다(bundleScope 단위 시험이 pickRecommend
+// 안에서 실제로 그 값으로 불리는지까지 닫는다).
+func TestPickBundleScopeReflectsRealCandidateCount(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "적격시험")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남시험")
+
+	addItem(t, s, "p", "s1-open", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "s2-claimed", []string{"services/b.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: other.Session.ID, ItemID: "s2-claimed"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	// 사전 조건: 후보 2건(s1-open, s2-claimed 는 살아있는 남의 선점이라 후보에 든다) 중
+	// 적격은 s1-open 하나뿐이어야 이 시험이 실제로 후보 수 ≠ 적격 수인 상황을 잰다.
+	if len(res.Rejected) == 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 탈락이 하나도 없으면 후보 수와 적격 수가 갈리지 않는다: %+v", res.Rejected)
+	}
+	if res.Bundle == nil {
+		t.Fatal("묶음 축이 nil 이다")
+	}
+	if strings.Contains(res.Bundle.Scope, "적격 항목") {
+		t.Fatalf("Scope 가 여전히 '적격 항목'을 주장한다: %q", res.Bundle.Scope)
+	}
+	if !strings.Contains(res.Bundle.Scope, "2건") {
+		t.Fatalf("Scope 의 수가 실제 후보 수(2건)와 안 맞는다: %q", res.Bundle.Scope)
+	}
+}
+
+// 구성원의 PathCheck 는 그 항목 **자신의** 경로로 본다 — 선두의 경로를 빌려주면 안 된다.
+// 합치면 `fd move <id> --project X` 처방이 엉뚱한 id 를 가리키게 된다(리뷰 라운드 1
+// finding 4). 선두와 구성원이 서로 다른 경로-실재 판정을 받도록 만들어 갈라둔다:
+// 선두는 실재하는 경로(README.md, newRepo 가 만든다)를, 구성원은 어디에도 없는
+// 경로를 선언한다.
+func TestPickBundleMemberPathCheckIsPerItemNotLead(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "경로시험")
+
+	addItem(t, s, "p", "path-a", []string{"README.md"}, nil)
+	addItem(t, s, "p", "path-b", []string{"does/not/exist.go"}, nil)
+	makeSiblings(t, st, "p", "path-a", "path-b")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	// 사전 조건: id 사전순 동점 처리로 path-a 가 선두여야 한다(설계대로).
+	if res.Item == nil || res.Item.ID != "path-a" {
+		t.Fatalf("사전 조건이 깨졌다 — 선두가 path-a 가 아니다: %+v", res.Item)
+	}
+	if res.PathCheck == nil || res.PathCheck.Kind != judge.KindOK {
+		t.Fatalf("사전 조건이 깨졌다 — 선두(path-a)의 경로 판정이 OK 가 아니다: %+v", res.PathCheck)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("구성원이 정확히 1건이어야 한다: %+v", res.Bundle)
+	}
+	m := res.Bundle.Members[0]
+	if m.Item.ID != "path-b" {
+		t.Fatalf("구성원 id 가 path-b 가 아니다: %s", m.Item.ID)
+	}
+	if m.PathCheck == nil {
+		t.Fatal("구성원의 경로 판정이 nil 이다")
+	}
+	if m.PathCheck.Kind == judge.KindOK {
+		t.Fatalf("구성원의 경로 판정이 선두 것을 빌려 썼다 — "+
+			"path-b 는 어디에도 없는데 OK 로 나왔다: %+v", m.PathCheck)
+	}
+	if m.PathCheck.Kind != judge.KindNowhere {
+		t.Fatalf("구성원의 경로 판정이 nowhere 가 아니다: %+v", m.PathCheck)
+	}
+}
+
+// 추천 응답의 Reason 은 지금 실제로 통하는 인자만 처방한다 — 리뷰 라운드 1
+// finding 1(CRITICAL). item_ids 는 태스크 9에서 온다. mcpsrv 의 pick 도구는 지금
+// item_id 하나만 받고(additionalProperties:false, DisallowUnknownFields) 모르는
+// 필드를 거절하므로, item_ids 를 처방하면 이 응답의 유일한 실행 가능한 줄이
+// "json: unknown field \"item_ids\"" 로 죽는다.
+func TestPickRecommendReasonPrescribesItemIDNotItemIDs(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "인자시험")
+	addItem(t, s, "p", "arg-item", []string{"services/a.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if strings.Contains(res.Reason, "item_ids") {
+		t.Fatalf("아직 없는 인자 item_ids 를 처방했다: %q", res.Reason)
+	}
+	if !strings.Contains(res.Reason, "item_id") {
+		t.Fatalf("실제로 통하는 item_id 인자를 아예 언급하지 않는다: %q", res.Reason)
+	}
+	// ★ 부분 문자열 "item_id"·id 존재만으로는 안 된다 — best.Reason 자체가 이미
+	// "선두 <id>" 를 담고 있어(bundleAround 의 ④ 키) 그 값만 보면 이 처방 줄이
+	// id 를 실제로 넣었는지와 무관하게 항상 참이 된다. "item_id 에 <id>" 라는
+	// **처방 문구 자체**가 있는지를 본다.
+	if !strings.Contains(res.Reason, "item_id 에 "+res.Item.ID) {
+		t.Fatalf("처방 문구에 item_id 와 선두 id 가 나란히 없다: %q", res.Reason)
 	}
 }
