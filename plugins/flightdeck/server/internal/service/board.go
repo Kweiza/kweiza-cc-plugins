@@ -62,6 +62,18 @@ type BoardView struct {
 	OutOfWindow int `json:"out_of_window,omitempty"`
 	// OldestOutside 는 창 밖 세션 중 가장 오래된 마지막 신호 시각이다.
 	OldestOutside time.Time `json:"oldest_outside,omitempty"`
+	// OutsideClaims 는 **창 밖인데 선점을 든 세션**이다. 화면 ①이 선점을 필터로 쓰면서
+	// 창은 안 걸기 때문에 필요하다 — 창을 함께 걸면 회수가 가장 필요한 카드(오래 조용한데
+	// 항목을 쥔 세션)가 먼저 사라진다. 실측: 마지막 활동 709분 전인 세션이 항목 하나를
+	// 12시간째 쥐고 있었다.
+	//
+	// ★ **아무것도 안 거른다.** Sessions·OutOfWindow 는 그대로다. 이미 도는 순회
+	// (OldestOutside)에 조건 하나를 얹은 것뿐이라 새 질의도 새 git 호출도 없다.
+	//
+	// ★ 카드가 아니라 **원시 뷰**다. git 파생(브랜치·ahead·미커밋)이 안 붙어 있다 —
+	// 파생은 카드당 git 호출 1~4회고 캐시가 없어서, 창 밖까지 파생하면 세션 수만큼 터진다.
+	// 표시 계층이 이 사실을 말해야 한다: 이 줄은 "무엇이 잠겼나"만 답하고 파생 축은 모른다.
+	OutsideClaims []model.SessionView `json:"outside_claims,omitempty"`
 	Derived
 }
 
@@ -115,6 +127,14 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 		for _, v := range all {
 			if shown[v.Session.ID] {
 				continue
+			}
+			// ★ 창 밖인데 항목을 쥔 세션. 화면 ①이 선점을 필터로 쓰면서 창은 안 걸기
+			// 때문에 이 줄이 필요하다 — 이 조건이 없으면 **회수가 가장 필요한 카드**가
+			// 정확히 창 때문에 화면에서 사라진다. 여기서 모으는 이유는 이 순회가 이미
+			// 돌고 있어서다: 새 질의도 새 git 파생도 안 는다(all 은 DB 전용이고
+			// store.ListLive 가 Claims 를 이미 채워 준다).
+			if len(v.Claims) > 0 {
+				view.OutsideClaims = append(view.OutsideClaims, v)
 			}
 			// 숨은 세션의 "마지막으로 언제 봤나" — 그 세션 신호들의 최댓값이다.
 			var lastSeen time.Time

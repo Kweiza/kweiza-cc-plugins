@@ -162,3 +162,11 @@ type moveReq struct {
 type rekeyReq struct {
 	CCSessionID string `json:"cc_session_id"`
 }
+
+// patchStateReq 는 PATCH /api/v1/sessions/{id} 의 본문이다.
+// 필드 이름이 internal/api 의 patchSessionRequest 와 어긋나면 서버가 조용히 0값을 받고,
+// 상태는 안 바뀐 채 200 이 돌아온다 — 그 실패는 어느 화면에도 안 뜬다.
+type patchStateReq struct {
+	State string `json:"state"`
+	Why   string `json:"why"`
+}

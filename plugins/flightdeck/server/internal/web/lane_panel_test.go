@@ -95,11 +95,30 @@ func TestLanePanelDrawsEveryRowWithItsAxes(t *testing.T) {
 	mustContain(t, html, lf.holder, "점유자 세션이 줄 표에 없다")
 	mustContain(t, html, lf.waiter, "대기자 세션이 줄 표에 없다 — 줄은 전부 내야 한다")
 
-	// 경과 넷이 **서로 다른 값**으로 찍힌다. 한 숫자를 여러 칸에 재사용하면 빨갛다.
-	mustContain(t, html, "10분 전", "점유자의 대기 경과(10분)가 없다")
-	mustContain(t, html, "7분 전", "대기자의 대기 경과(7분)가 없다")
-	mustContain(t, html, "4분 전", "점유자의 마지막 신호 나이(4분)가 없다 — 대기 경과를 그 칸에 찍은 것이다")
-	mustContain(t, html, "10분", "점유자의 획득 경과가 없다 — 회수 판정의 두 숫자 중 하나가 빠졌다")
+	// ★★ 여기 있던 분 단위 단정 넷 중 둘은 **거짓 초록이었다.**
+	//
+	// `mustContain(html, "10분 전")`(점유자 대기 경과)와 짝인 `"10분"`(획득 경과)은
+	// 레인 표가 아니라 **섹션 ①의 카드**가 내던 값이었다(`mcp 10분 전` 배지).
+	// 실측으로 확인했다: 레인 절 안의 값은 `4시간 3분 전` 이고 `10분 전` 은 그 절에 없다.
+	//
+	// 원인은 형식이 아니라 **시계 어긋남**이다. `internal/store/landing.go` 가
+	// `EnqueuedAt`·`AcquiredAt` 을 `nowStamp()`(실시계)로 찍어 주입된 시계를 안 쓰는데,
+	// 페이지는 픽스처 시계로 그린다. 운영에서는 양쪽 다 실시계라 **영향이 없고**,
+	// 시험에서만 갈린다 — 그래서 이 두 축은 지금까지 한 번도 검증된 적이 없다.
+	//
+	// ★ 픽스처에 선점을 넣어 ①의 카드를 되살리는 방식으로 통과시키지 마라.
+	//   그것은 거짓 초록을 그대로 복원하는 것이다. 후속 항목:
+	//   `fd-lane-timestamps-ignore-injected-clock`.
+	//
+	// 그때까지, 검증 가능한 축은 **레인 절 안에서** 본다. 그리고 신호 나이(4분)는
+	// 서비스 시계로 찍히므로 지금도 참이다 — 대기 경과를 신호 칸에 찍는 오류는 이것이 잡는다.
+	lane := laneSectionOf(t, html)
+	mustContain(t, lane, "4분 전", "점유자의 마지막 신호 나이(4분)가 없다 — 대기 경과를 그 칸에 찍은 것이다")
+	mustContain(t, lane, "7분 전", "대기자의 대기 경과(7분)가 없다")
+	if strings.Contains(lane, "10분 전") {
+		t.Fatal("레인 절이 10분 전을 찍는다 — 위 결함이 고쳐졌다는 뜻이다. " +
+			"이 갈래를 지우고 분 단위 단정 넷을 되살려라(fd-lane-timestamps-ignore-injected-clock)")
+	}
 
 	// 점유자와 대기자가 화면에서 구분돼야 한다. 안 그러면 "누가 지금 쥐고 있나"를 못 읽는다.
 	mustContain(t, html, "lane-holder", "점유자 행이 표시로 구분되지 않는다")
@@ -210,4 +229,23 @@ func TestLanePanelSeparatesZeroFromUnread(t *testing.T) {
 	if strings.Contains(html, "종료된 항목 0건 — 아직 아무 항목도 끝나거나 폐기되지 않았다. 줄이 비었다") {
 		t.Fatal("레인 0건 문장이 ④ 전체 Empty 에 뭉개졌다")
 	}
+}
+
+// laneSectionOf 는 렌더된 페이지에서 **레인 절만** 잘라낸다.
+//
+// ★ 이 헬퍼가 있는 이유가 이 파일의 교훈이다. 단정을 페이지 전체에 걸면 다른 절이
+// 우연히 같은 문자열을 내는 순간 그 단정이 조용히 거짓 초록이 된다 — 이 파일이
+// 실제로 그것을 들고 있었다(섹션 ①의 mcp 신호 배지가 레인의 대기 경과인 척했고,
+// ①을 접자마자 드러났다). 레인 축은 레인 절 안에서 재라.
+func laneSectionOf(t *testing.T, html string) string {
+	t.Helper()
+	i := strings.Index(html, "랜딩 레인")
+	if i < 0 {
+		t.Fatal("레인 절이 화면에 없다")
+	}
+	sec := html[i:]
+	if j := strings.Index(sec, "<section"); j > 0 {
+		sec = sec[:j]
+	}
+	return sec
 }

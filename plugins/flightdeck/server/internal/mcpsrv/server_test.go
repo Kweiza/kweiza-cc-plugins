@@ -537,6 +537,21 @@ func TestBoardDefaultOutputWithinBudget(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("신호 기록 실패: %v", err)
 		}
+		// ★ 항목을 하나씩 쥐게 한다. 보드 ①이 **선점을 든 카드만** 내므로,
+		//   선점 없이 두면 카드가 0장이 되어 detail 출력이 고정분만 남고(실측 454토큰)
+		//   자르는 경로를 아예 안 지난다 — 그러면 이 시험이 재려는 예산 기구가
+		//   초록인 채로 죽는다. 대조 단정이 그 상태를 잡아 준 것이 이 주석의 이유다.
+		itemID := fmt.Sprintf("it-%02d", i)
+		if _, err := svc.AddItem(ctx, service.AddItemInput{
+			Project: "repo", ID: itemID, Title: itemID + " 제목", Body: itemID + " 본문",
+		}); err != nil {
+			t.Fatalf("항목 등록 실패: %v", err)
+		}
+		if _, err := svc.Pick(ctx, service.PickInput{
+			Project: "repo", SessionID: res.Session.ID, ItemID: itemID,
+		}); err != nil {
+			t.Fatalf("선점 실패: %v", err)
+		}
 	}
 
 	srv := newServer(t, svc, repo, fullEnv(repo))
