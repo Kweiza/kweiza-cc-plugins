@@ -377,11 +377,15 @@ func TestFinishRejectsFollowupWithBadCoordinatePaths(t *testing.T) {
 	}
 	msg := err.Error()
 	// 몇 번째 후속인지와, 그 후속 안에서 몇 번째 경로인지를 **둘 다** 말해야 한다.
-	if !strings.Contains(msg, "0번째 후속") {
-		t.Errorf("몇 번째 후속인지 안 말한다: %s", msg)
+	//
+	// ★ 둘 다 1-based 다. 후속은 하나뿐이므로 "1번째 후속"이고, 그 안에서 틀린 것은
+	// 두 번째 경로(`internal\api\x.go`)이므로 "2번째 경로"다. 전에는 각각 "0번째"·
+	// "1번째"였다 — 사람이 세는 수와 어긋나 있었다.
+	if !strings.Contains(msg, "1번째 후속") {
+		t.Errorf("몇 번째 후속인지 안 말한다(1-based 여야 한다): %s", msg)
 	}
-	if !strings.Contains(msg, "1번째 경로") {
-		t.Errorf("후속 안에서 몇 번째 경로인지 안 말한다: %s", msg)
+	if !strings.Contains(msg, "2번째 경로") {
+		t.Errorf("후속 안에서 몇 번째 경로인지 안 말한다(1-based 여야 한다): %s", msg)
 	}
 	if !strings.Contains(msg, "백슬래시") {
 		t.Errorf("원인(백슬래시)을 안 짚는다: %s", msg)
