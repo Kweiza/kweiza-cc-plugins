@@ -160,8 +160,19 @@ var notFoundGuidance = map[store.NotFoundKind]string{
 	store.NFIdempotency:  "그 멱등 키의 기록이 없다 — 보존 구간이 지났거나 처음 보는 키다.",
 	store.NFRefState: "그 ref 의 관측 기록이 아직 없다 — 보드를 한 번 부르면 서버가 git 에서 읽어 남긴다. " +
 		"프로젝트 경로가 비어 있으면 파생 자체가 안 돈다(fd doctor).",
-	store.NFChangeSet:      "그 두 커밋 사이의 변경집합이 보관돼 있지 않다 — 보드 파생이 아직 그 구간을 안 읽었다.",
-	store.NFLiveLandingRow: "줄에 선 적이 없거나 이미 빠졌다 — land 로 다시 서라.",
+	store.NFChangeSet: "그 두 커밋 사이의 변경집합이 보관돼 있지 않다 — 보드 파생이 아직 그 구간을 안 읽었다.",
+	// ★ 주어를 붙이지 않는다 — 이 종류는 여러 자리에서 나고 **그중 하나는 주어가 내 행이 아니다**:
+	//   내 살아 있는 행 · 내 마지막 행(닫힌 것 포함) · **줄의 맨 앞**(아무도 안 섰으면 여기서 난다) ·
+	//   행 id 단위 닫기 — 실측으로 store/landing.go 의 네 자리다(그 수를 잠그는 시험은 없다).
+	//   "네 행이 없다"로 쓰면 남의 행이나 빈 줄을 찾다 온 경로에서 거짓말이 된다.
+	//   구체 좌표는 NotFoundError 의 Note 가 나르므로 처방은 일반형으로 둔다.
+	// ★ 형제 NFLiveClaim 과 같은 모양이다 — "왜 없어졌나" + "지금 상태는 어디서 보나".
+	//   뒤 문장이 없으면 현재 줄 상태를 볼 화면을 못 찾아 land 를 다시 부르는 것으로 조회한다.
+	//   앞 문장의 넷은 종류 다섯(ok·fail·leave·finish·force)을 묶은 것이다 — 그 다섯은
+	//   store 의 ValidateLandingLeave 와 TestValidateLandingLeave 가 잠근다.
+	store.NFLiveLandingRow: "줄에 선 적이 없거나 이미 빠졌다 — 빠졌다면 보고·이탈·마무리·회수 " +
+		"어느 쪽으로든 닫힌 것이다. 지금 누가 레인을 쥐고 줄이 어떻게 서 있는지는 " +
+		"board 의 랜딩 레인 절이 내고, 다시 서려면 land 다.",
 }
 
 // NotFoundAdvice 는 없음 하나를 소비자가 읽을 응답으로 옮긴다. 순수 함수다.

@@ -1,6 +1,7 @@
 package judge
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestPrescribe(t *testing.T) {
 		wantKeys []string
 	}{
 		{
-			name: "조사만 하는 세션 — 넷 다 안 뜬다",
+			name: "조사만 하는 세션 — 다섯 다 안 뜬다",
 			in: PrescribeInput{
 				Now: pt0, SessionID: "me", TurnPaths: nil, Others: []LiveSession{other},
 				LastJudgment: pt0.Add(-5 * time.Hour), NewPaths: 0,
@@ -188,6 +189,35 @@ func TestPrescribe(t *testing.T) {
 			},
 			wantKeys: nil,
 		},
+		{
+			// 발자국도 선점도 없는 세션이다 — 나머지 넷이 전부 안 도는 자리라
+			// lane-turn 축만 남는다.
+			name: "레인 차례가 오면 lane-turn 이 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 7, LastJudgment: pt0,
+			},
+			wantKeys: []string{"lane-turn:7"},
+		},
+		{
+			name: "같은 줄 행에는 다시 안 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 7, LastJudgment: pt0,
+				Emitted: map[string]time.Time{"lane-turn:7": pt0.Add(-time.Minute)},
+			},
+			wantKeys: nil,
+		},
+		{
+			// ★ **억제 키에 줄 행 번호를 넣은 이유가 이 케이스다.** 차례를 받고 랜딩에
+			//   실패한 세션은 굶주림 정책상 맨 뒤로 가서 새 줄 행을 받는다. 접미 없이
+			//   `lane-turn` 하나만 쓰면 suppressed 가 그 키를 영구히 누르므로
+			//   그 세션에게 두 번째 차례가 영영 안 뜨고, 그 뒤 줄 전원이 그만큼 선다.
+			name: "새 줄 행에는 다시 뜬다",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me", LaneTurnRow: 9, LastJudgment: pt0,
+				Emitted: map[string]time.Time{"lane-turn:7": pt0.Add(-time.Minute)},
+			},
+			wantKeys: []string{"lane-turn:9"},
+		},
 	}
 
 	for _, c := range cases {
@@ -250,5 +280,162 @@ func TestFoldPrescriptions(t *testing.T) {
 	shown, folded = FoldPrescriptions(mk(10))
 	if len(shown) != PrescribeMax || folded != 10-PrescribeMax {
 		t.Fatalf("상한을 안 지켰다: shown=%d folded=%d", len(shown), folded)
+	}
+}
+
+// ★ **접힘 시험** — 상한을 넘겨 놓고 lane-turn 이 살아남는지 본다.
+//
+// 순서만 단정하는 표 케이스로는 이 축이 원리적으로 안 보인다. 표는 전부 상한 아래에서
+// 돌아 lane-turn 이 목록 어디에 있든 초록이 나기 때문이다. 그런데 lane-turn 에게 접힘은
+// **영구 소실**이다: 접힌 처방도 호출자가 전부 발화 기록하고(PrescribeMax 주석),
+// suppressed 는 silent 외 모든 키를 무조건 누른다. 한 번 접히면 그 줄 행의 차례 통지는
+// 다시 안 뜨고, 그 세션은 레인을 안 쥔 채 남아 **뒤에 선 전원의 랜딩이 선다.**
+// 그리고 그 실패는 화면에 안 뜬다 — 원장에는 "정상적으로 접혔다"로만 남는다.
+//
+// overlap 을 상한만큼 까는 것이 억지 상황이 아니다: 발화 55건 중 31건이 overlap 이고
+// 세션 7개에 몰렸다(PrescribeMax 주석의 실측). 한 턴 최대 발화는 6건이었다.
+func TestLaneTurnSurvivesFolding(t *testing.T) {
+	others := []LiveSession{
+		{ID: "01SESSIONA", Paths: []string{"cmd/fd/hook.go"}},
+		{ID: "01SESSIONB", Paths: []string{"cmd/fd/hook.go"}},
+		{ID: "01SESSIONC", Paths: []string{"cmd/fd/hook.go"}},
+	}
+	in := PrescribeInput{
+		Now: pt0, SessionID: "me",
+		Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"internal/judge"}}},
+		TurnPaths:    []string{"cmd/fd/hook.go"},
+		Others:       others,
+		LaneTurnRow:  7,
+		LastJudgment: pt0, NewPaths: 1,
+	}
+
+	all := Prescribe(in)
+	// 순서 자체도 여기서 잠근다: lane-turn → overlap → outside.
+	want := []string{"lane-turn:7", "overlap:01SESSIONA", "overlap:01SESSIONB", "overlap:01SESSIONC", "outside:cmd/fd/hook.go"}
+	got := keys(all)
+	if len(got) != len(want) {
+		t.Fatalf("처방 구성이 다르다: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("순서가 다르다(%d번째): got %v, want %v", i, got, want)
+		}
+	}
+
+	shown, folded := FoldPrescriptions(all)
+	if folded == 0 {
+		t.Fatalf("접히지 않았다 — 이 시험이 겨냥한 상황 자체가 안 만들어졌다(처방 %d건, 상한 %d)", len(all), PrescribeMax)
+	}
+	found := false
+	for _, p := range shown {
+		if p.Key == "lane-turn:7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지는 영구히 사라지고 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
+			len(others), keys(shown), folded)
+	}
+	if shown[0].Key != "lane-turn:7" {
+		t.Fatalf("lane-turn 이 맨 앞이 아니다 — overlap 이 하나만 더 늘어도 접힌다: %v", keys(shown))
+	}
+}
+
+// ★ **축 순서 전체를 잠근다.**
+//
+// 위 표는 어느 줄도 축을 **둘 넘게** 내지 않는다. 그래서 순서 교환 변이가 표를 그대로
+// 통과한다 — 변이 스윕이 찾았고 이 시험을 넣기 전에 재현했다(2026-08-06): Prescribe 에서
+// `unclaimed ↔ silent` 를 바꾸면 이 패키지 전체가 초록이었다. (`overlap ↔ outside` 는
+// TestLaneTurnSurvivesFolding 이 잡는다. 다만 그 시험은 lane-turn 의 자리를 겨냥한 것이라
+// 나머지 쌍은 안 본다.)
+//
+// 순서는 표시 취향이 아니다. FoldPrescriptions 가 `ps[:PrescribeMax]` 로 **뒤를 자르므로**
+// 순서가 곧 **무엇을 버리느냐**이고, lane-turn 을 맨 앞에 둔 결정 전체가 그것이다.
+//
+// ★ **다섯이 동시에 뜨는 입력은 존재하지 않는다.** outside 는 선언 경로가 있는 선점을
+// 요구하고(outsidePrescriptions 는 declared 가 비면 nil), unclaimed 는 선점 0건을 요구한다
+// (unclaimedPrescription 의 첫 가드) — 배타다. 그래서 한 번에 뜨는 최대는 넷이고, 최대
+// 모양 **둘**로 나눠 잠근다. 둘을 합치면 outside↔unclaimed 를 뺀 모든 쌍이 잠기고, 그 한 쌍은
+// 애초에 출력에 함께 나타날 수 없으므로 잠글 대상 자체가 없다.
+func TestAxisOrderIsLockedWhereverTwoAxesCanCoexist(t *testing.T) {
+	other := LiveSession{ID: "01SESSIONA", Paths: []string{"cmd/fd/hook.go"}}
+
+	cases := []struct {
+		name string
+		in   PrescribeInput
+		want []string
+	}{
+		{
+			name: "선점 있음 — lane-turn → overlap → outside → silent",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"internal/judge"}}},
+				TurnPaths:    []string{"cmd/fd/hook.go"},
+				Others:       []LiveSession{other},
+				LaneTurnRow:  7,
+				LastJudgment: pt0, NewPaths: SilentNewPaths,
+			},
+			want: []string{"lane-turn:7", "overlap:01SESSIONA", "outside:cmd/fd/hook.go", "silent"},
+		},
+		{
+			name: "선점 없음 — lane-turn → overlap → unclaimed → silent",
+			in: PrescribeInput{
+				Now: pt0, SessionID: "me",
+				TurnPaths:    []string{"cmd/fd/hook.go"},
+				Others:       []LiveSession{other},
+				LaneTurnRow:  7,
+				LastJudgment: pt0, NewPaths: SilentNewPaths,
+			},
+			want: []string{"lane-turn:7", "overlap:01SESSIONA", "unclaimed", "silent"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := keys(Prescribe(c.in))
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Fatalf("축 순서가 다르다:\n got %v\nwant %v", got, c.want)
+			}
+
+			// 순서가 정하는 것은 표시가 아니라 **버릴 것**이다. 상한을 넘는 만큼이 맨 뒤에서
+			// 떨어져야 하고, 여기서 떨어지는 것은 silent 다 — 접혀도 판단 뒤에 다시 뜨는
+			// 유일한 축이라(suppressed) 접힘이 영구 소실이 아닌 자리도 그것 하나뿐이다.
+			if PrescribeMax >= len(c.want) {
+				return // 상한이 이 목록을 못 넘으면 접힘에 대해 말할 것이 없다
+			}
+			shown, folded := FoldPrescriptions(Prescribe(c.in))
+			if folded != len(c.want)-PrescribeMax {
+				t.Fatalf("접힌 수가 다르다: folded=%d, 기대 %d", folded, len(c.want)-PrescribeMax)
+			}
+			if strings.Join(keys(shown), ",") != strings.Join(c.want[:PrescribeMax], ",") {
+				t.Fatalf("맨 뒤가 아니라 다른 것이 접혔다: shown=%v, 기대 %v", keys(shown), c.want[:PrescribeMax])
+			}
+		})
+	}
+}
+
+// ★ **세션이 실제로 읽는 것은 Text 하나다** — Reason 은 원장에, Key 는 억제에 쓰인다.
+// 그런데 위 표가 Text 에 대해 잠그는 것은 "비어 있지 않다" 하나뿐이라, 없는 도구를 부르라고
+// 하거나 줄 행 번호를 빠뜨려도 전부 초록이다(overlap 문구는 TestPrescribeTextNamesTheCall 이
+// 잡는다. lane-turn 문구에는 그런 자리가 없었다).
+//
+// 잠그는 것은 **행동 가능한 정보 둘뿐**이다. 표현을 바꾸면 깨지는 시험은 나쁘다:
+//
+//	① 부를 도구와 인자 — land() · land(result='ok') · land(leave=…).
+//	   셋 다 실재를 확인했다(internal/mcpsrv/tools.go: 도구 "land", result 는 enum ok|fail,
+//	   leave 는 문자열). judge 가 mcpsrv 를 임포트하면 순환이라 그 대조는 **손으로** 한 것이고,
+//	   여기서 잠기는 것은 "문구가 그 이름을 계속 말한다"까지다.
+//	② 줄 행 번호 — 세션이 자기 차례가 **어느 행**인지 모르면 land 응답과 대조할 수 없고,
+//	   억제 키(lane-turn:<행>)가 가리키는 것이 무엇인지도 문구만 보고는 알 수 없다.
+func TestLaneTurnTextNamesTheCallAndTheRow(t *testing.T) {
+	const row = 4242 // 문구의 다른 어떤 숫자와도 안 겹치는 값 — 부분 일치가 우연히 통과하지 않는다
+	ps := Prescribe(PrescribeInput{Now: pt0, SessionID: "me", LaneTurnRow: row, LastJudgment: pt0})
+	if len(ps) != 1 {
+		t.Fatalf("lane-turn 하나만 나와야 한다: %v", keys(ps))
+	}
+	for _, want := range []string{"land()", "land(result='ok')", "land(leave=", fmt.Sprintf("%d", row)} {
+		if !strings.Contains(ps[0].Text, want) {
+			t.Errorf("차례 처방 문구가 %q 를 안 말한다 — 세션이 읽는 것은 이 문자열 하나다:\n%s", want, ps[0].Text)
+		}
 	}
 }

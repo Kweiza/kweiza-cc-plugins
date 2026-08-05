@@ -856,7 +856,8 @@ func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 		t.Fatalf("창 밖 문구에 옛 하드코딩 값(8h, 0113b35 이전 기본값)이 남아 있다:\n%s", got)
 	}
 	// ★ MCP board 도구는 window 인자를 받지 않는다(tools.go) — 없는 손잡이를
-	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 6개로 눌러 잡는다).
+	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 일곱으로 눌러 잡는다 —
+	//   그 수는 protocol_test.go 의 TestToolTableIsSeven 이 잠근다).
 	if strings.Contains(got, "window=") {
 		t.Fatalf("존재하지 않는 window 인자를 돌리라고 한다:\n%s", got)
 	}
@@ -1044,11 +1045,23 @@ func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
 // 0건 분기가 Holder 유무를 안 가르면 이 상태가 "비어 있음(질의는 돌았다)"으로 조용히 접힌다 —
 // 정확히 이 상태에서 경고가 필요한데 그 경고 분기(l.Holder != nil && !laneHolderIsQueued(l))에
 // 영원히 안 닿는다(len(l.Entries)==0 조기 반환이 앞을 막는다). 이 시험은 그 도달성을 잠근다.
+//
+// ★ 그리고 **회수 판정용 두 나이**(설계 §9 ①)를 여기서도 단정한다. 이 분기는 회수 판정이
+// 가장 절실한 화면인데(정상 경로와 달리 항목 조각이 하나도 없어 나이를 실을 자리가 머리밖에
+// 없다) 두 숫자가 둘 다 빠져 있었다. 특히 Holder.LastSignalAt 은 LandingLane 이 채워 두고도
+// renderLane 이 전 함수 통틀어 한 번도 안 읽던 필드였다 —
+// TestLandingQueueHasAProductionReader 가 잡으려는 "계산만 되고 읽는 쪽이 0건"의 필드 판이다.
+// 신호 나이는 획득 경과와 **다른 값**을 픽스처에 심는다(45초 vs 2분): 같은 값이면 한 숫자를
+// 두 번 찍어도 시험이 초록이다.
 func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
+	ghostSignal := t0.Add(-45 * time.Second)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
 		Lane: &service.LaneView{
-			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Holder: &service.LaneHolder{
+				SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute),
+				LastSignalAt: &ghostSignal,
+			},
 			Entries: []service.LaneEntry{},
 		},
 	}, BoardRenderOptions{Now: t0})
@@ -1061,6 +1074,29 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 	}
 	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
 		t.Fatalf("어느 세션이 점유했는지가 안 보인다 — 경고는 있는데 누구 것인지 답을 못한다:\n%s", got)
+	}
+
+	// ① 획득 경과 — 낱말은 정상 경로 머리(`(점유 획득 %s전)`)와 같아야 한다. 한 화면 안에서
+	//    두 축으로 읽히면 회수 판정이 두 어휘를 대조해야 한다.
+	if !strings.Contains(got, "점유 획득 2분전") {
+		t.Fatalf("점유 획득 경과가 안 보인다 — 회수를 판정할 첫 숫자가 가장 절실한 화면에 없다:\n%s", got)
+	}
+	// ② 마지막 신호 나이 — 항목별 조각(`신호 %s전`)과 같은 낱말.
+	if !strings.Contains(got, "신호 45초전") {
+		t.Fatalf("점유자의 마지막 신호 나이가 안 보인다 — 채워져 있는데 읽는 쪽이 0건이다:\n%s", got)
+	}
+
+	// 신호가 한 번도 없는 점유자는 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 규율).
+	// 이 대조가 없으면 nil 갈래를 통째로 지워도 위 단정이 초록이다.
+	noSignal := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Entries: []service.LaneEntry{},
+		},
+	}, BoardRenderOptions{Now: t0})
+	if !strings.Contains(noSignal, "신호 없음") {
+		t.Fatalf("신호가 없는 점유자의 그 사실이 안 보인다 — 침묵은 '못 읽었다'와 구분이 안 된다:\n%s", noSignal)
 	}
 }
 

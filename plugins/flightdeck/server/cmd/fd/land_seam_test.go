@@ -230,6 +230,59 @@ func TestLandReportOKReachesTheLedgerAsOK(t *testing.T) {
 	}
 }
 
+// reclaimed 가 **전선을 건너는 첫 시험**이다.
+//
+// ★ 지금까지 reclaimed 는 service 시험과 RenderLand 순수 시험에만 있었다. 뒤엣것은
+// 사유 문자열의 **사본**을 자기 손으로 넣어 보는 것이라(이 파일 머리의 규율) 서버가
+// 무엇을 내는지는 아무것도 안 지킨다. 그래서 "대기 중인 세션이 실수로 보고했을 때
+// 셸이 무엇을 찍고 무엇을 반환하며 자기 줄 행이 살아남는가"는 어느 시험도 안 봤다.
+//
+// ★ 종료코드가 이 시험의 절반이다. reclaimed 에 0 을 내면
+// `fd land --fail "..." && <랜딩>` 이 그대로 통과하고, 남의 레인에 보고한 세션이 랜딩한다.
+//
+// ★ 나머지 절반은 **오타 한 번이 순번을 못 날린다**는 것이다 — 줄 행은 살아 있고
+// 앞사람의 점유는 그대로여야 한다.
+func TestWaitingSessionsReportIsRefusedAllTheWayToTheShell(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.runAs("cc-lane-w1", "land"); code != 0 {
+		t.Fatalf("전제가 깨졌다 — 앞사람이 레인을 못 잡았다(%d):\n%s", code, out)
+	}
+	if code, out := h.runAs("cc-lane-w2", "land"); code == 0 {
+		t.Fatalf("남이 쥔 레인인데 둘째 land 가 0 으로 끝났다:\n%s", out)
+	}
+	rows := laneLive(t, h)
+	if len(rows) != 2 {
+		t.Fatalf("전제가 깨졌다 — 줄이 %d행이다(기대 2)", len(rows))
+	}
+	front, mine := rows[0], rows[1]
+
+	// 대기 중인 세션이 --fail 을 친다. 실제 경로는 오타이거나, 앞선 세션의 습관이다.
+	code, out := h.runAs("cc-lane-w2", "land", "--fail", "잘못 눌렀다")
+	if code != 1 {
+		t.Fatalf("남의 레인에 보고했는데 종료코드가 %d 다 — 1이어야 한다:\n%s", code, out)
+	}
+	mustContain(t, "대기 중 보고 stdout", out, "이 레인은 네 것이 아니다", "차례를 확인")
+	// ★ 안 놓은 것을 놓았다고 말하면 그 세션은 랜딩해도 된다고 믿는다.
+	if strings.Contains(out, "반납했다") {
+		t.Fatalf("쥔 적 없는 레인을 반납했다고 답했다:\n%s", out)
+	}
+
+	// ── 원장 축 ──
+	after := laneLive(t, h)
+	if len(after) != 2 || after[1].ID != mine.ID {
+		t.Fatalf("보고 뒤 줄이 %+v 다 — 대기자의 줄 행이 사라졌다(기대: 행 %d 가 살아 있음)",
+			after, mine.ID)
+	}
+	if kind, detail := laneRowByID(t, h, mine.ID); kind != "" || detail != "" {
+		t.Fatalf("대기자의 줄 행이 %q/%q 로 닫혔다 — 남의 레인에 보고한 것이 자기 자리를 없앴다",
+			kind, detail)
+	}
+	if holder, held := laneHolder(t, h); !held || holder != front.SessionID {
+		t.Fatalf("대기자의 보고가 앞사람의 점유를 건드렸다: %q(있음=%v), 기대 %q",
+			holder, held, front.SessionID)
+	}
+}
+
 // 둘 이상을 함께 주면 도구가 조용히 하나를 고르지 않는다. `--ok=false` 도 반납이 아니다.
 //
 // ★ 뒤엣것이 이 시험의 핵심이다: 불리언을 **준 것만** 보면 `--ok=false` 라는 표기가
