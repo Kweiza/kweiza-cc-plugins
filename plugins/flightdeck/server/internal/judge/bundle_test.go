@@ -36,6 +36,17 @@ func TestSamePathsCountsOnlyExactTokens(t *testing.T) {
 		{"여럿 중 하나만 일치",
 			[]string{"x.go", "shared.go", "y.go"},
 			[]string{"shared.go", "z.go"}, []string{"shared.go"}},
+
+		// ★ 아래 둘이 "첫 일치에서 끊는" 변이를 죽이는 자리다. 위의 한 개짜리
+		// 케이스만으로는 루프가 첫 일치에서 return 해도 전부 통과한다.
+		{"여럿이 일치하면 전부 낸다",
+			[]string{"x.go", "shared1.go", "y.go", "shared2.go"},
+			[]string{"shared2.go", "shared1.go", "z.go"},
+			[]string{"shared1.go", "shared2.go"}},
+		{"순서는 a 쪽을 따른다 — 화면의 경로가 항목이 선언한 순서여야 사람이 그 줄을 찾는다",
+			[]string{"z.go", "m.go", "a.go"},
+			[]string{"a.go", "m.go", "z.go"},
+			[]string{"z.go", "m.go", "a.go"}},
 		{"중복은 한 번만",
 			[]string{"s.go", "./s.go"}, []string{"s.go"}, []string{"s.go"}},
 		{"빈 토큰은 무시한다", []string{"", "  ", "a.go"}, []string{"a.go", ""}, []string{"a.go"}},
@@ -154,6 +165,28 @@ func TestLinkOfCarriesWhy(t *testing.T) {
 	}
 	if l.Item != "b" {
 		t.Fatalf("Link.Item 이 %q 다 — 이웃 id 여야 한다", l.Item)
+	}
+}
+
+// 겹친 경로가 여럿이면 근거 줄이 **전부** 불러야 한다.
+//
+// ★ 위의 SamePaths 표와 따로 두는 이유: 사람이 실제로 읽는 것은 이 한 줄이고,
+// 여기서 경로가 하나만 나오면 "이 둘이 어디서 만나나"를 화면만 보고는 못 짚는다.
+// SamePaths 가 첫 일치에서 끊기는 변이는 표에서도 이 줄에서도 죽어야 한다.
+func TestLinkOfCarriesEverySharedPath(t *testing.T) {
+	sib := SiblingIndex{"a": {"J9"}, "b": {"J9"}}
+	l := LinkOf(cand("a", 0, []string{"p/one.go", "p/two.go", "p/only-a.go"}),
+		cand("b", 1, []string{"p/two.go", "p/one.go"}), sib)
+	if l == nil {
+		t.Fatal("링크가 nil 이다")
+	}
+	for _, want := range []string{"p/one.go", "p/two.go"} {
+		if !strings.Contains(l.Detail, want) {
+			t.Fatalf("근거가 겹친 경로 %q 를 안 불렀다: %q", want, l.Detail)
+		}
+	}
+	if strings.Contains(l.Detail, "p/only-a.go") {
+		t.Fatalf("겹치지 않은 경로가 근거에 실렸다: %q", l.Detail)
 	}
 }
 
@@ -411,6 +444,55 @@ func TestEligibleBundleOverlapsUseWholeBundlePaths(t *testing.T) {
 	b, _ := EligibleBundle(in, sib)
 	if len(b.Lead.Overlaps) == 0 {
 		t.Fatal("구성원의 경로로 난 겹침이 안 잡혔다 — 겹침을 선두 경로로만 봤다")
+	}
+}
+
+// 묶음 겹침도 **형제 카드**를 건너뛴다 — 세션이 자기 자신과 조율하라는 경고를 막는 자리다.
+//
+// ★ 이 시험이 없으면 EligibleBundle 의 SelfCC 인자를 통째로 "" 로 바꿔도
+// 전 스위트가 초록이다(실측). 그 상태에서 나는 것이 정확히 이 레포가 방금 고친
+// 거짓 양성이다 — 카드 id 는 다르고 대화는 같은 형제가 남으로 보고된다.
+// self(id 일치)와 형제(cc 일치)를 한 시험에 같이 두는 이유는, id 비교만 남기고
+// cc 비교를 지우는 변이가 self 줄만 보는 시험은 통과하기 때문이다.
+func TestEligibleBundleOverlapsSkipSiblingCardOfSameConversation(t *testing.T) {
+	sib := SiblingIndex{"lead": {"J1"}, "mem": {"J1"}}
+	in := EligibleInput{
+		Self: "S1", SelfCC: "CC-1",
+		Candidates: []Candidate{
+			cand("lead", 0, []string{"lead-only.go"}),
+			cand("mem", 1, []string{"member-only.go"}),
+		},
+		Live: []LiveSession{
+			// 카드 id 는 다르지만 대화가 같다 — 형제다. 겹침이 아니다.
+			{ID: "S9", CCSessionID: "CC-1", Paths: []string{"lead-only.go", "member-only.go"}},
+			// 자기 카드. 이것도 겹침이 아니다.
+			{ID: "S1", CCSessionID: "CC-1", Paths: []string{"lead-only.go"}},
+		},
+	}
+	b, _ := EligibleBundle(in, sib)
+	for _, o := range b.Lead.Overlaps {
+		t.Fatalf("자기 대화의 카드 %q 가 겹침으로 보고됐다 — 세션이 자기 자신과 조율하게 된다", o.SessionID)
+	}
+}
+
+// 형제를 거르는 것이 겹침 축을 통째로 끄는 것이어서는 안 된다.
+// 위 시험만 있으면 OverlapsWithLive 호출을 아예 지우는 변이가 통과한다.
+func TestEligibleBundleOverlapsStillCatchOtherConversation(t *testing.T) {
+	sib := SiblingIndex{"lead": {"J1"}, "mem": {"J1"}}
+	in := EligibleInput{
+		Self: "S1", SelfCC: "CC-1",
+		Candidates: []Candidate{
+			cand("lead", 0, []string{"lead-only.go"}),
+			cand("mem", 1, []string{"member-only.go"}),
+		},
+		Live: []LiveSession{
+			{ID: "S9", CCSessionID: "CC-1", Paths: []string{"lead-only.go"}},
+			{ID: "S8", CCSessionID: "CC-2", Paths: []string{"member-only.go"}},
+		},
+	}
+	b, _ := EligibleBundle(in, sib)
+	if len(b.Lead.Overlaps) != 1 || b.Lead.Overlaps[0].SessionID != "S8" {
+		t.Fatalf("남의 대화(S8)와의 겹침이 안 잡혔다: %+v", b.Lead.Overlaps)
 	}
 }
 
