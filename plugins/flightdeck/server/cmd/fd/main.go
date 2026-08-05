@@ -36,7 +36,7 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd open [--label …]                     세션 등록(재호출은 재개다)
   fd beat --kind prompt|tool|mcp [--path] 생존 신호
   fd next                                 추천 1건 + 탈락 사유 전부. **선점하지 않는다**
-  fd pick <item-id>                       선점(오프라인에서는 거절된다)
+  fd pick <item-id> [<item-id>…]          선점(여럿이면 첫째가 선두 · 오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
   fd finish <item-id> --body …            판단+후속+종료+반납을 한 번에
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
