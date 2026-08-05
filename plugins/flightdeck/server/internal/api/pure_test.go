@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/buildinfo"
-	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -301,85 +300,6 @@ func TestEncodeSSE(t *testing.T) {
 	if lines := strings.Split(strings.TrimSuffix(string(frame), "\n\n"), "\n"); len(lines) != 2 {
 		// id·data 둘뿐이다 — event 줄을 안 찍는다(브라우저 onmessage 가 발화해야 하므로)
 		t.Fatalf("프레임 줄 수가 2가 아니다: %q", string(frame))
-	}
-}
-
-func TestValidateOrigin(t *testing.T) {
-	for _, c := range []struct {
-		in     string
-		want   model.FootprintOrigin
-		wantOK bool
-	}{
-		{"", model.OriginObserved, true},
-		{"observed", model.OriginObserved, true},
-		{"declared", model.OriginDeclared, true},
-		{"claimed", model.OriginClaimed, true},
-		{" declared ", model.OriginDeclared, true},
-		// 표 밖: 모르는 값을 기본값으로 접으면 셋의 구분이 조용히 사라진다.
-		{"OBSERVED", "", false},
-		{"guessed", "", false},
-	} {
-		got, err := ValidateOrigin(c.in)
-		if (err == nil) != c.wantOK {
-			t.Fatalf("ValidateOrigin(%q) 오류=%v, 통과 기대=%v", c.in, err, c.wantOK)
-		}
-		if c.wantOK && got != c.want {
-			t.Fatalf("ValidateOrigin(%q)=%q, 기대 %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestNormalizeFootprints(t *testing.T) {
-	got, _ := NormalizeFootprints("/repo", []string{
-		"/repo/internal/api/api.go",
-		"/repo/internal/api/api.go", // 중복은 접힌다
-		"internal/api/sse.go",       // 이미 상대인 것은 그대로
-		"",                          // 빈 것은 버린다
-		"/other/x.go",               // 저장소 밖은 원본을 둔다
-	})
-	want := []string{"/other/x.go", "internal/api/api.go", "internal/api/sse.go"}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("정규화 결과가 다르다: %v, 기대 %v", got, want)
-	}
-	// ★ 표 밖: 접두 문자열로 자르면 /repo-old/x.go 가 "-old/x.go" 로 둔갑한다.
-	if got, _ := NormalizeFootprints("/repo", []string{"/repo-old/x.go"}); got[0] != "/repo-old/x.go" {
-		t.Fatalf("저장소 밖 경로가 잘렸다: %q", got[0])
-	}
-}
-
-// 발자국은 거절하지 않고 버린다 — 훅을 400 으로 죽이면 세션 생존 신호가 끊긴다.
-// 대신 버린 것을 돌려줘야 한다. 안 그러면 경로가 조용히 사라진 것과 같다.
-func TestNormalizeFootprintsKeepsGoodDropsBad(t *testing.T) {
-	kept, rejected := NormalizeFootprints("/repo", []string{
-		"/repo/internal/api/x.go",
-		`C:\other\y.go`,
-		"/repo/Makefile",
-		`z\w.go`,
-	})
-
-	want := []string{"Makefile", "internal/api/x.go"} // UnionPaths 가 정렬한다
-	if fmt.Sprint(kept) != fmt.Sprint(want) {
-		t.Fatalf("kept = %v, want %v", kept, want)
-	}
-
-	if len(rejected) != 2 {
-		t.Fatalf("rejected %d건, want 2건: %+v", len(rejected), rejected)
-	}
-	if rejected[0].Path != `C:\other\y.go` {
-		t.Errorf("거절이 원본 경로를 안 나른다: %+v", rejected[0])
-	}
-	if rejected[0].Reason == "" {
-		t.Error("거절에 사유가 없다")
-	}
-}
-
-func TestNormalizeFootprintsAllGoodHasNoRejected(t *testing.T) {
-	kept, rejected := NormalizeFootprints("/repo", []string{"/repo/a.go", "/repo/b.go"})
-	if len(kept) != 2 {
-		t.Fatalf("kept = %v, want 2건", kept)
-	}
-	if len(rejected) != 0 {
-		t.Fatalf("정상 입력에 거절이 생겼다: %+v", rejected)
 	}
 }
 

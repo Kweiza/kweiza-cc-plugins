@@ -378,20 +378,14 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 		// 앞 5개만 자르고, 잘렸다는 사실이 드러나도록 총 건수(rejected·outside)를
 		// payload 에 함께 둔다. 사유 전체까지 실을 필요는 없다 — 경로가 무엇이었는지가
 		// 핵심이고, 왜는 로그(아래)가 낸다.
-		const droppedPathsLimit = 5
-		droppedPaths := make([]string, 0, droppedPathsLimit)
+		//
+		// 자르는 규율은 service.go 의 clipDroppedPaths 하나다 — item.claim 도 같은 것을
+		// 쓴다. 여기 로컬 const 로 두면 두 자리의 상한이 조용히 갈린다.
+		rejectedPaths := make([]string, 0, len(rejected))
 		for _, r := range rejected {
-			if len(droppedPaths) >= droppedPathsLimit {
-				break
-			}
-			droppedPaths = append(droppedPaths, clip(r.Path, 200))
+			rejectedPaths = append(rejectedPaths, r.Path)
 		}
-		for _, p := range outside {
-			if len(droppedPaths) >= droppedPathsLimit {
-				break
-			}
-			droppedPaths = append(droppedPaths, clip(p, 200))
-		}
+		droppedPaths := clipDroppedPaths(rejectedPaths, outside)
 
 		// ★ count 의 의미가 **두 번** 바뀌었다 — len(paths)(제출 전부) → len(kept)
 		// (좌표계 통과) → 지금은 len(inside)(포함 축까지 통과, 즉 실제로 Touch 한 수).

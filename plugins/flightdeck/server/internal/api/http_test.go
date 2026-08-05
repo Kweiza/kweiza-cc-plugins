@@ -423,7 +423,16 @@ func TestQueueRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSignalsAndFootprintsShareOneCoordinateSystem(t *testing.T) {
+// ★ 이 시험은 POST /api/v1/footprints 도 함께 봤다. 그 표면을 지우면서(2026-08-05)
+// 해당 절을 들어냈다 — 여기 있던 것은 ① 절대경로가 저장소 상대로 옮겨지는지 ②
+// 모르는 origin 이 bad_origin 으로 거절되는지였다.
+//
+// ①이 지키던 축은 사라지지 않았다. 살아 있는 두 문(Beat·Pick)에서 service 계층이
+// 본다 — containment_test.go 의 TestBeatKeepsEveryPathInsideTheWorktree 와
+// TestPickKeepsRelativeItemPathsAsDeclared 가 "안쪽 절대경로는 rel 로 옮긴다"를
+// 각각 단정하고, TestFootprintDoorsAreExactlyTwo 가 문이 늘면 빨간불을 켠다.
+// ②는 표면과 함께 사라졌다 — origin 을 밖에서 받는 자리가 이제 없다.
+func TestSignalsCoordinateAndSessionStateTransition(t *testing.T) {
 	e := newEnv(t, nil)
 	sess := e.openSession("cc-1")
 
@@ -432,28 +441,6 @@ func TestSignalsAndFootprintsShareOneCoordinateSystem(t *testing.T) {
 	})
 	if sig.Code != http.StatusAccepted {
 		t.Fatalf("신호 기록이 %d 다: %s", sig.Code, sig.Body.String())
-	}
-
-	fp := e.write(http.MethodPost, "/api/v1/footprints", map[string]any{
-		"session_id": sess, "origin": "declared",
-		"paths": []string{e.repo + "/internal/api/sse.go", "internal/api/api.go"},
-	})
-	if fp.Code != http.StatusOK {
-		t.Fatalf("발자국 기록이 %d 다: %s", fp.Code, fp.Body.String())
-	}
-	paths, _ := decodeBody(t, fp)["paths"].([]any)
-	// ★ 절대경로가 저장소 상대로 옮겨져야 한다 — 좌표계가 어긋나면 겹침 축이 조용히 죽는다.
-	for _, p := range paths {
-		if strings.HasPrefix(p.(string), "/") {
-			t.Fatalf("절대경로가 그대로 저장됐다: %v", paths)
-		}
-	}
-
-	bad := e.write(http.MethodPost, "/api/v1/footprints", map[string]any{
-		"session_id": sess, "origin": "guessed", "paths": []string{"x"},
-	})
-	if bad.Code != http.StatusBadRequest || errorOf(t, bad)["code"] != "bad_origin" {
-		t.Fatalf("모르는 출처가 통과했다: %d %s", bad.Code, bad.Body.String())
 	}
 
 	// 상태 전이 — blocked 에는 사유가 필수다(판정은 store 의 순수 함수가 한다).

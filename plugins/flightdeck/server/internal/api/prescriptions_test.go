@@ -18,10 +18,14 @@ func TestPrescriptionsRouteReturnsShownAndFolded(t *testing.T) {
 	sess := e.openSession("cc-presc-1")
 
 	// 선점 없이 경로 하나를 편집한다 — unclaimedPrescription 이 뜨는 조건이다.
-	if w := e.write(http.MethodPost, "/api/v1/footprints", map[string]any{
-		"session_id": sess, "paths": []string{"a/b.go"},
-	}); w.Code != http.StatusOK {
-		t.Fatalf("전제가 깨졌다 — 발자국 기록이 %d 다: %s", w.Code, w.Body.String())
+	//
+	// ★ 이 전제는 POST /api/v1/footprints 로 넣고 있었다. 그 표면을 지우면서
+	// signals 로 옮겼다(2026-08-05) — 발자국이 실제로 들어오는 문이 그쪽이고,
+	// 시험이 죽은 표면을 쓰고 있으면 그 표면이 살아 있는 것처럼 보인다.
+	if w := e.write(http.MethodPost, "/api/v1/sessions/"+sess+"/signals", map[string]any{
+		"kind": "tool", "paths": []string{"a/b.go"},
+	}); w.Code != http.StatusAccepted {
+		t.Fatalf("전제가 깨졌다 — 신호 기록이 %d 다: %s", w.Code, w.Body.String())
 	}
 
 	res := e.write(http.MethodPost, "/api/v1/sessions/"+sess+"/prescriptions", nil)
