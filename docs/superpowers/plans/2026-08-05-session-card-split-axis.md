@@ -55,7 +55,7 @@
 
 **Interfaces:**
 - Consumes: 없음(이 과제가 시작점이다).
-- Produces: `judge.SplitCard{SessionID, MachineID, Worktree, CCSessionID string}` · `judge.SplitReport{CCSessionID, MachineID, Root string; Recorded, SessionIDs []string}` · `func judge.DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport` · `func judge.SameConversation(a, b string) bool`
+- Produces: `judge.SplitCard{SessionID, MachineID, Worktree, CCSessionID string}` · `judge.SplitReport{CCSessionID, MachineID, Root string; Recorded, SessionIDs []string}` · `func judge.DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) (reports []SplitReport, unattributed int)` · `func judge.SameConversation(a, b string) bool`
 
 **이 과제가 판정하는 것 — 조상 관계가 아니라 "같은 트리에 값이 여럿"이다**
 
@@ -63,12 +63,26 @@
 (`cmd/fd/env.go` `resolveProject` 의 `--show-toplevel`). 따라서 한 대화가 **같은 트리**에
 대해 서로 다른 값을 둘 이상 기록했다면, 그 카드 중 최소 하나는 정규화 없이 열린 것이다.
 
-앞선 판은 "조상-자손 경로 쌍"으로 판정했다가 **실측에서 거짓 양성 56%** 를 냈다(2026-08-05,
-조상-자손 쌍 100건 중 56건). 원인은 이 저장소의 배치다 — flightdeck 링크 워크트리는
-`<repo>/.flightdeck/worktrees/X` 즉 **저장소 루트의 자손 경로**에 살고, 그것은 정규화가
-완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는 못 가른다.
+**앞선 두 판이 실측에서 무너졌다. 그 실측이 이 설계의 근거다.**
 
-그래서 **git 이 아는 워크트리 루트 목록**을 받아 각 경로의 소유 트리를 정한다.
+| 판정 규칙 | 실측 결과 |
+|---|---|
+| ① 조상-자손 경로 쌍 | 조상-자손 쌍 100건 중 **56건(56%)이 거짓 양성** |
+| ② `git worktree list` 의 **살아 있는** 루트로 소유 트리 판정 | 보고 31건 중 **26건(84%)이 거짓 양성** |
+| ③ 살아 있는 루트 **∪ 관례로 복원한 루트** | 보고 36건 중 **거짓 양성 0건** |
+
+①이 무너진 이유: 이 저장소의 링크 워크트리는 `<repo>/.flightdeck/worktrees/X` 즉
+저장소 루트의 **자손 경로**에 살고, 그것은 정규화가 완벽히 도는 클라이언트도 만드는
+정당한 모양이다. 경로 모양만으로는 못 가른다.
+
+②가 무너진 이유: 원장의 링크-워크트리 경로 93개 중 **81개가 이미 지워진 워크트리**다
+(랜딩 뒤 정리한다). `git worktree list` 는 살아 있는 것만 아므로 지워진 트리의 카드가
+저장소 루트로 흡수되고, ①의 거짓 양성이 그대로 재생산된다.
+
+③이 쓰는 관례 복원은 **추측이 아니다.** flightdeck 자신이 그 자리에 워크트리를 만든다 —
+`pick` 응답의 "워크트리 준비" 절이 `git worktree add '.flightdeck/worktrees/<항목id>'` 를
+출력한다. `.claude/worktrees/<이름>` 도 같은 부류(하네스가 만드는 자리)다. 즉 이것은
+**이 제품이 스스로 지키는 불변식**이고, 그래서 경로에서 되읽을 수 있다.
 
 ---
 
@@ -122,6 +136,26 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 			roots: testRoots,
 			want:  0,
 			why:   "둘 다 자기 트리의 루트다 — 정규화가 도는 클라이언트가 만드는 정당한 모양이고, 실측 거짓 양성 56%의 원인이었다",
+		},
+		{
+			name: "지워진 워크트리도 관례로 복원해 보고하지 않는다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/GONE", CCSessionID: cc},
+			},
+			roots: []string{"/repo"}, // GONE 은 git 이 모른다 — 이미 지워졌다
+			want:  0,
+			why:   "원장의 링크-워크트리 경로 93개 중 81개가 이미 지워진 것이다. 살아 있는 루트만 보면 거짓 양성 84%가 난다",
+		},
+		{
+			name: "지워진 워크트리 안의 하위 디렉토리는 그 트리로 보고한다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/GONE", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/GONE/plugins/flightdeck/server", CCSessionID: cc},
+			},
+			roots: []string{"/repo"},
+			want:  1,
+			why:   "복원된 트리 안에서 값이 둘이면 그것은 진짜 갈림이다 — 복원이 거짓 음성을 만들면 안 된다",
 		},
 		{
 			name: "링크 워크트리 안의 하위 디렉토리는 보고한다",
@@ -206,19 +240,33 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 			why:   "git 이 모르는 트리에 대고 '접혔어야 한다'를 판정할 근거가 없다",
 		},
 		{
+			// ★ 이 케이스의 roots 를 줄이지 마라. testRoots 를 쓰면 /repo-backup 이 자기
+			//   자신에 매칭돼 그룹이 갈리고, 그러면 isDescendant 를 HasPrefix 로 바꿔도
+			//   초록이 나온다(실제로 그렇게 죽어 있었다).
 			name: "경로 성분 경계를 지킨다",
 			cards: []SplitCard{
 				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
-				{SessionID: "s2", MachineID: m, Worktree: "/repo-backup", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo-backup/sub", CCSessionID: cc},
 			},
-			roots: []string{"/repo", "/repo-backup"},
+			roots: []string{"/repo"},
 			want:  0,
-			why:   "/repo 는 /repo-backup 의 조상이 아니다 — 문자열 접두로 보면 오답이 난다",
+			why:   "/repo 는 /repo-backup/sub 의 조상이 아니다 — 문자열 접두로 보면 둘이 한 트리로 묶인다",
+		},
+		{
+			name: "같은 트리를 여러 표기로 적어도 한 값으로 본다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/", CCSessionID: cc},
+				{SessionID: "s3", MachineID: m, Worktree: "/repo/sub/..", CCSessionID: cc},
+			},
+			roots: []string{" /repo "},
+			want:  0,
+			why:   "Clean·TrimSpace 가 없으면 표기 차이가 갈림으로 보고된다 — 없는 문제에 배너가 켜진다",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := DetectUnnormalizedSplit(c.cards, c.roots)
+			got, _ := DetectUnnormalizedSplit(c.cards, c.roots)
 			if len(got) != c.want {
 				t.Fatalf("보고 %d건, 원하는 것 %d건 — %s\n입력: %+v\n결과: %+v",
 					len(got), c.want, c.why, c.cards, got)
@@ -227,10 +275,10 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 	}
 }
 
-// 대조 단정 — 함수가 항상 빈 결과를 내도 위 표가 통과하는 케이스가 많다.
+// 대조 단정 — 함수가 항상 빈 결과를 내도 위 표의 다수가 통과한다(want 0 이 많다).
 // 이 시험이 보고의 **내용**까지 잠근다.
 func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
-	got := DetectUnnormalizedSplit([]SplitCard{
+	got, _ := DetectUnnormalizedSplit([]SplitCard{
 		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s2", MachineID: "m", Worktree: "/repo/a", CCSessionID: "cc"},
 		{SessionID: "s3", MachineID: "m", Worktree: "/repo/a/b", CCSessionID: "cc"},
@@ -256,13 +304,26 @@ func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 // 소유 루트는 **가장 긴** 것이어야 한다. 가장 짧은 것을 고르면 링크 워크트리가
 // 통째로 저장소 루트에 흡수되고, 그 순간 거짓 양성 56%가 돌아온다.
 func TestOwningRootPicksTheLongestMatch(t *testing.T) {
-	got := DetectUnnormalizedSplit([]SplitCard{
+	got, _ := DetectUnnormalizedSplit([]SplitCard{
 		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s2", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: "cc"},
 		{SessionID: "s3", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/B", CCSessionID: "cc"},
 	}, testRoots)
 	if len(got) != 0 {
 		t.Fatalf("보고 %d건, 원하는 것 0건 — 셋 다 자기 트리의 루트다: %+v", len(got), got)
+	}
+}
+
+// 버려진 카드는 **세어서 낸다.** 침묵하면 "갈림 없음"과 "그 트리를 못 알아봤다"가
+// 화면에서 같아진다 — 이 저장소가 반복해서 겪은 실패 모양이다.
+func TestDetectUnnormalizedSplitCountsUnattributed(t *testing.T) {
+	_, n := DetectUnnormalizedSplit([]SplitCard{
+		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "m", Worktree: "/elsewhere", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "m", Worktree: "/nowhere/deep", CCSessionID: "cc"},
+	}, []string{"/repo"})
+	if n != 2 {
+		t.Fatalf("버린 카드 %d장, 원하는 것 2장 — 어느 트리에도 안 붙은 카드를 세지 않으면 침묵이 된다", n)
 	}
 }
 
@@ -275,12 +336,12 @@ func TestDetectUnnormalizedSplitIsDeterministic(t *testing.T) {
 		{SessionID: "s3", MachineID: "machine-2", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s4", MachineID: "machine-2", Worktree: "/repo/sub", CCSessionID: "cc"},
 	}
-	want := DetectUnnormalizedSplit(in, testRoots)
+	want, _ := DetectUnnormalizedSplit(in, testRoots)
 	if len(want) != 2 {
 		t.Fatalf("보고 %d건, 원하는 것 2건: %+v", len(want), want)
 	}
 	for i := 0; i < 200; i++ {
-		got := DetectUnnormalizedSplit(in, testRoots)
+		got, _ := DetectUnnormalizedSplit(in, testRoots)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%d회차에서 결과가 흔들렸다:\n%+v\nvs\n%+v", i, got, want)
 		}
@@ -343,7 +404,7 @@ type SplitCard struct {
 type SplitReport struct {
 	CCSessionID string
 	MachineID   string
-	Root        string   // git 이 아는 워크트리 루트
+	Root        string   // 이 보고가 걸린 워크트리 루트
 	Recorded    []string // 그 트리에 대해 기록된 서로 다른 값들. 정렬된다. 언제나 2개 이상
 	SessionIDs  []string // 이 보고에 걸린 카드 전부. 정렬된다
 }
@@ -354,11 +415,21 @@ type SplitReport struct {
 // 정규화가 도는 클라이언트는 언제나 그 트리의 git 루트를 적으므로(cmd/fd/env.go
 // resolveProject 의 --show-toplevel) 값이 여럿이면 최소 하나는 정규화 없이 열린 것이다.
 //
-// ★★ 왜 조상-자손 경로 쌍으로 판정하지 않는가. 앞선 판이 그렇게 했다가 실측에서
-// **거짓 양성 56%** 를 냈다(2026-08-05, 조상-자손 쌍 100건 중 56건). 이 저장소의 링크
-// 워크트리는 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 **자손 경로**에 살고,
-// 그것은 정규화가 완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는
-// 못 가르고, git 이 아는 루트 목록이 있어야 갈린다.
+// 둘째 반환값은 **어느 트리에도 못 붙인 카드 수**다. 침묵하면 "갈림 없음"과
+// "그 트리를 못 알아봤다"가 화면에서 같아진다 — 호출부가 이 수를 반드시 낸다.
+//
+// ★★ 판정 규칙이 두 번 무너졌고, 그 실측이 이 설계의 근거다.
+//
+//	① 조상-자손 경로 쌍            → 조상-자손 쌍 100건 중 56건(56%)이 거짓 양성
+//	② 살아 있는 git 워크트리 루트   → 보고 31건 중 26건(84%)이 거짓 양성
+//	③ 살아 있는 루트 ∪ 관례 복원    → 보고 36건 중 거짓 양성 0건
+//
+// ①: 링크 워크트리가 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 자손 경로에
+// 살아서, 정규화가 완벽히 도는 클라이언트도 조상-자손 쌍을 만든다.
+//
+// ②: 원장의 링크-워크트리 경로 93개 중 81개가 **이미 지워진** 워크트리다(랜딩 뒤
+// 정리한다). git 은 살아 있는 것만 아므로 지워진 트리의 카드가 저장소 루트로 흡수돼
+// ①의 거짓 양성이 그대로 재생산된다.
 //
 // ★ 울타리:
 //   - 이것은 정체 판정도 겹침 판정도 **아니다. 보고다.** 어느 소비자도 이 결과로 두
@@ -367,27 +438,40 @@ type SplitReport struct {
 //     "전부 다른 대화였다"로 정정한 사고가 있다. 그 17건은 cc 가 달라 여기 안 걸린다.
 //   - **형제 트리는 안 건드린다.** 소유 루트가 다르면 아예 다른 묶음이 된다.
 //   - **빈 cc 끼리는 같다고 보지 않는다.**
-//   - **worktreeRoots 가 비면 아무것도 보고하지 않는다.** 못 읽었다는 사실은 호출부가
-//     파생 실패로 남긴다 — 여기서 추측으로 보고하면 위의 56%가 그대로 돌아온다.
-func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport {
-	roots := make([]string, 0, len(worktreeRoots))
-	for _, r := range worktreeRoots {
-		if r = strings.TrimSpace(r); r != "" {
-			roots = append(roots, filepath.Clean(r))
+//   - **알려진 루트가 하나도 없으면 아무것도 보고하지 않는다**(카드 전부가 둘째
+//     반환값으로 나간다).
+func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]SplitReport, int) {
+	seen := map[string]bool{}
+	var roots []string
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		if !seen[p] {
+			seen[p] = true
+			roots = append(roots, p)
 		}
 	}
-	if len(roots) == 0 {
-		return nil
+	for _, r := range worktreeRoots {
+		add(r)
+	}
+	// 관례로 알려진 루트를 카드 경로에서 되읽는다 — 지워진 워크트리를 덮는다.
+	for _, c := range cards {
+		if r := conventionRoot(c.Worktree); r != "" {
+			add(r)
+		}
 	}
 
 	type key struct{ machine, cc, root string }
 	groups := map[key]map[string][]string{} // (머신,cc,트리) → worktree 값 → 세션 id 들
+	unattributed := 0
 	for _, c := range cards {
 		cc := strings.TrimSpace(c.CCSessionID)
 		m := strings.TrimSpace(c.MachineID)
 		wt := strings.TrimSpace(c.Worktree)
 		if cc == "" || m == "" || wt == "" {
-			continue
+			continue // 3중키가 안 서는 카드다 — 판정 대상이 아니고 '버렸다'고 셀 것도 아니다
 		}
 		wt = filepath.Clean(wt)
 		if wt == "." {
@@ -395,7 +479,8 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitR
 		}
 		root := owningRoot(wt, roots)
 		if root == "" {
-			continue // git 이 모르는 트리다 — "접혔어야 한다"를 판정할 근거가 없다
+			unattributed++ // git 도 관례도 모르는 트리다. **세어서 낸다**
+			continue
 		}
 		k := key{m, cc, root}
 		if groups[k] == nil {
@@ -434,7 +519,37 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitR
 		}
 		return out[i].Root < out[j].Root
 	})
-	return out
+	return out, unattributed
+}
+
+// conventionRoot 는 경로 안에서 **관례로 알려진** 워크트리 루트를 되읽는다. 순수 함수다.
+//
+// ★ 추측이 아니다. flightdeck 자신이 그 자리에 워크트리를 만든다 — `pick` 응답의
+// "워크트리 준비" 절이 `git worktree add '.flightdeck/worktrees/<항목id>'` 를 출력한다.
+// `.claude/worktrees/<이름>` 도 같은 부류(하네스가 만드는 자리)다. 이 제품이 스스로
+// 지키는 불변식이라 경로에서 되읽을 수 있다.
+//
+// ★ 이것이 없으면 **지워진 워크트리**의 카드가 저장소 루트로 흡수된다. 실측에서
+// 원장의 링크-워크트리 경로 93개 중 81개가 이미 지워진 것이었고, 그 상태로는
+// 보고의 84%가 거짓 양성이었다.
+//
+// 못 찾으면 빈 문자열이다.
+func conventionRoot(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	segs := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
+	for i := 0; i+2 < len(segs); i++ {
+		if segs[i] != ".flightdeck" && segs[i] != ".claude" {
+			continue
+		}
+		if segs[i+1] != "worktrees" || segs[i+2] == "" {
+			continue
+		}
+		return filepath.FromSlash(strings.Join(segs[:i+3], "/"))
+	}
+	return ""
 }
 
 // owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
@@ -477,27 +592,34 @@ cd plugins/flightdeck/server && go test ./internal/judge/ -v
 
 기대: 새 시험 전부 PASS, **기존 judge 시험도 전부 PASS**.
 
-- [ ] **Step 5: 수정을 되돌려 빨강을 확인한다 — 셋**
+- [ ] **Step 5: 수정을 되돌려 빨강을 확인한다 — 다섯**
 
-이 과제의 품질은 이 단계가 정한다. 셋 다 **실제 실패 메시지를 눈으로 보고** 보고서에 적어라.
+이 과제의 품질은 이 단계가 정한다. 다섯 다 **실제 실패 메시지를 눈으로 보고** 보고서에 적어라.
+빨강이 안 나면 그 시험이 아무것도 안 잡는 것이다 — 시험을 고쳐라(구현을 고치지 마라).
 
-1. `owningRoot` 가 가장 **짧은** 루트를 고르게 바꾼다(`len(r) > len(best)` → `best == ""`).
-   기대: `저장소_루트와_링크_워크트리_루트는_보고하지_않는다` 와 `TestOwningRootPicksTheLongestMatch` 가 FAIL.
-   **이것이 거짓 양성 56%를 막는 단정이다.**
-2. `if len(roots) == 0 { return nil }` 을 지운다.
-   기대: `루트를_모르면_아무것도_보고하지_않는다` 가 FAIL.
-3. 정렬 키를 `CCSessionID` 하나로 되돌린다.
-   기대: `TestDetectUnnormalizedSplitIsDeterministic` 이 FAIL(200회 중 어딘가에서).
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | `owningRoot` 가 가장 **짧은** 루트를 고르게(`len(r) > len(best)` → `best == ""`) | `저장소_루트와_링크_워크트리_루트는_보고하지_않는다` · `TestOwningRootPicksTheLongestMatch` |
+| 2 | `conventionRoot` 가 언제나 `""` 를 내게 | `지워진_워크트리도_관례로_복원해_보고하지_않는다` |
+| 3 | `isDescendant` 를 `strings.HasPrefix(child, parent)` 로 | `경로_성분_경계를_지킨다` |
+| 4 | `unattributed++` 를 지우고 0을 내게 | `TestDetectUnnormalizedSplitCountsUnattributed` |
+| 5 | 정렬 키를 `CCSessionID` 하나로 | `TestDetectUnnormalizedSplitIsDeterministic` |
 
-셋 다 확인했으면 되돌린다.
+**`if len(roots) == 0 { return nil }` 류의 조기 반환은 이 판에 없다.** 앞선 판에서 그것이
+행동상 죽은 코드였고(어떤 입력을 넣어도 결과가 같았다) 존재할 수 없는 빨강을 약속했다.
+지금은 `루트를_모르면_아무것도_보고하지_않는다` 가 그 계약을 행동으로 잠근다.
+
+다섯 다 확인했으면 되돌린다.
 
 - [ ] **Step 6: 커밋**
 
 ```bash
 cd plugins/flightdeck/server && gofmt -l . && go vet ./internal/judge/
 git add internal/judge/split.go internal/judge/split_test.go
-git commit -m "feat(flightdeck): 정규화가 안 돈 흔적을 원장만으로 탐지한다 — 판정은 '같은 트리에 값이 여럿'이다"
+git commit -m "feat(flightdeck): 정규화가 안 돈 흔적을 원장만으로 탐지한다 — 지워진 워크트리를 관례로 복원한다"
 ```
+
+---
 
 ### Task 2: `service` — 카드를 대화 단위로 접는다
 
@@ -837,13 +959,22 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 그리고 `view.Conversations = …` 바로 다음 줄에 더한다.
 
 ```go
-	// ★ roots 가 비면 DetectUnnormalizedSplit 이 nil 을 낸다 — 추측으로 보고하면
-	//   실측 기준 거짓 양성이 56%다(2026-08-05). 그 침묵을 파생 실패로 남긴다.
+	// ★ 침묵하지 않는다. 루트를 못 읽었거나 어느 트리에도 못 붙인 카드가 있으면
+	//   그 사실을 파생 기록에 남긴다 — 안 남기면 "갈림 없음"과 "판정을 못 했다"가
+	//   화면에서 같아진다.
 	if len(roots) == 0 {
-		d.note("split-detect", "워크트리 루트를 못 읽어 갈림 탐지를 건너뛰었다")
+		d.note("split-detect", "워크트리 루트를 못 읽었다 — 갈림 탐지의 근거가 관례 복원뿐이다")
 	}
-	view.Splits = judge.DetectUnnormalizedSplit(splitCardsOf(cards), roots)
+	var unattributed int
+	view.Splits, unattributed = judge.DetectUnnormalizedSplit(splitCardsOf(cards), roots)
+	if unattributed > 0 {
+		d.note("split-detect", fmt.Sprintf(
+			"카드 %d장은 어느 워크트리에도 못 붙여 갈림 판정에서 빠졌다", unattributed))
+	}
 ```
+
+`d.note` 의 정확한 시그니처와 `fmt` import 유무는 같은 파일의 기존 호출부
+(`d.note("project-path", …)`)를 보고 맞춘다.
 
 `d.note` 의 정확한 시그니처는 같은 파일의 기존 호출부(`d.note("project-path", …)`)를 따른다.
 
