@@ -177,11 +177,12 @@ const (
 
 // ItemPathInput 은 판정에 필요한 **관측 결과**다. 이 구조체는 파일시스템을 모른다.
 type ItemPathInput struct {
-	Project    string
-	Paths      []string
-	Here       map[string]PathPresence            // 경로 → 이 프로젝트에서 본 결과
-	Elsewhere  map[string]map[string]PathPresence // 프로젝트 → 경로 → 결과
-	Unreadable []string                           // 아예 못 연 프로젝트
+	Project       string
+	Paths         []string
+	Here          map[string]PathPresence            // 경로 → 이 프로젝트에서 본 결과
+	Elsewhere     map[string]map[string]PathPresence // 프로젝트 → 경로 → 결과
+	Unreadable    []string                           // 아예 못 연 프로젝트
+	UnknownReason map[string]string                  // Here 가 Unknown 인 경로 → **왜** (§6)
 }
 
 type ItemPathVerdict struct {
@@ -194,6 +195,21 @@ type ItemPathVerdict struct {
 
 func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict
 ```
+
+**`UnknownReason` 이 여기 있는 이유**(2026-08-05 추가, `fd-itempath-unknown-carries-no-cause`).
+초판은 §5·§6 이 사유(errno·`..`)를 문장에 실으라고 약속했는데 **§3 의 어느 구조체에도 담을
+자리가 없었다** — `PathPresence` 는 정수 셋뿐이다. 즉 §5 의 예시는 §3 으로 만들 수 없었고,
+그 자기모순이 다음 사람에게 "이미 구현됐다"로 읽혔다. 관측(`service`)은 errno 를 손에 쥐고도
+넘길 통로가 없어 그 자리에서 버렸다.
+
+`PathPresence` 를 구조체로 **승격하지 않는다.** 그 타입의 0값이 `PathUnknown` 이어야 한다는
+안전장치가 거기 걸려 있다(위 ★). 사유는 문장을 만들 때만 읽히는 곁가지라 판정 축을 건드릴
+값어치가 없다. `ItemPathVerdict` 쪽에 담는 안도 버렸다 — 판정이 안 만든 문장이 판정 결과에
+실리면 §12 의 결이 흐려진다. `ItemPathInput` 은 json 태그가 없어 REST 를 안 건너므로
+필드 추가에 호환 비용이 0이다.
+
+`Elsewhere` 쪽 사유는 안 담는다. 남의 프로젝트를 못 읽은 사실은 `Unreadable` 이 이미 나르고,
+그 문장("지목이 그만큼 약하다")은 원인별로 갈릴 이유가 없다.
 
 **json 태그를 반드시 단다.** 이 값은 REST 를 왕복한다(§4). `internal/judge` 안에 판례가
 갈려 있어서 — `prescribe.go` 는 소문자 태그를 달고 `eligible.go`·`after.go` 는 안 단다 —
