@@ -28,7 +28,9 @@ func TestBoardNamesClaimHoldersOutsideTheWindow(t *testing.T) {
 		t.Fatalf("비트 실패: %v", err)
 	}
 
-	// 창 밖에서 항목을 쥔 세션 — 개시 시각도 신호도 전부 3시간 전으로 되돌린다
+	// 창 밖에서 항목을 쥔 세션 — 개시 시각을 3시간 전으로 되돌린다.
+	// ★ 신호는 안 심는다 — openSession + Pick 둘 다 Beat 를 안 부르므로 이 세션은
+	// 애초에 signal 행이 0건이다. opened_at 만으로 ListLive 의 창 판정이 완결된다.
 	outside := openSession(t, s, "p", repo, repo, "cc-outside", "밖")
 	addItem(t, s, "p", "it-locked", nil, nil)
 	if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: outside.Session.ID, ItemID: "it-locked"}); err != nil {
@@ -38,10 +40,6 @@ func TestBoardNamesClaimHoldersOutsideTheWindow(t *testing.T) {
 	if _, err := st.DB().ExecContext(ctx(),
 		`UPDATE session SET opened_at = ? WHERE id = ?`, old, outside.Session.ID); err != nil {
 		t.Fatalf("개시 시각 되돌리기 실패: %v", err)
-	}
-	if _, err := st.DB().ExecContext(ctx(),
-		`UPDATE signal SET at = ? WHERE session_id = ?`, old, outside.Session.ID); err != nil {
-		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
 	}
 
 	view, err := s.Board(ctx(), "p", BoardOptions{})
@@ -81,15 +79,13 @@ func TestBoardOutsideClaimsSkipsSessionsWithoutClaims(t *testing.T) {
 	repo := newRepo(t)
 	now := time.Now().UTC()
 
+	// 신호는 안 심는다 — openSession 은 Beat 를 안 부르므로 이 세션은 애초에
+	// signal 행이 0건이다. opened_at 만으로 창 판정이 완결된다.
 	quiet := openSession(t, s, "p", repo, repo, "cc-quiet", "조용")
 	old := stamp(now.Add(-3 * time.Hour))
 	if _, err := st.DB().ExecContext(ctx(),
 		`UPDATE session SET opened_at = ? WHERE id = ?`, old, quiet.Session.ID); err != nil {
 		t.Fatalf("개시 시각 되돌리기 실패: %v", err)
-	}
-	if _, err := st.DB().ExecContext(ctx(),
-		`UPDATE signal SET at = ? WHERE session_id = ?`, old, quiet.Session.ID); err != nil {
-		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
 	}
 
 	view, err := s.Board(ctx(), "p", BoardOptions{})

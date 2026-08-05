@@ -344,7 +344,7 @@ func TestOpenSessionAndSetStateLeaveNoSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("신호 조회 실패: %v", err)
 	}
-	if _, ok := sig[model.SignalMCP]; ok {
-		t.Fatalf("상태를 바꿨더니 mcp 가 생겼다 — 상태 전이는 도구 호출이 아니다: %v", sig)
+	if len(sig) != 0 {
+		t.Fatalf("상태를 바꿨더니 신호가 생겼다 — 상태 전이는 도구 호출이 아니다: %v", sig)
 	}
 }
