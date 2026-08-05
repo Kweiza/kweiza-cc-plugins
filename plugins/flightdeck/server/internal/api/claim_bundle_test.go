@@ -57,6 +57,25 @@ func TestClaimBundleClaimsAllMembers(t *testing.T) {
 
 // TestClaimSingleUnchangedWhenItemIDsEmpty 는 단정 ②다: item_ids 가 비면 오늘과
 // 똑같이 경로 id 단독 선점이다 — 이것이 이 태스크의 유일한 호환성 이야기다.
+//
+// ★ 리뷰 라운드 2 finding 5 로 **무엇을 단정하는지가 바뀌었다.**
+//
+// 처음 이 시험은 호환성의 대리물로 "응답 JSON 에 bundle 키가 **없다**"를 썼다.
+// 그런데 그 대리물이 곧 결함이었다: 렌더는 bundle 부재를 "이 응답은 그 축을
+// 읽지 않았다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다"로 찍는데,
+// 이 응답은 **현행 서버의 신선한 온라인 응답**이다. 즉 이 시험은 관측 안 함과
+// 값을 뭉개는 상태를 계약으로 못박고 있었고, 그것은 이 저장소가 다른 모든
+// 자리에서 금지하는 실패다(QueueOpen·PathCheck 이 포인터인 이유와 같다).
+//
+// 그래서 대리물을 **진짜 호환성**으로 바꾼다 — 기존 호출자가 실제로 기대는 것들:
+// 같은 mode · 같은 branch · 같은 워크트리 준비 명령 · 같은 claim 행, 그리고
+// 이 요청이 item_ids 를 **안 실었다**는 사실. 모르는 필드가 하나 늘어난 것은
+// 깨짐이 아니다: Go 디코더는 DisallowUnknownFields 를 켜지 않는 한 모르는 키를
+// 무시하고, cmd/fd 는 이 본문을 service.PickResult 로 푸는데 거기엔 그 필드가 있다.
+//
+// 새 계약을 **양쪽으로** 못박는다: bundle 절은 있어야 하고(축을 읽었다),
+// 구성원은 0건이어야 한다(묶지 않았다). 한쪽만 보면 "item_ids 를 안 줬는데
+// 남을 묶어 왔다"가 이 시험을 통과한다.
 func TestClaimSingleUnchangedWhenItemIDsEmpty(t *testing.T) {
 	e := newEnv(t, nil)
 	sess := e.openSession("cc-bundle-2")
@@ -69,23 +88,57 @@ func TestClaimSingleUnchangedWhenItemIDsEmpty(t *testing.T) {
 		t.Fatalf("항목 등록 실패: %d %s", add.Code, add.Body.String())
 	}
 
-	claim := e.write(http.MethodPost, "/api/v1/items/solo-item/claim", map[string]any{
-		"project": testProject, "session_id": sess,
-	})
+	// ★ 본문에 item_ids 를 **안 싣는다.** 그것이 이 갈래의 정의다.
+	body := map[string]any{"project": testProject, "session_id": sess}
+	if _, has := body["item_ids"]; has {
+		t.Fatal("전제가 깨졌다 — 이 시험은 item_ids 없는 요청이어야 한다")
+	}
+	claim := e.write(http.MethodPost, "/api/v1/items/solo-item/claim", body)
 	if claim.Code != http.StatusOK {
 		t.Fatalf("단독 선점 실패: %d %s", claim.Code, claim.Body.String())
 	}
 	cb := decodeBody(t, claim)
+
+	// ── 호환성 본체: 기존 호출자가 읽는 축이 전부 그대로인가 ──
 	if cb["mode"] != "claimed" {
 		t.Fatalf("mode 가 %v 다: %s", cb["mode"], claim.Body.String())
 	}
-	if _, has := cb["bundle"]; has {
-		t.Fatalf("item_ids 없이 불렀는데 bundle 절이 실렸다: %s", claim.Body.String())
+	if cb["branch"] != "solo-item" {
+		t.Fatalf("branch 가 %v 다 — 항목 id 그대로여야 한다: %s", cb["branch"], claim.Body.String())
+	}
+	setup, ok := cb["setup"].([]any)
+	if !ok || len(setup) != 3 {
+		t.Fatalf("워크트리 준비 명령이 3줄이 아니다(%v): %s", cb["setup"], claim.Body.String())
+	}
+	if first, _ := setup[0].(string); !strings.HasPrefix(first, "cd ") {
+		t.Fatalf("준비 명령 첫 줄이 cd 가 아니다: %v", setup[0])
+	}
+	if item, _ := cb["item"].(map[string]any); item == nil || item["ID"] != "solo-item" {
+		t.Fatalf("응답의 항목이 solo-item 이 아니다: %s", claim.Body.String())
 	}
 
+	// ── 새 계약: 축을 읽었고(non-nil), 아무도 안 묶었다(구성원 0건) ──
+	bundle, has := cb["bundle"].(map[string]any)
+	if !has {
+		t.Fatalf("bundle 절이 없다 — 부재는 '이 응답은 그 축을 안 읽었다'는 뜻이고, "+
+			"현행 서버의 신선한 응답이 그렇게 보이면 안 된다: %s", claim.Body.String())
+	}
+	if members, _ := bundle["members"].([]any); len(members) != 0 {
+		t.Fatalf("item_ids 를 안 줬는데 구성원 %d건을 묶어 왔다: %s", len(members), claim.Body.String())
+	}
+	// 구성원 0건이 "묶을 게 없다"로 오독되지 않도록 왜 0건인지가 실려야 한다.
+	if scope, _ := bundle["scope"].(string); strings.TrimSpace(scope) == "" {
+		t.Fatalf("구성원 0건인데 그 0건의 뜻(범위)이 비어 있다: %s", claim.Body.String())
+	}
+
+	// ── 좌표계는 원장이다: 선점 행 하나, 그것도 이 항목에만 ──
 	cl, err := e.st.GetClaim(t.Context(), testProject, "solo-item")
 	if err != nil || cl.ReleasedAt != nil {
 		t.Fatalf("선점 행이 없다: %+v %v", cl, err)
+	}
+	held, err := e.st.ClaimedItems(t.Context(), sess)
+	if err != nil || len(held) != 1 || held[0] != "solo-item" {
+		t.Fatalf("단독 선점인데 이 세션이 쥔 항목이 %v 다(%v)", held, err)
 	}
 }
 
