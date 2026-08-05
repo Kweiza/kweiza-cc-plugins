@@ -196,6 +196,19 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idem str
 // Read 는 읽기 요청이다. 성공하면 캐시하고, **미도달이면 캐시를 배너와 함께** 낸다.
 //
 // fresh=false 인 응답에는 반드시 Banner 가 붙는다 — 침묵하면 낡은 값이 현재 사실인 척한다.
+//
+// ★ **이 함수는 JudgeOffline 을 한 번도 안 본다.** 성공한 GET 을 조건 없이 캐시하고
+// 미도달이면 조건 없이 꺼낸다. 그 무조건성이 이 함수의 계약이고, 그래서
+// **어떤 표면을 GET 으로 만들 것인가가 곧 열화 정책의 결정**이다.
+//
+// ★ 그래서 land 는 세 갈래가 **전부 POST 다**(Write 를 탄다). "지금 내 차례인가"를
+// GET 으로 만들면 서버가 죽은 뒤 30분 전의 "네 차례다"가 그대로 나오고, 세션은 레인을
+// 안 쥔 채 랜딩을 시작한다. 배타가 깨지는 것이 아니라 **우회된다** — 서버는 내내 옳고
+// 아무 로그도 안 남는다. Healthz 가 캐시를 안 타고 c.do 직행인 것과 **같은 판정이다**:
+// "서버가 살아 있나"에 캐시로 답하면 그 질문 자체가 무의미해지듯,
+// "지금 내 차례인가"에 캐시로 답하면 그 질문 자체가 무의미해진다.
+// 레인을 GET 으로 **읽는** 표면은 보드 절이다 — 그것은 "누가 쥐었나"를 보여 주는 화면이지
+// "내가 쥐었나"에 답하는 취득 경로가 아니다. 둘을 한 표면으로 합치면 이 구분이 사라진다.
 type ReadResult struct {
 	Body   []byte
 	Fresh  bool
@@ -272,6 +285,17 @@ func (c *Client) Write(ctx context.Context, cmd, path string, body any) (WriteRe
 	res := WriteResult{Mode: v.Mode, Reason: v.Reason}
 	switch v.Mode {
 	case OfflineOutbox:
+		// ★ 둘째 방어. JudgeOffline 이 "쌓아라"라고 해도 **적격 집합 밖이면 안 쌓는다.**
+		//   두 정책이 어긋난 것 자체가 사고이므로 조용히 한쪽을 따르지 않는다 —
+		//   따르는 쪽이 아웃박스면 재연결 때 남의 레인을 뺏는 요청이 재생된다.
+		if ok, why := OutboxEligible(cmd, path); !ok {
+			c.Log.Error("아웃박스 적격이 아니다 — 쌓지 않는다",
+				"mode", clip(cmd, 40), "route", clip(path, 120), "reason", why)
+			res.Mode, res.Reason = OfflineRefuse,
+				"열화 표는 아웃박스라 했지만 적격 집합이 아니다("+why+") — "+
+					"두 정책이 어긋났으므로 아무것도 쌓지 않는다"
+			return res, fmt.Errorf("%w · %s: %s", ErrUnreachable, cmd, res.Reason)
+		}
 		e := OutboxEntry{Key: key, At: c.Now(), Path: path, Body: json.RawMessage(buf)}
 		if oerr := c.Outbox.Append(e); oerr != nil {
 			c.Log.Error("아웃박스 적재 실패 — 이 판단은 사라진다",

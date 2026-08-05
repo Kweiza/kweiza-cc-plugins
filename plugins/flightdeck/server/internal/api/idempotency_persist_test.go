@@ -239,6 +239,15 @@ func TestJudgePersistIdempotency(t *testing.T) {
 		{http.MethodPost, "/api/v1/items/t9-a/claim", false, "메모리 표로 충분"},
 		{http.MethodPut, "/api/v1/snapshots/k", false, "메모리 표로 충분"},
 
+		// 랜딩 레인 둘. 안 남기는 것이 판정이고, **사유가 서로 다르다** —
+		// 하나는 응답이 지금 상태라서, 하나는 두 번째 호출이 구조적으로 거절돼서다.
+		{http.MethodPost, "/api/v1/landing", false, "지금 내 차례인가"},
+		{http.MethodPost, "/api/v1/landing/rows/12/release", false, "중복이 원리적으로 안 생긴다"},
+		// 표 밖: 경계는 구조로 잡는다(접두 문자열이면 아래가 통과한다).
+		{http.MethodPost, "/api/v1/landingX", false, "메모리 표로 충분"},
+		{http.MethodPost, "/api/v1/landing/rows/12", false, "메모리 표로 충분"},
+		{http.MethodPost, "/api/v1/landing/rows/12/released", false, "메모리 표로 충분"},
+
 		// 읽기.
 		{http.MethodGet, "/api/v1/items/next", false, "읽기 요청"},
 		{http.MethodGet, "/api/v1/judgments", false, "읽기 요청"},

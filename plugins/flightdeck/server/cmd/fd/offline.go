@@ -41,6 +41,27 @@ type OfflineVerdict struct {
 	Reason string // 항상 채운다
 }
 
+// 랜딩 레인의 열화 명령 이름 — **리터럴로 흩뿌리지 않는다.**
+//
+// ★ JudgeOffline 은 표 밖 명령을 무조건 거절하므로 한 글자만 어긋나면 그 가지가 통째로
+// 죽는다. 그런데 그 죽음은 조용하다: 거절 사유가 "정책이 정의돼 있지 않다"로 바뀔 뿐이라
+// 서버가 살아 있는 동안에는 아무도 못 본다. 상수로 두면 오타가 컴파일 오류가 된다.
+//
+// ★ 값이 service.RefusedError 의 What 와 **글자 그대로 같은 것은 우연이 아니다.**
+// mcpbackend.apiError 가 서버 문구에서 "<what> 거절: " 접두를 떼어 이중 표기를 막는데,
+// 그 접두는 service 가 이 이름으로 조립한 것이다. 여기서 이름을 바꾸면 접두가 안 떼여
+// 도구 응답이 "land report 거절: land report 거절: …" 가 된다.
+const (
+	// CmdLandAcquire 는 줄 서기 · 내 자리 재확인이다(mode=acquire).
+	CmdLandAcquire = "land"
+	// CmdLandReport 는 보고+반납이다(mode=report).
+	CmdLandReport = "land report"
+	// CmdLandLeave 는 줄에서 스스로 빠지는 것이다(mode=leave).
+	CmdLandLeave = "land leave"
+	// CmdLaneRelease 는 사람의 회수다.
+	CmdLaneRelease = "lane release"
+)
+
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
 //
 // 축은 하나다: **잃으면 다시 만들 수 없는가.**
@@ -80,11 +101,65 @@ func JudgeOffline(cmd string) OfflineVerdict {
 	case "alloc":
 		return OfflineVerdict{OfflineRefuse,
 			"발번은 원자 카운터다 — 오프라인에서 발급하면 두 세션이 같은 번호를 쓴다(락이 원리적으로 못 막는 자리다)"}
+
+	// ── 랜딩 레인 넷. 전부 거절이지만 **사유가 셋으로 갈린다.**
+	//
+	// ★ 사유를 "레인은 오프라인에서 안 된다" 한 줄로 뭉개면 다음 사람이 그중 하나만
+	//   아웃박스로 연다 — 반납이 제일 그럴듯해 보이기 때문이다("어차피 놓을 건데
+	//   나중에 보내면 되지 않나"). 그 한 줄이 남의 점유를 반납한다.
+	case CmdLandAcquire:
+		return OfflineVerdict{OfflineRefuse,
+			"레인 취득은 오프라인에 성립할 수 없다 — 배타의 정본이 서버의 DB 제약이라 " +
+				"여기서 '내 차례'를 만들면 두 세션이 동시에 랜딩한다"}
+	case CmdLandReport, CmdLandLeave:
+		return OfflineVerdict{OfflineRefuse,
+			"레인 반납은 재생 대상이 아니다 — 재생 시점에 이미 남이 잡았을 수 있고, " +
+				"그러면 남의 점유를 반납한다"}
+	case CmdLaneRelease:
+		return OfflineVerdict{OfflineRefuse,
+			"회수는 사람의 판단이라 재생 대상이 아니다 — 지금 무엇이 물려 있는지를 보고 내린 판정인데, " +
+				"재생 시점의 레인은 그 판정이 본 레인이 아니다"}
+
 	default:
 		return OfflineVerdict{OfflineRefuse,
 			fmt.Sprintf("명령 %q 의 열화 정책이 정의돼 있지 않다 — "+
 				"기본값을 두면 아무도 정하지 않은 정책이 조용히 붙는다", clip(cmd, 40))}
 	}
+}
+
+// judgmentsPath 는 아웃박스가 재생할 수 있는 **유일한 경로**다.
+// 값이 cmds.go·mcpbackend.go 의 note 경로와 같아야 한다 — 어긋나면 오프라인 note 가
+// 쌓이지 않고 거절되는데, 그 거절은 시끄럽다(degrade_test.go 가 그 자리에서 빨강을 낸다).
+const judgmentsPath = "/api/v1/judgments"
+
+// OutboxEligible 은 이 명령이 아웃박스에 들어가도 되는지 본다. 순수 함수다.
+//
+// ★ 적격 집합이 {note} 하나인 것이 설계다 — 판단만이 원리적으로 파생 불가하다(설계 §7).
+// 여기를 넓히려면 이 함수와 그 시험을 **함께** 고쳐야 한다. JudgeOffline 한 자리만
+// 고쳐서 새 명령이 아웃박스로 새는 경로를 이 함수가 막는다.
+//
+// 왜 둘째 방어가 필요한가: JudgeOffline 의 아웃박스 가지는 `case "note":` 한 줄이라,
+// 거기에 낱말 하나를 더 끼워 넣는 것이 물리적으로 가장 쉬운 수정이다. 그런데 아웃박스는
+// **재연결 시점에 재생**된다 — 그때 세상은 달라져 있다. 레인 취득이 그 자리에 들어가면
+// 남이 랜딩 중인 레인을 5분 뒤에 뺏고, 반납이 들어가면 남의 점유를 반납한다.
+// "잃으면 다시 만들 수 없는가"만 보고 넓히면 이 축이 안 보인다.
+//
+// 경로까지 보는 이유: 명령 이름은 클라이언트가 붙이는 라벨이라 같은 이름으로 다른 표면을
+// 칠 수 있다. 아웃박스에 실제로 쌓이는 것은 (키, 경로, 본문)이고 재생이 치는 것도 그 경로다.
+func OutboxEligible(cmd, path string) (bool, string) {
+	c := strings.TrimSpace(cmd)
+	p := strings.TrimSpace(path)
+	if c != "note" {
+		return false, fmt.Sprintf("아웃박스 적격 명령은 note 하나인데 %q 다 — "+
+			"판단만이 원리적으로 파생 불가하고, 나머지는 재생 시점에 세상이 달라져 있다",
+			clip(c, 40))
+	}
+	if p != judgmentsPath {
+		return false, fmt.Sprintf("적격 경로는 %s 하나인데 %q 다 — "+
+			"명령 이름은 클라이언트가 붙이는 라벨이고, 재생이 실제로 치는 것은 이 경로다",
+			judgmentsPath, clip(p, 120))
+	}
+	return true, "판단은 원리적으로 파생 불가한 유일한 자산이다 — 쌓아 두고 멱등 재생한다"
 }
 
 // ErrUnreachable 은 서버에 **닿지 못했다**는 표식이다. 4xx·5xx 와 다른 축이다.
