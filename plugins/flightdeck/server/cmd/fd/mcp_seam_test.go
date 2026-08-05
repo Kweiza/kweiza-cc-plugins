@@ -243,6 +243,14 @@ func containsStr(xs []string, s string) bool {
 //   두 행이고, land 는 인자 없는 취득 한 갈래만 여기 있다 — 보고·이탈·회수의 사유는
 //   land_seam_test.go 의 TestLandDegradeReasonsAreDistinct 가 순수 함수 쪽에서 가른다.
 //   여기서 재는 것은 그 판정이 **MCP 응답까지 건너오는가**이지 판정 자체가 아니다.
+//
+// ★ **그 "다 덮는다"를 잠그는 시험은 없다.** 아래 표를 mcpsrv.ToolNames() 와 대조하는 자리가
+//   이 패키지에 한 군데도 없다(cmd/fd 전체에 ToolNames·KnownTool·Tools 호출이 0건이다) —
+//   실측: alloc 행 하나를 지워도 이 시험이 초록으로 통과한다. 도구가 여덟이 되면
+//   mcpsrv 의 TestToolTableIsSeven 은 빨개지지만 그 빨간불은 **다른 패키지의 다른 사실**을
+//   말하고, 그것을 고치는 사람을 이 표로 데려오는 문장은 없다. 그래서 여덟째 도구의
+//   열화 처방은 조용히 안 덮인 채로 남을 수 있다(api/errors.go 의 "그 수를 잠그는 시험은
+//   없다", DESIGN.md 의 "이 수를 잠그는 시험은 없다"와 같은 부류의 결손이다).
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
