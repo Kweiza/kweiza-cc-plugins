@@ -133,6 +133,17 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 			want: 0,
 			why:  "/repo 는 /repo-backup 의 조상이 아니다 — 문자열 접두로 보면 오답이 난다",
 		},
+		{
+			name: "한 대화 안의 무관한 갈림 쌍을 둘 다 보고한다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/a", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/a/b", CCSessionID: cc},
+				{SessionID: "s3", MachineID: m, Worktree: "/x", CCSessionID: cc},
+				{SessionID: "s4", MachineID: m, Worktree: "/x/y", CCSessionID: cc},
+			},
+			want: 2,
+			why:  "대표 하나만 내면 /x↔/x/y 가 조용히 사라진다 — 실측에서 한 대화가 워크트리 16개에 걸쳤다",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -168,6 +179,44 @@ func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 	}
 	if r.CCSessionID != "cc" {
 		t.Errorf("cc %q, 원하는 것 %q", r.CCSessionID, "cc")
+	}
+}
+
+// 사슬은 최상위 하나가 덮는다 — 중첩 보고를 내면 같은 카드가 두 번 세어진다.
+func TestDetectUnnormalizedSplitReportsOnlyTopmostInAChain(t *testing.T) {
+	got := DetectUnnormalizedSplit([]SplitCard{
+		{SessionID: "s1", MachineID: "m", Worktree: "/a", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "m", Worktree: "/a/b", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "m", Worktree: "/a/b/c", CCSessionID: "cc"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("보고 %d건, 원하는 것 1건 — 사슬은 최상위 하나가 덮는다: %+v", len(got), got)
+	}
+	if got[0].Ancestor != "/a" || len(got[0].Descendants) != 2 {
+		t.Fatalf("조상 %q · 자손 %v — 원하는 것 /a 와 자손 2개", got[0].Ancestor, got[0].Descendants)
+	}
+}
+
+// 정렬이 결정적인가 — 같은 cc 가 머신 둘에서 보고를 만들 때가 유일한 흔들림 자리다.
+// 맵 순회 순서가 결과로 새면 같은 입력이 매번 다른 문서를 낸다.
+func TestDetectUnnormalizedSplitIsDeterministic(t *testing.T) {
+	in := []SplitCard{
+		{SessionID: "s1", MachineID: "machine-1", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "machine-1", Worktree: "/repo/sub", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "machine-2", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s4", MachineID: "machine-2", Worktree: "/repo/sub", CCSessionID: "cc"},
+	}
+	want := DetectUnnormalizedSplit(in)
+	if len(want) != 2 {
+		t.Fatalf("보고 %d건, 원하는 것 2건: %+v", len(want), want)
+	}
+	for i := 0; i < 200; i++ {
+		got := DetectUnnormalizedSplit(in)
+		for j := range got {
+			if got[j].MachineID != want[j].MachineID || got[j].Ancestor != want[j].Ancestor {
+				t.Fatalf("%d회차에서 순서가 흔들렸다: %+v vs %+v", i, got, want)
+			}
+		}
 	}
 }
 
@@ -283,7 +332,23 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 		sort.Strings(wts)
 
 		// 가장 짧은 것부터 보며, 자기 아래로 들어간 것을 모은다.
+		//
+		// ★ wts 는 사전순 정렬돼 있고, 경로 접두는 언제나 사전순으로 더 작다 —
+		//   그래서 조상은 항상 자기 자손보다 먼저 온다. 이 성질에 기대어 "이미 낸
+		//   조상의 아래면 건너뛴다"로 **최상위 조상 하나만** 낸다.
+		//   사슬(/a → /a/b → /a/b/c)은 /a 하나가 셋 다 덮으므로 보고도 하나여야 한다.
+		var chosen []string
 		for _, anc := range wts {
+			nested := false
+			for _, c := range chosen {
+				if isDescendant(c, anc) {
+					nested = true
+					break
+				}
+			}
+			if nested {
+				continue
+			}
 			var desc []string
 			for _, d := range wts {
 				if d != anc && isDescendant(anc, d) {
@@ -293,6 +358,7 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 			if len(desc) == 0 {
 				continue
 			}
+			chosen = append(chosen, anc)
 			ids := append([]string{}, byWT[anc]...)
 			for _, d := range desc {
 				ids = append(ids, byWT[d]...)
@@ -303,10 +369,27 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 				CCSessionID: k.cc, MachineID: k.machine,
 				Ancestor: anc, Descendants: desc, SessionIDs: ids,
 			})
-			break // 대화 하나에 보고 하나. 가장 짧은 조상이 대표한다
+			// ★ 여기서 break 하지 않는다. 한 대화가 **서로 무관한** 갈림 쌍을 둘 이상
+			//   가질 수 있고(/a→/a/b 와 /x→/x/y), 대표 하나만 내면 나머지가 조용히
+			//   사라진다. 실측에서 한 대화가 워크트리 16개에 걸쳐 있었다 — 실제로 나는 모양이다.
+			//
+			//   대신 **배너는 len(reports) 가 아니라 서로 다른 cc 수를 센다**(splitBanner).
+			//   보고는 갈림 그룹 단위이고 배너가 세는 것은 대화 단위라, 둘을 같은 수로
+			//   접으면 대화 하나가 여러 개로 부풀어 보인다.
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CCSessionID < out[j].CCSessionID })
+	// ★ 정렬 키가 셋이어야 결정적이다. cc 하나만 쓰면 같은 cc 가 서로 다른 머신
+	//   둘에서 보고를 만들 때 두 보고의 상대 순서가 맵 순회에 따라 흔들린다 —
+	//   그리고 "같은 cc 가 여러 머신에 걸친다"는 이 축이 감지하려는 모양 중 하나다.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CCSessionID != out[j].CCSessionID {
+			return out[i].CCSessionID < out[j].CCSessionID
+		}
+		if out[i].MachineID != out[j].MachineID {
+			return out[i].MachineID < out[j].MachineID
+		}
+		return out[i].Ancestor < out[j].Ancestor
+	})
 	return out
 }
 
@@ -825,10 +908,17 @@ func splitBanner(reports []judge.SplitReport) string {
 	if len(reports) == 0 {
 		return ""
 	}
+	// ★ len(reports) 를 세지 않는다. 보고는 **갈림 그룹** 단위이고 한 대화가 무관한
+	//   그룹을 둘 이상 가질 수 있다 — 그대로 세면 대화 하나가 여러 개로 부풀어
+	//   보이고, 그러면 이 배너가 고치려던 바로 그 부풀림을 스스로 저지른다.
+	ccs := map[string]bool{}
+	for _, r := range reports {
+		ccs[r.CCSessionID] = true
+	}
 	return fmt.Sprintf(
 		"⚠ 대화 %d개의 카드가 상하위 경로로 갈렸다 — 그 카드를 연 클라이언트에서 "+
 			"워크트리 정규화(4de4b21)가 안 돈다. 정규화가 도는 판은 이 모양을 만들 수 없다.",
-		len(reports))
+		len(ccs))
 }
 
 // rankConversations 는 묶음을 정렬한다.
