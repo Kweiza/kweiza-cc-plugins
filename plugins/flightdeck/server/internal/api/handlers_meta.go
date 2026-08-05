@@ -343,7 +343,23 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer beat.Stop()
 
 	for {
+		// ★ 종료 통지를 **먼저** 본다. select 는 준비된 갈래 중 무작위로 고르므로,
+		// 구독자 버퍼에 프레임이 남아 있으면 통지를 받고도 최대 버퍼 길이(기본 32)만큼
+		// 더 쓴다 — 그러면 종료 시간이 버퍼 길이만큼 흔들리고, 읽지 않는 피어에 쓰면
+		// 그 자리에서 막힌다.
 		select {
+		case <-s.draining:
+			s.byeAndReturn(w, rc)
+			return
+		default:
+		}
+
+		select {
+		case <-s.draining:
+			// 서버가 종료 중이다 — 클라이언트 절단과 **다른 사실**이고, 그래서
+			// 다른 채널로 온다(api.go 의 draining 주석).
+			s.byeAndReturn(w, rc)
+			return
 		case <-r.Context().Done():
 			return // 클라이언트가 끊었다
 		case <-beat.C:
@@ -355,7 +371,12 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		case frame, ok := <-subscriber.ch:
 			if !ok {
-				return // 허브가 닫았다(서버 종료)
+				// ★ **도달 불가다.** 이 채널을 닫는 자리는 Hub.Unsubscribe 하나뿐이고 그
+				// 유일한 프로덕션 호출자는 이 핸들러 자신의 defer — 즉 루프가 반환한 뒤에 돈다.
+				// 방어로만 남긴다(없으면 닫힌 채널에서 빈 프레임을 무한히 쓴다).
+				// **서버 종료는 위 s.draining 이 말한다.** 두 사실을 한 채널로 접지 않는다 —
+				// 접으면 !ok 하나가 "허브가 닫혔다"와 "내 구독이 해지됐다" 둘의 신호가 된다.
+				return
 			}
 			if _, err := w.Write(frame); err != nil {
 				return
@@ -365,6 +386,21 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// byeAndReturn 은 종료를 소비자 좌표계로 말하고 나간다.
+//
+// ★ **침묵하지 않는다.** 이 줄이 없으면 구독자가 받는 것은 조용한 EOF 하나이고,
+// 대시보드는 그것을 `onerror` 로만 보므로 "서버가 내려갔다"와 "이벤트가 안 온다"를
+// 사람이 못 가른다. SSE 주석 줄(`: `)이라 EventSource 는 그냥 무시하고 재연결한다 —
+// 와이어 계약이 안 바뀐다.
+//
+// 오류는 삼킨다. 이미 나가는 길이고, 여기서 할 수 있는 다른 일이 없다.
+func (s *server) byeAndReturn(w io.Writer, rc *http.ResponseController) {
+	if _, err := io.WriteString(w, ": bye 서버가 종료한다 — 재연결하면 이어진다\n\n"); err != nil {
+		return
+	}
+	_ = rc.Flush()
 }
 
 // handleUnmatched 는 라우트를 못 맞춘 요청에 JSON 으로 답한다.
