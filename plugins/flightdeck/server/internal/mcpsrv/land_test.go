@@ -298,3 +298,75 @@ func TestLandWaitingShowsTheFrontRunner(t *testing.T) {
 		}
 	}
 }
+
+// TestMCPReportWithoutTheLaneNeverClaimsItReleasedIt — 대기 중인 세션이 result=ok 로
+// 보고했을 때 **반납을 말하지 않는다.**
+//
+// ★ 이 조합(toolLand 의 report 디스패치 × reclaimed)은 왕복 시험이 0건이었다. 위 파일의
+// RenderLand 시험들은 사유 문자열을 **손으로 넣어** 보는 것이라 service 가 실제로 무엇을
+// 내는지는 못 지킨다. 여기서 "반납했다"가 나가면 에이전트는 레인을 놓았다고 믿고 그대로
+// 랜딩한다 — 실제로는 앞사람이 쥔 채다.
+//
+// ★ isErr 는 **false** 여야 한다. 이 갈래는 오류가 아니라 사실이다(service.laneNotMine).
+// 오류로 접으면 에이전트가 무엇이 잘못됐는지 모른 채 재시도 루프를 돈다.
+//
+// 앞사람을 세우는 수법은 바로 위 시험과 같다 — MCP 서버 하나는 환경 하나에 묶여 있어
+// 같은 서버로 다른 세션을 흉내 낼 수 없다(설계 §13).
+func TestMCPReportWithoutTheLaneNeverClaimsItReleasedIt(t *testing.T) {
+	repo := newRepo(t)
+	svc, _ := newSvc(t)
+	project := filepath.Base(repo)
+
+	other, err := svc.OpenSession(context.Background(), service.OpenSessionInput{
+		Project: project, ProjectPath: repo, MachineID: "other-machine",
+		Hostname: "other-machine", Worktree: repo, CCSessionID: "cc-other",
+	})
+	if err != nil {
+		t.Fatalf("앞사람 세션을 못 열었다: %v", err)
+	}
+	if _, err := svc.Land(context.Background(), service.LandInput{
+		Project: project, SessionID: other.Session.ID,
+	}); err != nil {
+		t.Fatalf("앞사람이 레인을 못 잡았다: %v", err)
+	}
+
+	srv := newServer(t, svc, repo, fullEnv(repo))
+	frames := serve(t, srv,
+		call("land", map[string]any{}),
+		call("land", map[string]any{"result": "ok"}),
+	)
+	if len(frames) != 2 {
+		t.Fatalf("응답이 %d개다", len(frames))
+	}
+	if joined, isErr := toolText(t, frames[0]); isErr || !strings.Contains(joined, "2번째") {
+		t.Fatalf("전제가 깨졌다 — 줄을 안 섰다(isErr=%v):\n%s", isErr, joined)
+	}
+
+	body, isErr := toolText(t, frames[1])
+	if isErr {
+		t.Fatalf("남의 레인에 보고한 것이 오류로 났다 — 이 갈래는 오류가 아니라 사실이다:\n%s", body)
+	}
+	if !strings.Contains(body, "네 것이 아니다") {
+		t.Errorf("보고 응답이 레인이 남의 것이라는 사실을 안 말한다:\n%s", body)
+	}
+	if strings.Contains(body, "반납했다") {
+		t.Fatalf("쥔 적 없는 레인을 반납했다고 답했다 — 에이전트는 그대로 랜딩한다:\n%s", body)
+	}
+	// 처방 절반이 이 표면까지 온다. 없으면 에이전트가 할 수 있는 것은 폴링뿐이다.
+	if !strings.Contains(body, "차례를 확인") {
+		t.Errorf("무엇을 하면 되는지가 응답에 없다:\n%s", body)
+	}
+
+	// 원장 축 — 잘못된 보고가 앞사람의 점유도, 자기 줄 행도 안 건드렸다.
+	lane, err := svc.LandingLane(context.Background(), project)
+	if err != nil {
+		t.Fatalf("레인 조회 실패: %v", err)
+	}
+	if lane.Holder == nil || lane.Holder.SessionID != other.Session.ID {
+		t.Fatalf("보고가 앞사람의 점유를 건드렸다: %+v", lane.Holder)
+	}
+	if len(lane.Entries) != 2 {
+		t.Fatalf("보고 뒤 줄이 %d행이다(기대 2) — 오타 한 번이 순번을 날렸다: %+v",
+			len(lane.Entries), lane.Entries)
+	}
+}
