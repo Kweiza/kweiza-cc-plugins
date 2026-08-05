@@ -251,6 +251,16 @@ func TestBoardOldestOutsideOnlyCountsHiddenSessions(t *testing.T) {
 		`UPDATE signal SET at = ? WHERE session_id = ?`, hiddenAt, hidden.Session.ID); err != nil {
 		t.Fatalf("신호 시각 되돌리기 실패: %v", err)
 	}
+	// ★ 신호를 **심는다**. 이 시험이 재는 것은 OldestOutside 이고 그 재료가 신호인데,
+	// 그 신호가 지금까지는 세션 열기가 찍던 mcp 비트였다. 열기가 신호를 안 찍게 되면
+	// 위 UPDATE 는 0행이 되고 이 세션의 신호는 0건이 된다 — 그러면 board.go 의
+	// `if lastSeen.IsZero() { continue }` 가 걸려 OldestOutside 가 비고,
+	// 이 시험은 "화면이 침묵한다"를 통과로 읽는다. 재는 축을 픽스처가 직접 세운다.
+	if _, err := st.DB().ExecContext(ctx(),
+		`INSERT INTO signal(session_id, kind, at) VALUES (?, 'prompt', ?)`,
+		hidden.Session.ID, hiddenAt); err != nil {
+		t.Fatalf("숨은 세션 신호 심기 실패: %v", err)
+	}
 
 	view, err := s.Board(ctx(), "p", BoardOptions{})
 	if err != nil {
