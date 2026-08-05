@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
@@ -383,6 +384,241 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(out, mcpsrv.RenderFinish(fr))
+	return 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 랜딩 레인
+// ─────────────────────────────────────────────────────────────────────────────
+
+// flagsSet 은 **실제로 준 플래그**의 이름들이다.
+//
+// ★ 값으로 판정하면 안 되는 자리가 있어서 필요하다: `--fail ""` 는 값이 빈 문자열이라
+// "안 줬다"와 구분되지 않는데, 둘의 뜻이 정반대다(안 줬다=줄 서기 · 빈 사유로 보고=거절).
+// 값으로 접으면 사유 없는 보고가 **조용히 줄 서기로 둔갑한다.**
+func flagsSet(fs *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// LandExitCode 는 land 응답 하나의 종료코드다. 순수 함수다.
+//
+// ★ 종료코드가 답하는 질문은 "요청이 성공했나"가 아니라 **"지금 랜딩해도 되는가"** 다.
+// `fd land && <랜딩>` 이 이 명령의 가장 자연스러운 쓰임이고, 거기서 waiting 에 0 을 내면
+// 그 한 줄이 배타를 통째로 우회한다 — 서버는 내내 옳고 아무 로그도 안 남는다.
+//
+// 모르는 상태도 1 이다. 0 으로 접으면 상태 낱말이 하나 늘어난 날 그 낱말이 조용히
+// "랜딩해도 된다"가 된다.
+func LandExitCode(state string) int {
+	switch strings.TrimSpace(state) {
+	case "turn": // 레인을 쥐었다
+		return 0
+	case "released", "left": // 놓겠다고 한 것을 놓았다
+		return 0
+	default: // waiting · reclaimed · 모르는 낱말
+		return 1
+	}
+}
+
+// runLand 는 `fd land` 다. 랜딩 줄의 취득·보고·이탈 셋을 한 명령으로 한다.
+//
+// ★ 셋을 한 명령에 둔 이유: 셋 다 **자기 줄 행 하나**를 다루는 일이고, 세션이 그 셋을
+// 오가는 것이 정상 경로다(서고 → 기다리고 → 쓰고 → 놓는다). MCP 의 land 도구도 같은 축이라
+// 두 표면의 모양이 같아진다.
+//
+// ★ **회수는 여기 없다**(fd lane release 다). 회수는 세션이 자기 자리를 다루는 일이 아니라
+// 사람이 남의 점유를 끊는 일이다 — MCP 의 land 도구가 release 인자를 거절하는 것과 같은 판정이고,
+// 무엇보다 land 는 폴링으로 **반복해서** 부르는 명령이라 그 자리에 회수를 섞으면
+// 오타 한 번이 남의 랜딩을 끊는다.
+//
+// 값이 성립하는지(사유가 비었나 · 종류가 ok|fail 인가)는 **서버가 판정한다.** 여기서
+// 한 벌 더 두면 두 벌이 되고, 두 벌은 반드시 표류한다. 이 함수가 보는 것은
+// "플래그를 줬는가"뿐이다.
+func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("land")
+	fail := fs.String("fail", "", "검증이 깨져 반납한다 — 사유를 함께 준다")
+	leave := fs.String("leave", "", "줄에서 스스로 빠진다 — 사유를 함께 준다")
+	ok := fs.Bool("ok", false, "다 쓰고 반납한다(랜딩됐다는 뜻이 아니다 — 레인을 놓았다는 뜻이다)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	set := flagsSet(fs)
+	// ★ 불리언만 **값도 본다.** `--ok=false` 는 준 것이지만 "보고하겠다"는 뜻이 아니다.
+	//   준 것만 보면 그 표기가 반납으로 둔갑하고, 그 반납은 되돌릴 수 없다.
+	//   문자열 둘은 반대다 — `--fail ""` 은 "사유 없이 보고하겠다"라서 서버가 거절해야 한다.
+	chose := map[string]bool{"ok": set["ok"] && *ok, "fail": set["fail"], "leave": set["leave"]}
+
+	// 둘 이상을 준 것은 도구가 조용히 하나를 고를 일이 아니다 — 보고와 이탈은 다른 원장 결과다.
+	var given []string
+	for _, n := range []string{"ok", "fail", "leave"} {
+		if chose[n] {
+			given = append(given, "--"+n)
+		}
+	}
+	if len(given) > 1 {
+		fmt.Fprintf(out, "%s 를 함께 줬다 — 한 번에 하나만 해라.\n", strings.Join(given, " 와 "))
+		fmt.Fprintln(out, "레인을 반납하려면 --ok|--fail <사유>, 줄에서 완전히 빠지려면 --leave <사유> 다.")
+		return 2
+	}
+
+	cmd, req := CmdLandAcquire, landReq{Mode: api.LandModeAcquire}
+	switch {
+	case chose["ok"]:
+		cmd = CmdLandReport
+		req = landReq{Mode: api.LandModeReport, Kind: string(model.LandingLeftOK)}
+	case chose["fail"]:
+		cmd = CmdLandReport
+		req = landReq{Mode: api.LandModeReport, Kind: string(model.LandingLeftFail), Detail: *fail}
+	case chose["leave"]:
+		cmd = CmdLandLeave
+		req = landReq{Mode: api.LandModeLeave, Detail: *leave}
+	}
+
+	a.cli.Flush(ctx)
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "%s 하지 못했다: %v\n", cmd, err)
+		return 1
+	}
+	a.cli.Session = sess
+	req.Project, req.SessionID = a.proj.ID, sess
+
+	res, err := a.cli.Write(ctx, cmd, landingPath, req)
+	if err != nil {
+		fmt.Fprintf(out, "%s 하지 못했다: %v\n", cmd, err)
+		return 1
+	}
+	if !res.Sent {
+		// 레인 명령의 열화는 전부 거절이라 여기 오지 않는다. 그래도 조용히 성공으로 접지 않는다 —
+		// 표가 바뀌는 날 "안 한 일"이 0 으로 끝나는 것이 이 자리의 유일한 사고다.
+		fmt.Fprintf(out, "%s: %s\n", res.Mode, res.Reason)
+		return 1
+	}
+	var lr service.LandResult
+	if err := json.Unmarshal(res.Body, &lr); err != nil {
+		fmt.Fprintf(out, "랜딩 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, strings.TrimRight(mcpsrv.RenderLand(lr, a.now()), "\n"))
+	// ★ 렌더는 MCP 도구와 **공유**한다(같은 사실을 두 벌로 그리지 않는다). 그 대가로
+	//   차례 안내가 도구 인자 이름(result·leave)으로 적혀 있어 이 셸에서는 부를 수 없는
+	//   이름이다 — 없는 손잡이를 가리키는 문구는 이 레포가 결함으로 분류하는 부류라,
+	//   그 자리에서 이 채널의 이름으로 옮겨 준다.
+	if lr.State == "turn" {
+		fmt.Fprintln(out, "이 셸에서는: fd land --ok · fd land --fail \"<사유>\" · fd land --leave \"<사유>\"")
+	}
+	return LandExitCode(lr.State)
+}
+
+// runLane 은 `fd lane <하위명령>` 이다. 지금 있는 하위 명령은 release 하나다.
+//
+// 하위 명령을 하나 두려고 이름 공간을 여는 이유: 이 자리에 앞으로 오는 것들
+// (레인 목록·강제 재정렬)이 전부 **레인 전체를 다루는 사람의 일**이고,
+// 세션이 자기 자리를 다루는 land 와 섞이면 안 된다.
+func (a *App) runLane(ctx context.Context, args []string, out io.Writer) int {
+	const help = "fd lane release --row <id> --reason \"...\"  — 물린 줄 행 하나를 사람이 회수한다"
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(out, "lane 하위 명령을 줘라. 지금 있는 것은 release 하나다:")
+		fmt.Fprintln(out, "  "+help)
+		return 2
+	}
+	switch args[0] {
+	case "release":
+		return a.runLaneRelease(ctx, args[1:], out)
+	default:
+		fmt.Fprintf(out, "모르는 lane 하위 명령: %s\n  %s\n", clip(args[0], 40), help)
+		return 2
+	}
+}
+
+// laneActor 는 회수를 **누가 했나**다. 순수 함수다.
+//
+// 이 값은 회수 판단 본문에 그대로 박혀 불변으로 남는다. 그래서 지어내지 않는다:
+// 세션 좌표가 있으면 그것이 가장 정확하고(어느 세션에서 끊었나), 없으면 사람 좌표로 접고,
+// 둘 다 없으면 **빈 문자열**이다. 모르는 것을 "cli" 같은 고정 문자열로 채우면
+// 그 판단이 영원히 "모름"을 "cli 가 했음"으로 말하게 된다.
+func laneActor(fromFlag, ccSession, user, host string) string {
+	if v := strings.TrimSpace(fromFlag); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(ccSession); v != "" {
+		return v
+	}
+	u, h := strings.TrimSpace(user), strings.TrimSpace(host)
+	switch {
+	case u != "" && h != "":
+		return u + "@" + h
+	case u != "":
+		return u
+	case h != "":
+		return h
+	default:
+		return ""
+	}
+}
+
+// runLaneRelease 는 `fd lane release --row <id> --reason "..."` 다.
+//
+// ★ **물린 레인의 유일한 탈출구다.** 자동 만료가 없고, 세션 정체가
+// (machine, worktree, cc_session_id) 라 죽은 세션 명의로 land(leave) 를 부를 방법이 없다.
+// 이 명령이 없으면 복구가 sqlite3 직접 UPDATE 뿐이고 — 그 경로에는 판단이 한 줄도 안 남는다.
+//
+// ★ **세션을 요구하지 않는다.** 요구하는 순간 탈출구가 다시 막힌다: 회수하는 사람은
+// 대개 그 세션이 아니고, 그 세션은 이미 죽었다. 그래서 열지도(a.sessionID) 않는다.
+func (a *App) runLaneRelease(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("lane release")
+	row := fs.Int64("row", 0, "회수할 줄 행 번호(보드의 레인 절과 land 응답이 낸다)")
+	reason := fs.String("reason", "", "왜 회수하나 — 필수. 판단으로 원장에 남는다")
+	actor := fs.String("actor", "", "누가 회수하나(비면 이 셸의 좌표로 채운다)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	set := flagsSet(fs)
+	// 여기서 보는 것은 **플래그를 줬는가**뿐이다. 값이 성립하는지(사유가 비었나 ·
+	// 그 행이 살아 있나)는 서버가 판정한다 — 그 판정에는 처방까지 붙어 있고,
+	// 사본을 여기에 두면 두 벌이 표류한다.
+	if !set["row"] || !set["reason"] {
+		fmt.Fprintln(out, "회수 대상과 사유를 줘라: fd lane release --row <id> --reason \"...\"")
+		fmt.Fprintln(out, "번호는 보드의 레인 절과 land 응답이 낸다. 사유 없는 회수는 나중에 되짚을 수 없다.")
+		return 2
+	}
+
+	a.cli.Flush(ctx)
+	user, _ := a.env("USER")
+	if strings.TrimSpace(user) == "" {
+		user, _ = a.env("LOGNAME")
+	}
+	res, err := a.cli.Write(ctx, CmdLaneRelease, laneReleasePath(*row), laneReleaseReq{
+		Project: a.proj.ID,
+		Actor:   laneActor(*actor, a.ccSessionID(""), user, a.host),
+		Reason:  *reason,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "회수하지 못했다: %v\n", err)
+		return 1
+	}
+	if !res.Sent {
+		fmt.Fprintf(out, "%s: %s\n", res.Mode, res.Reason)
+		return 1
+	}
+	var rr service.LaneReleaseResult
+	if err := json.Unmarshal(res.Body, &rr); err != nil {
+		fmt.Fprintf(out, "회수는 됐으나 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "lane release · 줄 행 %d 를 회수했다(세션 %s)\n", rr.RowID, rr.SessionID)
+	if rr.HeldRelease {
+		fmt.Fprintln(out, "레인 점유까지 풀었다 — 다음 land 가 그 자리를 가져간다.")
+	} else {
+		// 대기 중인 행이었다. 이 사실을 안 말하면 "레인이 풀렸다"고 오해하고
+		// 진짜 점유자를 그대로 둔 채 랜딩하러 간다.
+		fmt.Fprintln(out, "이 행은 대기 중이었다 — 점유는 원래 없었고 줄에서만 뺐다. 레인은 여전히 남이 쥐고 있을 수 있다.")
+	}
+	if rr.JudgmentID != "" {
+		fmt.Fprintf(out, "판단 %s 에 남겼다 — 무엇을 관측하고 끊었는지가 거기 있다.\n", rr.JudgmentID)
+	}
 	return 0
 }
 

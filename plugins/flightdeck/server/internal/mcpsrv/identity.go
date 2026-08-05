@@ -142,7 +142,7 @@ func (id Identity) Banner() string {
 			fmt.Fprintf(&b, "   · %s: %s\n", m, axisWhy(m))
 		}
 		b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
-		b.WriteString("   안 되는 것: pick·note·add·finish — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
+		b.WriteString("   안 되는 것: pick·note·add·finish·land — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
 	}
 	for _, w := range id.Warnings {
@@ -171,8 +171,14 @@ func axisWhy(axis string) string {
 // board·alloc 은 빠져 있다 — 전자는 읽기이고, 후자의 원장 행은 프로젝트 귀속이다.
 // 정체가 반쪽이어도 그 둘은 답할 수 있고, 답할 수 있는 것까지 막으면
 // 배너가 "서버가 통째로 죽었다"로 읽힌다.
+//
+// ★ 표에 없는 도구는 거절이 아니라 **통과**다(GateTool 의 `if !sessionBoundTools[tool]`).
+//
+//	land 는 resource_hold.session_id 와 landing_queue.session_id 로 원장에 행을 남기므로
+//	반드시 넣는다. 빼먹으면 세션 좌표 없이 레인을 잡고, 실패는 "정체가 없다"가 아니라
+//	FK/CHECK 위반으로 엉뚱하게 나온다 — 그리고 어떤 시험도 안 깨져서 조용하다.
 var sessionBoundTools = map[string]bool{
-	"pick": true, "note": true, "add": true, "finish": true,
+	"pick": true, "note": true, "add": true, "finish": true, "land": true,
 }
 
 // GateTool 은 이 정체로 그 도구를 부를 수 있는지 판정한다. 순수 함수다.

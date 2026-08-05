@@ -130,6 +130,12 @@ func IdempotencyStable(cmd string) (bool, string) {
 		return false, "신호는 시각이 값이다 — 고정하면 두 번째 신호부터 서버에 안 닿는다"
 	case "pick", "claim":
 		return false, "선점 결과는 지금 상태다 — 고정하면 남이 반납한 뒤에도 옛 거절이 재생된다"
+	case CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease:
+		// ★ 기본 가지도 false 라 동작은 같지만, 사유가 다르다. 기본 문구는 "모르는 명령이라"라고
+		//   말하는데 이 넷은 아는 명령이다 — 그대로 두면 다음 사람이 "표에 없으니 넣어야겠다"
+		//   하고 위쪽(고정) 목록에 넣는다. 고정하면 대기 중인 세션이 land 를 다시 부를 때
+		//   **첫 응답("너는 3번째다")이 영원히 재생돼** 차례가 왔는데도 오지 않은 것으로 보인다.
+		return false, "응답이 지금 상태다(내 자리·점유자) — 선점과 같은 처지라 고정하면 낡은 답이 재생된다"
 	default:
 		return false, "모르는 명령이라 고정하지 않는다 — 고정은 '응답을 재사용하겠다'는 선언이고, " +
 			"그것을 기본값으로 두면 새 명령마다 조용히 낡은 답이 나간다"

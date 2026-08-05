@@ -692,3 +692,209 @@ func TestRenderPickOmitsPathAxisWhenThereIsNoItem(t *testing.T) {
 		t.Fatalf("항목이 없는데 경로 축 줄이 나왔다:\n%s", got)
 	}
 }
+
+// TestRenderBoardLaneNilStaysSilent 는 v.Lane == nil(안 읽었다)일 때 레인 절 자체가
+// 안 나온다는 것을 잠근다. **찍을 말이 없으면 아예 안 찍는다** — "0건"으로 지어내면
+// "안 읽었다"와 "질의는 돌았는데 0건이다"가 같은 문구가 된다.
+func TestRenderBoardLaneNilStaysSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 nil 인데 레인 절이 찍혔다 — '안 읽었다'와 '0건'이 같은 문구가 됐다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneEmptySaysTheQueryRan 은 브리프의 핵심 요구다: Lane 이 있지만
+// Entries 가 빈 것과 Lane 자체가 nil 인 것을 렌더가 **다른 문장**으로 낸다.
+// 0건 문장은 "질의는 돌았다"를 반드시 말해야 한다 — 안 그러면 위 시험과 이 시험의
+// 두 출력이 우연히 같아질 수 있고, 그러면 화면에서 둘이 구분 안 된다.
+func TestRenderBoardLaneEmptySaysTheQueryRan(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane:     &service.LaneView{Entries: []service.LaneEntry{}},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 비었을 뿐 nil 이 아닌데 레인 절이 안 찍혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "질의는 돌았다") {
+		t.Fatalf("0건 문구가 '질의는 돌았다'를 안 말한다 — nil 과 구분이 안 된다:\n%s", got)
+	}
+
+	// 대조군: nil 일 때와 정확히 갈라야 한다.
+	nilGot := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+	if got == nilGot {
+		t.Fatalf("Lane==nil 출력과 Lane 빈 슬라이스 출력이 똑같다 — 두 상태가 화면에서 안 갈린다")
+	}
+}
+
+// laneEntrySegment 는 렌더된 레인 절에서 세션 하나에 해당하는 항목 조각만 잘라낸다
+// (`N.<세션>(행R·대기AGE전MARK)` 모양이라, marker 부터 그 항목을 닫는 `)` 까지가 경계다).
+//
+// 시험이 문자열 전체에 "점유" 가 있는지만 보면 그 표시가 **엉뚱한 항목에 붙어도** 통과한다 —
+// 그 조각만 떼어 봐야 표시가 뒤바뀐 버그를 잡는다.
+func laneEntrySegment(t *testing.T, s, marker string) string {
+	t.Helper()
+	i := strings.Index(s, marker)
+	if i < 0 {
+		t.Fatalf("표시 %q 를 렌더 결과에서 못 찾았다:\n%s", marker, s)
+	}
+	rest := s[i:]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		t.Fatalf("표시 %q 의 항목이 ')' 로 안 닫힌다:\n%s", marker, s)
+	}
+	return rest[:end+1]
+}
+
+// TestRenderBoardLaneListsEntriesAndMarksTheHolder 는 줄 항목이 실제로 나오는지,
+// 그리고 지금 점유자가 어느 항목인지 표시가 갈리는지를 본다.
+//
+// ★ 단정을 **그 항목의 조각에** 붙인다(laneEntrySegment). 문자열 전체에 "점유" 가 있는지만
+// 보면 그 표시가 대기자 쪽에 잘못 붙어도(뒤바뀐 버그) 통과한다 — 실제로 앞선 판이 그 모양의
+// 시험이었다.
+func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
+	enq := t0.Add(-90 * time.Second)
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-1 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: enq},
+				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인 2건") {
+		t.Fatalf("레인 항목 수(2건)가 안 나온다:\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01HOLDERSESSION")) || !strings.Contains(got, ShortID("01WAITERSESSION")) {
+		t.Fatalf("줄에 선 세션 둘이 다 안 보인다:\n%s", got)
+	}
+
+	holderSeg := laneEntrySegment(t, got, ShortID("01HOLDERSESSION"))
+	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
+
+	// 점유자 쪽 조각에만 표시가 붙어야 한다 — 대기자 조각에 있으면 표시가 뒤바뀐 것이다.
+	if !strings.Contains(holderSeg, "점유") {
+		t.Fatalf("지금 점유자 조각에 '점유' 표시가 없다: %q\n전체:\n%s", holderSeg, got)
+	}
+	if strings.Contains(waiterSeg, "점유") {
+		t.Fatalf("대기자 조각에 '점유' 표시가 붙었다 — 점유자·대기자 표시가 뒤바뀌었다: %q\n전체:\n%s", waiterSeg, got)
+	}
+}
+
+// TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent — Entries 가 완전히 비었는데 Holder 가
+// 있는 상태는 이 레포에서 가장 위험한 불변식 위반이다: landing.go 의 "살아 있는 랜딩 점유에는
+// 반드시 대응하는 살아 있는 줄 행이 있다"가 깨졌다는 뜻이고, 그 축은
+// TestLiveLandingHoldAlwaysHasALiveQueueRow(internal/service/landing_test.go)가 동작으로 잠근다.
+//
+// 0건 분기가 Holder 유무를 안 가르면 이 상태가 "비어 있음(질의는 돌았다)"으로 조용히 접힌다 —
+// 정확히 이 상태에서 경고가 필요한데 그 경고 분기(l.Holder != nil && !laneHolderIsQueued(l))에
+// 영원히 안 닿는다(len(l.Entries)==0 조기 반환이 앞을 막는다). 이 시험은 그 도달성을 잠근다.
+func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Entries: []service.LaneEntry{},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "비어 있음") {
+		t.Fatalf("점유자가 있는데 '비어 있음'으로 찍혔다 — 가장 위험한 불변식 위반이 조용히 접혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠") {
+		t.Fatalf("정합 어긋남 경고가 안 찍혔다(불변식 위반인데 화면이 침묵한다):\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
+		t.Fatalf("어느 세션이 점유했는지가 안 보인다 — 경고는 있는데 누구 것인지 답을 못한다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent — **같은 불변식의 부분
+// 어긋남 갈래**다: 줄에 사람은 있는데 그중 아무도 점유자가 아니다.
+//
+// 0건 갈래(위 시험)만 잠그고 이쪽을 비워 두면 그 비대칭이 다음 리팩터에서 잠기지 않은 쪽을
+// 조용히 지운다 — 실제로 이 분기(render.go 의 `l.Holder != nil && !laneHolderIsQueued(l)`)는
+// 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
+// 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
+func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "⚠") {
+		t.Fatalf("점유자가 줄 목록에 없는데 경고가 없다 — 줄만 보면 정상으로 읽히고 레인은 아무도 못 잡는다:\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
+		t.Fatalf("경고가 어느 세션의 점유인지 말하지 않는다 — 누구를 회수해야 하는지 답이 없다:\n%s", got)
+	}
+	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
+	ok := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+	if strings.Contains(ok, "⚠") {
+		t.Fatalf("정합이 맞는데 어긋남 경고가 찍혔다 — 경고가 흔해지면 판별력이 0이 된다:\n%s", ok)
+	}
+}
+
+// TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy — 설계 §9 ① 이 요구하는 두 숫자:
+// 점유자의 **획득 경과**와 항목마다의 **마지막 신호 나이**.
+//
+// ★ 이 기능은 자동 만료를 안 만들었고 그 근거가 "사람이 나이를 보고 판정한다"다. 그런데
+// 판정하는 사람은 대기자가 아니라 **보드를 보는 사람**이라, 이 두 축이 보드에서 빠지면
+// 그 근거가 통째로 빈다. LaneEntry.LastSignalAt 은 service 가 항목마다 질의(N+1)로
+// 계산해 놓고도 보드 경로에서 읽는 쪽이 0건이었다 — 계산만 되고 안 읽히는 필드는
+// 나중에 "그 축은 이미 있다"의 거짓 근거가 된다(session_workspace 함정의 필드 판).
+func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
+	holderSignal := t0.Add(-4 * time.Minute)
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{
+				SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-2 * time.Hour),
+				LastSignalAt: &holderSignal,
+			},
+			Entries: []service.LaneEntry{
+				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: t0.Add(-3 * time.Hour), LastSignalAt: &holderSignal},
+				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	// ① 점유자의 획득 경과 — 레인 줄 머리에 있다.
+	if !strings.Contains(got, "획득") || !strings.Contains(got, "2시간") {
+		t.Fatalf("점유자의 획득 경과가 안 보인다 — 회수를 판정할 첫 숫자가 화면에 없다:\n%s", got)
+	}
+
+	// ② 마지막 신호 나이 — **그 항목의 조각에** 붙어 있어야 한다. 문자열 전체에 있는지만
+	//    보면 나이가 엉뚱한 항목에 붙어도 통과한다.
+	holderSeg := laneEntrySegment(t, got, ShortID("01HOLDERSESSION"))
+	if !strings.Contains(holderSeg, "신호 4분전") {
+		t.Fatalf("점유자 항목에 마지막 신호 나이가 없다: %q\n전체:\n%s", holderSeg, got)
+	}
+
+	// 신호가 없는 세션은 침묵이 아니라 "없음"으로 낸다(못 읽음/없음을 가르는 규율).
+	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
+	if !strings.Contains(waiterSeg, "신호 없음") {
+		t.Fatalf("신호가 없는 대기자의 그 사실이 안 보인다: %q\n전체:\n%s", waiterSeg, got)
+	}
+}

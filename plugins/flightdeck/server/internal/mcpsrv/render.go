@@ -235,7 +235,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		// 바뀔 때마다(0113b35 처럼) 조용히 낡는다. 그리고 "이렇게 본다"에서 멈춘다 —
 		// "window=Nh 로 본다"처럼 손잡이를 돌리라는 투로 쓰지 않는다. MCP board 도구는
 		// window 인자를 받지 않고(tools.go), 그 인자를 새로 만들지도 않는다(설계가
-		// 도구 수를 6개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
+		// 도구 수를 7개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
 		// 웹 패널(internal/web/page.go)이 이미 이렇게 한다: 사실만 말하고 지시하지 않는다.
 		foot = append(foot, fmt.Sprintf(
 			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
@@ -245,6 +245,13 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		foot = append(foot, boardDetailFoot(v)...)
 	} else {
 		foot = append(foot, boardBriefFoot(v)...)
+	}
+	// 레인 절 — v.Lane 이 nil 이면 이 조회가 레인을 안 읽은 것이라 아예 안 찍는다.
+	// 읽었으면(0건이어도) 반드시 한 줄을 낸다 — renderLane 이 그 0건 문장에
+	// "질의는 돌았다"를 적어 nil(안 읽음)과 빈 슬라이스(질의는 돌았는데 아무도 없음)를 가른다
+	// (service.BoardView.Lane 주석과 같은 판정).
+	if v.Lane != nil {
+		foot = append(foot, renderLane(v.Lane, now))
 	}
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
@@ -555,6 +562,83 @@ func boardDetailFoot(v service.BoardView) []string {
 	return out
 }
 
+// renderLane 은 보드의 레인 절 한 줄이다. 순수 함수다.
+//
+// 설계 §9 ① 이 요구하는 축을 전부 낸다: **점유자의 획득 경과**(머리) · 대기 줄 전체
+// (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
+// 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
+//
+// ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
+// 이상 질의는 이미 돈 것이고, Entries 가 비었어도 그 사실("질의는 돌았다")을 문장에
+// 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Entries)가
+// 화면에서 같아진다(service.LaneView 주석과 같은 판정).
+func renderLane(l *service.LaneView, now time.Time) string {
+	if len(l.Entries) == 0 {
+		if l.Holder == nil {
+			// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
+			//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
+			//   실제로 길게 썼을 때 TestBoardDefaultOutputWithinBudget 이 5토큰 초과로 빨개졌다.
+			//   "지금 아무도 안 섰다"는 "0건"과 같은 말이라 뺀다 —
+			//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
+			return "랜딩 레인 0건(질의는 돌았다)"
+		}
+		// ★ 점유는 있는데 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는 랜딩 점유에는
+		// 반드시 대응하는 살아 있는 줄 행이 있다")이 깨진 가장 위험한 모양이다
+		// (TestLiveLandingHoldAlwaysHasALiveQueueRow 가 잡으려는 상태 그 자체다. Land 도 이
+		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
+		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
+		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
+		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다",
+			ShortID(l.Holder.SessionID))
+	}
+	parts := make([]string, 0, len(l.Entries))
+	for i, e := range l.Entries {
+		mark := ""
+		if l.Holder != nil && l.Holder.SessionID == e.SessionID {
+			mark = "◀점유"
+		}
+		// ★ **신호 나이를 낸다**(설계 §9 ①). 자동 만료를 안 만든 근거가 "사람이 나이를 보고
+		// 판정한다"인데, 그 판정을 내리는 사람은 대기자가 아니라 보드를 보는 사람이다.
+		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
+		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
+		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		sig := "신호 없음"
+		if e.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
+		}
+		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전·%s%s)",
+			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), sig, mark))
+	}
+	// ★ 머리에 **점유자의 획득 경과**를 낸다(설계 §9 ①). 회수를 판정하는 사람이 봐야 할
+	// 두 숫자가 획득 경과와 신호 나이인데, 앞엣것은 LaneHolder.AcquiredAt 에 채워져 있으면서
+	// 이 함수가 안 읽어 화면에 없었다.
+	//
+	// ★ 점유자의 ShortID 를 머리에 **다시 적지 않는다.** 누가 쥐었나는 항목의 ◀점유 표시가
+	// 이미 답하고, 머리에 `<세션>(…)` 모양을 하나 더 두면 항목 조각을 잘라 보는 시험
+	// (laneEntrySegment)이 머리 쪽을 먼저 집어 표시 뒤바뀜을 못 잡게 된다.
+	head := fmt.Sprintf("랜딩 레인 %d건", len(l.Entries))
+	if l.Holder != nil {
+		head += fmt.Sprintf("(점유 획득 %s전)", FormatAge(now.Sub(l.Holder.AcquiredAt)))
+	}
+	line := head + ": " + strings.Join(parts, " ")
+	if l.Holder != nil && !laneHolderIsQueued(l) {
+		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
+		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
+		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남)", ShortID(l.Holder.SessionID))
+	}
+	return line
+}
+
+// laneHolderIsQueued 는 지금 점유자가 줄 목록에도 있는지다.
+func laneHolderIsQueued(l *service.LaneView) bool {
+	for _, e := range l.Entries {
+		if e.SessionID == l.Holder.SessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func heldLine(held []model.ResourceHold) string {
 	parts := make([]string, 0, len(held))
 	for _, h := range held {
@@ -760,7 +844,7 @@ func RenderAdd(it model.Item) string {
 	// 않는 경로를 가리켰고, 그중 하나(fd-item-move)는 폐기됐는데 **id 가 전역 유일이라
 	// 회수되지 않아 그 이름이 영구히 죽었다.**
 	//
-	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 여섯으로
+	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 일곱으로
 	// 눌러 잡는다 — 컨텍스트 예산), 대신 §6 이 정한 방식이 이것이다:
 	// **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
 	fmt.Fprintf(&b, "add · %s 를 **프로젝트 %s** 의 큐에 넣었다 [%s]\n", it.ID, it.Project, it.State)
@@ -933,4 +1017,64 @@ func RenderRefusal(what, reason, guidance string) string {
 		s += "\n" + guidance
 	}
 	return s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// land
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderLand 는 land 한 번의 결과다. 순수 함수다.
+//
+// 세 갈래가 뼈대다: **네 차례다**(turn) · **너는 N번째다**(waiting — 앞사람 세션·획득 경과·
+// 마지막 신호 나이) · **이 레인은 네 것이 아니다**(reclaimed — 사유가 무엇이 일어났는지 말한다).
+// report·leave 의 확인(released·left)은 그보다 단순해서 한 줄이다.
+//
+// ★ **lane-turn 처방을 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다
+// (설계 단계 ③ 이 그것을 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는
+// 부류다. waiting 응답이 낼 수 있는 유일한 처방은 "다시 물어라"(폴링)뿐이다.
+func RenderLand(r service.LandResult, now time.Time) string {
+	var b strings.Builder
+	switch r.State {
+	case "turn":
+		fmt.Fprintf(&b, "land · 네 차례다 — 레인을 쥐었다 (줄 행 %d)\n", r.RowID)
+		b.WriteString("다 쓰면 result 로 보고하고 반납해라. 줄 서 놓고 그만두려면 leave 를 써라.\n")
+
+	case "waiting":
+		fmt.Fprintf(&b, "land · 너는 %d번째다 (줄 행 %d)\n", r.Position, r.RowID)
+		if r.Holder == nil {
+			b.WriteString("지금 레인을 쥔 사람이 없다 — 앞사람이 아직 land 를 안 불렀다.\n")
+		} else {
+			fmt.Fprintf(&b, "지금 레인: %s · 획득 %s 전",
+				ShortID(r.Holder.SessionID), FormatAge(now.Sub(r.Holder.AcquiredAt)))
+			if r.Holder.LastSignalAt != nil {
+				fmt.Fprintf(&b, " · 마지막 신호 %s 전\n", FormatAge(now.Sub(*r.Holder.LastSignalAt)))
+			} else {
+				b.WriteString(" · 마지막 신호 없음\n")
+			}
+		}
+		b.WriteString("차례는 서버가 밀어주지 않는다 — 다시 물으려면 land 를 다시 불러라.\n")
+
+	case "released":
+		fmt.Fprintf(&b, "land · 보고하고 레인을 반납했다 (줄 행 %d)\n", r.RowID)
+
+	case "left":
+		fmt.Fprintf(&b, "land · 줄에서 빠졌다 (줄 행 %d)\n", r.RowID)
+
+	case "reclaimed":
+		// ★ 머리글이 사유를 앞지르지 않는다. service.laneNotMine 은 "내가 점유자가 아니다"
+		// **전부**를 이 한 낱말로 접는데 도달 갈래가 셋이다: 진짜 회수됨(left_detail) ·
+		// 아직 대기 중인 세션의 보고("레인을 쥔 적이 없다 …") · 줄에 선 적조차 없는 세션
+		// ("이 프로젝트 줄에 선 기록이 없다"). 머리글에 "회수됐다"를 박으면 뒤의 둘에서
+		// **한 문장 안에서 회수됐다와 쥔 적이 없다가 정면 충돌한다** — 사용자에게 나가는
+		// 거짓 문장이다. 그래서 머리글은 세 갈래 모두에 참인 것만 말하고(네 것이 아니다)
+		// **무엇이 일어났나는 사유가 말한다**(laneLeftReason 이 절대 빈 문자열을 안 내므로
+		// 이 자리가 비는 경우는 없다). State 어휘 다섯과 LandExitCode 표는 그대로다.
+		fmt.Fprintf(&b, "land · 이 레인은 네 것이 아니다 — %s\n", r.Reason)
+
+	default:
+		// KnownTool 이 표와 디스패치를 지키듯, 여기는 service.LandResult.State 다섯 낱말과
+		// 이 switch 가 어긋나지 않는다는 전제 위에 있다. 어긋나면 침묵하지 않고 값을 그대로 보인다.
+		fmt.Fprintf(&b, "land · 이 서버가 모르는 상태 %q 다 — 서버 결함이다 (줄 행 %d)\n", r.State, r.RowID)
+	}
+	return b.String()
 }

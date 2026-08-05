@@ -63,6 +63,11 @@ const (
 	TargetRefState         ConflictTarget = "ref_state"
 	TargetChangeSet        ConflictTarget = "change_set"
 	TargetIdempotency      ConflictTarget = "idempotency"
+
+	// TargetLandingQueue 는 landing_queue 표다. 부분 유니크 인덱스
+	// landing_queue_one_live_per_session 이 지키는 "한 세션은 살아 있는 줄 행 하나"가
+	// 위반되면 여기로 온다.
+	TargetLandingQueue ConflictTarget = "landing_queue"
 )
 
 // ConflictTargets 는 이 패키지가 쓰는 대상 전부다.
@@ -76,6 +81,7 @@ func ConflictTargets() []ConflictTarget {
 		TargetSession, TargetSessionWorkspace, TargetSignal, TargetFootprint,
 		TargetResourceHold, TargetCounter,
 		TargetRefState, TargetChangeSet, TargetIdempotency,
+		TargetLandingQueue,
 	}
 }
 

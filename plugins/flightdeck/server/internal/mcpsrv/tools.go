@@ -1,10 +1,11 @@
 package mcpsrv
 
-// 도구 6개 — 설계 §6 표 그대로. 늘리지 않는다.
+// 도구 7개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
+// land 하나를 더했다. 더는 늘리지 않는다.
 //
 // ★ 설명 문구를 짧게 유지하는 것이 이 파일의 규율이다. 세션 시작에 실리는 것은
-// 도구 이름과 설명, 그리고 서버 instructions 뿐이고 그 예산이 도구 수를 6개로
-// 눌러 잡은 이유다(설계 §6). **규율 산문은 여기 없다** — 응답 꼬리에 있다.
+// 도구 이름과 설명, 그리고 서버 instructions 뿐이고 그 예산이 도구 수를 눌러 잡는
+// 이유다(설계 §6). **규율 산문은 여기 없다** — 응답 꼬리에 있다.
 
 // Tool 은 tools/list 가 내는 항목 하나다.
 type Tool struct {
@@ -134,6 +135,17 @@ var tools = []Tool{
 			"counter_name": str("카운터 이름"),
 		}, "counter_name"),
 	},
+	{
+		Name:        "land",
+		Description: "랜딩 줄에 서거나 내 차례를 본다. result 로 보고+반납, leave 로 이탈한다.",
+		InputSchema: obj(map[string]any{
+			"result": enumStr("보고 종류. 채우면 레인을 반납한다", "ok", "fail"),
+			"detail": str("보고 사유. result=fail 이면 필수"),
+			"leave":  str("채우면 이 값을 사유로 줄에서 빠진다"),
+			"release": str("레인을 회수하는 사유. **이 서버는 회수하지 않는다** — " +
+				"주면 사유와 함께 거절한다"),
+		}),
+	},
 }
 
 // Tools 는 tools/list 가 내는 목록의 사본이다.
@@ -218,4 +230,16 @@ type finishArgs struct {
 
 type allocArgs struct {
 	CounterName string `json:"counter_name"`
+}
+
+// landArgs 는 land 세 동작(줄 서기·보고·이탈)과 거절 한 동작(회수)을 한 인자로 받는다.
+//
+// ★ 동작을 고르는 것은 도구 이름이 아니라 **채운 필드**다: 전부 비면 줄을 서거나 내 자리를
+// 다시 묻고, Result 를 채우면 보고+반납, Leave 를 채우면 이탈이다. Release 는 채워도 되는 동작이
+// 아니라 **거절 사유를 만드는 미끼**다 — pick 의 steal_reason 과 같은 자리(mcpsrv.go 참조).
+type landArgs struct {
+	Result  string `json:"result"`
+	Detail  string `json:"detail"`
+	Leave   string `json:"leave"`
+	Release string `json:"release"`
 }

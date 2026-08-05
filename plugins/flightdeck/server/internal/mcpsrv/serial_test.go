@@ -89,7 +89,7 @@ func (p *serialProbe) report() (maxInflight, calls int, overlapped []string) {
 }
 
 // ── Backend 전면 ─────────────────────────────────────────────────────────────
-// 아홉 개를 **전부** 감싼다. 하나만 감싸면 "그 하나가 안 겹쳤다"만 참이 되는데,
+// 열두 개를 **전부** 감싼다. 하나만 감싸면 "그 하나가 안 겹쳤다"만 참이 되는데,
 // 갈아쓰기가 있는 자리는 Pick·Note·AddItem·Finish 넷이고 파일을 다시 쓰는 자리는
 // 그 밖에도 있다. 전제는 백엔드 표면 전체에 걸린 것이므로 시험도 전체를 봐야 한다.
 
@@ -131,6 +131,21 @@ func (p *serialProbe) Finish(ctx context.Context, in service.FinishInput) (servi
 func (p *serialProbe) Alloc(ctx context.Context, project, counter string) (int64, error) {
 	defer p.enter("Alloc")()
 	return p.Backend.Alloc(ctx, project, counter)
+}
+
+func (p *serialProbe) Land(ctx context.Context, in service.LandInput) (service.LandResult, error) {
+	defer p.enter("Land")()
+	return p.Backend.Land(ctx, in)
+}
+
+func (p *serialProbe) LandReport(ctx context.Context, in service.LandReportInput) (service.LandResult, error) {
+	defer p.enter("LandReport")()
+	return p.Backend.LandReport(ctx, in)
+}
+
+func (p *serialProbe) LandLeave(ctx context.Context, in service.LandLeaveInput) (service.LandResult, error) {
+	defer p.enter("LandLeave")()
+	return p.Backend.LandLeave(ctx, in)
 }
 
 func (p *serialProbe) RecentNotes(ctx context.Context, project string, limit int) ([]model.Judgment, error) {

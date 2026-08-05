@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -209,6 +210,190 @@ func TestFinishIsOneCallForJudgmentFollowupCloseAndRelease(t *testing.T) {
 	for _, want := range []string{"item:batch7", "item:batch8"} {
 		if !links[want] {
 			t.Fatalf("판단 링크 %q 가 없다: %v", want, j.Links)
+		}
+	}
+}
+
+// TestFinishWhileHoldingTheLaneLetsTheSessionQueueAgain — 레인을 쥔 채 마무리한 세션이
+// 뒤탈 없이 다시 줄을 설 수 있어야 한다.
+//
+// ★ 단정은 "자원이 반납됐나"가 아니라 **"그 세션이 다시 줄을 설 수 있나"**다. 자원만 보면
+// (아래 res.Released 확인만으로는) 줄 행이 유령으로 남는 결함을 못 잡는다 — 자원은 정상
+// 반납되고, EnqueueLanding 은 재진입 안전이라 살아 있는 유령 행을 오류 없이 그대로
+// 돌려주기 때문이다(store/landing.go). 그러면 새로 서는 줄이 옛 유령 행(오래된 id)에
+// 계속 들러붙어, 이미 기다리던 세션을 영영 추월 못 하게 막는다 —
+// TestFailedReportSendsTheSessionToTheBack(landing_test.go)이 report 경로에서 잠근
+// "새로 서면 맨 뒤" 규율이 finish 경로에서만 깨져 있었던 자리다.
+func TestFinishWhileHoldingTheLaneLetsTheSessionQueueAgain(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	mine, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("줄 서기 실패: %v", err)
+	}
+	if mine.State != "turn" {
+		t.Fatalf("빈 레인의 첫 세션이 차례를 못 받았다: %+v", mine)
+	}
+	theirs, err := s.Land(ctx(), LandInput{Project: "p", SessionID: other.Session.ID})
+	if err != nil {
+		t.Fatalf("두 번째 세션의 줄 서기 실패: %v", err)
+	}
+	if theirs.State != "waiting" {
+		t.Fatalf("레인을 쥔 세션이 있는데 두 번째가 %q 다(기대 waiting): %+v", theirs.State, theirs)
+	}
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "① 왜 그렇게 했나 …",
+	})
+	if err != nil {
+		t.Fatalf("레인을 쥔 채 마무리가 실패했다: %v", err)
+	}
+	if len(res.Released) != 1 || res.Released[0] != LaneResource {
+		t.Fatalf("레인 자원이 반납 목록에 없다: %v", res.Released)
+	}
+
+	// ★ 여기부터가 핵심 단정이다 — 자원 반납이 아니라 재입장.
+	again, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("마무리 뒤 다시 줄 서기가 실패했다: %v", err)
+	}
+	if again.RowID <= theirs.RowID {
+		t.Fatalf("옛 유령 줄 행(%d)이 재사용됐다 — finish 가 줄 행을 안 닫았다"+
+			"(다시 선 행 %d, 기다리던 행 %d)", mine.RowID, again.RowID, theirs.RowID)
+	}
+	if again.State != "waiting" || again.Position != 2 {
+		t.Fatalf("마무리하고 다시 선 세션이 유령 행 덕에 새치기했다: %+v", again)
+	}
+
+	// 옛 행은 finish 로 닫혀 있어야 한다 — 유령이 없다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_kind = 'finish'`, mine.RowID); n != 1 {
+		t.Fatalf("첫 줄 행이 finish 로 안 닫혔다(id=%d)", mine.RowID)
+	}
+}
+
+// TestFinishSurvivesAForcedReleaseRacingIt — 사람이 강제 회수를 finish 보다 먼저 커밋해도
+// finish 는 판단을 남기고 성공해야 한다.
+//
+// ★ 판단(handoff)은 이 레포가 "원리적으로 파생 불가한 유일한 자산"이라 부르는 값이다.
+// holds 를 트랜잭션 밖에서 읽던 시절에는(고치기 전) 그 사이에 사람이 레인을 강제
+// 회수했을 때 ④ 의 반납 시도가 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로
+// 롤백시켜 판단이 함께 사라졌다.
+//
+// ★ 이 시험이 고친 뒤 실제로 증명하는 것: guard 가 먼저 강제 회수하고 **커밋한다.**
+// finish 는 그동안 guard 의 쓰기 잠금(BEGIN IMMEDIATE)에 막혀 대기하다가, guard 가
+// 놓은 뒤에야 들어가 t.ListHeld 를 **자기 트랜잭션 안에서** 읽는다 — 그 시점엔 이미
+// guard 의 회수가 커밋돼 있으므로 반납할 것이 하나도 없다. finish 는 반납을
+// 시도조차 하지 않고도(아래 lane.release_skipped 원장 단정이 그것을 본다) 판단을
+// 커밋한다.
+//
+// ★ 아래 sleep 이 왜 아직 있는가(실측으로 확인했다) — guardReady 핸드셰이크는
+// "guard 가 잠금을 쥐고 회수를 실행했다"만 결정적으로 보장하지, "finish 의 **바깥**
+// (트랜잭션 밖) 코드가 그 커밋 전에 뭔가를 읽었다"는 보장하지 않는다. 고친 코드
+// 자체의 정확성에는 그 보장이 필요 없다 — t.ListHeld 는 쓰기 잠금에 물려 있어
+// guard 뒤로 오는 순서가 sleep 유무와 무관하게 강제된다(그래서 위 시험은 sleep 을
+// 빼도 늘 통과한다). 문제는 **회귀 검출**이다: "holds 를 트랜잭션 밖에서 다시 읽는"
+// 변이(수정①을 되돌린 것)를 이 시험이 잡으려면 그 바깥 읽기가 guard 의 커밋 **전에**
+// 실행돼 낡은 점유를 봐야 하는데, 그 읽기는 WAL 이라 아무 잠금에도 안 걸려 락으로
+// 순서를 강제할 수단이 없다. 실측: sleep 을 빼고 그 변이를 넣으면 `go test -race
+// -count=50` 에서 50/50 회 전부 못 잡았다(고루틴 예약이 guard 의 커밋보다 항상
+// 늦었다 — race 계측 오버헤드가 그 편향을 더 키운다). sleep 을 되살리면 같은 조건에서
+// 50/50 회 전부 잡는다. 즉 이 sleep 은 "고친 코드가 맞다"를 위한 게 아니라
+// "이 시험이 그 회귀를 실제로 잡는다"를 위한 것이다.
+func TestFinishSurvivesAForcedReleaseRacingIt(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	land, err := s.Land(ctx(), LandInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("줄 서기 실패: %v", err)
+	}
+	if land.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 레인을 못 쥐었다: %+v", land)
+	}
+
+	guardReady := make(chan struct{})
+	pause := make(chan struct{})
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- st.Tx(ctx(), func(t *store.Tx) error {
+			if err := t.ForceReleaseResource("p", LaneResource,
+				"레이스 시험: finish 의 ListHeld 와 Tx 사이에 사람이 회수했다"); err != nil {
+				close(guardReady)
+				return err
+			}
+			close(guardReady) // 회수는 이미 실행됐다(아직 커밋 전) — finish 를 열어도 안전하다
+			<-pause
+			return nil
+		})
+	}()
+	<-guardReady
+
+	type finishOutcome struct {
+		res FinishResult
+		err error
+	}
+	finishDone := make(chan finishOutcome, 1)
+	go func() {
+		res, err := s.Finish(ctx(), FinishInput{
+			Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+			Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "① 왜 그렇게 했나 …",
+		})
+		finishDone <- finishOutcome{res, err}
+	}()
+
+	// finish 의 바깥(트랜잭션 밖) 코드가 guard 의 커밋 전에 뭔가 읽을 시간을 번다 —
+	// 위 함수 주석 참조. 고친 코드의 정확성 자체에는 이 sleep 이 필요 없지만
+	// (쓰기 잠금이 순서를 대신 강제한다), 이게 없으면 "holds 를 트랜잭션 밖에서
+	// 읽는" 회귀를 이 시험이 못 잡는다(실측 근거도 위에 있다).
+	time.Sleep(100 * time.Millisecond)
+	close(pause)
+
+	if err := <-guardDone; err != nil {
+		t.Fatalf("강제 회수(guard)가 실패했다: %v", err)
+	}
+	out := <-finishDone
+
+	if out.err != nil {
+		t.Fatalf("경합 중에도 마무리는 성공해야 한다(판단은 원리적으로 파생 불가한 유일한 자산이다): %v",
+			out.err)
+	}
+	// ★ 이 시험이 수정 ①(holds 를 트랜잭션 안에서 읽기)을 실제로 잠그는 자리다.
+	//   finish 의 t.ListHeld 가 guard 커밋 뒤에 도니 반납할 것이 애초에 없다 — 그러면
+	//   ReleaseResource 를 부를 일도, 그 안의 멱등 처리(skip)를 탈 일도 없다. holds 를
+	//   다시 트랜잭션 밖에서 읽게 되돌리면(변이) 밖에서 읽은 낡은 점유 때문에
+	//   ReleaseResource 가 ErrNotFound 를 내고 멱등 분기가 그것을 삼켜 skip 이벤트를
+	//   남긴다 — 그때만 이 카운트가 0 을 벗어난다. 즉 이 단정 없이는 멱등 처리 하나로도
+	//   시험 전체가 초록이 돼, 이 태스크가 존재하는 이유인 "트랜잭션 안에서 읽기"가
+	//   무방비로 남는다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE project='p' AND kind='lane.release_skipped'`); n != 0 {
+		t.Fatalf("트랜잭션 안에서 읽었으면 반납을 시도할 일이 없다 — 건너뛴 반납이 %d건 있다", n)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM judgment WHERE project='p' AND session_id=?`, me.Session.ID); n != 1 {
+		t.Fatalf("판단 행이 안 남았다(%d건) — 강제 회수 경합이 핸드오프를 함께 지웠다", n)
+	}
+	it, err := st.GetItem(ctx(), "p", "batch7")
+	if err != nil {
+		t.Fatalf("항목 조회 실패: %v", err)
+	}
+	if it.State != model.ItemDone {
+		t.Fatalf("경합 뒤 항목이 안 끝났다: %s", it.State)
+	}
+	// 레인은 guard 가 이미 강제 회수했다 — finish 가 그것을 다시 반납했다고 보고하면 거짓이다.
+	for _, r := range out.res.Released {
+		if r == LaneResource {
+			t.Fatalf("이미 강제 회수된 자원을 finish 가 다시 반납했다고 보고했다: %v", out.res.Released)
 		}
 	}
 }

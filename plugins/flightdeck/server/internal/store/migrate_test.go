@@ -98,9 +98,15 @@ func makeV1DB(t *testing.T, path string) {
 		model.Item{Project: "v1p", ID: "v1-item", Title: "옛 항목", Body: "본문"}); err != nil {
 		t.Fatalf("v1 DB 구성 실패(항목): %v", err)
 	}
+	// v1 로 되돌린다 — 증분이 만든 객체를 전부 걷어낸다.
+	// ★ 새 증분을 더할 때마다 여기에 그 객체를 더해야 한다. 안 더하면 재열기에서
+	//   "table already exists" 로 죽고, 그 실패는 마이그레이션 결함처럼 보이지만 이 목록의 누락이다.
 	for _, q := range []string{
 		`DROP INDEX IF EXISTS idempotency_by_at`,
 		`DROP TABLE IF EXISTS idempotency`,
+		`DROP INDEX IF EXISTS landing_queue_waiting`,
+		`DROP INDEX IF EXISTS landing_queue_one_live_per_session`,
+		`DROP TABLE IF EXISTS landing_queue`,
 		`DELETE FROM schema_version WHERE version > 1`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
@@ -140,8 +146,10 @@ func TestOpenUpgradesVersion1Database(t *testing.T) {
 	if v != 1 {
 		t.Fatalf("전제가 성립하지 않았다: schema_version=%d — 이 상태로는 아래 단정이 무의미하다", v)
 	}
-	if hasTableIn(t, raw, "idempotency") {
-		t.Fatal("전제가 성립하지 않았다: v1 인데 idempotency 표가 이미 있다")
+	for _, table := range []string{"idempotency", "landing_queue"} {
+		if hasTableIn(t, raw, table) {
+			t.Fatalf("전제가 성립하지 않았다: v1 인데 %s 표가 이미 있다", table)
+		}
 	}
 	raw.Close()
 
@@ -159,8 +167,10 @@ func TestOpenUpgradesVersion1Database(t *testing.T) {
 	if v != SchemaVersion {
 		t.Errorf("업그레이드 뒤 버전이 %d 다 — %d 를 기대했다", v, SchemaVersion)
 	}
-	if !hasTableIn(t, s.db, "idempotency") {
-		t.Error("업그레이드했는데 idempotency 표가 없다")
+	for _, table := range []string{"idempotency", "landing_queue"} {
+		if !hasTableIn(t, s.db, table) {
+			t.Errorf("업그레이드했는데 %s 표가 없다", table)
+		}
 	}
 	// 옛 데이터가 살아 있어야 한다. 여기가 이 시험의 진짜 축이다.
 	if _, err := s.GetItem(context.Background(), "v1p", "v1-item"); err != nil {
