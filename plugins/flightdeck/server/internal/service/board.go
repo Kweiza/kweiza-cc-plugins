@@ -142,8 +142,10 @@ type BoardView struct {
 	// Splits 는 워크트리 정규화가 안 돈 흔적이다. **비어 있는 것이 정상**이고,
 	// 하나라도 있으면 그 카드를 연 클라이언트가 4de4b21 이전 판이라는 뜻이다.
 	//
-	// ★ git 을 못 읽으면 이 축은 **판정 자체를 안 한다**(빈 슬라이스). 그 사실은
-	//   Failures 에 남는다 — 침묵과 "갈림 없음"을 구분해야 한다.
+	// ★ git 을 못 읽어도 이 축이 **완전히 죽지는 않는다** — judge 가 카드 경로에서
+	//   관례 루트(.flightdeck/worktrees/<이름>)를 되읽기 때문이다. 다만 근거가 그것뿐이라
+	//   판정 범위가 좁아지고, 그 사실은 Failures 의 `split-detect` 축에 남는다.
+	//   침묵과 "갈림 없음"을 구분해야 한다.
 	Splits    []judge.SplitReport  `json:"splits,omitempty"`
 	OpenItems []model.Item         `json:"open_items,omitempty"`
 	Blocked   []model.Judgment     `json:"blocked,omitempty"`
