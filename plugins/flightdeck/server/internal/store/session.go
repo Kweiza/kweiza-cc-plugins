@@ -147,6 +147,27 @@ func (t *Tx) sessionByTriple(machineID, worktree, ccSessionID string) (model.Ses
 	return s, nil
 }
 
+// FindSession 은 3중키로 세션을 찾는다. **없으면 만들지 않는다.**
+//
+// OpenSession 과 이 함수의 차이가 이 항목의 전부다 — 저쪽은 upsert 라 행이 없으면
+// 만든다. 훅의 복구 갈래가 "옛 cc 의 카드를 찾는" 용도로 그것을 부르고 있었고,
+// 카드가 없고 rekey 가 거절되는 갈래에서 **빈 카드 한 장을 남겼다.**
+func (s *Store) FindSession(ctx context.Context, machineID, worktree, ccSessionID string) (model.Session, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+sessionCols+` FROM session
+		 WHERE machine_id = ? AND worktree = ? AND cc_session_id = ?`,
+		machineID, worktree, ccSessionID)
+	sess, err := scanSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sess, notFoundNote(NFSession, "3중키(머신·워크트리·cc 세션)에 해당하는")
+	}
+	if err != nil {
+		return sess, fmt.Errorf("세션 3중키 조회 실패(machine=%q worktree=%q): %w",
+			clip(machineID, 64), clip(worktree, 200), err)
+	}
+	return sess, nil
+}
+
 // DivergentSessions 는 **같은 대화(cc_session_id)인데 project 나 machine 이 다른** 세션을 낸다.
 //
 // ★ 키를 바꾸지 않는다. 세션 정체는 (machine, worktree, cc) 3중키 그대로이고, 이 조회는

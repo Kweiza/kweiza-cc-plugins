@@ -254,6 +254,9 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		fmt.Sprintf("잡혀 있는 작업 %d건 (선점 기준이다 — 세션의 생사가 아니다)",
 			len(claimed)+len(v.OutsideClaims)),
 	)
+	if b := splitBanner(v.Splits); b != "" {
+		head = append(head, b)
+	}
 
 	ranked := rankCards(v, claimed, opt.Self, now)
 	blocks := make([]string, 0, len(ranked))
@@ -450,6 +453,29 @@ func rankCards(v service.BoardView, cards []service.SessionCard, self string, no
 	return out
 }
 
+// splitBanner 는 갈림 보고를 머리 한 줄로 낸다.
+//
+// ★ 없으면 **빈 문자열**이다. 항상 찍으면 배너가 배경이 되고 배경은 아무도 안 읽는다.
+// ★ 카드 절이 아니라 머리에 두는 이유: 이것은 특정 카드의 성질이 아니라 이 관측
+//
+//	전체가 낡은 클라이언트에서 왔다는 사실이다.
+func splitBanner(reports []judge.SplitReport) string {
+	if len(reports) == 0 {
+		return ""
+	}
+	// ★ len(reports) 를 세지 않는다. 보고는 **갈림 그룹** 단위이고 한 대화가 무관한
+	// 그룹을 둘 이상 가질 수 있다 — 그대로 세면 대화 하나가 여러 개로 부풀어
+	// 보이고, 그러면 이 배너가 고치려던 바로 그 부풀림을 스스로 저지른다.
+	ccs := map[string]bool{}
+	for _, r := range reports {
+		ccs[r.CCSessionID] = true
+	}
+	return fmt.Sprintf(
+		"⚠ 대화 %d개의 카드가 상하위 경로로 갈렸다 — 그 카드를 연 클라이언트에서 "+
+			"워크트리 정규화(4de4b21)가 안 돈다. 정규화가 도는 판은 이 모양을 만들 수 없다.",
+		len(ccs))
+}
+
 // lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.
 // **합치지 않는다** — 여기서 최댓값을 쓰는 것은 정렬 키일 뿐이고,
 // 카드 본문은 종류별로 따로 낸다(설계 §4).
@@ -624,6 +650,12 @@ func boardDetailFoot(v service.BoardView) []string {
 		for _, j := range v.Asks {
 			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
 		}
+	}
+	if r := v.AckReach; r != nil && r.Emitted > 0 {
+		out = append(out, fmt.Sprintf(
+			"확인율 — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
+				"(두 수가 크게 다르면 그 차이가 카드 갈림이다)",
+			r.Emitted, r.Reachable, r.Acked))
 	}
 	return out
 }
