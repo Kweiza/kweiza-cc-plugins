@@ -575,7 +575,12 @@ func boardDetailFoot(v service.BoardView) []string {
 func renderLane(l *service.LaneView, now time.Time) string {
 	if len(l.Entries) == 0 {
 		if l.Holder == nil {
-			return "랜딩 레인: 비어 있음(질의는 돌았다 — 지금 아무도 안 섰다)"
+			// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
+			//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
+			//   실제로 길게 썼을 때 TestBoardDefaultOutputWithinBudget 이 5토큰 초과로 빨개졌다.
+			//   "지금 아무도 안 섰다"는 "0건"과 같은 말이라 뺀다 —
+			//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
+			return "랜딩 레인 0건(질의는 돌았다)"
 		}
 		// ★ 점유는 있는데 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는 랜딩 점유에는
 		// 반드시 대응하는 살아 있는 줄 행이 있다")이 깨진 가장 위험한 모양이다
