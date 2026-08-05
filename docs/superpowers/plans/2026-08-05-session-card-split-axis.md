@@ -926,6 +926,30 @@ git commit -m "feat(flightdeck): 보드가 카드를 대화 단위로 접는다 
 - Consumes: `judge.DetectUnnormalizedSplit(cards []judge.SplitCard, worktreeRoots []string) []judge.SplitReport` (Task 1) · `service.SessionCard` (기존) · `Service.worktreeIndex` (기존, `sessionCards` 안에서 이미 돈다)
 - Produces: `service.BoardView.Splits []judge.SplitReport` · `func service.splitCardsOf(cards []SessionCard) []judge.SplitCard` · `sessionCards` 가 워크트리 루트 목록을 함께 돌려준다
 
+**Task 1 에서 이월된 것 둘 — 이 과제에서 함께 처리한다**
+
+1. **`TestOwningRootPicksTheLongestMatch` 에 `wantUn` 단정을 더한다**(2줄).
+   그 시험은 지금 둘째 반환값을 안 봐서, `owningRoot` 가 언제나 `""` 를 내는
+   뮤테이션을 **단독으로는 못 잡는다**(재검토가 확인). 스위트 전체로는 16자리가
+   덮고 있어 살아 있는 구멍은 아니지만, 표를 줄이면 다시 열린다.
+
+   ```go
+   got, un := DetectUnnormalizedSplit([]SplitCard{…}, testRoots)
+   if len(got) != 0 { … }
+   if un != 0 {
+       t.Fatalf("버린 카드 %d장, 원하는 것 0장 — 보고 0건이 '판정을 못 해서'면 안 된다", un)
+   }
+   ```
+
+2. **버려진 카드 수가 잡음으로 읽히지 않게 한다.** 실측에서 8장이고 그 정체는
+   `/tmp/…/scratchpad` probe 5장 · `/home/aaron/cdo-dev/.wt-kweiza/fd-item-move`(옛 워크트리
+   관례) 1장 · `/home/aaron`·`/home/aaron/infra`(등록된 저장소 밖) 2장이다. 전부 정직한
+   "판정 불가"지만 **매번 같은 수가 뜨면 배경이 된다.**
+
+   그래서 `d.fail` 이 아니라 `d.note` 로 낸다 — 파생 실패가 아니라 관측 메모다.
+   `.wt-kweiza` 를 세 번째 관례로 인정할지는 **여기서 정하지 않는다**(Task 1 의 관례 둘은
+   flightdeck·Claude Code 가 스스로 만드는 자리라는 근거가 있는데, 그 경로는 근거가 없다).
+
 **이 과제의 핵심은 루트 목록을 어디서 얻느냐다**
 
 `DetectUnnormalizedSplit` 은 git 이 아는 워크트리 루트 목록이 있어야 돈다(없으면 `nil` 을 낸다).
