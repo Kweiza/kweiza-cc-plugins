@@ -898,3 +898,21 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 		t.Fatalf("신호가 없는 대기자의 그 사실이 안 보인다: %q\n전체:\n%s", waiterSeg, got)
 	}
 }
+
+// 건너뛴 후속은 **화면에 나온다.** 응답 구조체에만 있으면 세션은 못 본다.
+//
+// ★ 이 줄이 없으면 finish 의 흡수가 조용한 거짓이 된다 — "후속 1건 등록"만 보고
+// 세션이 떠나는데, 실제로 그 id 의 항목은 남이 만든 다른 것이다.
+func TestRenderFinishSaysWhichFollowupsWereSkipped(t *testing.T) {
+	out := RenderFinish(service.FinishResult{
+		Item:             model.Item{ID: "batch7", State: model.ItemDone},
+		Judgment:         model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+		Followups:        []model.Item{{ID: "batch8"}},
+		SkippedFollowups: []string{"taken-id"},
+	})
+	for _, want := range []string{"taken-id", "이미 있"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("건너뛴 후속 화면에 %q 가 없다 — 세션은 안 들어간 것을 들어간 줄 안다:\n%s", want, out)
+		}
+	}
+}
