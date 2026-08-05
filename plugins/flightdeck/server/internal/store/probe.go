@@ -25,31 +25,13 @@ func ProbeMigration(ctx context.Context, path string) (MigrationPlan, error) {
 	}
 	defer db.Close()
 
-	var hasTable int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_version'`,
-	).Scan(&hasTable); err != nil {
-		return MigrationPlan{}, fmt.Errorf("schema_version 존재 확인 실패: %w", err)
-	}
-
-	var dbVersion int
-	if hasTable > 0 {
-		var v sql.NullInt64
-		if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
-			return MigrationPlan{}, fmt.Errorf("schema_version 읽기 실패: %w", err)
-		}
-		if v.Valid {
-			dbVersion = int(v.Int64)
-		}
-	}
-
-	var objects int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view')`,
-	).Scan(&objects); err != nil {
-		return MigrationPlan{}, fmt.Errorf("sqlite_master 읽기 실패: %w", err)
+	// 판정 입력을 readMigrationState 로 읽는다. Open 경로(migrate)도 같은 함수를 쓴다 —
+	// 두 벌로 두면 한쪽만 고쳐져 탐지가 갈린다.
+	hasTable, dbVersion, objects, err := readMigrationState(ctx, db)
+	if err != nil {
+		return MigrationPlan{}, err
 	}
 
 	// 판정은 migrate 와 **같은 순수 함수**를 쓴다. 여기서 다시 판정하면 두 벌이 된다.
-	return PlanMigration(hasTable > 0, dbVersion, objects, SchemaVersion), nil
+	return PlanMigration(hasTable, dbVersion, objects, SchemaVersion), nil
 }
