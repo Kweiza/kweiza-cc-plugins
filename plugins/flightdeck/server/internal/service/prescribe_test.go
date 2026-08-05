@@ -47,13 +47,31 @@ func TestPrescriptionsAreEmittedOnceAcrossCalls(t *testing.T) {
 	}
 }
 
-// 접힌 것도 발화 기록된다. 요약된 것은 "안 낸 것"이 아니다.
-func TestFoldedPrescriptionsAreStillRecorded(t *testing.T) {
+// TestFoldedPrescriptionsAreNotRecordedAndComeBack — **접힌 것은 발화로 안 센다.**
+//
+// 앞선 판은 정반대를 계약으로 두고("요약된 것도 이미 낸 것") 접힌 것까지 기록했다.
+// 그 조합이 접힌 처방을 **영구히 지웠다**: 기록되면 suppressed 가 그 키를 누르고
+// (해제 규칙은 silent 에만 있다), 세션은 그 문구를 한 번도 못 본 채 원장에는
+// "정상적으로 접혔다"로만 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다)나
+// `unclaimed` 면 그 사실을 아무도 못 듣는다.
+//
+// ★ 상한이 무의미해지지 않는다는 것까지 여기서 단정한다 — **순환**이 그 답이다.
+// 표시된 셋은 기록되어 눌리므로, 다음 턴에 같은 조건이 다시 오면 접혔던 것이 올라온다.
+// 그래서 둘째 턴에 **다섯 경로를 전부 다시** 만지고도 뜨는 것이 접혔던 둘뿐인지를 본다.
+// 이 단정이 상시 점등(설계 §4: 같은 것이 매 턴 반복)과 이 동작을 가르는 자리다.
+//
+// ★ "다음 턴에 다시 뜬다"의 정확한 조건은 **그 축의 입력이 다시 생길 때**다. `outside`·
+// `overlap` 의 입력인 TurnPaths 는 `f.LastAt.After(since)` 로 뽑고 그 `since` 가
+// **마지막 발화 시각**이라, 아무것도 안 만진 턴에는 축 자체가 안 돈다. 그러니 이 시험이
+// 경로를 다시 만지는 것은 편의가 아니라 **일하는 세션의 정상 흐름을 그대로 재현하는 것**이다
+// (훅은 매 턴 부르고, 그 사이 세션은 파일을 만진다).
+func TestFoldedPrescriptionsAreNotRecordedAndComeBack(t *testing.T) {
 	svc, st := newSvc(t)
 
+	paths := []string{"a/1.go", "b/2.go", "c/3.go", "d/4.go", "e/5.go"}
 	sess := openSessionForPrescribeTest(t, svc)
 	claimItemForPrescribeTest(t, svc, st, sess, "fd-x", []string{"internal/judge"})
-	for _, p := range []string{"a/1.go", "b/2.go", "c/3.go", "d/4.go", "e/5.go"} {
+	for _, p := range paths {
 		touchPathForPrescribeTest(t, st, sess, p)
 	}
 
@@ -65,9 +83,60 @@ func TestFoldedPrescriptionsAreStillRecorded(t *testing.T) {
 		t.Fatalf("5개 경로가 선언 밖인데 안 접혔다: shown=%d", len(res.Shown))
 	}
 	evs, _ := st.ListSessionEvents(ctx(), sess, "prescribe", time.Time{})
-	if len(evs) != len(res.All) {
-		t.Fatalf("접힌 것이 발화 기록에서 빠졌다: events=%d, all=%d", len(evs), len(res.All))
+	if len(evs) != len(res.Shown) {
+		t.Fatalf("발화 기록이 표시분과 다르다: events=%d, shown=%d, all=%d\n"+
+			"접힌 것을 기록하면 suppressed 가 눌러서 그 문구는 영영 안 나간다",
+			len(evs), len(res.Shown), len(res.All))
 	}
+
+	firstShown := map[string]bool{}
+	for _, p := range res.Shown {
+		firstShown[p.Key] = true
+	}
+	folded := map[string]bool{}
+	for _, p := range res.All[len(res.Shown):] {
+		folded[p.Key] = true
+	}
+
+	// 둘째 턴 — 같은 다섯을 전부 다시 만진다. 표시됐던 셋은 눌려 있어야 하고,
+	// 접혔던 둘은 올라와야 한다.
+	for _, p := range paths {
+		touchPathForPrescribeTest(t, st, sess, p)
+	}
+	second, err := svc.Prescriptions(ctx(), sess)
+	if err != nil {
+		t.Fatalf("둘째 호출 실패: %v", err)
+	}
+	if len(second.Shown) == 0 {
+		t.Fatalf("접힌 것이 다음 턴에 안 올라왔다 — 그대로 소실이다(첫 턴 접힘 %d건)", res.Folded)
+	}
+	for _, p := range second.Shown {
+		if firstShown[p.Key] {
+			t.Fatalf("첫 턴에 이미 표시된 %q 가 다시 떴다 — 이것이 설계 §4 의 상시 점등이다.\n"+
+				"눌려야 할 것은 **표시된 것**이고, 다시 떠야 할 것은 접힌 것뿐이다", p.Key)
+		}
+	}
+	for key := range folded {
+		var seen bool
+		for _, p := range second.Shown {
+			if p.Key == key {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Fatalf("접혔던 %q 가 같은 조건이 다시 왔는데도 안 떴다 — 이 수리가 막으려는 소실 그대로다:\n"+
+				"둘째 턴 표시분 %v", key, keysOf(second.Shown))
+		}
+	}
+}
+
+// keysOf 는 실패 메시지용이다.
+func keysOf(ps []judge.Prescription) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.Key)
+	}
+	return out
 }
 
 // note 하나가 그 시점 열린 처방 전부를 닫고, 무엇이 열려 있었는지가 ack 에 남는다.
