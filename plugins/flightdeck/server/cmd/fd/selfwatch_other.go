@@ -14,28 +14,10 @@ import (
 // syscall.Exec 이 없는 플랫폼이라 애초에 자기 재기동을 할 수 없다.
 var errSelfWatchUnsupported = errors.New("이 플랫폼은 자기 재기동을 지원하지 않는다(syscall.Exec 부재)")
 
-type ExeID struct{ OK bool }
-
-func (e ExeID) Same(o ExeID) bool { return false }
-func (e ExeID) String() string    { return "관측 안 됨" }
-
-type Action int
-
-const (
-	ActNothing Action = iota
-	ActVerify
-	ActExec
-	ActRefuse
-)
-
-func (a Action) String() string { return "nothing" }
-
-func Decide(start, now, lastFailed ExeID, statErr error) (Action, string) {
-	return ActNothing, errSelfWatchUnsupported.Error()
-}
-
+// exeIDOfPath 는 경로 하나를 잰다.
 func exeIDOfPath(path string) (ExeID, error) {
 	return ExeID{}, fmt.Errorf("%w (path=%q)", errSelfWatchUnsupported, path)
 }
 
+// selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
 func selfWatchSupported() bool { return false }
