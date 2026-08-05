@@ -1414,6 +1414,82 @@ func TestRenderBoardSilentWhenNoSplit(t *testing.T) {
 	}
 }
 
+// splitBanner 는 보고 수가 아니라 **서로 다른 cc 수**를 센다.
+// 픽스처가 보고를 늘 1건만 넣으면 두 수가 같아서 이 로직이 무시험이 된다
+// (검토가 뮤테이션으로 확인 — len(reports) 로 바꿔도 초록이었다).
+func TestSplitBannerCountsConversationsNotReports(t *testing.T) {
+	now := time.Now()
+	v := service.BoardView{
+		Project: model.Project{ID: "p"}, At: now, Window: 2 * time.Hour,
+		// 같은 대화(cc-a)가 트리 둘에서 각각 안 접힌 모양 — 보고는 2건, 대화는 1개다.
+		Splits: []judge.SplitReport{
+			{CCSessionID: "cc-a", MachineID: "m", Root: "/repo",
+				Recorded: []string{"/repo", "/repo/sub"}, SessionIDs: []string{"s1", "s2"}},
+			{CCSessionID: "cc-a", MachineID: "m", Root: "/other",
+				Recorded: []string{"/other", "/other/sub"}, SessionIDs: []string{"s3", "s4"}},
+		},
+	}
+	out := RenderBoard(v, BoardRenderOptions{Now: now})
+	if !strings.Contains(out, "대화 1개") {
+		t.Fatalf("보고 2건이 전부 같은 cc 인데 배너가 대화 1개라고 안 한다 — "+
+			"보고 수를 그대로 세면 이 배너가 고치려던 부풀림을 스스로 저지른다:\n%s", out)
+	}
+	if strings.Contains(out, "대화 2개의 카드가 상하위") {
+		t.Fatalf("배너가 보고 수(2)를 대화 수로 냈다:\n%s", out)
+	}
+}
+
+// rankConversations 는 묶음의 IsSelf 를 본다 — 카드 id 비교만으로는 부족하다.
+// 형제 카드가 갈려 있으면 내 카드 id 는 다른 묶음에 있을 수 있고, 그때 IsSelf 가
+// 유일한 근거다. 검토가 확인했다: 유일한 IsSelf 시험이 self 문자열과 세션 id 를
+// 같이 맞춰 놔서 `case c.IsSelf` 분기를 **어떤 시험도 실행하지 않았다.**
+func TestRankConversationsHonorsIsSelfWithoutMatchingID(t *testing.T) {
+	now := time.Now()
+	mine := convCard("s-mine", "cc-me", "/repo", "a.go")
+	other := convCard("s-other", "cc-other", "/other", "b.go")
+	v := service.BoardView{
+		Project: model.Project{ID: "p"}, At: now, Window: 2 * time.Hour,
+		Sessions: []service.SessionCard{other, mine},
+	}
+	v.Conversations = service.FoldConversations(v.Sessions)
+	// IsSelf 를 묶음에만 세우고 self 문자열은 **비운다** — 카드 id 비교가 못 잡는 상태.
+	for i := range v.Conversations {
+		if v.Conversations[i].CCSessionID == "cc-me" {
+			v.Conversations[i].IsSelf = true
+		}
+	}
+	got := rankConversations(v, "", now)
+	if len(got) != 2 {
+		t.Fatalf("묶음 %d개, 원하는 것 2개", len(got))
+	}
+	if got[0].CCSessionID != "cc-me" {
+		t.Fatalf("내 묶음이 첫째가 아니다(%q) — IsSelf 분기가 안 돈다", got[0].CCSessionID)
+	}
+}
+
+// 같은 등급 안에서는 마지막 신호가 최근인 묶음이 먼저다.
+// lastSignalOfConversation 을 제로값으로 바꿔도 초록이던 자리다(검토 확인).
+func TestRankConversationsOrdersByLatestSignal(t *testing.T) {
+	now := time.Now()
+	old := convCard("s-old", "cc-old", "/a", "a.go")
+	old.View.Signals = map[model.SignalKind]time.Time{model.SignalPrompt: now.Add(-2 * time.Hour)}
+	fresh := convCard("s-fresh", "cc-fresh", "/b", "b.go")
+	fresh.View.Signals = map[model.SignalKind]time.Time{model.SignalPrompt: now.Add(-1 * time.Minute)}
+
+	v := service.BoardView{
+		Project: model.Project{ID: "p"}, At: now, Window: 4 * time.Hour,
+		Sessions: []service.SessionCard{old, fresh}, // 일부러 옛것을 먼저 넣는다
+	}
+	v.Conversations = service.FoldConversations(v.Sessions)
+	got := rankConversations(v, "", now)
+	if len(got) != 2 {
+		t.Fatalf("묶음 %d개, 원하는 것 2개", len(got))
+	}
+	if got[0].CCSessionID != "cc-fresh" {
+		t.Fatalf("첫째가 %q — 신호가 최근인 묶음이 먼저여야 한다", got[0].CCSessionID)
+	}
+}
+
 func TestConversationCardFoldsByDefaultAndExpandsInDetail(t *testing.T) {
 	now := time.Now()
 	cards := []service.SessionCard{
@@ -1616,6 +1692,67 @@ func conversationCard(c service.Conversation, now time.Time, pathLimit int, deta
 ```
 
 import 에 `sort` 와 `judge` 가 이미 있는지 확인하고 없으면 더한다.
+
+**그리고 `Sessions` 와 `Conversations` 가 갈렸을 때 소리 내어 말한다.**
+
+카드 루프의 근거가 `v.Conversations` 로 바뀌었으므로, `Sessions` 는 찼는데 `Conversations` 가
+비면 머리줄은 "카드 N장"이라 말하고 몸통은 0장을 낸다. 그리고 "지금 살아 있는 세션이 없다"
+발문은 여전히 `len(v.Sessions) == 0` 을 보므로 **그 말도 안 뜬다.** 검토가 실측으로 재현했다:
+
+```
+대화 0개(카드 2장) (최근 2시간 0분 안에 신호가 있었다 — 생존 판정이 아니다)
+
+큐 열림 0건
+```
+
+서로 모순인 문서가 조용히 나간다. 이 저장소가 가장 싫어하는 모양이고, 이 정확한 결함이
+이번 과제 안에서 기존 시험 6건을 실제로 깨뜨렸다 — 가설이 아니다.
+
+**즉석 접기로 폴백하지 마라.** 그러면 배선이 빠진 사실이 숨겨진다. 이 브랜치는 정확히 그
+사고(배선 한 줄을 지워도 전 패키지가 초록)를 막으려고 배선 시험을 따로 뒀다.
+고치는 대신 **말한다.**
+
+`RenderBoard` 의 `var foot []string` 직후, 앵커 `if len(v.Sessions) == 0 {` **바로 앞**에 넣는다.
+
+```go
+	// ★ Sessions 는 찼는데 Conversations 가 비면 소리 내어 말한다. 폴백하지 않는다 —
+	//   즉석 접기로 덮으면 배선이 빠진 사실이 숨겨지고, 그 침묵이 이 브랜치가 막으려는
+	//   사고 그 자체다. 서로 모순인 문서를 조용히 내보내는 것보다 모순을 말하는 것이 낫다.
+	if len(v.Conversations) == 0 && len(v.Sessions) > 0 {
+		foot = append(foot, fmt.Sprintf(
+			"⚠ 카드 %d장이 있는데 대화 묶음이 비었다 — 접기 파생이 안 돌았다"+
+				"(BoardView.Conversations 미배선). 카드 절은 비어 있지만 세션은 있다.",
+			len(v.Sessions)))
+	}
+```
+
+**시험을 함께 둔다.** 이 입력 모양을 고정하는 것이 목적이다.
+
+```go
+// 카드 루프가 Conversations 를 근거로 삼으므로, 그 둘이 갈리면 머리줄과 몸통이
+// 서로 모순인 문서가 나간다. **조용히 나가면 안 된다.**
+func TestRenderBoardSaysWhenConversationsAreMissing(t *testing.T) {
+	now := time.Now()
+	cards := []service.SessionCard{
+		convCard("s1", "cc-a", "/repo", "a.go"),
+		convCard("s2", "cc-b", "/other", "b.go"),
+	}
+	// Conversations 를 **일부러 안 채운다** — 배선이 빠진 상태의 재현이다.
+	v := service.BoardView{
+		Project: model.Project{ID: "p"}, At: now, Window: 2 * time.Hour,
+		Sessions: cards,
+	}
+	out := RenderBoard(v, BoardRenderOptions{Now: now})
+	if !strings.Contains(out, "대화 묶음이 비었다") {
+		t.Fatalf("카드 2장이 있는데 묶음이 비었다는 사실을 화면이 안 말한다:\n%s", out)
+	}
+	// 대조 — 정상 입력에서는 그 경고가 뜨면 안 된다(항상 뜨면 배경이 된다).
+	v.Conversations = service.FoldConversations(cards)
+	if out := RenderBoard(v, BoardRenderOptions{Now: now}); strings.Contains(out, "대화 묶음이 비었다") {
+		t.Fatalf("묶음이 정상인데 경고가 떴다:\n%s", out)
+	}
+}
+```
 
 - [ ] **Step 4: 초록을 확인한다**
 
