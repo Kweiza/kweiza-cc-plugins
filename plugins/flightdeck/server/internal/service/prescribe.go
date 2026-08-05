@@ -159,7 +159,8 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 //
 // ★ **LandingLane 을 기각했다.** 새 SQL 을 안 만드는 것은 어느 쪽이든 같지만, LandingLane 은
 // 줄 전체(ListLandingQueue) + 점유 + (어긋나 보이면 줄 재조회) + **행마다 lastSignal 한 번씩**
-// 을 돈다(그 함수가 스스로 N+1 을 인정한다). 처방은 모든 세션의 모든 턴 종료에 도는데
+// 을 돈다(그 함수가 스스로 "줄 길이만큼 LastSignal 을 부른다"고 적어 뒀다). 처방은 모든
+// 세션의 모든 턴 종료에 도는데
 // 여기서 필요한 것은 맨 앞 하나와 점유 유무뿐이라 그 신호 나이들은 전부 버려질 값이다.
 // 그리고 LaneView.Entries[0] 으로 "맨 앞"을 다시 표현하면 순서 집행이 두 자리가 된다 —
 // FrontLandingRow 의 독스트링이 자기가 그 유일한 자리라고 선언한 것을 깨는 모양이다.

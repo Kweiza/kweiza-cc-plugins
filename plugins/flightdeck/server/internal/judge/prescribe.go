@@ -141,7 +141,8 @@ type Prescription struct {
 //
 // 순서는 고정이다: lane-turn → overlap → outside → unclaimed → silent.
 // 앞의 둘이 앞인 이유는 **그 둘만이 남에게 걸리는 사건**이기 때문이다.
-// 뒤의 셋은 이 세션의 규율 축이라 접혀도 남의 화면이 틀리지 않는다.
+// 뒤의 셋은 이 세션의 규율 축이라 접혀도 남이 지금 보는 화면이 바로 틀리지는 않는다
+// — 다만 outside 는 남이 보는 겹침 판정의 **입력**을 낡은 채로 둔다(아래 대가 문단).
 //
 // ★ **개정 — lane-turn 을 들이면서 맨 앞을 내줬다.** 원래 이 자리는 "overlap 이 맨 앞인
 // 이유는 그것만이 남이 알아야 하는 사건이기 때문이고, 나머지 셋은 접혀도 남의 화면이
@@ -153,13 +154,32 @@ type Prescription struct {
 // 원장에는 "정상적으로 접혔다"로만 남는다. overlap 은 접혀도 남이 겹침을 늦게 알 뿐
 // 아무도 멈추지 않는다.
 //
-// ★ **대가는 치른다.** 상한을 넘는 턴에서 접히는 쪽이 lane-turn 이 아니라 overlap 이 된다.
-// 그래도 비대칭이 성립하는 이유는 둘이다: overlap 은 **상대마다 별개 키**라 접히는 것은
-// 상대 한 명에 대한 통지고 남은 상대들의 통지는 그대로 나간다 — 통째로 꺼지지 않는다.
-// 그리고 그 확인율은 위 PrescribeMax 정정 문단이 실측한 대로 **원리적으로** 0 이다
-// (한 대화가 카드 둘로 갈리면 처방은 발자국 카드에 뜨고 ack 은 판단 카드에 꽂힌다).
-// 접히면 안 되는 쪽은 하나뿐이고, 접혀도 되는 쪽은 이미 아무도 안 읽고 있었다.
-// 이 순서를 잠근 것은 TestLaneTurnSurvivesFolding 이다.
+// ★ **대가는 치른다 — 그런데 그 대가가 떨어지는 자리를 원래 틀리게 적었다.** 이 자리는
+// 원래 "상한을 넘는 턴에서 접히는 쪽이 lane-turn 이 아니라 overlap 이 된다"였다. 틀렸다:
+// FoldPrescriptions 는 `ps[:PrescribeMax]` 로 **뒤를 자르므로** 접히는 것은 이 순서의
+// 뒤쪽 전부다. 맨 뒤부터 silent · unclaimed · outside 가 먼저 접히고, overlap 은
+// lane-turn 이 떠 있는 턴이면 **셋째 상대부터** 접힌다(상한 3 중 한 자리를 lane-turn 이 쓴다).
+//
+// 그래서 우리가 실제로 뒤로 민 것은 overlap 이 아니라 **그 뒤 축들**이고, 완화 근거 둘은
+// 축마다 다르게 성립한다:
+//
+//	· **키가 쪼개져 있다** — overlap 은 상대마다, outside 는 경로마다 별개 키라
+//	  접히는 것이 통지 하나지 축 전체가 아니다. 다만 overlap 이 하나라도 접히는 턴이면
+//	  이미 overlap 이 적어도 둘 표시된 뒤인 반면, **lane-turn 이 뜬 턴에 overlap 이 둘만 더 떠도**
+//	  outside 는 그 턴에 한 건도 표시되지 않는다. 부분 손실과 전량 손실은 다르다.
+//	· **확인율** — 0/31 은 overlap 의 수치다(위 silent 임계 주석의 정정 문단. 카드가 갈려
+//	  처방은 발자국 카드에 뜨고 ack 은 판단 카드에 꽂히므로 원리적으로 0). outside 에는
+//	  이 근거가 **없다** — 같은 실측에서 outside 는 2건 뜨고 둘 다 확인됐다(PrescribeMax 문단).
+//
+// 즉 "접혀도 되는 쪽은 이미 아무도 안 읽고 있었다"는 overlap 에만 참이다. 그런데도 이 순서를
+// 고르는 이유는 손실의 **크기**다: 접힌 키도 호출자가 전부 발화 기록하고 suppressed 는
+// silent 외 모든 키를 무조건 누르므로 접힘에서 되돌아오는 축은 silent 하나뿐인데,
+// outside 한 경로가 접히면 남이 보는 겹침 판정의 입력이 그 경로만큼 낡은 채로 남고,
+// lane-turn 이 접히면 레인이 빈 채로 남아 **뒤에 선 전원**이 선다. 그리고 접기 자체가
+// 드물다 — 처방이 뜬 턴 35개 중 2개였다(PrescribeMax 문단).
+//
+// 이 순서를 잠근 것은 TestLaneTurnSurvivesFolding(맨 앞 · 접힘)과
+// TestAxisOrderIsLockedWhereverTwoAxesCanCoexist(축 순서 전체)다.
 func Prescribe(in PrescribeInput) []Prescription {
 	var out []Prescription
 	if p, ok := laneTurnPrescription(in); ok {

@@ -291,6 +291,18 @@ func listLandingQueue(ctx context.Context, q dbtx, project string) ([]model.Land
 // service.LandingLane 이 이 슬라이스를 그대로 LaneView.Entries 에 담고, 화면은 담긴
 // 차례를 사람이 읽는 대기 순서로 낸다. 뒤집으면 맨 앞 세션이 꼴찌로 보인다.
 // (TestListLandingQueueKeepsOrderAndDoesNotFilterByWindow 가 이 짝으로 그 순서를 잠근다.)
+//
+// ★ 정직하게 적는다: 그 시험이 잠그는 것은 **정렬의 방향까지고, ORDER BY 의 존재는 아니다.**
+// `ORDER BY id` 를 `DESC` 로 뒤집으면 그 자리에서 `순서가 순번(id)과 다르다: got=[2,1]` 으로
+// 빨개진다. 그런데 **ORDER BY 를 통째로 지우면 초록이다** — 그 시험도, store·service 두
+// 패키지 전건(-count=2)도 전부 초록이었다(변이 주입으로 확인). 그 시험의 단정이 바로
+// "got[0]=ra · got[1]=rb" 라, 초록이라는 사실 자체가 "ORDER BY 없이도 SQLite 가 그 픽스처를
+// id 순으로 내줬다"는 증거다. 즉 지우는 변경에는 빨간불이 없고, 그 순간 이 함수의 순서는
+// 질의가 보장하는 것이 아니라 **SQLite 가 고른 질의 계획**이 보장하게 된다 — landing_queue 의
+// 부분 인덱스는 둘이고(`landing_queue_waiting`(project,id) · `landing_queue_one_live_per_session`
+// (project,session_id)) 어느 쪽을 타는지 단정하는 시험은 이 레포에 없다(EXPLAIN QUERY PLAN 은
+// store_test.go 의 주석에 한 번 적혀 있을 뿐 실행되는 자리가 0건이다). 그래서 이 ORDER BY 는
+// "있어도 그만"이 아니다.
 func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.LandingRow, error) {
 	return listLandingQueue(ctx, s.db, project)
 }

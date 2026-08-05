@@ -699,7 +699,14 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		//
 		// 낱말은 아래 정상 경로(`점유 획득 %s전` · 항목별 `신호 %s전`/`신호 없음`)를 그대로 베낀다.
 		// 같은 숫자가 한 화면에서 두 어휘로 읽히면 회수 판정이 대조부터 해야 한다.
-		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		//
+		// ★ nil 은 빈칸으로 두지 않고 "신호 없음"이라고 **적는다** — 여기서 하는 일은 그것뿐이다.
+		// **못 읽음과 없음을 가르는 자리가 아니다.** 이 nil 은 두 경우가 이미 뭉개진 값이다:
+		// 그 둘을 실제로 가르는 것은 service/landing.go 의 lastSignal 의 **둘째 반환값**인데,
+		// 이 필드를 채우는 세 자리(Land 의 점유자 채움 · LandingLane 의 루프 · LandingLane 의
+		// 점유자-줄에-없음 갈래)가 전부 그 값을 `_` 로 버린다. 읽기 실패는 그쪽 WARN 에만 남는다.
+		// 그 규율이 지켜지는 곳은 불변으로 남는 판단 본문(ReleaseLaneRow)이고, 거기만
+		// "읽지 못했다"와 "없음"을 다른 문장으로 적는다 — 화면은 애초에 그 축을 못 받는다.
 		//
 		// ★ ShortID 바로 뒤에 여는 괄호를 두지 않고 문장 꼬리에 ` · ` 로 잇는다. 머리에
 		// `<세션>(…)` 모양이 생기면 항목 조각을 잘라 보는 시험(laneEntrySegment)이 그 `)` 를
@@ -721,7 +728,9 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 판정한다"인데, 그 판정을 내리는 사람은 대기자가 아니라 보드를 보는 사람이다.
 		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
 		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
-		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		// nil 은 빈칸이 아니라 "신호 없음"으로 적는다 — 다만 그 nil 은 못 읽음과 없음이 이미
+		// 뭉개진 값이다(위 어긋남 갈래 주석의 세 자리와 같은 이유. LaneEntry 쪽을 채우는 것이
+		// 그중 LandingLane 의 루프다).
 		sig := "신호 없음"
 		if e.LastSignalAt != nil {
 			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
