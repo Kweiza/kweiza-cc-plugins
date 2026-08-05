@@ -750,7 +750,6 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 	for _, m := range best.Members {
 		picked[m.Item.ID] = true
 	}
-	rank := 2
 	for _, c := range fit {
 		if picked[c.Item.ID] {
 			continue
@@ -758,7 +757,6 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 		rejected = append(rejected, model.Rejection{Item: c.Item.ID, Reason: RejectNotTop,
 			Detail: fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
 				best.Lead.Item.ID, len(best.Members)+1)})
-		rank++
 	}
 	return &best, rejected
 }
@@ -2856,9 +2854,11 @@ EOF
 
 **Files:**
 - Modify: `plugins/flightdeck/server/cmd/fd/wire_test.go`
+- Modify: `plugins/flightdeck/server/cmd/fd/cmds.go` (`fd pick` 이 인자 여럿을 받는다 — Step 3)
 
 **Interfaces:**
-- Consumes: 이 파일의 기존 하네스(`newHarness` — 먼저 읽어라)
+- Consumes: `newHarness(t) *harness` · `h.run(stdin string, args ...string) (int, string)` · `h.st *store.Store` · `h.project` · `mustContain(t, what, got string, wants ...string)` (전부 `cmd/fd/harness_test.go`)
+- Produces: `fd pick <id> [<id>…]` — 첫째가 선두
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
