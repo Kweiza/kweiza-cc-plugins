@@ -909,3 +909,236 @@ func TestPickRecommendReasonPrescribesItemIDNotItemIDs(t *testing.T) {
 		t.Fatalf("처방 문구에 item_id 와 선두 id 가 나란히 없다: %q", res.Reason)
 	}
 }
+
+// 선두를 못 집으면 아무것도 안 쓴다 — 브랜치가 정의되지 않으므로
+// "묶음을 집었다"고 말할 수 없다.
+func TestPickBundleLeadIsAtomic(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "mem", []string{"services/b.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: other.Session.ID, ItemID: "lead"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err == nil {
+		t.Fatalf("선두가 남의 것인데 성공했다: %+v", res)
+	}
+	// mem 에 선점 행이 생기면 안 된다.
+	if _, cerr := st.GetClaim(ctx(), "p", "mem"); !errors.Is(cerr, store.ErrNotFound) {
+		t.Fatalf("선두가 막혔는데 구성원을 집었다 (GetClaim err=%v)", cerr)
+	}
+}
+
+// 선두를 집었으면 구성원 하나가 막혀도 나머지는 살아야 한다.
+func TestPickBundleKeepsLeadWhenMemberBlocked(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "m1-taken", []string{"services/b.go"}, nil)
+	addItem(t, s, "p", "m2-free", []string{"services/c.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: other.Session.ID, ItemID: "m1-taken"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "m1-taken", "m2-free"}})
+	if err != nil {
+		t.Fatalf("구성원 하나가 막혔다고 pick 이 실패했다: %v", err)
+	}
+	if res.Mode != PickClaimed {
+		t.Fatalf("모드가 %q 다", res.Mode)
+	}
+	if res.Branch != "lead" {
+		t.Fatalf("브랜치가 %q 다 — 선두 id 여야 한다", res.Branch)
+	}
+	var claimed, blocked int
+	for _, m := range res.Bundle.Members {
+		if m.Claimed {
+			claimed++
+			continue
+		}
+		blocked++
+		if m.Rejection == nil || m.Rejection.Reason == "" {
+			t.Fatalf("못 집은 구성원 %q 에 사유가 없다", m.Item.ID)
+		}
+		if m.Rejection.Detail == "" {
+			t.Fatalf("못 집은 구성원 %q 에 상세가 없다 — 사유 코드만으로는 왜인지 모른다", m.Item.ID)
+		}
+	}
+	if claimed != 1 || blocked != 1 {
+		t.Fatalf("집은 것 %d · 막힌 것 %d", claimed, blocked)
+	}
+}
+
+// 집었으면 구성원의 판단 전문이 온다 — 추천과 다른 점이 이것이다.
+func TestPickBundleLoadsMemberNotesWhenClaimed(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "mem", []string{"services/b.go"}, nil)
+	if _, err := s.Note(ctx(), NoteInput{
+		Project: "p", SessionID: me.Session.ID, Kind: model.JudgmentNotDone,
+		Title: "일부러 안 한 것", Body: "DLQ 재처리는 계약 대기라 손대지 않았다", ItemID: "mem",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || len(res.Bundle.Members[0].Notes) == 0 {
+		t.Fatalf("집은 구성원의 판단 전문이 없다: %+v", res.Bundle.Members)
+	}
+}
+
+// 원소 1개짜리 item_ids 는 기존 item_id 와 같은 결과여야 한다.
+// 다르면 CLI 가 인자 하나를 넘겼을 때 조용히 다른 경로를 탄다.
+func TestPickBundleOfOneEqualsSinglePick(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	a := openSession(t, s, "p", repo, repo, "cc-1", "A")
+	b := openSession(t, s, "p", repo, repo, "cc-2", "B")
+	addItem(t, s, "p", "one", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "two", []string{"services/b.go"}, nil)
+
+	viaID, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: a.Session.ID, ItemID: "one"})
+	if err != nil {
+		t.Fatalf("단독 선점 실패: %v", err)
+	}
+	viaIDs, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: b.Session.ID, ItemIDs: []string{"two"}})
+	if err != nil {
+		t.Fatalf("원소 1개 묶음 선점 실패: %v", err)
+	}
+	if viaID.Mode != viaIDs.Mode {
+		t.Fatalf("모드가 갈렸다: %q vs %q", viaID.Mode, viaIDs.Mode)
+	}
+	if viaIDs.Branch != "two" {
+		t.Fatalf("브랜치가 %q 다", viaIDs.Branch)
+	}
+	if len(viaIDs.Setup) != len(viaID.Setup) {
+		t.Fatalf("워크트리 명령 수가 갈렸다: %d vs %d", len(viaID.Setup), len(viaIDs.Setup))
+	}
+	if viaIDs.Bundle == nil || len(viaIDs.Bundle.Members) != 0 {
+		t.Fatalf("원소 1개인데 구성원이 있다: %+v", viaIDs.Bundle)
+	}
+}
+
+// 큐 열림 수는 **모든 쓰기 뒤에** 센다. 묶음 3건을 집으면 3이 빠진다.
+func TestPickBundleCountsQueueAfterWrites(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	for _, id := range []string{"q1", "q2", "q3", "q4", "q5"} {
+		addItem(t, s, "p", id, []string{"services/" + id + ".go"}, nil)
+	}
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"q1", "q2", "q3"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 없다")
+	}
+	if *res.QueueOpen != 2 {
+		t.Fatalf("큐 열림이 %d 다 — 5건 중 3건을 집었으니 2여야 한다", *res.QueueOpen)
+	}
+}
+
+// item_ids 가 왔는데(길이 > 0) 다듬고 나면 쓸 게 없으면(전부 공백) 거절해야 한다 —
+// 조용히 추천 경로로 미끄러지면 세션은 묶음을 넣은 줄 알고 기다리는데 서버는
+// 다른 질문(추천)에 답한다. 아무 항목도 안 만들어졌는지도 함께 본다.
+func TestPickBundleRefusesAllBlankItemIDs(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "untouched", []string{"services/a.go"}, nil)
+
+	_, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"", "   "}})
+	if err == nil {
+		t.Fatalf("전부 공백인 item_ids 가 통과했다")
+	}
+	var refused *RefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("거절 오류 타입이어야 한다: %T %v", err, err)
+	}
+	// 추천 경로로 미끄러졌다면 이 항목이 선점됐을 것이다.
+	if _, cerr := st.GetClaim(ctx(), "p", "untouched"); !errors.Is(cerr, store.ErrNotFound) {
+		t.Fatalf("거절돼야 하는데 뭔가를 집었다 (GetClaim err=%v)", cerr)
+	}
+}
+
+// 같은 id 를 두 번 주면 둘째 사본은 버려진다(순서 보존 중복 제거) — 안 그러면
+// 둘째 사본이 pickExplicit 의 재개 경로("이미 내 선점")를 타 구성원 목록에
+// "막혔다"가 아니라 "재개했다"는 엉뚱한 결과가 섞인다.
+func TestPickBundleCollapsesDuplicateItemIDs(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "mem", []string{"services/b.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Branch != "lead" {
+		t.Fatalf("브랜치가 %q 다", res.Branch)
+	}
+	// 중복이 안 걷혔다면 구성원이 둘(lead 사본 + mem)이 됐을 것이다.
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("구성원이 %d건이다 — 중복 lead 가 안 걷혔다: %+v", len(res.Bundle.Members), res.Bundle.Members)
+	}
+	if res.Bundle.Members[0].Item.ID != "mem" {
+		t.Fatalf("남은 구성원이 %q 다 — mem 이어야 한다", res.Bundle.Members[0].Item.ID)
+	}
+	if !strings.Contains(res.Reason, "묶음 2건") {
+		t.Fatalf("사유의 묶음 수가 중복 제거 전 수를 세고 있다: %q", res.Reason)
+	}
+}
+
+// 겹침은 묶음 전체 경로의 합집합으로 다시 봐야 한다 — "남과 부딪히는가"는 항목
+// 단위가 아니라 묶음 단위 질문이다. 선두 자신의 경로는 남과 안 겹치지만
+// 구성원의 경로가 겹치는 상황을 만들어, 그 겹침이 선두 단독 판정에는 안 잡히고
+// 묶음 재계산에서만 잡힌다는 것을 확인한다.
+func TestPickBundleOverlapsCoverWholeBundle(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	// 남이 구성원의 경로만 만지고 있다 — 선두의 경로는 건드리지 않는다.
+	if err := s.Beat(ctx(), other.Session.ID, model.SignalTool,
+		[]string{filepath.Join(repo, "services", "mem.go")}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	addItem(t, s, "p", "mem", []string{"services/mem.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 집혔어야 한다: %+v", res.Bundle.Members)
+	}
+	if len(res.Overlaps) != 1 || res.Overlaps[0].SessionID != other.Session.ID {
+		t.Fatalf("구성원 경로의 겹침이 묶음 응답에 안 실렸다: %+v", res.Overlaps)
+	}
+}
