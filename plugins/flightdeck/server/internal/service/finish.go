@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -111,15 +112,25 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			"item", clip(in.ItemID, 64), "reason", v.Reason)
 		return FinishResult{}, &RefusedError{What: "finish", Reason: v.Reason, Guidance: v.Guidance}
 	}
+	// 후속을 안 실었으면 **한 번** 붙잡는다 — 판정과 사유는 finish_followups.go 에 있다.
+	// body 관문(위 JudgeFinish)과 같은 자리·같은 모양이다: 빠진 것을 그 자리에서 말한다.
+	if len(in.Followups) == 0 {
+		if refused := s.judgeMissingFollowups(ctx, in); refused != nil {
+			s.log.WarnContext(ctx, "마무리 거절 — 후속이 안 실렸다",
+				"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+				"item", clip(in.ItemID, 64))
+			return FinishResult{}, refused
+		}
+	}
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason:   fmt.Sprintf("%d번째 후속: %v", i, err),
+				Reason:   fmt.Sprintf("%d번째 후속: %v", i+1, err),
 				Guidance: "후속 항목 id 도 브랜치 이름으로 그대로 쓰인다."}
 		}
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i, clip(f.ID, 64)),
+				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i+1, clip(f.ID, 64)),
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
 					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다."}
 		}
@@ -131,7 +142,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// 다른 문에서 배신한다).
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i, clip(f.ID, 64), err),
+				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i+1, clip(f.ID, 64), err),
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
 					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
 		}
@@ -139,14 +150,8 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 
 	now := s.now()
 
-	// 자원 목록은 트랜잭션 밖에서 읽는다(읽기는 WAL 이라 쓰기 잠금과 안 부딪힌다).
-	holds, err := s.st.ListHeld(ctx, in.Project)
-	if err != nil {
-		return FinishResult{}, err
-	}
-
 	var out FinishResult
-	err = s.st.Tx(ctx, func(t *store.Tx) error {
+	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		// ★ 시도를 **먼저** 예약한다. Tx.LogEvent 는 롤백된 뒤에도 흘러가므로
 		//   "무엇을 시도했다 실패했나"가 원장에 남는다 — 끝에 두면 성공한 것만 세게 되고,
 		//   그러면 §10 의 "세션당 쓰기 호출 수"가 실패를 못 본다.
@@ -189,14 +194,39 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		}
 
 		// ④ 이 세션이 쥔 자원 반납. 규율 산문이 강제하던 마지막 단계다.
+		//
+		// ★ holds 를 **트랜잭션 안에서** 읽는다. 밖에서 읽으면 그 사이에 사람이 레인을
+		//   강제 회수했을 때 아래 반납이 ErrNotFound 를 올리고, 그 오류가 ①②③ 을 통째로
+		//   롤백시켜 **원리적으로 파생 불가한 유일한 자산인 판단이 사라진다.**
+		holds, err := t.ListHeld(in.Project)
+		if err != nil {
+			return err
+		}
 		for _, h := range holds {
 			if h.SessionID != in.SessionID {
 				continue
 			}
 			if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+				var held *store.ResourceHeldError
+				if errors.Is(err, store.ErrNotFound) || errors.As(err, &held) {
+					// ★ 남이 이미 반납했거나 강제로 회수했다. 그것은 finish 를 실패시킬
+					//   이유가 아니다 — 원장에만 남기고 Released 에서 뺀다
+					//   (item.go 의 ReleaseClaim 과 같은 규율).
+					t.LogEvent("lane.release_skipped", in.Project, in.SessionID,
+						map[string]any{"resource": h.Resource, "why": "이미 반납되었거나 남이 회수했다"})
+					continue
+				}
 				return fmt.Errorf("자원 %s 반납 실패: %w", clip(h.Resource, 64), err)
 			}
 			out.Released = append(out.Released, h.Resource)
+		}
+
+		// ★ 줄 행 닫기는 **반납 루프 밖에서 조건 없이** 한다. 루프 안에 두면 레인을 안 쥔 채
+		//   줄만 서 있던 세션(대기 중 마무리)의 유령 행이 안 닫힌다. 살아 있는 행이 없으면
+		//   무동작으로 통과하므로 줄을 한 번도 안 선 세션에도 안전하다.
+		if err := t.CloseLandingRowBySession(
+			in.Project, in.SessionID, model.LandingLeftFinish, ""); err != nil {
+			return err
 		}
 
 		return nil

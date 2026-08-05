@@ -150,7 +150,7 @@ func (t *Tx) AddItem(it model.Item) error {
 	for i, a := range it.After {
 		if err := t.addAfter(it.Project, it.ID, a); err != nil {
 			return fmt.Errorf("항목 %s/%s 의 %d번째 선행 조건: %w",
-				clip(it.Project, 64), clip(it.ID, 64), i, err)
+				clip(it.Project, 64), clip(it.ID, 64), i+1, err)
 		}
 	}
 	return nil

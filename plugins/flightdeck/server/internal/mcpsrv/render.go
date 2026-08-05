@@ -165,11 +165,34 @@ type BoardRenderOptions struct {
 	Notice string
 }
 
+// boardCardFloor 는 예산이 아무리 빠듯해도 내는 카드 수다. **예산보다 세다.**
+//
+// ★ 이 바닥이 없어서 보드가 카드를 0장 냈다. 실측(2026-08-05 01:12 UTC): 살아 있는
+// 세션 34건, 카드 0장, "34건을 예산 때문에 접었다" 한 줄만.
+//
+// 기제: 고정분(머리·발·꼬리·배너)을 루프 **앞에서** 재고 `used+cost > budget` 이면
+// break 하므로, 고정분만으로 예산을 넘으면 **첫 블록에서 즉시 break 해 kept==0** 이 된다.
+// 그 출력은 예산을 지키지도 못하면서(고정분이 이미 넘었다) 보드의 본체를 100% 잃는다 —
+// 양쪽을 다 잃는 유일한 결말이라 어떤 예산 정책으로도 정당화되지 않는다.
+// 예산의 목적은 화면을 작게 하는 것이지 **비우는 것이 아니다.**
+//
+// 그래서 바닥이 예산을 이긴다. 넘긴 사실은 아래에서 소리 내어 말한다 — 조용히 넘기면
+// "기본 출력은 예산 안이다"라는 이 함수의 계약이 거짓이 되고, 거짓인 계약은 다음 사람이
+// 못 고친다(고정분에 상한을 더한 이번 변경도 그 계약을 믿었으면 시작조차 못 했다).
+//
+// 값이 3인 이유: 이 보드에서 사람이 카드로 하는 일은 "누가 내 자리를 만지나"이고,
+// rankCards 가 ① 나 ② 사건 붙은 카드 ③ 나와 겹치는 카드 순으로 이미 정렬한다.
+// 앞 셋이면 그 질문의 답이 나온다 — 바닥은 화면을 채우는 값이 아니라 **판별력이 죽는 지점**이다.
+const boardCardFloor = 3
+
 // RenderBoard 는 보드 한 장을 사람이 읽는 텍스트로 만든다. 순수 함수다.
 //
 // 기본 출력은 BoardTokenBudget 안이다. 넘치면 세션 블록을 자르고
 // **잘랐다는 사실과 남은 건수를 찍는다** — 조용히 자르면 "세션이 셋뿐"과
 // "셋만 보여준다"가 구분되지 않는다.
+//
+// 한 가지 예외가 boardCardFloor 다 — 고정분이 예산을 다 먹어도 카드는 그만큼 낸다.
+// 그때는 출력이 예산을 넘고, 넘었다는 사실과 넘긴 주체를 함께 찍는다.
 func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	now := opt.Now
 	if now.IsZero() {
@@ -212,7 +235,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		// 바뀔 때마다(0113b35 처럼) 조용히 낡는다. 그리고 "이렇게 본다"에서 멈춘다 —
 		// "window=Nh 로 본다"처럼 손잡이를 돌리라는 투로 쓰지 않는다. MCP board 도구는
 		// window 인자를 받지 않고(tools.go), 그 인자를 새로 만들지도 않는다(설계가
-		// 도구 수를 6개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
+		// 도구 수를 7개로 눌러 잡는다) — 없는 손잡이를 가리키는 문구는 그 자체가 결함이다.
 		// 웹 패널(internal/web/page.go)이 이미 이렇게 한다: 사실만 말하고 지시하지 않는다.
 		foot = append(foot, fmt.Sprintf(
 			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
@@ -222,6 +245,13 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		foot = append(foot, boardDetailFoot(v)...)
 	} else {
 		foot = append(foot, boardBriefFoot(v)...)
+	}
+	// 레인 절 — v.Lane 이 nil 이면 이 조회가 레인을 안 읽은 것이라 아예 안 찍는다.
+	// 읽었으면(0건이어도) 반드시 한 줄을 낸다 — renderLane 이 그 0건 문장에
+	// "질의는 돌았다"를 적어 nil(안 읽음)과 빈 슬라이스(질의는 돌았는데 아무도 없음)를 가른다
+	// (service.BoardView.Lane 주석과 같은 판정).
+	if v.Lane != nil {
+		foot = append(foot, renderLane(v.Lane, now))
 	}
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
@@ -249,18 +279,35 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		if kept < len(blocks)-1 {
 			reserve = 24
 		}
-		if used+cost+reserve > budget {
+		// ★ 카드 바닥이 예산보다 세다 — boardCardFloor 주석을 보라.
+		if used+cost+reserve > budget && kept >= boardCardFloor {
 			break
 		}
 		used += cost
 		kept++
 	}
-	if kept == len(blocks) {
+
+	// 두 사실은 **따로** 말한다. "접었다"는 카드가 넘쳤다는 것이고, 아래 ⚠ 는 고정분이
+	// 넘쳤다는 것이다. 원인이 다르므로 뭉치면 읽는 사람이 손댈 자리를 못 찾는다.
+	var notes []string
+	if kept < len(blocks) {
+		notes = append(notes, fmt.Sprintf("… 세션 %d건을 예산(%d토큰) 때문에 접었다 — detail=true 로 전부 본다",
+			len(blocks)-kept, budget))
+	}
+	if used > budget {
+		msg := fmt.Sprintf(
+			"⚠ 이 출력은 예산 %d토큰을 %d토큰 넘는다 — 넘긴 것은 카드가 아니라 고정분(머리·발·꼬리·배너)이다",
+			budget, used-budget)
+		if kept > 0 {
+			msg += fmt.Sprintf(". 카드 %d장은 바닥(%d장)이 지켰다", kept, boardCardFloor)
+		}
+		notes = append(notes, msg)
+	}
+	if len(notes) == 0 {
 		return joinAll(head, blocks, foot, opt.Tail)
 	}
 	shown := append([]string(nil), blocks[:kept]...)
-	shown = append(shown, fmt.Sprintf("… 세션 %d건을 예산(%d토큰) 때문에 접었다 — detail=true 로 전부 본다",
-		len(blocks)-kept, budget))
+	shown = append(shown, notes...)
 	return joinAll(head, shown, foot, opt.Tail)
 }
 
@@ -418,22 +465,45 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 	return strings.Join(lines, "\n")
 }
 
+// cardNoteLimit 은 카드 하나가 싣는 사건 줄 수다.
+//
+// ★ 이것이 **카드 바닥의 비용**을 정한다. boardCardFloor 는 예산을 이기고 카드를 남기는데,
+// 그 카드 한 장의 크기에 상한이 없으면 바닥이 예산을 얼마나 넘길지도 상한이 없다.
+// 실측(2026-08-05, 살아 있는 세션 33건): 남은 카드 3장에 사건 줄이 8개 붙어 예산을
+// 531토큰 넘겼고, 그 줄들이 초과분의 대부분이었다.
+//
+// 이 축은 세션이 오래 살수록 자란다(한 세션이 ask 를 계속 남긴다). 즉 꼬리·배너와
+// 같은 O(N) 이고, 같은 이유로 상한이 필요하다. 최신순으로 앞의 몇 개만 낸다 —
+// 오래된 요청보다 방금 온 요청이 지금 조율에 필요한 것이다.
+const cardNoteLimit = 2
+
 // noteLines 는 이 카드가 실을 사건 줄이다.
 //
 // ★ 전역 꼬리를 없애지 않는다. 카드가 접히면 사건도 접히므로 꼬리가 그 안전망이다.
+// 상한에 걸려 안 보인 것도 마찬가지다 — 수를 말하고, 전부는 detail 과 꼬리가 맡는다.
 func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) []string {
 	var out []string
+	dropped := 0
 	add := func(kind string, js []model.Judgment) {
+		shown := 0
 		for _, j := range js {
 			if j.SessionID != sessionID {
 				continue
 			}
+			if shown >= cardNoteLimit {
+				dropped++
+				continue
+			}
+			shown++
 			out = append(out, fmt.Sprintf("   [%s %s] %s",
 				kind, FormatAge(now.Sub(j.At)), clip(firstLine(j.Title, j.Body), 100)))
 		}
 	}
 	add("ask", asks)
 	add("blocked", blocked)
+	if dropped > 0 {
+		out = append(out, fmt.Sprintf("   … 이 세션의 사건 %d건 더 — detail=true 로 전부 본다", dropped))
+	}
 	return out
 }
 
@@ -490,6 +560,83 @@ func boardDetailFoot(v service.BoardView) []string {
 		}
 	}
 	return out
+}
+
+// renderLane 은 보드의 레인 절 한 줄이다. 순수 함수다.
+//
+// 설계 §9 ① 이 요구하는 축을 전부 낸다: **점유자의 획득 경과**(머리) · 대기 줄 전체
+// (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
+// 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
+//
+// ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
+// 이상 질의는 이미 돈 것이고, Entries 가 비었어도 그 사실("질의는 돌았다")을 문장에
+// 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Entries)가
+// 화면에서 같아진다(service.LaneView 주석과 같은 판정).
+func renderLane(l *service.LaneView, now time.Time) string {
+	if len(l.Entries) == 0 {
+		if l.Holder == nil {
+			// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
+			//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
+			//   실제로 길게 썼을 때 TestBoardDefaultOutputWithinBudget 이 5토큰 초과로 빨개졌다.
+			//   "지금 아무도 안 섰다"는 "0건"과 같은 말이라 뺀다 —
+			//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
+			return "랜딩 레인 0건(질의는 돌았다)"
+		}
+		// ★ 점유는 있는데 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는 랜딩 점유에는
+		// 반드시 대응하는 살아 있는 줄 행이 있다")이 깨진 가장 위험한 모양이다
+		// (TestLiveLandingHoldAlwaysHasALiveQueueRow 가 잡으려는 상태 그 자체다. Land 도 이
+		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
+		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
+		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
+		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다",
+			ShortID(l.Holder.SessionID))
+	}
+	parts := make([]string, 0, len(l.Entries))
+	for i, e := range l.Entries {
+		mark := ""
+		if l.Holder != nil && l.Holder.SessionID == e.SessionID {
+			mark = "◀점유"
+		}
+		// ★ **신호 나이를 낸다**(설계 §9 ①). 자동 만료를 안 만든 근거가 "사람이 나이를 보고
+		// 판정한다"인데, 그 판정을 내리는 사람은 대기자가 아니라 보드를 보는 사람이다.
+		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
+		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
+		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		sig := "신호 없음"
+		if e.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
+		}
+		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전·%s%s)",
+			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), sig, mark))
+	}
+	// ★ 머리에 **점유자의 획득 경과**를 낸다(설계 §9 ①). 회수를 판정하는 사람이 봐야 할
+	// 두 숫자가 획득 경과와 신호 나이인데, 앞엣것은 LaneHolder.AcquiredAt 에 채워져 있으면서
+	// 이 함수가 안 읽어 화면에 없었다.
+	//
+	// ★ 점유자의 ShortID 를 머리에 **다시 적지 않는다.** 누가 쥐었나는 항목의 ◀점유 표시가
+	// 이미 답하고, 머리에 `<세션>(…)` 모양을 하나 더 두면 항목 조각을 잘라 보는 시험
+	// (laneEntrySegment)이 머리 쪽을 먼저 집어 표시 뒤바뀜을 못 잡게 된다.
+	head := fmt.Sprintf("랜딩 레인 %d건", len(l.Entries))
+	if l.Holder != nil {
+		head += fmt.Sprintf("(점유 획득 %s전)", FormatAge(now.Sub(l.Holder.AcquiredAt)))
+	}
+	line := head + ": " + strings.Join(parts, " ")
+	if l.Holder != nil && !laneHolderIsQueued(l) {
+		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
+		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
+		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남)", ShortID(l.Holder.SessionID))
+	}
+	return line
+}
+
+// laneHolderIsQueued 는 지금 점유자가 줄 목록에도 있는지다.
+func laneHolderIsQueued(l *service.LaneView) bool {
+	for _, e := range l.Entries {
+		if e.SessionID == l.Holder.SessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func heldLine(held []model.ResourceHold) string {
@@ -697,7 +844,7 @@ func RenderAdd(it model.Item) string {
 	// 않는 경로를 가리켰고, 그중 하나(fd-item-move)는 폐기됐는데 **id 가 전역 유일이라
 	// 회수되지 않아 그 이름이 영구히 죽었다.**
 	//
-	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 여섯으로
+	// 되돌리는 길도 같은 줄에 적는다. MCP 표면에는 move 가 없고(설계 §6 이 도구 수를 일곱으로
 	// 눌러 잡는다 — 컨텍스트 예산), 대신 §6 이 정한 방식이 이것이다:
 	// **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
 	fmt.Fprintf(&b, "add · %s 를 **프로젝트 %s** 의 큐에 넣었다 [%s]\n", it.ID, it.Project, it.State)
@@ -767,6 +914,18 @@ type TailInput struct {
 	OverlapsNote     string // 안 읽었으면 왜 안 읽었나
 }
 
+// tailOverlapLimit 은 꼬리가 **줄을 내는** 겹침 세션 수다. 건수는 머리줄이 전부 센다.
+//
+// ★ 안쪽 차원은 이미 잘리고 있었는데(겹침 한 건 안의 경로쌍 4개) **바깥 차원인 겹침 건수에는
+// 상한이 없었다.** 꼬리는 모든 응답에 붙고 board 에서는 고정분이라, 겹침 줄이 늘면 카드가
+// 그만큼 밀려난다. 즉 꼬리가 살아 있는 세션 수에 O(N) 으로 자라는데 예산은 상수다.
+// 실측(2026-08-05): 겹침 16줄일 때 788토큰 = 예산 1200 의 66%.
+//
+// ★★ 알림 쪽에 같은 상한을 **여기 두지 않는다.** 그 축은 tailNoteLimit(mcpsrv.go)이 이미
+// 쥐고 있다 — 같은 판정을 두 자리에 두면 반드시 표류한다(이 패키지가 워크트리·머신·프로젝트
+// 축에서 세 번 겪고 세 번 다 주입으로 고친 그 사고다).
+const tailOverlapLimit = 5
+
 // RenderTail 은 응답 꼬리를 만든다. 순수 함수다.
 func RenderTail(in TailInput) string {
 	var lines []string
@@ -800,7 +959,13 @@ func RenderTail(in TailInput) string {
 		lines = append(lines, "겹침: 없음 — 살아 있는 세션 어느 것과도 경로가 안 겹친다.")
 	default:
 		lines = append(lines, fmt.Sprintf("겹침 %d건 (거르지 않고 알린다):", len(in.Overlaps)))
-		for _, o := range in.Overlaps {
+		for i, o := range in.Overlaps {
+			if i >= tailOverlapLimit {
+				lines = append(lines, fmt.Sprintf(
+					"  · … %d건 더 — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
+					len(in.Overlaps)-tailOverlapLimit))
+				break
+			}
 			pairs := make([]string, 0, len(o.Pairs))
 			for i, p := range o.Pairs {
 				if i >= 4 {
@@ -852,4 +1017,64 @@ func RenderRefusal(what, reason, guidance string) string {
 		s += "\n" + guidance
 	}
 	return s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// land
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderLand 는 land 한 번의 결과다. 순수 함수다.
+//
+// 세 갈래가 뼈대다: **네 차례다**(turn) · **너는 N번째다**(waiting — 앞사람 세션·획득 경과·
+// 마지막 신호 나이) · **이 레인은 네 것이 아니다**(reclaimed — 사유가 무엇이 일어났는지 말한다).
+// report·leave 의 확인(released·left)은 그보다 단순해서 한 줄이다.
+//
+// ★ **lane-turn 처방을 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다
+// (설계 단계 ③ 이 그것을 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는
+// 부류다. waiting 응답이 낼 수 있는 유일한 처방은 "다시 물어라"(폴링)뿐이다.
+func RenderLand(r service.LandResult, now time.Time) string {
+	var b strings.Builder
+	switch r.State {
+	case "turn":
+		fmt.Fprintf(&b, "land · 네 차례다 — 레인을 쥐었다 (줄 행 %d)\n", r.RowID)
+		b.WriteString("다 쓰면 result 로 보고하고 반납해라. 줄 서 놓고 그만두려면 leave 를 써라.\n")
+
+	case "waiting":
+		fmt.Fprintf(&b, "land · 너는 %d번째다 (줄 행 %d)\n", r.Position, r.RowID)
+		if r.Holder == nil {
+			b.WriteString("지금 레인을 쥔 사람이 없다 — 앞사람이 아직 land 를 안 불렀다.\n")
+		} else {
+			fmt.Fprintf(&b, "지금 레인: %s · 획득 %s 전",
+				ShortID(r.Holder.SessionID), FormatAge(now.Sub(r.Holder.AcquiredAt)))
+			if r.Holder.LastSignalAt != nil {
+				fmt.Fprintf(&b, " · 마지막 신호 %s 전\n", FormatAge(now.Sub(*r.Holder.LastSignalAt)))
+			} else {
+				b.WriteString(" · 마지막 신호 없음\n")
+			}
+		}
+		b.WriteString("차례는 서버가 밀어주지 않는다 — 다시 물으려면 land 를 다시 불러라.\n")
+
+	case "released":
+		fmt.Fprintf(&b, "land · 보고하고 레인을 반납했다 (줄 행 %d)\n", r.RowID)
+
+	case "left":
+		fmt.Fprintf(&b, "land · 줄에서 빠졌다 (줄 행 %d)\n", r.RowID)
+
+	case "reclaimed":
+		// ★ 머리글이 사유를 앞지르지 않는다. service.laneNotMine 은 "내가 점유자가 아니다"
+		// **전부**를 이 한 낱말로 접는데 도달 갈래가 셋이다: 진짜 회수됨(left_detail) ·
+		// 아직 대기 중인 세션의 보고("레인을 쥔 적이 없다 …") · 줄에 선 적조차 없는 세션
+		// ("이 프로젝트 줄에 선 기록이 없다"). 머리글에 "회수됐다"를 박으면 뒤의 둘에서
+		// **한 문장 안에서 회수됐다와 쥔 적이 없다가 정면 충돌한다** — 사용자에게 나가는
+		// 거짓 문장이다. 그래서 머리글은 세 갈래 모두에 참인 것만 말하고(네 것이 아니다)
+		// **무엇이 일어났나는 사유가 말한다**(laneLeftReason 이 절대 빈 문자열을 안 내므로
+		// 이 자리가 비는 경우는 없다). State 어휘 다섯과 LandExitCode 표는 그대로다.
+		fmt.Fprintf(&b, "land · 이 레인은 네 것이 아니다 — %s\n", r.Reason)
+
+	default:
+		// KnownTool 이 표와 디스패치를 지키듯, 여기는 service.LandResult.State 다섯 낱말과
+		// 이 switch 가 어긋나지 않는다는 전제 위에 있다. 어긋나면 침묵하지 않고 값을 그대로 보인다.
+		fmt.Fprintf(&b, "land · 이 서버가 모르는 상태 %q 다 — 서버 결함이다 (줄 행 %d)\n", r.State, r.RowID)
+	}
+	return b.String()
 }

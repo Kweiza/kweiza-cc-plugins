@@ -46,7 +46,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PostToolUse`(Edit\|Write) 훅 | `tool` 신호 + **미커밋 발자국** — 경로 겹침 축의 유일한 원천 |
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
-| MCP 도구 6개 | `board` `pick` `note` `add` `finish` `alloc` |
+| MCP 도구 7개 | `board` `pick` `note` `add` `finish` `alloc` `land` |
 | 스킬 3개 | `fd-pickup` · `fd-handoff` · `fd-setup` |
 
 `bin/fd` 는 셸 런처다. 첫 훅이 `server/` 를 빌드해 `${CLAUDE_PLUGIN_DATA}` 에 캐시한다.
@@ -75,6 +75,7 @@ note(kind: "ask", body: …) 남이 건드리면 곤란한 것
 add(id, title, body)       큐 항목
 finish(item_id, outcome, body, followups)   판단+후속+종료+반납을 한 번에
 alloc(counter_name)        원자 발번(개정 차수 같은 논리 카운터)
+land                       랜딩 줄에 선다 / 내 차례를 본다. result 로 보고+반납, leave 로 이탈
 ```
 
 터미널에서는 같은 것을 `fd` 로 한다.
@@ -85,8 +86,15 @@ fd next                   # 추천만
 fd pick <item-id>         # 선점
 fd note --kind decision --body "왜 그렇게 했나"
 fd finish <item-id> --outcome done --body "① 왜 ② 기각 ③ 안 한 것 ④ 확인만 한 것"
+fd land                   # 랜딩 줄에 선다(--ok|--fail <사유>|--leave <사유> 로 보고·이탈)
+fd lane release --row <id> --reason "왜 끊었나"   # 물린 줄 행을 사람이 회수한다
 fd doctor                 # 이 머신의 플랫폼 축과 서버 상태를 실제로 잰다
 ```
+
+`fd land` 는 **내 차례가 아니면 종료코드 1** 이다. 종료코드가 답하는 질문은 "요청이 성공했나"가
+아니라 **"지금 랜딩해도 되는가"** 라서, `fd land && <랜딩 명령>` 한 줄이 그대로 성립한다.
+`turn`·`released`·`left` 만 0 이고 `waiting`·`reclaimed`·모르는 상태는 전부 1 이다 —
+대기에 0 을 내면 그 한 줄이 배타를 통째로 우회하는데 서버는 내내 옳고 아무 로그도 안 남는다.
 
 ---
 
@@ -105,6 +113,10 @@ fd doctor                 # 이 머신의 플랫폼 축과 서버 상태를 실�
 - **판단·노트** — 아웃박스에 쌓이고 재연결 시 **멱등 재생**된다. 종료코드 0.
 - **선점** — 거절된다. 배타는 서버만 보장할 수 있고, 오프라인 획득을 허용하면 배타가 거짓이 된다.
 - **발번** — 거절된다. 오프라인에서 발급하면 두 세션이 같은 번호를 쓴다.
+- **랜딩 레인 넷**(`land` 취득 · 보고 · 이탈 · `lane release`) — 전부 거절되고 **사유가 셋으로 갈린다.**
+  취득은 배타의 정본이 서버 DB 제약이라 여기서 "내 차례"를 만들면 두 세션이 동시에 랜딩한다.
+  보고·이탈은 재생 시점에 이미 남이 레인을 잡았을 수 있어 재생하면 **남의 점유를 반납한다.**
+  회수는 지금 무엇이 물렸나를 보고 사람이 내린 판정이라, 재생 시점의 레인은 그 판정이 본 레인이 아니다.
 
 상태는 `${CLAUDE_PLUGIN_DATA}` 에 둔다 — `${CLAUDE_PLUGIN_ROOT}` 는 갱신마다 경로가 바뀐다.
 

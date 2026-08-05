@@ -8,7 +8,7 @@
 //     CLAUDE_PROJECT_DIR)과 cwd 에서 온다(설계 §13 실측). 파생 가능한 값에 파라미터를
 //     두면 틀린 값이 들어오고, 그 틀린 값은 검사로 막히지 않는다 — 우회할 필드가 있으면 우회된다.
 //  2. **못 읽으면 조용히 익명으로 진행하지 않는다.** 결손 축을 이름으로 배너에 싣고
-//     세션 귀속이 필요한 도구(pick·note·add·finish)를 거절한다.
+//     세션 귀속이 필요한 도구(pick·note·add·finish·land)를 거절한다.
 //  3. **규율은 도구 설명이 아니라 응답에 싣는다.** 세션 시작에 실리는 것은 도구 이름과
 //     300자 instructions 뿐이고, 무엇을 적어야 하는지는 finish 를 body 없이 부른
 //     **그 자리에서** 온다(설계 §6).
@@ -72,6 +72,7 @@ type Option func(*builder)
 type builder struct {
 	projectID   string
 	projectPath string
+	worktree    string
 	machineID   string
 	getenv      func(string) (string, bool)
 	cwd         string
@@ -166,6 +167,26 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	} else if id.ProjectID != "" {
 		id.Warnings = append(id.Warnings,
 			"프로젝트 좌표를 경로의 마지막 성분으로 정했다 — 워크트리에서는 주 저장소와 다를 수 있다")
+	}
+
+	// 워크트리도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고, 안 넣었다가 같은 사고를 겪었다.
+	//
+	// ★ 이 패키지가 스스로 푸는 규칙(워크트리 = 자기 cwd)은 **저장소 하위 디렉토리에서 틀린다.**
+	// 53c18ba 가 훅 쪽을 `git rev-parse --show-toplevel` 로 바꿨는데 이 계층은 안 바꿨고,
+	// 그래서 두 계층이 같은 창에 다른 좌표를 매겼다. 세션 카드의 키가 (머신·워크트리·cc)
+	// 3중키라 그 갈림은 가드 하나가 아니라 **카드 자체를 쪼갠다.**
+	//
+	// 실측(2026-08-04): 같은 cc·같은 머신인데 상하위 경로로 갈린 카드쌍 60건,
+	// 남의 워크트리 하위 경로에 있는 카드 80건. session.worktree 에
+	// `…/kweiza-cc-plugins` 와 `…/kweiza-cc-plugins/plugins/flightdeck/server` 가 나란히 있다.
+	//
+	// ★ 여기서 git 을 부르지 않는 이유는 프로젝트 축과 같다 — **같은 판정을 두 자리에 두지 않는다.**
+	// `--show-toplevel` 은 이미 진입점(cmd/fd 의 resolveProject)이 푼다. 이 계층은 순수하게 남는다.
+	if b.worktree != "" {
+		id.Worktree = b.worktree
+	} else if id.Worktree != "" {
+		id.Warnings = append(id.Warnings,
+			"워크트리를 cwd 로 정했다 — 저장소 하위 디렉토리에서 열면 훅의 --show-toplevel 과 갈려 카드가 쪼개진다")
 	}
 
 	// 머신 id 도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고 같은 사고를 겪었다.
@@ -423,6 +444,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		res = s.toolFinish(ctx, sessionID, args)
 	case "alloc":
 		res = s.toolAlloc(ctx, sessionID, args)
+	case "land":
+		res = s.toolLand(ctx, sessionID, args)
 	default:
 		// KnownTool 을 통과했는데 여기 오면 도구 표와 디스패치가 어긋난 것이다.
 		res = textResult(fmt.Sprintf("도구 %q 가 표에는 있는데 디스패치에 없다 — 서버 결함이다", clip(name, 64)), true)
@@ -635,7 +658,10 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 
 	notes := append(append([]model.Judgment(nil), view.Asks...), view.Blocked...)
 	tail := s.tail(ctx, tailOpts{
-		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID),
+		// self 는 위에서 이미 구한 openedIdentity 다 — 이 프로세스가 **실제로 연 카드**의
+		// 좌표라, 표류 배너가 쓰는 것과 같은 기준점이다. 둘이 갈리면 배너는 "갈렸다"고
+		// 하는데 겹침은 형제를 못 빼는 상태가 된다.
+		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID, self.CCSessionID),
 		observed: true,
 		notes:    notes,
 		haveNote: true,
@@ -693,6 +719,9 @@ func liveOf(cards []service.SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// ★ 대화 id 를 함께 넘긴다 — 없으면 형제 카드가 남으로 보여 자기 자신과
+			// 겹친다고 알린다. 판정은 judge.OverlapsWithLive 한 자리에만 있다.
+			CCSessionID: c.View.Session.CCSessionID,
 		})
 	}
 	return out
@@ -819,6 +848,57 @@ func (s *Server) toolAlloc(ctx context.Context, sessionID string, raw json.RawMe
 	}
 	_ = sessionID // 발번의 원장 행은 프로젝트 귀속이다(service 가 그렇게 남긴다)
 	return textResult(s.withTail(ctx, RenderAlloc(name, n), tailOpts{}), false)
+}
+
+// toolLand 는 랜딩 줄 하나를 다룬다 — 인자가 무엇을 채웠는지로 동작을 고른다
+// (줄 서기/내 자리 · result=보고+반납 · leave=이탈). release 는 동작이 아니라 거절 사유다.
+func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
+	var a landArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
+	}
+
+	// ★ 회수는 이 서버가 하지 않는다 — pick 의 steal_reason 거절과 **같은 판정, 같은 문장 틀**이다.
+	//   한 서버가 선점 회수는 거절하고 레인 회수는 허용하면 그 거절 문구가 화면에서 거짓이 된다.
+	if strings.TrimSpace(a.Release) != "" {
+		return textResult(s.withTail(ctx, RenderRefusal("land",
+			"release 가 왔지만 이 서버는 레인을 회수하지 않는다",
+			"회수는 사람만 한다 — 마지막 신호 종류·나이, 발자국 경로 수, 원격 마지막 커밋 시각, "+
+				"미푸시 커밋 수, 마지막 판단 다섯 축을 나란히 본 뒤에야 한다(설계 §4). "+
+				"지금 할 수 있는 것: note(kind=ask) 로 점유자에게 묻거나, "+
+				"`fd lane release --row <id> --reason \"...\"` 를 쓴다."), tailOpts{}), true)
+	}
+
+	result := strings.TrimSpace(a.Result)
+	leave := strings.TrimSpace(a.Leave)
+
+	var res service.LandResult
+	var err error
+	switch {
+	case result != "" && leave != "":
+		// 둘 다 채운 것은 서버가 조용히 하나를 고를 일이 아니다 — 보고와 이탈은 다른 원장 결과다.
+		return textResult(s.withTail(ctx, RenderRefusal("land",
+			"result 와 leave 를 함께 줬다 — 보고와 이탈은 다른 동작이다",
+			"한 번에 하나만 해라: 레인을 반납하려면 result, 줄에서 완전히 빠지려면 leave."), tailOpts{}), true)
+	case result != "":
+		res, err = s.be.LandReport(ctx, service.LandReportInput{
+			Project: s.id.ProjectID, SessionID: sessionID,
+			Kind: model.LandingLeftKind(result), Detail: a.Detail,
+		})
+	case leave != "":
+		res, err = s.be.LandLeave(ctx, service.LandLeaveInput{
+			Project: s.id.ProjectID, SessionID: sessionID, Detail: leave,
+		})
+	default:
+		res, err = s.be.Land(ctx, service.LandInput{Project: s.id.ProjectID, SessionID: sessionID})
+	}
+	if err != nil {
+		if r, ok := s.degradedResult(ctx, "land", err); ok {
+			return r
+		}
+		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
+	}
+	return textResult(s.withTail(ctx, RenderLand(res, s.now()), tailOpts{}), false)
 }
 
 // toAfter 는 인자의 선행 조건을 도메인 타입으로 옮긴다.
@@ -986,6 +1066,23 @@ func WithProject(id, path string) Option {
 // 프로젝트 축이 먼저 같은 사고를 겪고 주입으로 고쳤는데 머신 축만 그 교정에서 빠져 있었다.
 func WithMachine(id string) Option {
 	return func(b *builder) { b.machineID = strings.TrimSpace(id) }
+}
+
+// WithWorktree 는 세션의 워크트리 절대경로를 **주입**한다. 위 둘과 같은 자리, 같은 이유다.
+//
+// 이 패키지가 스스로 푸는 규칙(워크트리 = 자기 cwd)은 진입점의 규칙
+// (`git rev-parse --show-toplevel`, 53c18ba)과 다르다. 저장소 하위 디렉토리에서 Claude Code 를
+// 열면 그 둘이 갈리고, 3중키의 둘째 축이 갈리므로 **한 창이 카드 두 장으로 열린다.**
+// 프로젝트 축과 머신 축이 차례로 같은 사고를 겪고 주입으로 고쳤는데 워크트리 축만 남아 있었다.
+//
+// 빈 값은 주입이 아니다 — 안 넣은 것과 같이 다뤄 cwd 규칙으로 떨어지고 경고를 남긴다.
+// 지어낸 좌표로 카드를 여는 것보다 "cwd 로 정했다"고 말하는 쪽이 낫다.
+func WithWorktree(path string) Option {
+	return func(b *builder) {
+		if p := strings.TrimSpace(path); p != "" {
+			b.worktree = filepath.Clean(p)
+		}
+	}
 }
 
 // WithBeaconDir 는 창 비콘을 둘 디렉토리를 준다.

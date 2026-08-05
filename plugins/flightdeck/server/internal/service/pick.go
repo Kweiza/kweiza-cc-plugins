@@ -172,12 +172,13 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 		return PickResult{}, err
 	}
 	live := liveFor(cards)
+	selfCC := selfCCOf(cards, in.SessionID)
 
 	var res PickResult
 	if strings.TrimSpace(in.ItemID) != "" {
-		res, err = s.pickExplicit(ctx, proj, in, live, d, now)
+		res, err = s.pickExplicit(ctx, proj, in, live, selfCC, d, now)
 	} else {
-		res, err = s.pickRecommend(ctx, proj, in, live, d, now)
+		res, err = s.pickRecommend(ctx, proj, in, live, selfCC, d, now)
 	}
 	if err != nil {
 		return PickResult{}, err
@@ -218,7 +219,7 @@ func (s *Service) fillQueueOpen(ctx context.Context, project string, res *PickRe
 
 // pickExplicit 은 지정된 항목을 선점한다(또는 재개 맥락을 낸다).
 func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickInput,
-	live []judge.LiveSession, d *derive, now time.Time) (PickResult, error) {
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
 
 	item, err := s.st.GetItem(ctx, proj.ID, in.ItemID)
 	if err != nil {
@@ -226,7 +227,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	}
 
 	res := PickResult{Item: &item, Branch: item.ID, Scope: "지정된 항목 1건"}
-	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID)
+	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
 	if res.Setup == nil {
@@ -307,7 +308,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 
 // pickRecommend 는 적격 항목 하나를 고르고 탈락 사유 전부를 남긴다.
 func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in PickInput,
-	live []judge.LiveSession, d *derive, now time.Time) (PickResult, error) {
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
 
 	cands, scope, openCount, err := s.candidates(ctx, proj, live)
 	if err != nil {
@@ -320,7 +321,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	}
 
 	picked, rejected := judge.Eligible(judge.EligibleInput{
-		Self: in.SessionID, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
+		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
 	})
 
 	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
@@ -544,8 +545,14 @@ type AddItemInput struct {
 }
 
 // judgeItemPathsCoordinate 는 경로 목록에 좌표계 관문(judge.JudgePathCoordinate)을
-// 순서대로 태운다. 처음 위반한 경로의 인덱스(0-based)와 사유를 "%d번째 경로: %s"
-// 형태로 담아 낸다 — 위반이 없으면 nil.
+// 순서대로 태운다. 처음 위반한 경로의 순번과 사유를 "%d번째 경로: %s" 형태로 담아
+// 낸다 — 위반이 없으면 nil.
+//
+// ★ 표기 규약: **사람이 읽는 "%d번째" 는 1-based 다.** range 인덱스를 그대로 실으면
+// 목록의 세 번째 것이 "2번째"로 나오고, 사람은 그 말을 믿고 두 번째 것을 고치러 간다.
+// 사유는 사람이 고칠 수 있어야 사유다(coordinateGuidance 와 같은 규율). 이 규약은
+// service·store·cmd/fd 를 걸쳐 있어 한 패키지 시험으로 못 잡으므로 소스 전수 가드가
+// 따로 있다 — indexnotation_test.go. 새로 %d번째 를 쓰면 그 가드가 걸린다.
 //
 // add(item.paths)와 finish(followup.paths)가 이 헬퍼를 공유한다. 둘 다 사람/에이전트가
 // 대화형으로 등록하는 경로이고, 훅이 자동으로 보내는 발자국과 달리 스펙 §4.2 의
@@ -554,7 +561,7 @@ type AddItemInput struct {
 func judgeItemPathsCoordinate(paths []string) error {
 	for i, p := range paths {
 		if v := judge.JudgePathCoordinate(p); !v.OK {
-			return fmt.Errorf("%d번째 경로: %s", i, v.Reason)
+			return fmt.Errorf("%d번째 경로: %s", i+1, v.Reason)
 		}
 	}
 	return nil
@@ -578,7 +585,7 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 	for i, a := range in.After {
 		if err := store.ValidateAfter(a); err != nil {
 			return model.Item{}, &RefusedError{What: "add",
-				Reason: fmt.Sprintf("%d번째 선행 조건: %v", i, err),
+				Reason: fmt.Sprintf("%d번째 선행 조건: %v", i+1, err),
 				Guidance: "미랜딩 선행은 항목 id 로, 랜딩된 것은 sha 로 가리켜라 — " +
 					"브랜치 이름을 담을 자리가 없다(랜딩이 끝나면 브랜치가 지워져 그 순간 해석 불가가 된다)."}
 		}
@@ -593,6 +600,12 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 	// finish 는 t.AddItem 을 직접 불러 이 함수의 검증을 거치지 않으므로, 거기서 따로
 	// 부르지 않으면 같은 사람이 같은 세션에서 add 는 거절당하고 finish 는 조용히
 	// 통과하는 반쪽 관문이 된다 — 반쪽 발화는 균일한 부재보다 나쁘다.
+	//
+	// ★ item.paths 로 가는 문은 **셋**이다. 이 주석은 오래 둘만 세고 있었다.
+	// 세 번째는 레거시 이관(legacy/apply.go 의 tx.AddItem)이고, 그 관문은 여기가
+	// 아니라 계획 쪽(legacy/plan.go, code="bad_path_coordinate")에 있다.
+	// 규율도 다르다 — add·finish 는 **거절**하고 이관은 **그 경로만 버리고 남긴다.**
+	// 갈린 이유는 고칠 사람이 그 자리에 있느냐다(legacy/plan.go 의 그 주석을 보라).
 	if err := judgeItemPathsCoordinate(in.Paths); err != nil {
 		return model.Item{}, &RefusedError{What: "add",
 			Reason: err.Error(),

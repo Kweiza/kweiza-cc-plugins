@@ -54,6 +54,9 @@ type BoardView struct {
 	Blocked   []model.Judgment     `json:"blocked,omitempty"`
 	Asks      []model.Judgment     `json:"asks,omitempty"`
 	Held      []model.ResourceHold `json:"held,omitempty"`
+	// Lane 은 랜딩 줄이다. **nil 과 빈 값을 구분한다** — nil 은 이 조회가 레인을 안 읽었다는
+	// 뜻이고, Entries 가 빈 슬라이스인 것은 질의는 돌았는데 아무도 안 섰다는 뜻이다(LaneView 주석).
+	Lane *LaneView `json:"lane,omitempty"`
 	// OutOfWindow 는 창 밖이라 카드가 안 나간 세션 수다. **화면이 반드시 말한다** —
 	// 침묵하면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
 	OutOfWindow int `json:"out_of_window,omitempty"`
@@ -154,6 +157,13 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	}
 	if view.Held, err = s.st.ListHeld(ctx, project); err != nil {
 		return BoardView{}, err
+	}
+	// 레인 — 항상 채운다. LandingLane 은 지금까지 비시험 호출자가 0건이었고(TestLandingQueueHasAProductionReader
+	// 가 그 축을 잠근다), 이 한 줄이 그 표를 "저장만 하고 아무도 안 읽는 표"에서 꺼낸다.
+	if lane, err := s.LandingLane(ctx, project); err != nil {
+		return BoardView{}, err
+	} else {
+		view.Lane = &lane
 	}
 
 	view.Derived = d.result(now)
@@ -396,7 +406,24 @@ func liveFor(cards []SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// ★ 대화 id 를 함께 넘긴다. 카드 id 만으로는 형제 카드(같은 대화, 다른 카드)를
+			// 남으로 보고 **자기 자신과 겹친다**고 알린다. prescribe 쪽이 먼저 같은 사고를
+			// 겪고 같은 한 줄로 고쳤다(service/prescribe.go 의 Others 조립부).
+			CCSessionID: c.View.Session.CCSessionID,
 		})
 	}
 	return out
+}
+
+// selfCCOf 는 카드 목록에서 **내 카드의 대화 id** 를 찾는다.
+//
+// 못 찾으면 빈 문자열이고, 그러면 형제 판정이 안 돈다 — 겹침이 더 나오는 쪽이다.
+// 반대로 접었다가는 관측이 깨진 순간 진짜 겹침이 조용히 사라진다.
+func selfCCOf(cards []SessionCard, self string) string {
+	for _, c := range cards {
+		if c.View.Session.ID == self {
+			return c.View.Session.CCSessionID
+		}
+	}
+	return ""
 }
