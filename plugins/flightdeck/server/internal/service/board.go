@@ -130,6 +130,14 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 	return out
 }
 
+// AckReach 는 처방 확인율이 지금 무엇을 재고 있는지다.
+// Emitted 와 Reachable 이 크게 다르면 그 차이가 곧 카드 갈림이다.
+type AckReach struct {
+	Emitted   int `json:"emitted"`
+	Reachable int `json:"reachable"`
+	Acked     int `json:"acked"`
+}
+
 // BoardView 는 보드 한 장이다.
 type BoardView struct {
 	Project  model.Project `json:"project"`
@@ -146,7 +154,9 @@ type BoardView struct {
 	//   관례 루트(.flightdeck/worktrees/<이름>)를 되읽기 때문이다. 다만 근거가 그것뿐이라
 	//   판정 범위가 좁아지고, 그 사실은 Failures 의 `split-detect` 축에 남는다.
 	//   침묵과 "갈림 없음"을 구분해야 한다.
-	Splits    []judge.SplitReport  `json:"splits,omitempty"`
+	Splits []judge.SplitReport `json:"splits,omitempty"`
+	// AckReach 는 detail 꼬리 전용이다. nil 이면 이 조회가 안 돌았다는 뜻이다.
+	AckReach  *AckReach            `json:"ack_reach,omitempty"`
 	OpenItems []model.Item         `json:"open_items,omitempty"`
 	Blocked   []model.Judgment     `json:"blocked,omitempty"`
 	Asks      []model.Judgment     `json:"asks,omitempty"`
@@ -199,6 +209,14 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	if unattributed > 0 {
 		d.note("split-detect", fmt.Sprintf(
 			"카드 %d장은 어느 워크트리에도 못 붙여 갈림 판정에서 빠졌다", unattributed))
+	}
+
+	// ★ 실패해도 보드를 죽이지 않는다 — 파생이 통째로 실패해도 응답을 내는 것이
+	//   이 도구의 존재 이유다. 다만 침묵하지 않고 파생 실패로 남긴다.
+	if em, re, ak, aerr := s.st.AckReach(ctx, project); aerr != nil {
+		d.fail("ack-reach", aerr)
+	} else {
+		view.AckReach = &AckReach{Emitted: em, Reachable: re, Acked: ak}
 	}
 
 	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).
