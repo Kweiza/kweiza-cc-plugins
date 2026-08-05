@@ -234,9 +234,12 @@ func (s *Store) ForceReleaseResource(ctx context.Context, project, resource, rea
 	return s.Tx(ctx, func(t *Tx) error { return t.ForceReleaseResource(project, resource, reason) })
 }
 
-// ListHeld 는 지금 쥐어져 있는 자원 전부를 낸다. 획득이 오래된 순이다.
-func (s *Store) ListHeld(ctx context.Context, project string) ([]model.ResourceHold, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// listHeld 는 지금 쥐어져 있는 자원 전부를 낸다. 획득이 오래된 순이다.
+//
+// Tx 안팎에서 같은 질의가 필요해서(finish 의 holds 읽기를 트랜잭션 안으로 옮기는 자리,
+// ReleaseLaneRow 의 "점유가 있을 때만 회수" 판정) 자유 함수로 뺐다 — heldBy 와 같은 자리다.
+func listHeld(ctx context.Context, q dbtx, project string) ([]model.ResourceHold, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, project, resource, session_id, job_id, acquired_at, force_reason
 		FROM resource_hold
 		WHERE project = ? AND released_at IS NULL
@@ -264,6 +267,28 @@ func (s *Store) ListHeld(ctx context.Context, project string) ([]model.ResourceH
 		return nil, fmt.Errorf("자원 점유 목록 순회 실패: %w", err)
 	}
 	return out, nil
+}
+
+// ListHeld 는 트랜잭션 밖에서 읽는다.
+func (s *Store) ListHeld(ctx context.Context, project string) ([]model.ResourceHold, error) {
+	return listHeld(ctx, s.db, project)
+}
+
+// ListHeld 는 트랜잭션 안에서 읽는다.
+//
+// finish 처럼 "점유 목록을 보고 그것을 근거로 같은 트랜잭션에서 반납까지 하는" 호출자를 위한
+// 것이다 — 밖에서 읽고 트랜잭션 안에서 반납하면 그 사이에 남이 잡을 수 있고, 그러면
+// **남의 점유를 반납한다.**
+func (t *Tx) ListHeld(project string) ([]model.ResourceHold, error) {
+	return listHeld(t.ctx, t.tx, project)
+}
+
+// HeldBy 는 트랜잭션 안에서 자원의 현재 점유자를 낸다. 없으면 ErrNotFound.
+//
+// ReleaseLaneRow 의 "점유가 있을 때만 회수" 판정을 트랜잭션 안에 두기 위한 것이다 —
+// 밖에서 판정하면 그 사이에 남이 잡은 점유를 반납하게 된다.
+func (t *Tx) HeldBy(project, resource string) (model.ResourceHold, error) {
+	return heldBy(t.ctx, t.tx, project, resource)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

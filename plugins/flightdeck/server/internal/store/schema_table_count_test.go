@@ -79,6 +79,7 @@ func TestDeclaredTablesMatchDesign(t *testing.T) {
 		"judgment",
 		"judgment_fts", // CREATE VIRTUAL TABLE
 		"judgment_link",
+		"landing_queue", // 증분 003 — 랜딩 순서 큐
 		"machine",
 		"pick_eval",
 		"project",
