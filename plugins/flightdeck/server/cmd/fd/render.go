@@ -171,9 +171,23 @@ func selfUpdateLines(h healthzResponse) []string {
 		}
 		return []string{"자동 갱신  **안 본다** — " + clip(reason, 300)}
 	}
-	if su.Outcome == "" {
-		return []string{"자동 갱신  보는 중 — 아직 교체를 못 봤다"}
+	var lines []string
+	// ★ **막힌 것을 "보는 중"으로 찍지 않는다.** 감시기는 켜져 있는데 실행 파일을 못 재는
+	// 상태(삭제·권한·마운트 소실)는 영원히 이어질 수 있고, 그때 "보는 중 — 아직 교체를
+	// 못 봤다"는 정반대의 안심을 준다. 서버는 옛 코드로 계속 산다.
+	if s := strings.TrimSpace(su.Stalled); s != "" {
+		lines = append(lines, "자동 갱신  **막혔다** — "+clip(s, 300))
 	}
+	if su.Outcome == "" {
+		if len(lines) == 0 {
+			lines = append(lines, "자동 갱신  보는 중 — 아직 교체를 못 봤다")
+		}
+		return lines
+	}
+	// ★ "failed" 는 **/healthz 로는 못 온다** — 그 값은 drain() 뒤에만 쓰이고, 그때
+	// 리스너는 이미 닫혔으며 프로세스는 곧 비0으로 죽는다(serve.go 가 그것을 읽는다).
+	// 그래도 갈래를 남기는 것은 구조상 방어다: 이 함수는 순수 함수라 값이 어디서 오든
+	// 이름을 말할 수 있어야 하고, 없으면 다음 사람이 "왜 이 값엔 시험이 없나"를 뒤진다.
 	label := map[string]string{"refused": "**거절**", "failed": "**실패**"}[su.Outcome]
 	if label == "" {
 		label = clip(su.Outcome, 40)
@@ -182,7 +196,7 @@ func selfUpdateLines(h healthzResponse) []string {
 	if strings.TrimSpace(su.LastAt) != "" {
 		head += " (" + clip(su.LastAt, 40) + ")"
 	}
-	lines := []string{head}
+	lines = append(lines, head)
 	// ★ 화살표를 매달아 두지 않는다. 거절 경로 중 To 가 빈 채로 오는 것이 알려진 한계라
 	// (Task 4 지연 항목), From·To 중 하나만 비어도 "07e5df4 → " 처럼 끝을 침묵으로
 	// 남기면 부재가 안 보인다 — 빈 쪽을 "(미상)"으로 채워 그 자리를 말로 남긴다.

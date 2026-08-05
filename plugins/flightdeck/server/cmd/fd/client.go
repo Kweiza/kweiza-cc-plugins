@@ -398,6 +398,7 @@ type healthzResponse struct {
 	SelfUpdate struct {
 		Watching bool   `json:"watching"`
 		Reason   string `json:"reason"`
+		Stalled  string `json:"stalled"`
 		LastAt   string `json:"last_at"`
 		From     string `json:"from"`
 		To       string `json:"to"`

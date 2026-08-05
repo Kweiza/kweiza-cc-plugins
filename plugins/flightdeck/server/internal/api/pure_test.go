@@ -456,6 +456,33 @@ func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
 	}
 }
 
+// ★ **보고는 있는데 못 재는** 상태가 선을 넘어가야 한다. 이것이 안 실리면 클라이언트는
+// watching=true 만 보고 "따라가는 중"이라 찍는다 — 지워진 바이너리를 감시하는 서버가
+// 화면에서는 정상으로 보인다. 여기서도 키:값 쌍으로 단언한다(태그 오타를 잡으려면 그래야 한다).
+func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true,
+			Stalled:  "실행 파일을 못 쟀다: no such file or directory",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if !strings.Contains(string(raw), `"stalled":"실행 파일을 못 쟀다`) {
+		t.Fatalf("막힌 사실이 선을 안 넘었다: %s", raw)
+	}
+	// 아무 일도 없을 때는 안 나가야 한다 — 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
+	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(quiet), `"stalled"`) {
+		t.Fatalf("막히지 않았는데 stalled 가 실렸다: %s", quiet)
+	}
+}
+
 // ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
 // json.Marshal 을 거쳐 **실제 바이트**로 확인한다 — 구조체 필드만 보면 태그 오타를
 // 원리적으로 못 잡는다(Go 필드 값은 태그와 무관하게 그대로 있으므로).
