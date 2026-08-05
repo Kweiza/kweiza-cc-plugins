@@ -321,10 +321,16 @@ func (s *Store) PutSnapshot(ctx context.Context, sn model.Snapshot) error {
 //
 // 링크가 없는 항목은 **키를 안 만든다.** 빈 슬라이스를 넣으면
 // "이 항목에 판단이 없다"와 "이 항목을 안 봤다"가 같은 값이 된다.
+//
+// 입력이 비면 DB 를 건드리지 않고 바로 돌아간다 — 결과가 애초에 빈 맵일 게 뻔한데
+// 왕복을 한 번 더 할 이유가 없어서다. (이전에는 "IN () 가 SQLite 구문 오류를 낸다"고
+// 여기 적어 뒀는데 틀린 주장이었다 — 실측하니 이 저장소가 쓰는 modernc.org/sqlite 는
+// `x IN ()` 을 오류 없이 "항상 거짓"으로 받아들인다. 엔진이 뭘 허용하는지에 기대는 이유가
+// 아니라는 뜻이라, 다음 사람이 또 확인하지 않도록 여기 사실대로 남긴다.)
 func (s *Store) JudgmentLinksForItems(ctx context.Context, project string, itemIDs []string) (map[string][]string, error) {
 	out := map[string][]string{}
 	if len(itemIDs) == 0 {
-		return out, nil // 질의를 쏘지 않는다. IN () 는 SQLite 구문 오류다
+		return out, nil // 결과가 뻔히 빈 맵일 왕복을 생략한다 — 엔진의 IN () 처리에 기대지 않는다
 	}
 	ph := make([]string, len(itemIDs))
 	args := make([]any, 0, len(itemIDs)+1)
