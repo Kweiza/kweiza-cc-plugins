@@ -235,7 +235,8 @@ func CheckPragmas(got map[string]string) error {
 		"— 드라이버가 모르는 pragma 이름을 조용히 무시하므로 DSN 문법을 확인하라", strings.Join(bad, ", "))
 }
 
-// readMigrationState 는 DB 의 스키마 상태를 읽는다. 순수 함수다.
+// readMigrationState 는 DB 의 스키마 상태를 읽는다. **순수 함수가 아니다** — 질의 셋을 던진다.
+// 판정은 여기서 안 한다. 읽은 값을 PlanMigration(순수 함수)에 그대로 넘기는 것이 이 함수의 전부다.
 //
 // ★ Open 경로(마이그레이션 적용)와 검증 경로(ProbeMigration 읽기 전용)가 **같은 탐지를 쓴다**.
 // 두 벌로 두면 한쪽만 고쳐져 실제 열기와 검증이 갈린다 — 낡은 탐지로 재기동을 승인하면
@@ -644,16 +645,6 @@ func (s *Store) rollbackable(err error, backupPath string) error {
 	s.log.Error("마이그레이션 실패 — 되돌리는 절차를 함께 낸다",
 		"path", s.path, "reason", hint, "error", err.Error())
 	return fmt.Errorf("%w — %s", err, hint)
-}
-
-func (s *Store) hasTable(ctx context.Context, name string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("테이블 존재 확인 실패(name=%q): %w", name, err)
-	}
-	return n > 0, nil
 }
 
 // BackupSuffix 는 백업 파일 이름의 꼬리를 만든다. 사전순 = 시간순이다.

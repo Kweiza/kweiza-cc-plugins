@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -113,7 +114,12 @@ func TestWatcherExecsAfterVerifyPasses(t *testing.T) {
 	var gotArgs []string
 	w.execSelf = func(exe string, argv, env []string) error {
 		if !drained {
-			t.Fatal("드레인 전에 exec 했다 — 인플라이트 요청이 통째로 끊긴다")
+			// ★ 드레인이 먼저인 이유는 요청을 살리기 위해서가 **아니다.** 드레인은
+			// serveCtx 를 취소하므로 인플라이트 요청 컨텍스트도 함께 끊긴다(api.go 의
+			// BaseContext). 끊긴 쓰기의 안전은 클라이언트 아웃박스 + 멱등키가 준다(설계 §3①).
+			// 순서가 계약인 진짜 이유는 **포트다**: 리스너가 닫히기 전에 exec 하면
+			// 새 이미지가 이미 쓰이고 있는 주소에 붙으려다 죽는다.
+			t.Fatal("드레인 전에 exec 했다 — 새 이미지가 아직 열려 있는 포트에 붙으려다 죽는다")
 		}
 		gotExe, gotArgs = exe, argv
 		return nil
@@ -188,18 +194,29 @@ func TestWatcherRefusesWhenBinaryChangesDuringVerify(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("재확인 stat 을 안 했다(calls=%d)", calls)
 	}
+	// ★ 이 갈래도 화면까지 가야 한다. 서버 로그를 안 보는 사람에게 "검증까지 통과했는데
+	// 왜 안 바뀌나"의 답이 아무 데도 없었다.
+	if st := w.Status(); st.Outcome != "refused" || !strings.Contains(st.Detail, "또 바뀌었다") {
+		t.Fatalf("TOCTOU 건너뜀이 상태에 안 남았다: %+v", st)
+	}
+	// 다음 회차가 새 판을 다시 봐야 하므로 lastFail 은 안 타야 한다.
+	if w.lastFail.OK {
+		t.Fatal("늦었을 뿐인 판을 실패로 태웠다 — 다음 회차가 그 판을 다시 안 본다")
+	}
 }
 
-// ★ verify 도중 운영자가 멈추라고 했으면(ctx 취소) 재기동하지 않는다. 안 보면
-// "멈추라는 요청 뒤에 fd serve 가 되살아난다" — drain() 의 <-served 가 이미 다른
-// 경로(SIGTERM 이 유발한 정상 종료)로 풀려 있어 안 막히기 때문이다.
-func TestWatcherDoesNotExecWhenCtxCanceledDuringVerify(t *testing.T) {
+// ★ 종료 의사는 **신호 컨텍스트**로 묻는다. step 에 들어오는 ctx 는 watchCtx 이고
+// 그것은 stopWatch() 로만 끊긴다 — 즉 api.Serve 가 이미 돌아온 뒤다. 운영자가 방금
+// SIGTERM 을 보낸 순간에 watchCtx 는 멀쩡하다. 그 상태로 검증이 통과하면
+// "멈추라는 요청 뒤에 fd serve 가 되살아난다".
+func TestWatcherDoesNotExecWhenShutdownRequestedDuringVerify(t *testing.T) {
 	w := newTestWatcher(t)
 	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
 
-	ctx, cancel := context.WithCancel(context.Background())
+	shutdown := false
+	w.shutdownRequested = func() bool { return shutdown }
 	w.verify = func(context.Context, string, string) (string, error) {
-		cancel() // 검증이 도는 동안 종료 요청이 온 상황을 흉내낸다
+		shutdown = true // 검증이 도는 동안 SIGTERM 이 왔다
 		return "1d044b2 · 2026-08-05T00:11:57Z", nil
 	}
 	w.execSelf = func(string, []string, []string) error {
@@ -207,9 +224,74 @@ func TestWatcherDoesNotExecWhenCtxCanceledDuringVerify(t *testing.T) {
 		return nil
 	}
 
-	got := w.tick(ctx, func() { t.Fatal("종료 요청이 왔는데 드레인했다") })
+	// ctx 는 **안 끊는다** — 운영 경로에서 watchCtx 는 이 시점에 멀쩡하기 때문이다.
+	got := w.tick(context.Background(), func() { t.Fatal("종료 요청이 왔는데 드레인했다") })
 	if got != ActNothing {
 		t.Fatalf("%v 다", got)
+	}
+}
+
+// ★ 종료 중에 자식이 죽어서 난 검증 실패는 **후보의 잘못이 아니다.**
+// 그것을 거절로 적으면 정상 종료 로그에 `selfcheck 실패(signal: killed)` 가 남고,
+// lastFail 이 멀쩡한 판을 태워 다음 기동이 그 판을 다시 안 본다.
+func TestWatcherDoesNotRecordRefusalWhenVerifyIsKilledByShutdown(t *testing.T) {
+	w := newTestWatcher(t)
+	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
+	w.shutdownRequested = func() bool { return true }
+	w.verify = func(context.Context, string, string) (string, error) {
+		// 실제 verifyWithSelfcheck 가 내는 모양이다 — exec.CommandContext 가 자식을 죽였다.
+		return "", errors.New("selfcheck 실패(signal: killed): ")
+	}
+	w.execSelf = func(string, []string, []string) error { t.Fatal("종료 중인데 exec 했다"); return nil }
+
+	if got := w.tick(context.Background(), func() { t.Fatal("드레인했다") }); got != ActNothing {
+		t.Fatalf("%v 다", got)
+	}
+	if st := w.Status(); st.Outcome != "" {
+		t.Fatalf("정상 종료인데 거절이 기록됐다: %+v", st)
+	}
+	if w.lastFail.OK {
+		t.Fatal("멀쩡한 판을 실패로 태웠다")
+	}
+}
+
+// ★ 진짜 창은 drain() **전체**다. drain 은 api.Serve 의 셧다운 유예만큼 매달릴 수 있고,
+// 그 사이에 온 SIGTERM 은 <-served 를 그 종료로 풀어 준다 — 아무 저항 없이 exec 에 닿는다.
+func TestWatcherDoesNotExecWhenShutdownArrivesDuringDrain(t *testing.T) {
+	w := newTestWatcher(t)
+	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
+	w.verify = func(context.Context, string, string) (string, error) { return "1d044b2", nil }
+
+	shutdown := false
+	w.shutdownRequested = func() bool { return shutdown }
+	w.execSelf = func(string, []string, []string) error {
+		t.Fatal("드레인 중 종료 요청이 왔는데 exec 했다 — 되돌릴 수 없는 자리다")
+		return nil
+	}
+
+	if got := w.tick(context.Background(), func() { shutdown = true }); got != ActNothing {
+		t.Fatalf("%v 다", got)
+	}
+}
+
+// ★ 반대편 회귀. stopWatch() 는 close(served) **직후** 정상적으로 불린다 —
+// 드레인 뒤에 watchCtx 를 종료 의사로 읽으면 멀쩡한 재기동이 매번 접혀 기능이 죽는다.
+func TestWatcherStillExecsWhenWatchCtxIsCanceledDuringDrain(t *testing.T) {
+	w := newTestWatcher(t)
+	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
+	w.verify = func(context.Context, string, string) (string, error) { return "1d044b2", nil }
+	w.shutdownRequested = func() bool { return false } // 사람은 안 껐다
+
+	ctx, cancel := context.WithCancel(context.Background())
+	execd := false
+	w.execSelf = func(string, []string, []string) error { execd = true; return nil }
+
+	// serveWithWatcher 가 하는 것 그대로: 드레인이 풀린 직후 stopWatch().
+	if got := w.tick(ctx, func() { cancel() }); got != ActExec {
+		t.Fatalf("%v 다 — 정상적인 stopWatch() 를 종료 의사로 읽었다", got)
+	}
+	if !execd {
+		t.Fatal("exec 를 안 했다")
 	}
 }
 
@@ -238,6 +320,66 @@ func TestContainerIsNotWatched(t *testing.T) {
 				t.Fatalf("컨테이너가 아닌데 사유가 있다: %q", why)
 			}
 		})
+	}
+}
+
+// ★ 이 시험이 1번 결함의 본체다. 실행 파일을 영영 못 재는 감시기는 **아무것도 못 하는데**
+// 지금까지 어느 화면에도 안 떴다 — /healthz 는 watching=true 만 말하고 `fd doctor` 는
+// "보는 중 — 아직 교체를 못 봤다"라고 찍었다. 서버는 옛 코드로 영원히 산다.
+func TestWatcherReportsThatItCannotMeasureTheBinary(t *testing.T) {
+	var buf bytes.Buffer
+	w := newTestWatcher(t)
+	w.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	w.stat = func(string) (ExeID, error) { return ExeID{}, errors.New("no such file or directory") }
+
+	for i := 0; i < 3; i++ {
+		if got := w.tick(context.Background(), func() { t.Fatal("드레인했다") }); got != ActNothing {
+			t.Fatalf("%d회차가 %v 다", i+1, got)
+		}
+	}
+
+	st := w.Status()
+	if !strings.Contains(st.Stalled, "no such file") {
+		t.Fatalf("못 잰다는 사실이 상태에 안 남았다: %+v", st)
+	}
+	// ★ 30초 티커가 같은 줄을 쌓으면 그 로그는 읽히지 않는 배경이 된다 — 침묵과 같다.
+	if n := strings.Count(buf.String(), "실행 파일을 못 재고 있다"); n != 1 {
+		t.Fatalf("같은 사유를 %d번 찍었다 — 한 번만 찍어야 한다:\n%s", n, buf.String())
+	}
+}
+
+// 다시 재지면 그 사실을 지운다. 지나간 고장을 현재형으로 남기면 반대 방향으로 거짓말한다.
+func TestWatcherClearsTheStallOnceItCanMeasureAgain(t *testing.T) {
+	w := newTestWatcher(t)
+	broken := true
+	w.stat = func(string) (ExeID, error) {
+		if broken {
+			return ExeID{}, errors.New("no such file or directory")
+		}
+		return id(10, 1000), nil // 기준값 그대로 — 교체는 없었다
+	}
+
+	w.tick(context.Background(), func() {})
+	if w.Status().Stalled == "" {
+		t.Fatal("막힌 사실이 안 남았다")
+	}
+	broken = false
+	w.tick(context.Background(), func() {})
+	if s := w.Status().Stalled; s != "" {
+		t.Fatalf("회복했는데 여전히 막혔다고 말한다: %q", s)
+	}
+}
+
+// stat 이 오류 없이 관측 실패(OK=false)를 내는 갈래도 같은 대접을 받아야 한다.
+func TestWatcherReportsUnmeasurableEvenWithoutAnError(t *testing.T) {
+	w := newTestWatcher(t)
+	w.stat = func(string) (ExeID, error) { return ExeID{}, nil }
+
+	if got := w.tick(context.Background(), func() {}); got != ActNothing {
+		t.Fatalf("%v 다", got)
+	}
+	if st := w.Status(); strings.TrimSpace(st.Stalled) == "" {
+		t.Fatalf("관측 실패가 상태에 안 남았다: %+v", st)
 	}
 }
 

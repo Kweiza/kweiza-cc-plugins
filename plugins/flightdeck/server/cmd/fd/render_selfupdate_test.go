@@ -50,6 +50,41 @@ func TestRenderHealthIsQuietWhenWatchingAndNothingHappened(t *testing.T) {
 	}
 }
 
+// ★ 보고는 있는데 못 재는 서버를 "보는 중"으로 찍으면 정반대의 안심을 준다 —
+// 그 서버는 교체가 와도 못 보고 옛 코드로 영원히 산다.
+func TestRenderHealthSaysTheWatcherIsStalled(t *testing.T) {
+	var h healthzResponse
+	h.OK, h.APIVersion, h.DBOK = true, "1", true
+	h.SelfUpdate.Watching = true
+	h.SelfUpdate.Stalled = "실행 파일을 못 쟀다: stat /usr/local/bin/fd: no such file or directory"
+
+	got := RenderHealth(h, true, "http://x:7420")
+	if !strings.Contains(got, "자동 갱신  **막혔다** — 실행 파일을 못 쟀다") {
+		t.Fatalf("막혔다는 사실이 화면에 없다:\n%s", got)
+	}
+	if strings.Contains(got, "보는 중") {
+		t.Fatalf("못 재고 있는데 '보는 중'이라 찍었다:\n%s", got)
+	}
+}
+
+// 막힌 사실과 지난 거절은 **둘 다** 참일 수 있다. 하나가 다른 하나를 지우면 안 된다.
+func TestRenderHealthShowsStallAndPastRefusalTogether(t *testing.T) {
+	var h healthzResponse
+	h.OK, h.APIVersion, h.DBOK = true, "1", true
+	h.SelfUpdate.Watching = true
+	h.SelfUpdate.Stalled = "실행 파일을 못 쟀다: permission denied"
+	h.SelfUpdate.Outcome = "refused"
+	h.SelfUpdate.From, h.SelfUpdate.To = "07e5df4", "1d044b2"
+	h.SelfUpdate.Detail = "selfcheck exit 1"
+
+	got := RenderHealth(h, true, "http://x:7420")
+	for _, want := range []string{"막혔다", "permission denied", "거절", "07e5df4 → 1d044b2"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 화면에 없다:\n%s", want, got)
+		}
+	}
+}
+
 // ★ 거절 경로에서 To 가 빈 채로 오는 것이 알려진 한계다(Task 4 지연 항목).
 // 그때 "07e5df4 → " 처럼 화살표를 매달아 두면 부재가 빈칸으로 묻힌다 —
 // 빈 쪽은 "(미상)"으로 말하고, 끝을 침묵으로 남기지 않는다.

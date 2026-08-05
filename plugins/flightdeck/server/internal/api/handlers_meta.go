@@ -69,6 +69,11 @@ type SelfUpdateStatus struct {
 	To       string     `json:"to,omitempty"`
 	Outcome  string     `json:"outcome,omitempty"` // refused | failed
 	Detail   string     `json:"detail,omitempty"`
+
+	// ★ Stalled 는 **보고는 있는데 지금 실행 파일을 못 잰다**는 사실이다.
+	// Watching=true 인데 이것이 차 있으면 "따라가는 중"이 아니라 "눈이 멀었다"다 —
+	// 그 둘을 안 가르면 지워진 바이너리를 감시하는 서버가 화면에서는 정상으로 보인다.
+	Stalled string `json:"stalled,omitempty"`
 }
 
 // AuthNotice 는 지금 설정을 사람이 읽을 한 줄로 만든다. 순수 함수다.

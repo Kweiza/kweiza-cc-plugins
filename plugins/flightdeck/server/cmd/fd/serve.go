@@ -112,6 +112,9 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 		log.Error("DB 를 열지 못해 기동을 중단한다", "db_path", clip(path, 200), "error", err.Error())
 		return 1
 	}
+	// ★ 자동 갱신 경로에서는 이 defer 가 **안 돈다.** syscall.Exec 는 스택째 버린다.
+	// 그래도 되는 근거: exec 뒤에도 같은 프로세스라 POSIX 락이 자기 자신과 안 부딪히고,
+	// 커밋된 것은 WAL 파일에 남아 새 이미지가 그대로 이어 읽는다. 잃는 것은 이 로그 한 줄이다.
 	defer func() {
 		if cerr := st.Close(); cerr != nil {
 			log.Error("DB 닫기 실패", "error", cerr.Error())
@@ -131,7 +134,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 		SelfUpdate: func() api.SelfUpdateStatus {
 			st := watcher.Status()
 			out := api.SelfUpdateStatus{
-				Watching: st.Watching, Reason: st.Reason,
+				Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
 				From: st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
 			}
 			// ★ LastAt 변환: cmd/fd 는 time.Time(제로값 = 시도 없음), api 는 *time.Time
@@ -171,19 +174,31 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 // 죽여 selfVerifyTimeout 안에 verify 가 돌아온다. drain 중이던 감시기는 served 가
 // 이미 닫혀 있어 <-served 에 안 막힌다. 그 외에는 Run 이 ctx.Done() 으로 바로
 // 돌아온다. 그래서 <-watchDone 은 못 매달린다.
+//
+// ★ 그 대가로 감시기는 **종료 의사를 스스로 알 수 없게 된다.** watchCtx 는 SIGTERM 으로
+// 안 끊기고(stopWatch() 는 api.Serve 가 돌아온 **뒤에** 불린다), serveCtx 는 감시기 자신의
+// 드레인으로도 끊긴다. 그래서 신호 컨텍스트인 ctx 를 그대로 읽는 술어를 따로 건네준다 —
+// exec 직전 두 자리가 그것으로 묻는다.
 func serveWithWatcher(ctx context.Context, addr string, h http.Handler, log *slog.Logger, w *selfWatcher) int {
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	defer stopWatch()
 	serveCtx, drainServe := context.WithCancel(ctx)
 	defer drainServe()
 
+	w.shutdownRequested = func() bool { return ctx.Err() != nil }
+
 	served := make(chan struct{})
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
 		w.Run(watchCtx, func() {
-			drainServe() // api.Serve 가 srv.Shutdown 으로 인플라이트를 마무리한다
-			<-served     // 그것이 실제로 끝날 때까지 기다린다
+			// ★ 이것은 **우아한 마무리가 아니다.** api.Serve 의 BaseContext 가 serveCtx 라
+			// 인플라이트 요청 컨텍스트가 전부 그 자손이고, 여기서 그 ctx 를 취소하는 순간
+			// srv.Shutdown 이 기다리기도 전에 도는 요청들이 함께 끊긴다.
+			// 그래도 되는 근거는 요청이 끝난다는 것이 아니라 **클라이언트의 아웃박스 +
+			// 멱등키**다(설계 §3①): 끊긴 쓰기는 재시도로 돌아오고 중복은 멱등키가 접는다.
+			drainServe()
+			<-served // 리스너가 실제로 닫힐 때까지 기다린다 — 그 전에 exec 하면 포트가 겹친다
 		})
 	}()
 
