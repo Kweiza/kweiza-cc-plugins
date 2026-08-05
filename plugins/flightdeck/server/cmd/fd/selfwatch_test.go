@@ -160,6 +160,59 @@ func TestWatcherRefusesAndRemembersFailedBuild(t *testing.T) {
 	}
 }
 
+// ★ TOCTOU 회귀 시험. stat(Decide 용) 과 verify 사이에는 창이 없지만, verify 자체가
+// 걸리는 시간(≤selfVerifyTimeout) 동안 파일이 또 바뀔 수 있다 — 그러면 방금 검증한
+// 것은 지금 디스크에 있는 파일이 아니다. drain 없이 물러나야 한다.
+func TestWatcherRefusesWhenBinaryChangesDuringVerify(t *testing.T) {
+	w := newTestWatcher(t)
+	calls := 0
+	w.stat = func(string) (ExeID, error) {
+		calls++
+		if calls == 1 {
+			return id(11, 2000), nil // Decide 가 보는 "now"
+		}
+		return id(12, 3000), nil // verify 뒤 재확인 — 그새 또 바뀌었다
+	}
+	w.verify = func(context.Context, string, string) (string, error) {
+		return "1d044b2 · 2026-08-05T00:11:57Z", nil // 검증 자체는 통과한다
+	}
+	w.execSelf = func(string, []string, []string) error {
+		t.Fatal("검증한 판이 이미 지나간 판인데 exec 했다")
+		return nil
+	}
+
+	got := w.tick(context.Background(), func() { t.Fatal("검증한 판이 아닌데 드레인했다") })
+	if got != ActRefuse {
+		t.Fatalf("%v 다", got)
+	}
+	if calls != 2 {
+		t.Fatalf("재확인 stat 을 안 했다(calls=%d)", calls)
+	}
+}
+
+// ★ verify 도중 운영자가 멈추라고 했으면(ctx 취소) 재기동하지 않는다. 안 보면
+// "멈추라는 요청 뒤에 fd serve 가 되살아난다" — drain() 의 <-served 가 이미 다른
+// 경로(SIGTERM 이 유발한 정상 종료)로 풀려 있어 안 막히기 때문이다.
+func TestWatcherDoesNotExecWhenCtxCanceledDuringVerify(t *testing.T) {
+	w := newTestWatcher(t)
+	w.stat = func(string) (ExeID, error) { return id(11, 2000), nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w.verify = func(context.Context, string, string) (string, error) {
+		cancel() // 검증이 도는 동안 종료 요청이 온 상황을 흉내낸다
+		return "1d044b2 · 2026-08-05T00:11:57Z", nil
+	}
+	w.execSelf = func(string, []string, []string) error {
+		t.Fatal("종료 요청이 왔는데 exec 했다")
+		return nil
+	}
+
+	got := w.tick(ctx, func() { t.Fatal("종료 요청이 왔는데 드레인했다") })
+	if got != ActNothing {
+		t.Fatalf("%v 다", got)
+	}
+}
+
 // ★ 컨테이너에서는 감시를 아예 안 켠다. 켜 두면 "보는 중"이라고 말하면서
 // 영원히 안 올 교체를 기다린다 — 침묵보다 나쁘다(따라오고 있다고 믿게 만든다).
 func TestContainerIsNotWatched(t *testing.T) {
