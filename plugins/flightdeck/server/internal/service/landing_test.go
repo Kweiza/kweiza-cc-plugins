@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -780,6 +781,126 @@ func TestLandingLaneStillReportsRealDivergenceAfterTheRecheck(t *testing.T) {
 	}
 	if len(lane.Entries) != 0 {
 		t.Errorf("줄 행을 다 닫았는데 항목이 %d건 보인다: %+v", len(lane.Entries), lane.Entries)
+	}
+
+	// ★ 여기서부터는 나중에 더한 단정이다(위 단정은 그대로 둔다). 이 상태가 곧
+	//   **LandingLane 이 점유자 신호를 위해 질의를 한 번 더 도는 유일한 갈래**라서,
+	//   그 갈래를 이미 만들어 둔 이 시험이 그 값을 잠그기에 가장 값싼 자리다.
+	//
+	//   정상 경로는 줄 루프에서 읽은 값을 재사용하므로 이 갈래의 질의를 지워도(값을 nil 로)
+	//   service·web·mcpsrv·cmd/fd 가 전부 초록이었다 — 변이로 확인했다. 그런데 이 값에는
+	//   실물 독자가 있다: 줄이 0건인 지금 같은 모양에서 mcpsrv/render.go 의 어긋남 문장과
+	//   web/page.go 의 Missing 행이 회수 판정용 "신호 나이"로 이 필드만 읽는다.
+	//   빈칸이 되면 두 화면이 조용히 "신호 없음"이 되고, 사람이 회수를 판정할 두 숫자 중
+	//   하나가 사라진다.
+	//
+	//   기대값을 시험이 지어내지 않고 저장층에 되묻는다 — 여기서 상수를 심으면 잠그는 것이
+	//   "서비스가 원장을 읽어 왔나"가 아니라 "시험이 심은 값과 같나"가 된다.
+	want, ok, err := st.LastSignal(ctx(), a)
+	if err != nil {
+		t.Fatalf("점유자의 마지막 신호를 원장에서 못 읽었다: %v", err)
+	}
+	if !ok {
+		t.Fatalf("사전 조건이 깨졌다 — 이 세션에 신호가 하나도 없다(세션 열기가 비트를 남긴다)")
+	}
+	if lane.Holder.LastSignalAt == nil {
+		t.Fatalf("어긋난 갈래에서 점유자의 마지막 신호가 비었다 — 원장에는 %v 가 있다. "+
+			"줄이 0건이라 이 필드가 나이를 말하는 유일한 자리인데, 화면이 \"신호 없음\"을 낸다", want)
+	}
+	if !lane.Holder.LastSignalAt.Equal(want) {
+		t.Errorf("점유자의 마지막 신호가 %v 다(원장은 %v)", lane.Holder.LastSignalAt, want)
+	}
+}
+
+// TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates — 점유자의 마지막 신호가
+// **그 세션 자신의 값**인지 잠근다(정상 경로 — 점유자가 줄에 있을 때).
+//
+// ★ 이 시험 전까지 LaneView.Holder.LastSignalAt 은 **채워지는지 자체가 시험 밖**이었다.
+// 정상 경로의 채움을 통째로 죽여도(값을 nil 로) service·web·mcpsrv·cmd/fd 가 전부 초록이었다 —
+// 변이로 확인했다. 화면 쪽 시험은 LaneView 를 손으로 만들어 넣으므로 서비스가 실제로 채우는지를
+// 원리적으로 못 본다. 그래서 잠그는 자리는 여기다.
+//
+// ★ 단정을 "nil 이 아니다"로 두지 않는 이유: LandingLane 은 점유자가 줄에 있으면 줄 루프에서
+// 읽은 값을 **재사용한다**(점유자 몫 질의를 아낀다). 재사용이 엉뚱한 줄 행의 값을 집어도
+// nil 검사는 통과한다 — 그 실수가 정확히 이 최적화가 새로 만든 실패 모양이다. 그래서 두 세션의
+// 신호 시각을 다르게 심어 값 자체를 가른다.
+func TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 두 세션에 **서로 다른** 신호 시각을 심는다.
+	//
+	// 시각을 미래로 주는 이유: 세션 열기가 이미 비트를 남겼고 Beat 는 시각을 뒤로 안 돌리므로
+	// (store/session.go), 심는 값이 그 비트보다 뒤여야 MAX 가 바뀐다. LastSignal 은 생존 창으로
+	// 거르지 않으니 미래 값도 그대로 나온다 — 여기서 재는 것은 나이가 아니라 **어느 행의 값인가**다.
+	//
+	// 심은 값이 정말 최신이 됐는지 저장층에 되물어 확인한다: 확인을 빼면 이 시험은 자기가 무엇을
+	// 비교하는지 모르는 채 초록일 수 있다.
+	plant := func(session string, ahead time.Duration) time.Time {
+		t.Helper()
+		at := time.Now().Add(ahead).UTC().Truncate(time.Microsecond)
+		if err := st.Beat(ctx(), session, model.SignalPush, at); err != nil {
+			t.Fatalf("신호 심기 실패(%s): %v", session, err)
+		}
+		got, ok, err := st.LastSignal(ctx(), session)
+		if err != nil || !ok || !got.Equal(at) {
+			t.Fatalf("사전 조건이 깨졌다 — 심은 신호가 최신이 아니다(session=%s got=%v ok=%v err=%v)",
+				session, got, ok, err)
+		}
+		return at
+	}
+	sigA := plant(a, time.Minute)
+	sigB := plant(b, 2*time.Minute)
+	if sigA.Equal(sigB) {
+		t.Fatalf("사전 조건이 깨졌다 — 두 신호가 같은 값(%v)이다. 그러면 엉뚱한 세션의 값을 실어도 통과한다", sigA)
+	}
+
+	lane, err := s.LandingLane(ctx(), "p")
+	if err != nil {
+		t.Fatalf("레인 조회가 실패했다: %v", err)
+	}
+	if lane.Holder == nil || lane.Holder.SessionID != a {
+		t.Fatalf("사전 조건이 깨졌다 — 점유자가 %+v 다(기대 %s)", lane.Holder, a)
+	}
+	entry := func(session string) LaneEntry {
+		t.Helper()
+		for _, e := range lane.Entries {
+			if e.SessionID == session {
+				return e
+			}
+		}
+		t.Fatalf("줄에 %s 의 행이 없다: %+v", session, lane.Entries)
+		return LaneEntry{}
+	}
+	entA, entB := entry(a), entry(b)
+	if entA.LastSignalAt == nil || entB.LastSignalAt == nil {
+		t.Fatalf("줄 행의 신호 시각이 비었다(a=%v b=%v) — 비교 축이 무너졌다",
+			entA.LastSignalAt, entB.LastSignalAt)
+	}
+	if !entA.LastSignalAt.Equal(sigA) || !entB.LastSignalAt.Equal(sigB) {
+		t.Fatalf("줄 행이 심은 신호를 안 낸다 — 비교 축이 무너졌다: a=%v(기대 %v) b=%v(기대 %v)",
+			entA.LastSignalAt, sigA, entB.LastSignalAt, sigB)
+	}
+
+	// ★ 이 시험의 심장 — 점유자 값이 **자기 줄 행과 같은 값**이다.
+	if lane.Holder.LastSignalAt == nil {
+		t.Fatalf("점유자의 마지막 신호가 비었다 — 같은 세션의 줄 행은 %v 를 내는데, "+
+			"사람이 회수를 판정할 두 숫자 중 하나가 화면에서 사라진다", sigA)
+	}
+	if !lane.Holder.LastSignalAt.Equal(sigA) {
+		extra := ""
+		if lane.Holder.LastSignalAt.Equal(sigB) {
+			extra = " — 이것은 대기자의 신호다. 재사용이 엉뚱한 줄 행을 집었다"
+		}
+		t.Errorf("점유자의 마지막 신호가 %v 다(기대 %v — 자기 줄 행의 값)%s",
+			lane.Holder.LastSignalAt, sigA, extra)
 	}
 }
 

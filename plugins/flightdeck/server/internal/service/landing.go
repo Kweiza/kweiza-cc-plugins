@@ -329,10 +329,15 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 // 만들 수 있다. 어긋나 보일 때만 줄을 한 번 더 읽어 재확인한다 — 아래 본문 주석에
 // 왜 트랜잭션이 아니라 재확인인지가 있다.
 //
-// ★ 줄 길이만큼 LastSignal 을 부른다(N+1). 줄 길이는 그 프로젝트의 동시 세션 수라
-// 실무상 한 자릿수이므로 지금은 이대로 둔다 — 여기가 느려지면 신호 MAX 를 세션 목록으로
-// 한 번에 읽는 질의를 store 에 더하면 된다. 나중에 "왜 느리지"를 묻는 사람이
-// 이 문장을 보고 바로 답에 닿아야 해서 적어 둔다.
+// ★ 줄 길이만큼 LastSignal 을 부른다. 점유자 몫은 **따로 안 부른다** — 점유자가 줄에
+// 있으면(정상 경로) 루프에서 읽은 값을 재사용하고, 줄에 없을 때(정합 어긋남)만 한 번 더
+// 부른다. 줄 길이는 그 프로젝트의 동시 세션 수라 실무상 한 자릿수이므로 지금은 이대로
+// 둔다 — 여기가 느려지면 신호 MAX 를 세션 목록으로 한 번에 읽는 질의를 store 에 더하면
+// 된다. 나중에 "왜 느리지"를 묻는 사람이 이 문장을 보고 바로 답에 닿아야 해서 적어 둔다.
+//
+// ★ 이 문단은 **계약이 아니라 지금 코드의 사실이다.** 질의 수를 세는 이음매가 없어서
+// 잠그는 시험도 없다 — 여기를 고치는 사람은 아래 두 자리(루프의 캡처, 점유자 채움)를
+// 눈으로 같이 봐야 하고, 그러기 싫으면 세는 이음매를 먼저 만들어야 한다.
 func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, error) {
 	if strings.TrimSpace(project) == "" {
 		return LaneView{}, &RefusedError{What: "lane", Reason: "project 가 비었다"}
@@ -377,19 +382,43 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 		rows = fresh
 	}
 
+	// ★ 점유자가 줄에 있으면 아래 점유자 채움이 **같은 세션을 또 묻게 된다** — 정상 경로에서
+	//   늘 그렇다. 그래서 루프를 돌면서 그 한 값을 붙잡아 둔다. 두 키(줄 행의 session_id 와
+	//   점유의 session_id)는 같은 Land 호출의 한 값에서 갈라진 것이고 어느 쪽에도 정규화가
+	//   없으므로 문자열이 같다 — 이 전제는 새로 만드는 것이 아니라 바로 아래 rowsHaveSession
+	//   과 표시 계층 둘이 이미 == 로 의존하고 있는 것이다.
+	//   맵을 만들지 않는다: 재사용할 대상이 최대 하나(점유는 배타다)라 값 두 개면 족하다.
+	var holderSignal *time.Time
+	holderSeen := false
+
 	out := LaneView{Entries: make([]LaneEntry, 0, len(rows)), Holder: holder}
 	for _, r := range rows {
 		// 관측 실패와 "신호 없음"은 화면에서 둘 다 빈칸이다 — 사람이 다시 물으면 되고,
 		// 실패 사유는 WARN 에 남는다. 이 축을 반드시 봐야 하는 곳은 불변으로 남는
 		// 판단 본문이고, 그쪽(ReleaseLaneRow)은 두 경우를 다른 문장으로 적는다.
 		at, _ := s.lastSignal(ctx, r.SessionID)
+		if holder != nil && r.SessionID == holder.SessionID {
+			holderSignal, holderSeen = at, true
+		}
 		out.Entries = append(out.Entries, LaneEntry{
 			RowID: r.ID, SessionID: r.SessionID, EnqueuedAt: r.EnqueuedAt,
 			LastSignalAt: at,
 		})
 	}
 	if out.Holder != nil {
-		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
+		if holderSeen {
+			out.Holder.LastSignalAt = holderSignal
+			// 위 재사용은 정합에 영향이 0이다: 키가 같으면 같은 질의라 결과가 같고,
+			// 시점이 몇 ms 이른 것은 이 값이 표시용이라는 판정(lastSignal 주석)과 정합한다.
+		} else {
+			// ★ **여기 질의는 지운 것이 아니라 남긴 것이다.** 점유자가 줄에 없는 정합 어긋남
+			//   갈래에서는 루프가 그 세션을 한 번도 안 읽었다. 그리고 이 값에는 실제 독자가
+			//   있다 — 줄이 0건일 때 mcpsrv/render.go 의 어긋남 문장과 web/page.go 의 Missing
+			//   행이 회수 판정용 "신호 나이"로 이 필드를 읽는 유일한 자리다. 안 채우면 그 두
+			//   화면이 조용히 "신호 없음"이 되어, 사람이 회수를 판정할 두 숫자 중 하나가
+			//   사라진다. 즉 이 갈래의 +1 질의는 낭비가 아니라 화면 계약이다.
+			out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
+		}
 	}
 	return out, nil
 }
