@@ -371,3 +371,39 @@ func bundlePaths(b Bundle) []string {
 	}
 	return out
 }
+
+// UnaccountedIDs 는 **요청한 id 중 응답이 설명하지 못한 것**이다. 순수 함수다.
+//
+// ★ 이 함수가 없으면 무엇이 깨지나. 서버는 독립 컨테이너인데 플러그인은 자동
+// 갱신된다 — item_ids 를 **모르는 서버**(cae53bd 판)에 신 클라이언트가 묶음을 보내면
+// 그 서버는 경로의 선두 하나만 집고 나머지 필드를 조용히 무시한 채 200 을 낸다.
+// api_version 은 양쪽 다 "1" 이라 SkewBanner 도 안 뜬다. 그러면 `fd pick a b c` 가
+// 종료코드 0 으로 a 만 찍고 끝나고, b·c 는 **선점되지도, 이름이 불리지도 않는다.**
+// 선점이 존재하는 이유가 정확히 그 상황을 막는 것이다 — 세션 서른이 도는 판에서
+// "쥐었다고 믿는데 안 쥔" 항목은 두 세션이 같은 파일을 동시에 고치는 사고가 된다.
+//
+// 판정은 한 줄이다: 요청 집합 − 응답이 설명한 집합. 비교는 공백을 다듬은 문자열
+// 동등성이다(항목 id 는 ValidateItemID 가 [A-Za-z0-9._/-] 로 좁혀 둔 값이라
+// 대소문자 접기 같은 추가 규칙을 넣으면 서로 다른 두 id 가 같은 것으로 접힌다).
+//
+// 순서는 **요청 순서**를 지킨다 — 사람이 명령줄에 적은 순서 그대로 불러야
+// 어느 인자가 빠졌는지를 눈으로 짚을 수 있다.
+func UnaccountedIDs(requested, accounted []string) []string {
+	seen := make(map[string]bool, len(accounted))
+	for _, id := range accounted {
+		if id = strings.TrimSpace(id); id != "" {
+			seen[id] = true
+		}
+	}
+	var out []string
+	dup := map[string]bool{}
+	for _, id := range requested {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] || dup[id] {
+			continue
+		}
+		dup[id] = true
+		out = append(out, id)
+	}
+	return out
+}
