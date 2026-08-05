@@ -880,13 +880,49 @@ go test ./... -race && git commit -am "feat(flightdeck): 보드가 랜딩 줄을
 
 ### Task 11: `lane-turn` 처방
 
+> ★ 개정(2026-08-05) — **이 과제는 끝났다.** 브랜치 `fd-lane-residuals`(base `64037d1`)의
+> 커밋 셋이다: `034f47d`(judge 처방 + 접힘 시험) · `50cd987`(service 배선) ·
+> `7e1c15f`(`RenderLand` 대기 문구). 아래 상자를 닫았고, **계획과 다르게 한 것 하나**를 함께 적는다.
+>
+> - **Step 3 은 계획의 답을 기각했다.** 계획은 "`lane-turn` 은 이 세션에게만 의미 있는 사건이므로
+>   `overlap` 뒤"라고 적었으나 랜딩판은 **맨 앞**이다(`lane-turn → overlap → outside → unclaimed
+>   → silent`). 근거 판단 `01KZ8ZYHV0DHS237FNBCRMY2MJ`: `FoldPrescriptions` 는 `ps[:PrescribeMax]`
+>   로 **뒤를 자르고**, `PrescribeMax` 주석이 "접힌 것도 호출자가 전부 발화 기록한다"를 계약으로
+>   못박았고, `suppressed` 는 `silent` 외 모든 키를 무조건 누른다 — 셋을 이으면 한 번 접힌
+>   `lane-turn` 은 그 줄 행에 대해 **영구히** 사라지고, 그 세션은 레인을 안 쥔 채 남아 뒤에 선
+>   전원의 랜딩이 선다. 그리고 그 실패는 화면에 안 뜨고 원장에는 "정상적으로 접혔다"로만 남는다.
+>   대가는 명시했다: 상한을 넘는 턴에서 접히는 쪽이 `overlap` 이 된다. `Prescribe` 독스트링의
+>   "`overlap` 이 맨 앞인 이유는 **그것만이** 남이 알아야 하는 사건이기 때문"도 이 커밋에서
+>   거짓이 되므로 개정 블록으로 함께 고쳤다. 기각한 대안 둘(`FoldPrescriptions` 에 예외를 파는
+>   것 · 접힌 처방을 발화 기록에서 빼는 것)은 그 판단에 근거와 함께 남아 있다.
+> - **Step 4 는 복원이 아니라 교체였다.** ①·② 가 넣어 둔 "차례는 서버가 밀어주지 않는다"가
+>   통로가 서는 순간 **거짓**이 돼서, 문장을 되살린 것이 아니라 그 줄을 갈아 끼웠다. 새 문구는
+>   `lane-turn` 이 `(세션 × 키)` **1회**라는 사실과 다시 묻는 길을 함께 말한다 — 폴링을 닫는
+>   문장을 쓰면 "가만히 있어도 된다"로 읽히고 그 세션 뒤로 줄 전원이 선다. 허용은 `waiting`
+>   하나뿐이고 나머지 넷은 여전히 금지다(근거가 "통로가 없다"에서 "그 자리에서 할 말이
+>   아니다"로 바뀌었다).
+> - **만진 파일이 위 Files 보다 둘 많다** — 시험 둘(`internal/service/prescribe_test.go` ·
+>   `internal/mcpsrv/land_test.go`)이 함께 움직였다.
+> - **Step 5 를 잠근 것 — `TestPrescribe` 표 케이스 셋 + 시험 함수 넷:**
+>   `judge/prescribe_test.go:20 TestPrescribe` 의 케이스 셋("레인 차례가 오면 lane-turn 이
+>   뜬다" · "같은 줄 행에는 다시 안 뜬다" · "새 줄 행에는 다시 뜬다") · `judge/prescribe_test.go:296
+>   TestLaneTurnSurvivesFolding`(overlap 을 상한 이상으로 깔고 생존과 맨 앞을 함께 단정) ·
+>   `service/prescribe_test.go:332 TestLaneTurnFiresOnceWhenTheLaneBecomesMine` ·
+>   `service/prescribe_test.go:399 TestLaneTurnReturnsForANewQueueRow` ·
+>   `mcpsrv/land_test.go:128 TestRenderLandWaitingPointsAtLaneTurn`(옛
+>   `TestRenderLandNeverMentionsLaneTurn` 을 지우지 않고 뒤집은 것).
+>
+> ★ **이 파일에서 `[x]` 는 여기가 처음이다.** 단계 ①·②(Task 1~10)는 이미 랜딩했는데도 상자가
+> 전부 `[ ]` 로 남아 있고, 이 레포의 계획 문서 열한 개 중 `[x]` 를 쓴 것이 하나도 없다.
+> 즉 **이 문서에서 빈 상자는 "안 했다"는 뜻이 아니다** — 완료의 정본은 커밋과 판단이다.
+
 **Files:** `internal/judge/prescribe.go` · `prescribe_test.go` · `internal/service/prescribe.go` · `internal/mcpsrv/render.go`(대기 문구 복원)
 
-- [ ] **Step 1:** `PrescribeLaneTurn = "lane-turn"` 을 키에 더한다. 처방은 상태가 아니라 **전이**에서만, `(세션 × Key)` 당 1회 뜬다.
-- [ ] **Step 2:** **억제 키에 줄 행 id 를 넣는다** — `lane-turn:<row id>`. 안 넣으면 한 번 차례를 받고 실패해 다시 선 세션에게 두 번째 차례가 영영 안 뜬다.
-- [ ] **Step 3:** `Prescribe` 의 순서에 어디에 끼울지 정한다. `overlap` 이 맨 앞인 이유(그것만이 남이 알아야 하는 사건)를 읽고, `lane-turn` 은 **이 세션에게만 의미 있는 사건**이므로 그 뒤다.
-- [ ] **Step 4:** `RenderLand` 의 대기 문구에 "차례가 오면 처방이 알린다"를 되살린다. ①·② 동안 뺐던 문장이다.
-- [ ] **Step 5:** 시험 — 차례가 오면 정확히 한 번 뜨고, 같은 줄 행에는 다시 안 뜨고, 새 줄 행에는 다시 뜬다.
+- [x] **Step 1:** `PrescribeLaneTurn = "lane-turn"` 을 키에 더한다. 처방은 상태가 아니라 **전이**에서만, `(세션 × Key)` 당 1회 뜬다.
+- [x] **Step 2:** **억제 키에 줄 행 id 를 넣는다** — `lane-turn:<row id>`. 안 넣으면 한 번 차례를 받고 실패해 다시 선 세션에게 두 번째 차례가 영영 안 뜬다.
+- [x] **Step 3:** `Prescribe` 의 순서에 어디에 끼울지 정한다. `overlap` 이 맨 앞인 이유(그것만이 남이 알아야 하는 사건)를 읽고, `lane-turn` 은 **이 세션에게만 의미 있는 사건**이므로 그 뒤다. — **정하는 일은 끝났고 답은 반대였다(맨 앞). 위 개정 참고.**
+- [x] **Step 4:** `RenderLand` 의 대기 문구에 "차례가 오면 처방이 알린다"를 되살린다. ①·② 동안 뺐던 문장이다. — **복원이 아니라 교체로 했다. 위 개정 참고.**
+- [x] **Step 5:** 시험 — 차례가 오면 정확히 한 번 뜨고, 같은 줄 행에는 다시 안 뜨고, 새 줄 행에는 다시 뜬다.
 
 ---
 
