@@ -434,6 +434,58 @@ func TestPickRecommendationQueueSizeCannotDivergeFromItsOwnScopeLine(t *testing.
 	}
 }
 
+// TestPickRecommendQueueOpenCountsOpenNotCandidates 는 QueueOpen 이 **열린 항목**만
+// 센다는 것을 남이 쥔 항목이 후보에 섞인 판에서 단정한다.
+//
+// ★ 안 그러면 무엇이 깨지나. candidates() 의 후보 집합은 열린 항목 ∪ 살아 있는 세션이
+// 쥔 항목이다 — 뒤쪽은 정의상 이미 남의 것이라 아무도 못 집는다. 그 합을 QueueOpen 으로
+// 내면 화면의 "남은 큐" 가 실제로 집을 수 있는 수보다 커지고, 세션은 "아직 N건 남았으니
+// 하나 더 집자"고 판단해 남이 쥔 항목만 있는 큐에 계속 pick 을 던진다. 같은 응답의
+// 범위 줄은 그때도 옳은 수(열린 항목 M건)를 찍으므로 **한 응답 안에서 두 숫자가 갈린다** —
+// 이 파일의 다른 두 시험이 막는 갈림과 같은 부류인데, 그 둘은 후보와 열림이 우연히
+// 같은 판(남의 선점이 없는 큐)만 봐서 이 방향은 비어 있었다.
+//
+// 실측: 그 자리를 len(items)(후보 전체)로 바꿔도 전 스위트가 초록이었다.
+func TestPickRecommendQueueOpenCountsOpenNotCandidates(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	addItem(t, s, "p", "q-held", []string{"services/held.go"}, nil)
+	addItem(t, s, "p", "q-open1", []string{"services/o1.go"}, nil)
+	addItem(t, s, "p", "q-open2", []string{"services/o2.go"}, nil)
+	if _, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: other.Session.ID, ItemID: "q-held"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+
+	got, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	// 이 줄은 두 몫을 한다.
+	//  ① 사전 조건 — 남이 쥔 항목이 **정말 후보에 들어와야** 아래 단정이 뭔가를 잰다.
+	//     안 들어오면 후보 수와 열림 수가 같아져 QueueOpen 단정이 늘 참이 된다.
+	//  ② 그 자체가 단정 — 범위 문장의 둘째 수는 실측이어야 한다. 상수 0 으로 박으면
+	//     "살아 있는 세션이 쥔 항목"이 후보에 든다는 사실이 화면에서 사라지고,
+	//     세션은 남이 쥔 것까지 훑은 판정 결과를 열린 항목만 본 것으로 읽는다.
+	//     실측: claimedCount 증가를 지워도 전 스위트가 초록이었다.
+	if !strings.Contains(got.Scope, "쥔 항목 1건") {
+		t.Fatalf("범위가 남이 쥔 후보를 안 센다(그 축이 상수로 박혔거나 후보에 안 들어왔다): %q", got.Scope)
+	}
+	if got.QueueOpen == nil {
+		t.Fatal("큐 열림 수가 안 실렸다")
+	}
+	if *got.QueueOpen != 2 {
+		t.Fatalf("큐 열림 %d건 (기대 2) — 남이 쥔 q-held 까지 열림으로 세고 있다: %q",
+			*got.QueueOpen, got.Scope)
+	}
+	if !strings.Contains(got.Scope, "열린 항목 2건") {
+		t.Fatalf("범위 문자열과 큐 수가 갈렸다: %q vs %d건", got.Scope, *got.QueueOpen)
+	}
+}
+
 // TestPickNoneModeQueueSizeCannotDivergeFromItsOwnScopeLine 은 none 모드도
 // QueueOpen 을 낸다는 것과, 그 수가 자기 사유 안의 수와 갈리지 않는다는 것을 단정한다.
 //
@@ -650,6 +702,183 @@ func TestPickRecommendsBundleOfSiblings(t *testing.T) {
 	}
 }
 
+// 추천 묶음의 구성원도 **자기 근거**를 단다.
+//
+// ★ 안 그러면 무엇이 깨지나. 화면은 구성원 줄마다 그 구성원의 Link 를 "묶은 근거" 로
+// 찍는다. 조립부는 Members[i] 옆에 Links[i] 를 놓는데, 그 짝이 어긋나면 응답은
+// **구성원 A 의 줄에 B 의 근거**를 싣는다 — 축(형제냐 선행이냐)도 상세도 남의 것이다.
+// 세션은 그것을 읽고 "이건 선행이라 함께 간다"를 엉뚱한 항목에 붙여 이해하고,
+// 묶음을 풀어야 할지 판단하는 유일한 근거가 통째로 거짓이 된다. 값이 그럴듯해서
+// 아무도 못 알아챈다 — 두 줄 다 실재하는 근거이고 자리만 바뀌었기 때문이다.
+//
+// 지정 묶음 쪽에는 이미 짝을 못박는 시험이 있다
+// (TestPickBundleEveryMemberCarriesItsOwnLinkDetail). 판정이 링크를 만드는 **추천**
+// 경로에는 없었다 — 실측: Links 를 역순으로 배정해도 전 스위트가 초록이었다.
+// 구성원이 둘 이상이어야 이 시험이 뭔가를 잰다(하나면 역순도 같은 값이다).
+func TestPickRecommendEveryMemberCarriesItsOwnLink(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "구성원링크시험")
+	for _, id := range []string{"ml1-sib", "ml2-sib", "ml3-sib"} {
+		addItem(t, s, "p", id, []string{"services/" + id + ".go"}, nil)
+	}
+	makeSiblings(t, st, "p", "ml1-sib", "ml2-sib", "ml3-sib")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) < 2 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 둘 이상이어야 자리 바뀜을 잰다: %+v", res.Bundle)
+	}
+	for _, m := range res.Bundle.Members {
+		if m.Link.Item != m.Item.ID {
+			t.Fatalf("구성원 %q 에 %q 의 근거가 붙었다 — 자리가 어긋났다: %+v",
+				m.Item.ID, m.Link.Item, res.Bundle.Members)
+		}
+		if len(m.Link.Axes) == 0 || strings.TrimSpace(m.Link.Detail) == "" {
+			t.Fatalf("구성원 %q 의 근거가 비었다: %+v", m.Item.ID, m.Link)
+		}
+	}
+}
+
+// 반납된 선점은 **점유자가 아니다.**
+//
+// ★ 안 그러면 무엇이 깨지나. candidates() 는 항목마다 선점 행을 읽어 c.ClaimedBy 를
+// 채우고, judge 는 그 칸이 차 있으면 그 항목을 "남이 쥐고 있다"로 탈락시킨다.
+// 반납 여부를 안 보면 **한 번이라도 집혔던 항목은 영영 추천에서 사라진다** — 선점 행은
+// 지워지지 않고 released_at 만 찍히기 때문이다(store 는 반납하면서 항목을 open 으로
+// 되돌린다). 화면은 그때 이미 손을 뗀 세션의 id 를 점유자로 찍으므로, 사람은 큐에
+// 열려 있는 항목을 보면서 "저 세션에게 물어봐야 한다"고 읽는다 — 그 세션은 줄 것이 없다.
+// 회수(ForceReleaseClaim)가 이 판의 유일한 구제 수단이라 그것까지 막히면 항목은 끝이다.
+//
+// 실측: `err == nil && cl.ReleasedAt == nil` 에서 뒷 조건을 떼도 전 스위트가 초록이었다.
+func TestPickRecommendsItemWhoseClaimWasReleased(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+	addItem(t, s, "p", "rc-item", []string{"services/a.go"}, nil)
+
+	if _, err := s.Pick(ctx(), PickInput{
+		Project: "p", SessionID: other.Session.ID, ItemID: "rc-item"}); err != nil {
+		t.Fatalf("남의 선점 준비 실패: %v", err)
+	}
+	if err := st.ReleaseClaim(ctx(), "p", "rc-item", other.Session.ID); err != nil {
+		t.Fatalf("반납 실패: %v", err)
+	}
+	// 사전 조건: 반납 행이 **남아 있어야** 이 시험이 뭔가를 잰다(지워지면 볼 것이 없다).
+	if n := countRows(t, st,
+		`SELECT count(*) FROM claim WHERE project='p' AND item_id='rc-item' AND released_at IS NOT NULL`); n != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 반납된 선점 행이 %d개다", n)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+	for _, r := range res.Rejected {
+		if r.Item == "rc-item" {
+			t.Fatalf("반납된 항목을 %q 로 탈락시켰다(상세: %q) — 그 선점은 이미 풀렸다",
+				r.Reason, r.Detail)
+		}
+	}
+	if res.Mode != PickRecommended || res.Item == nil || res.Item.ID != "rc-item" {
+		t.Fatalf("반납된 항목이 다시 추천되지 않았다 — mode=%q item=%+v 탈락=%+v",
+			res.Mode, res.Item, res.Rejected)
+	}
+}
+
+// 재개된 구성원도 **쥐고 있다**로 보고한다.
+//
+// ★ 안 그러면 무엇이 깨지나. Claimed 는 "이번 호출이 썼나"가 아니라 "원장이 이 세션의
+// 것이라 말하나"다 — 그래서 재개(PickResumed)에도 true 다. 그 자리를 "이번에 새로 썼나"로
+// 바꾸면 두 번째 호출부터 **자기가 쥔 구성원이 안 쥔 것으로 찍힌다.** 게다가 사유(Rejection)는
+// 없으므로 Claimed=false·사유 nil 이라는 조합이 나오는데, 이 응답에서 그 쌍은
+// "이 축을 아예 안 봤다"는 뜻이다. 컨텍스트가 날아가 재개로 돌아온 세션이 정확히 이
+// 화면을 받고, 만료도 세션 종료 반납도 없는 판에서 자기가 쥔 항목을 남의 것으로 여겨
+// 손을 뗀다 — 그 항목은 사람이 강제로 풀 때까지 아무도 못 집는다.
+//
+// 쥔 건수를 말하는 사유 줄(TestPickBundleResumeDoesNotSayItClaimed)은 이 칸을 안 본다.
+// 실측: 그 자리를 `sub.Mode == PickClaimed` 로 바꿔도 전 스위트가 초록이었다.
+func TestPickBundleResumedMemberIsStillReportedHeld(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "재개구성원시험")
+	addItem(t, s, "p", "rm-lead", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "rm-mem", []string{"services/b.go"}, nil)
+	ids := []string{"rm-lead", "rm-mem"}
+
+	first, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemIDs: ids})
+	if err != nil {
+		t.Fatalf("첫 묶음 선점 실패: %v", err)
+	}
+	if len(first.Bundle.Members) != 1 || !first.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 첫 호출에서 구성원이 집혔어야 한다: %+v", first.Bundle.Members)
+	}
+
+	again, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemIDs: ids})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if again.Mode != PickResumed {
+		t.Fatalf("사전 조건이 깨졌다 — 재개여야 한다: %q", again.Mode)
+	}
+	if len(again.Bundle.Members) != 1 {
+		t.Fatalf("구성원이 1건이어야 한다: %+v", again.Bundle.Members)
+	}
+	m := again.Bundle.Members[0]
+	if !m.Claimed {
+		t.Fatalf("재개인데 구성원을 안 쥔 것으로 보고한다(사유=%+v) — 세션이 자기가 쥔 항목에서 손을 뗀다: %+v",
+			m.Rejection, m)
+	}
+	if m.Rejection != nil {
+		t.Fatalf("쥐고 있는 구성원에 탈락 사유가 붙었다: %+v", m.Rejection)
+	}
+}
+
+// 묶음 근거는 **판정이 낸 그 문장 그대로**여야 한다.
+//
+// ★ 안 그러면 무엇이 깨지나. 화면은 이 문자열을 "왜 이 묶음인가:" 로 찍는다
+// (mcpsrv/render.go). 그 자리에 오는 judge 의 문장은 정렬 키 넷의 **실제 값**이고,
+// 그것이 "왜 하필 이 브랜치 이름인가"에 답하는 유일한 근거다(judge/bundle.go 의
+// Reason 주석). 여기에 상수를 박으면 화면은 모든 묶음에 대해 같은 이유를 찍는다 —
+// 그 문장은 정렬 키를 안 담으므로 틀린 축을 들먹여도 아무도 못 가리고, 세션은
+// 자기 묶음이 왜 1순위인지 물을 자리를 잃는다. 실측: best.Reason 을 상수로 바꿔도
+// 전 스위트가 초록이었다.
+//
+// 문구가 아니라 **출처**를 단정한다: 같은 응답의 사유 줄이 이 문장으로 시작한다.
+// 둘 다 best.Reason 한 관측에서 나오므로 구조적으로 못 갈리고, judge 가 문구를
+// 다듬어도 이 시험은 안 붉어진다.
+func TestPickRecommendBundleReasonComesFromTheJudgment(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "묶음근거시험")
+	addItem(t, s, "p", "br1-sib", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "br2-sib", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "br1-sib", "br2-sib")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 1건이어야 한다: %+v", res.Bundle)
+	}
+	if strings.TrimSpace(res.Bundle.Reason) == "" {
+		t.Fatal("묶은 근거가 비었다 — 화면의 '왜 이 묶음인가' 줄이 통째로 사라진다")
+	}
+	if !strings.HasPrefix(res.Reason, res.Bundle.Reason) {
+		t.Fatalf("묶은 근거가 판정이 낸 문장이 아니다(사유 줄과 갈렸다):\n 근거: %q\n 사유: %q",
+			res.Bundle.Reason, res.Reason)
+	}
+	// 선두 id 는 값이다 — 상수 문장은 이것을 못 담는다.
+	if !strings.Contains(res.Bundle.Reason, res.Item.ID) {
+		t.Fatalf("묶은 근거가 선두 %q 를 안 말한다 — '왜 하필 이 브랜치 이름인가'에 답을 못 한다: %q",
+			res.Item.ID, res.Bundle.Reason)
+	}
+}
+
 // ★ 이 시험이 부재 규율을 지킨다.
 // 묶을 게 없어도 Bundle 은 non-nil 이고 구성원이 0건이다.
 // nil 은 "이 응답은 그 축을 안 읽었다" 하나만 뜻해야 한다.
@@ -730,6 +959,128 @@ func TestPickRecordsBundleInPickEval(t *testing.T) {
 		`SELECT count(*) FROM pick_eval WHERE picked_with IS NOT NULL AND picked_with <> '[]'`); n != 1 {
 		t.Fatalf("picked_with 에 나머지가 안 남았다")
 	}
+	// ★ **무엇이** 남았는지까지 본다. 위 줄은 "비어 있지 않다"만 재는데, 그것은 선두를
+	// 구성원 수만큼 되풀이해 적어도 참이다 — 실측: 그 자리에 m.Item.ID 대신
+	// best.Lead.Item.ID 를 넣어도 전 스위트가 초록이었다. 이 칸의 소비자는 SQL 질의이고
+	// (§10: 사유 분포가 질의 가능해진다), 그 질의가 답하는 질문은 "무엇과 무엇이 함께
+	// 나갔나"다. 선두가 두 번 들어 있으면 그 답은 **구성원을 한 번도 언급하지 않은 채**
+	// 형태만 맞다 — 함께 나간 항목이 원장에서 통째로 사라지고, picked 와 겹쳐서
+	// 묶음 크기 분포까지 부풀린다.
+	var withRaw string
+	if err := st.DB().QueryRowContext(ctx(),
+		`SELECT picked_with FROM pick_eval ORDER BY id DESC LIMIT 1`).Scan(&withRaw); err != nil {
+		t.Fatalf("picked_with 읽기 실패: %v", err)
+	}
+	var with []string
+	if err := json.Unmarshal([]byte(withRaw), &with); err != nil {
+		t.Fatalf("picked_with 해석 실패(%s): %v", withRaw, err)
+	}
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 1건이어야 한다: %+v", res.Bundle)
+	}
+	member := res.Bundle.Members[0].Item.ID
+	if len(with) != 1 || with[0] != member {
+		t.Fatalf("picked_with 가 %v 다 — 구성원 %q 여야 한다(선두 %q 를 되풀이했나)",
+			with, member, lead)
+	}
+	for _, id := range with {
+		if id == lead {
+			t.Fatalf("picked_with 에 선두 %q 가 들어 있다 — picked 와 겹쳐 묶음 크기가 부풀려진다: %v",
+				lead, with)
+		}
+	}
+}
+
+// item.pick 이벤트의 picked_count 는 **선두를 포함한** 묶음 크기다.
+//
+// ★ 안 그러면 무엇이 깨지나. 0 은 이 칸에서 이미 뜻이 정해져 있다 — "적격 0건이라
+// 아무것도 추천 못 했다"(pick.go 가 best==nil 에서 내는 값이다). 선두를 안 세면
+// **단독 추천이 그 값을 그대로 낸다.** 그러면 이벤트 로그로 "추천이 몇 번 나갔나"를
+// 세는 질의가 단독 추천 전부를 추천 없음으로 집계하고, 큐가 멀쩡히 도는데도
+// "아무도 뭘 추천받지 못한다"는 결론이 나온다. pick_eval 은 이 축을 대신 못 한다 —
+// 거기엔 크기가 아니라 id 만 있고, 이 칸을 읽는 질의는 이벤트 표를 본다.
+//
+// 실측: `len(eval.PickedWith) + 1` 에서 +1 을 떼도 전 스위트가 초록이었다.
+// 세 갈래(단독 · 묶음 · 추천 없음)를 한 시험에서 본다 — 한 갈래만 보면 상수를
+// 박는 고침이 통과한다.
+func TestPickEventCountsLeadInPickedCount(t *testing.T) {
+	lastPickedCount := func(t *testing.T, st *store.Store) int {
+		t.Helper()
+		var raw string
+		if err := st.DB().QueryRowContext(ctx(),
+			`SELECT payload FROM event WHERE kind='item.pick' ORDER BY id DESC LIMIT 1`).
+			Scan(&raw); err != nil {
+			t.Fatalf("item.pick 이벤트 읽기 실패: %v", err)
+		}
+		var p struct {
+			PickedCount *int `json:"picked_count"`
+		}
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatalf("payload 해석 실패(%s): %v", raw, err)
+		}
+		if p.PickedCount == nil {
+			t.Fatalf("picked_count 칸이 아예 없다: %s", raw)
+		}
+		return *p.PickedCount
+	}
+
+	// ① 단독 추천 — 선두 하나뿐이어도 1이다. 여기가 0 이면 "추천 없음"과 겹친다.
+	t.Run("단독", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "단독")
+		addItem(t, s, "p", "pc-solo", []string{"services/a.go"}, nil)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("추천 실패: %v", err)
+		}
+		if res.Mode != PickRecommended || len(res.Bundle.Members) != 0 {
+			t.Fatalf("사전 조건이 깨졌다 — 구성원 0건짜리 추천이어야 한다: %+v", res.Bundle)
+		}
+		if n := lastPickedCount(t, st); n != 1 {
+			t.Fatalf("picked_count 가 %d 다 — 선두를 안 셌다(0 은 '추천 없음'의 값이다)", n)
+		}
+	})
+
+	// ② 묶음 추천 — 선두 + 구성원이다.
+	t.Run("묶음", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "묶음")
+		addItem(t, s, "p", "pc1-sib", []string{"services/a.go"}, nil)
+		addItem(t, s, "p", "pc2-sib", []string{"services/b.go"}, nil)
+		makeSiblings(t, st, "p", "pc1-sib", "pc2-sib")
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("추천 실패: %v", err)
+		}
+		if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+			t.Fatalf("사전 조건이 깨졌다 — 구성원이 1건이어야 한다: %+v", res.Bundle)
+		}
+		if n := lastPickedCount(t, st); n != 2 {
+			t.Fatalf("picked_count 가 %d 다 — 선두 1 + 구성원 1 이어야 한다", n)
+		}
+	})
+
+	// ③ 추천 없음 — 0이다. 이 갈래가 없으면 "무조건 +1" 로 고쳐도 위 둘이 통과한다.
+	t.Run("추천없음", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "없음")
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("추천 실패: %v", err)
+		}
+		if res.Mode != PickNone {
+			t.Fatalf("사전 조건이 깨졌다 — 큐가 비었으니 none 이어야 한다: %q", res.Mode)
+		}
+		if n := lastPickedCount(t, st); n != 0 {
+			t.Fatalf("picked_count 가 %d 다 — 추천이 없었는데 집었다고 말한다", n)
+		}
+	})
 }
 
 // siblingIndex 는 오류를 안 돌려준다 — 조회가 실패하면 빈 색인을 낸다.
@@ -1143,6 +1494,63 @@ func TestPickBundleCollapsesDuplicateItemIDs(t *testing.T) {
 	if !strings.Contains(res.Reason, "묶음 2건") {
 		t.Fatalf("사유의 묶음 수가 중복 제거 전 수를 세고 있다: %q", res.Reason)
 	}
+	// ★ 범위 줄도 같은 수를 세야 한다. 사유만 보면 이 자리는 비어 있었다 —
+	// 실측: 범위의 인자를 len(in.ItemIDs)(다듬기 **전**의 요청)로 바꿔도 전 스위트가
+	// 초록이었다. 그러면 한 응답이 "지정된 묶음 3건" 옆에 "묶음 2건 중 2건을 집었다"를
+	// 나란히 찍는다. 읽는 쪽은 그 차이를 "하나를 못 집었는데 사유가 없다" 로 읽고
+	// 없는 실패를 쫓는다 — 이 저장소가 큐 수에서 이미 두 번 막은 갈림과 같은 부류다.
+	if !strings.Contains(res.Scope, "지정된 묶음 2건") {
+		t.Fatalf("범위가 다듬기 전 요청 수를 세고 있다: %q (사유: %q)", res.Scope, res.Reason)
+	}
+	if strings.Contains(res.Scope, "3건") {
+		t.Fatalf("범위에 중복 제거 전 수(3건)가 남아 있다: %q", res.Scope)
+	}
+}
+
+// AccountedIDs 는 구성원의 **세 자리를 각각 따로** 읽는다.
+//
+// ★ 안 그러면 무엇이 깨지나. 이 함수를 부르는 것은 서버가 아니라 **클라이언트**다
+// (cmd/fd 의 runPick · mcpsrv 의 pick 도구). 둘 다 자기가 보낸 item_ids 와 이 집합을
+// 대조해, 안 걸린 id 가 있으면 "응답이 설명하지 못했다" 배너를 찍고 종료코드 1을 낸다.
+// 그 배너의 뜻은 "서버가 네 id 를 통째로 버렸다"이고, 읽는 쪽은 구서버 스큐를 의심하러
+// 간다 — 응답 본문에는 그 id 가 멀쩡히 줄로 찍혀 있는데도.
+//
+// 세 자리가 각각 필요한 이유는 **판이 갈리기 때문**이다. 이 클라이언트는 자기가 띄운
+// 서버가 아니라 그때 붙은 서버의 JSON 을 읽는다. 못 집은 구성원의 재조회 폴백
+// (pickBundle ②)이 없던 서버는 Item 을 통째로 비운 채 Rejection 에만 id 를 실었고,
+// 그 폴백은 지금도 이 저장소의 한 커밋 차이다. Link 만 찬 모양도 같은 부류다.
+//
+// 기존 대조(pick_report_truth_test.go 의 TestAccountedIDsReadsEveryPlaceAnIDCanLive)는
+// 한 구성원에 세 자리를 **함께** 채워 두어, 한 자리를 지워도 나머지 둘이 덮는다 —
+// 실측: add(m.Link.Item) 과 Rejection 가지를 각각 지워도 전 스위트가 초록이었다.
+// 그래서 여기서는 자리를 하나씩만 채운 구성원으로 축을 격리한다.
+func TestAccountedIDsReadsEachMemberAxisAlone(t *testing.T) {
+	for _, c := range []struct {
+		axis   string
+		member BundleMember
+	}{
+		{"Item", BundleMember{Item: model.Item{ID: "only"}}},
+		{"Link", BundleMember{Link: judge.Link{Item: "only", Detail: "세션이 함께 지정했다"}}},
+		{"Rejection", BundleMember{
+			Rejection: &model.Rejection{Item: "only", Reason: RejectClaimNotFound}}},
+	} {
+		t.Run(c.axis, func(t *testing.T) {
+			res := PickResult{
+				Item:   &model.Item{ID: "lead"},
+				Branch: "lead",
+				Bundle: &BundleInfo{Members: []BundleMember{c.member}},
+			}
+			got := res.AccountedIDs()
+			if strings.Join(got, ",") != "lead,only" {
+				t.Fatalf("설명한 id 집합이 %v 다 — %s 자리의 id 를 안 읽었다", got, c.axis)
+			}
+			// 그 사실이 소비자 쪽에서 뜻하는 것까지 본다: 요청한 id 가 전부 설명됐어야 한다.
+			if missing := judge.UnaccountedIDs([]string{"lead", "only"}, got); len(missing) != 0 {
+				t.Fatalf("서버가 %s 자리에 이름으로 실은 id 를 클라이언트가 %v 로 신고한다 — "+
+					"없는 서버 스큐를 쫓게 된다", c.axis, missing)
+			}
+		})
+	}
 }
 
 // 겹침은 묶음 전체 경로의 합집합으로 다시 봐야 한다 — "남과 부딪히는가"는 항목
@@ -1409,6 +1817,54 @@ func TestPickBundleEveryMemberCarriesItsOwnLinkDetail(t *testing.T) {
 // 코드는 **문자열 실값으로도** 단정한다. 심볼로만 보면 judge 쪽 상수 값이 바뀌어도 이
 // 시험이 따라 움직여 초록으로 남는데, 이 값은 rejection.reason_code 로 질의되는 원장의
 // 어휘다 — 값이 바뀌면 옛 질의가 조용히 0건을 센다.
+// item_id 경로의 범위 줄도 **응답에 실제로 실린다.**
+//
+// ★ 안 그러면 무엇이 깨지나. 화면은 이 문자열이 비면 "범위:" 줄을 아예 안 찍는다
+// (mcpsrv/render.go 의 `if r.Scope != ""`). 그러면 선점·재개 응답이 **무엇을 후보로
+// 봤는지 침묵한 채** 항목 하나만 내민다 — 그 모양은 판정을 거쳐 1순위를 고른 추천과
+// 화면에서 구별되지 않는다. 이 경로는 후보를 고른 적이 없고 세션이 준 id 를 그대로
+// 집었을 뿐인데, 읽는 쪽은 서버가 큐를 훑어 이것을 골라 줬다고 믿는다.
+//
+// 묶음 경로는 같은 사고를 이미 한 번 막았다(TestPickBundleScopeLinesRideOnTheResponse).
+// 이 경로에는 그 짝이 없었다 — 실측: 이 자리를 "" 로 비워도 전 스위트가 초록이었다.
+// 선점과 재개를 둘 다 본다: 재개는 정의상 앞 응답의 기억이 없는 세션이 오는 자리라
+// 빠진 줄을 알아챌 다른 단서가 더 적다.
+func TestPickExplicitScopeLineRidesOnTheResponse(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "단독범위시험")
+	addItem(t, s, "p", "sc-solo", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "sc-other", []string{"services/b.go"}, nil)
+
+	claim, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "sc-solo"})
+	if err != nil {
+		t.Fatalf("선점 실패: %v", err)
+	}
+	resume, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: "sc-solo"})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if claim.Mode != PickClaimed || resume.Mode != PickResumed {
+		t.Fatalf("사전 조건이 깨졌다 — 선점 다음 재개여야 한다: %q, %q", claim.Mode, resume.Mode)
+	}
+	for _, c := range []struct {
+		what string
+		res  PickResult
+	}{{"선점", claim}, {"재개", resume}} {
+		if strings.TrimSpace(c.res.Scope) == "" {
+			t.Fatalf("%s 응답의 범위가 비었다 — 화면의 '범위:' 줄이 통째로 사라져 "+
+				"판정 없이 지정된 그대로 집은 것이 추천과 같은 모양이 된다", c.what)
+		}
+		// 세는 것은 **지정된 항목의 수**다. 큐 크기(2건)가 새어 들어오면 안 된다.
+		if !strings.Contains(c.res.Scope, "1건") {
+			t.Fatalf("%s 응답의 범위가 지정된 항목 수를 안 말한다: %q", c.what, c.res.Scope)
+		}
+		if strings.Contains(c.res.Scope, "2건") {
+			t.Fatalf("%s 응답의 범위가 큐 크기를 세고 있다: %q", c.what, c.res.Scope)
+		}
+	}
+}
+
 func TestPickBundleHeldMemberIsRejectedWithTheClaimedCode(t *testing.T) {
 	s, st := newSvc(t)
 	repo := newRepo(t)
