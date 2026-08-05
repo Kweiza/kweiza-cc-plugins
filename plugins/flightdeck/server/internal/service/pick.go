@@ -172,12 +172,13 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 		return PickResult{}, err
 	}
 	live := liveFor(cards)
+	selfCC := selfCCOf(cards, in.SessionID)
 
 	var res PickResult
 	if strings.TrimSpace(in.ItemID) != "" {
-		res, err = s.pickExplicit(ctx, proj, in, live, d, now)
+		res, err = s.pickExplicit(ctx, proj, in, live, selfCC, d, now)
 	} else {
-		res, err = s.pickRecommend(ctx, proj, in, live, d, now)
+		res, err = s.pickRecommend(ctx, proj, in, live, selfCC, d, now)
 	}
 	if err != nil {
 		return PickResult{}, err
@@ -218,7 +219,7 @@ func (s *Service) fillQueueOpen(ctx context.Context, project string, res *PickRe
 
 // pickExplicit 은 지정된 항목을 선점한다(또는 재개 맥락을 낸다).
 func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickInput,
-	live []judge.LiveSession, d *derive, now time.Time) (PickResult, error) {
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
 
 	item, err := s.st.GetItem(ctx, proj.ID, in.ItemID)
 	if err != nil {
@@ -226,7 +227,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	}
 
 	res := PickResult{Item: &item, Branch: item.ID, Scope: "지정된 항목 1건"}
-	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID)
+	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
 	if res.Setup == nil {
@@ -307,7 +308,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 
 // pickRecommend 는 적격 항목 하나를 고르고 탈락 사유 전부를 남긴다.
 func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in PickInput,
-	live []judge.LiveSession, d *derive, now time.Time) (PickResult, error) {
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
 
 	cands, scope, openCount, err := s.candidates(ctx, proj, live)
 	if err != nil {
@@ -320,7 +321,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	}
 
 	picked, rejected := judge.Eligible(judge.EligibleInput{
-		Self: in.SessionID, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
+		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
 	})
 
 	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
