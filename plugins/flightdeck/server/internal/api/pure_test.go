@@ -315,13 +315,13 @@ func TestValidateWorkspacePath(t *testing.T) {
 }
 
 func TestAuthNoticeAndHealthzScrub(t *testing.T) {
-	if !strings.Contains(AuthNotice(false, true), "무인증") {
+	if !strings.Contains(AuthNotice(false, LoopbackReach{Configured: true, Observed: true}), "무인증") {
 		t.Fatal("토큰 미설정을 알리지 않는다 — 조용한 무인증은 안 된다")
 	}
-	if !strings.Contains(AuthNotice(true, true), "루프백") {
+	if !strings.Contains(AuthNotice(true, LoopbackReach{Configured: true, Observed: true}), "루프백") {
 		t.Fatal("루프백 면제 사실이 없다")
 	}
-	if strings.Contains(AuthNotice(true, false), "루프백만") {
+	if strings.Contains(AuthNotice(true, LoopbackReach{Configured: false}), "루프백만") {
 		t.Fatal("면제가 꺼졌는데 켜진 것처럼 말한다")
 	}
 
@@ -330,7 +330,7 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 		DBPath:    "/home/user/.flightdeck/fd.db",
 		DBError:   "unable to open database file /home/user/.flightdeck/fd.db",
 		DiskError: "statfs /home/user/.flightdeck: no such file",
-	}, true, true, buildinfo.Coord{})
+	}, true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -343,6 +343,174 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 	}
 	if body.DBError == "" {
 		t.Fatal("DB 가 죽었는데 그 사실이 응답에 없다 — 침묵하면 배너가 정상으로 읽힌다")
+	}
+}
+
+// 루프백 문장은 **설정이 아니라 도달 가능성**을 말해야 한다.
+//
+// ★ 실물 사고가 이 시험의 근거다(2026-08-05). 서버를 컨테이너로 띄우면 호스트에서 온
+// 요청의 원격 주소가 브리지 게이트웨이(172.x)라 IsLoopback 이 false 다 — **면제를 실제로
+// 받는 클라이언트가 0인데** /healthz 는 "루프백 요청만 토큰 없이 통과한다"를 그대로 냈다.
+// 운영자는 그것을 믿고 클라이언트에 토큰을 안 준 채 전환했고 첫 쓰기에서 401 을 만났다.
+// 그 대응이 **인증을 통째로 끄는 것**이었다(token → token.off-2026-08-05). 그것이 이 문장의 비용이다.
+func TestAuthNoticeSaysLoopbackIsConfiguredButUnreached(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: false})
+	if !strings.Contains(n, "도달") {
+		t.Fatalf("면제가 설정만 열려 있고 아무도 그것을 못 받는다는 사실이 없다: %q", n)
+	}
+	if strings.Contains(n, "루프백 요청만 토큰 없이 통과한다") {
+		t.Fatalf("면제를 받는 클라이언트가 0인데 통과한다고 단정한다: %q", n)
+	}
+}
+
+// 안 닿는 **사유를 아는데 말하지 않는 것**은 절반만 고친 것이다.
+//
+// 설정과 관측이 어긋난다는 사실만 내면 운영자는 "왜?"를 스스로 파야 하고, 그 답
+// (도커 브리지가 소스 주소를 갈아 끼운다)은 서버가 이미 알고 있다 — self_update 축이
+// 같은 신호(/.dockerenv)를 이미 본다.
+func TestAuthNoticeNamesContainerWhenLoopbackUnreached(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: false, InContainer: true})
+	if !strings.Contains(n, "컨테이너") {
+		t.Fatalf("안 닿는 사유를 아는데 안 말한다: %q", n)
+	}
+	if !strings.Contains(n, "토큰") {
+		t.Fatalf("그래서 무엇을 해야 하는지가 없다 — 클라이언트도 토큰이 필요하다: %q", n)
+	}
+}
+
+// 면제가 **꺼져 있을 때**는 관측을 물을 이유가 없다. 그 갈래를 관측으로 오염시키면
+// "면제를 껐다"와 "면제는 켰는데 아무도 못 받는다"가 화면에서 같아진다 — 처방이 정반대다.
+func TestAuthNoticeKeepsTheDisabledCaseDistinct(t *testing.T) {
+	off := AuthNotice(true, LoopbackReach{Configured: false, Observed: false, InContainer: true})
+	if strings.Contains(off, "도달") || strings.Contains(off, "컨테이너") {
+		t.Fatalf("면제를 끈 서버가 '안 닿는다'고 말한다 — 끈 것은 결함이 아니다: %q", off)
+	}
+	if !strings.Contains(off, "루프백에도 토큰이 필요하다") {
+		t.Fatalf("면제가 꺼졌다는 사실이 사라졌다: %q", off)
+	}
+}
+
+// loopback_open 은 **관측**이고, 설정값은 따로 남는다.
+//
+// 둘을 한 필드에 접으면 "왜 안 닿는가"를 물을 수 없다 — 설정이 꺼진 것인지
+// 켰는데 도달이 없는 것인지가 같은 false 로 보인다.
+func TestHealthzLoopbackOpenIsObservedNotConfigured(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		true, LoopbackReach{Configured: true, Observed: false}, buildinfo.Coord{}, SelfUpdateStatus{})
+	if body.Auth.LoopbackOpen {
+		t.Fatal("도달한 루프백 요청이 없는데 loopback_open 이 참이다 — 설정을 옮기기만 하면 그것이 거짓 광고다")
+	}
+	if !body.Auth.LoopbackConfigured {
+		t.Fatal("설정값이 사라졌다 — 관측과 설정이 둘 다 있어야 '왜 안 닿는가'를 물을 수 있다")
+	}
+
+	seen := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{})
+	if !seen.Auth.LoopbackOpen {
+		t.Fatal("루프백으로 도달한 요청이 있는데 loopback_open 이 거짓이다 — 관측을 안 읽는다")
+	}
+}
+
+// ★ 문자열 포함만 보면 태그 오타(예: outcome → outcomeX)가 안 잡힌다 — 그 오타가 나도
+// 값은 여전히 응답 어딘가에 있으므로 strings.Contains(raw, "refused") 는 그대로 통과한다.
+// 그래서 **키:값 쌍**으로 단언한다. `"outcome":"refused"` 는 태그가 정확히 outcome 일 때만 나온다.
+func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
+	at := time.Date(2026, 8, 5, 0, 31, 2, 0, time.UTC)
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, LastAt: &at,
+			From: "07e5df4", To: "1d044b2",
+			Outcome: "refused", Detail: "selfcheck exit 1 — 증분 계획이 거절된다",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{
+		`"self_update":`,
+		`"watching":true`,
+		`"outcome":"refused"`,
+		`"from":"07e5df4"`,
+		`"to":"1d044b2"`,
+		`"detail":`,
+		`"last_at":`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ **보고는 있는데 못 재는** 상태가 선을 넘어가야 한다. 이것이 안 실리면 클라이언트는
+// watching=true 만 보고 "따라가는 중"이라 찍는다 — 지워진 바이너리를 감시하는 서버가
+// 화면에서는 정상으로 보인다. 여기서도 키:값 쌍으로 단언한다(태그 오타를 잡으려면 그래야 한다).
+func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true,
+			Stalled:  "실행 파일을 못 쟀다: no such file or directory",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if !strings.Contains(string(raw), `"stalled":"실행 파일을 못 쟀다`) {
+		t.Fatalf("막힌 사실이 선을 안 넘었다: %s", raw)
+	}
+	// 아무 일도 없을 때는 안 나가야 한다 — 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
+	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(quiet), `"stalled"`) {
+		t.Fatalf("막히지 않았는데 stalled 가 실렸다: %s", quiet)
+	}
+}
+
+// ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
+// json.Marshal 을 거쳐 **실제 바이트**로 확인한다 — 구조체 필드만 보면 태그 오타를
+// 원리적으로 못 잡는다(Go 필드 값은 태그와 무관하게 그대로 있으므로).
+func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: false, Reason: "이 플랫폼은 자기 재기동을 지원하지 않는다",
+		})
+	if body.SelfUpdate.Watching {
+		t.Fatal("watching 이 참이다")
+	}
+	if strings.TrimSpace(body.SelfUpdate.Reason) == "" {
+		t.Fatal("왜 안 보는지가 비었다")
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{`"watching":false`, `"reason":`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%s 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ 시도가 없었으면 last_at 은 응답에서 아예 **빠져야** 한다(omitempty). 제로 시각을
+// null 로 찍으면 "시도가 있었는데 시각을 모른다"로 읽힐 수 있다 — 부재와 null 은 다른 말이다.
+// serve.go 의 LastAt.IsZero() 변환(time.Time 제로값 → nil *time.Time)이 이 축의 유일한
+// 방어이고, 그 변환이 깨지면(예: 항상 &at 를 채우면) 이 시험이 잡는다.
+func TestHealthzOmitsLastAtWhenNoAttemptEver(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, // 감시 중이지만 아직 교체를 한 번도 안 봤다 — LastAt 이 nil
+		})
+	if body.SelfUpdate.LastAt != nil {
+		t.Fatalf("시도가 없었는데 LastAt 이 채워졌다: %v", body.SelfUpdate.LastAt)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(raw), `"last_at"`) {
+		t.Fatalf("last_at 이 omitempty 로 안 빠졌다: %s", raw)
 	}
 }
 

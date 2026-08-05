@@ -309,6 +309,82 @@ func (s *Store) PutSnapshot(ctx context.Context, sn model.Snapshot) error {
 	return s.Tx(ctx, func(t *Tx) error { return t.PutSnapshot(sn) })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 항목별 판단 링크
+// ─────────────────────────────────────────────────────────────────────────────
+
+// JudgmentLinksForItems 는 항목 id 들에 걸린 판단 id 를 한 번에 읽는다.
+//
+// ★ judgment_link_by_target 인덱스(schema.sql:261)는 처음부터 있었고 접근자만 없었다.
+// 그래서 service/pick.go 가 종류 9개를 훑어 링크로 거르는 방식으로 우회했는데,
+// 묶음 N건이면 그것이 N×9 질의가 된다.
+//
+// 링크가 없는 항목은 **키를 안 만든다.** 빈 슬라이스를 넣으면
+// "이 항목에 판단이 없다"와 "이 항목을 안 봤다"가 같은 값이 된다.
+//
+// 입력이 비면 DB 를 건드리지 않고 바로 돌아간다 — 결과가 애초에 빈 맵일 게 뻔한데
+// 왕복을 한 번 더 할 이유가 없어서다. (이전에는 "IN () 가 SQLite 구문 오류를 낸다"고
+// 여기 적어 뒀는데 틀린 주장이었다 — 실측하니 이 저장소가 쓰는 modernc.org/sqlite 는
+// `x IN ()` 을 오류 없이 "항상 거짓"으로 받아들인다. 엔진이 뭘 허용하는지에 기대는 이유가
+// 아니라는 뜻이라, 다음 사람이 또 확인하지 않도록 여기 사실대로 남긴다.)
+func (s *Store) JudgmentLinksForItems(ctx context.Context, project string, itemIDs []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	if len(itemIDs) == 0 {
+		return out, nil // 결과가 뻔히 빈 맵일 왕복을 생략한다 — 엔진의 IN () 처리에 기대지 않는다
+	}
+	ph := make([]string, len(itemIDs))
+	args := make([]any, 0, len(itemIDs)+1)
+	args = append(args, project)
+	for i, id := range itemIDs {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT jl.target_id, jl.judgment_id
+		   FROM judgment_link jl JOIN judgment j ON j.id = jl.judgment_id
+		  WHERE j.project = ? AND jl.target_kind = 'item'
+		    AND jl.target_id IN (`+strings.Join(ph, ",")+`)
+		  ORDER BY jl.target_id, jl.judgment_id`,
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("항목별 판단 링크 조회 실패(project=%q, 항목 %d건): %w",
+			clip(project, 64), len(itemIDs), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item, jid string
+		if err := rows.Scan(&item, &jid); err != nil {
+			return nil, fmt.Errorf("판단 링크 행 해석 실패: %w", err)
+		}
+		out[item] = append(out[item], jid) // ORDER BY 가 사전순을 보장한다
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("판단 링크 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// JudgmentsForItem 은 항목 하나에 걸린 판단 **전문**이다. 최신 먼저, 동점이면 id 역순.
+//
+// service/pick.go 의 linkedJudgments 가 종류 9개를 훑던 자리를 대신한다.
+func (s *Store) JudgmentsForItem(ctx context.Context, project, itemID string) ([]model.Judgment, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+judgmentCols+`
+		   FROM judgment j JOIN judgment_link jl ON jl.judgment_id = j.id
+		  WHERE j.project = ? AND jl.target_kind = 'item' AND jl.target_id = ?
+		  ORDER BY j.at DESC, j.id DESC`,
+		project, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("항목의 판단 조회 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	js, err := collectJudgments(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.fillLinks(ctx, js)
+}
+
 // GetSnapshot 은 스냅숏 하나를 읽는다.
 // "낡음" 판정은 여기서 하지 않는다 — input_digest 를 현재 트리와 대조하는 것은
 // git 을 읽는 계층의 몫이고, 저장 계층이 그 판정을 흉내 내면 두 벌이 된다.

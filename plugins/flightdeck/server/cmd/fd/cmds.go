@@ -12,6 +12,7 @@ import (
 
 	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/buildinfo"
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -76,6 +77,45 @@ func TakeFirstPositional(args []string) (pos string, rest []string) {
 		return args[0], args[1:]
 	}
 	return "", args
+}
+
+// TakeLeadingPositionals 는 맨 앞에서부터 이어지는 위치 인자를 **전부** 떼어낸다.
+// TakeFirstPositional 과 같은 순서 문제(위/뒤 어느 쪽에 플래그가 와도 같은 뜻)를
+// 여러 개의 위치 인자로 확장한 판이다 — `fd pick <id> <id>… [--flags]` 를 받으려면
+// 첫 번째 하나만 떼는 것으로는 부족하다: 둘째 id 가 그대로 "모르는 플래그"로 보여
+// flag.Parse 가 죽거나, 최악의 경우 조용히 버려진다(바로 이 태스크가 닫는 결함이다).
+//
+// ★ **`args[:i:i]` 로 자른다** — 3-인덱스 슬라이스라 cap 이 len 과 같아진다.
+// `args[:i]` 로 두면(리뷰 라운드 1 finding 3) cap 이 호출자의 원본 배열 끝까지
+// 남고, 호출부가 이 반환값에 `append` 하면 그 배열의 뒤쪽(=rest 가 가리키는 바로 그
+// 메모리)을 덮어쓴다. 지금은 `run()` 이 args 를 다시 안 읽어 우연히 안 터졌을 뿐이다 —
+// 호출부가 하나라도 늘면 그 순간 조용히 값이 바뀐다. cap 을 끊으면 append 가 항상
+// 새 배열을 할당해 이 위험이 원천적으로 없다.
+func TakeLeadingPositionals(args []string) (pos []string, rest []string) {
+	i := 0
+	for i < len(args) && !strings.HasPrefix(args[i], "-") {
+		i++
+	}
+	return args[:i:i], args[i:]
+}
+
+// nonBlankPositionals 는 다듬으면 빈 문자열이 되는 항목을 골라낸다. 순수 함수다.
+//
+// ★ 왜 필요한가(리뷰 라운드 1 finding 1 — CRITICAL). `len(itemIDs) == 0` 만으로는
+// `fd pick "   "` 를 못 거른다: 슬라이스 길이는 1이라 통과하고, 그 공백이 그대로
+// URL 경로에 실려 `/api/v1/items/   /claim` 이 되어 서버가 **추천 경로**로 떨어진다.
+// 그러면 아무것도 안 집었는데 종료코드 0·"브랜치: wa"·워크트리 명령이 나온다 —
+// 이 태스크가 닫으려던 바로 그 모양("성공했다고 말하지만 아무것도 안 집었다")이
+// 공백 인자 한 자리로 되살아난다. 옛 코드는 `strings.TrimSpace(itemID) == ""` 로
+// 이 축을 봤는데, 다중 인자로 옮기며 그 트림을 빠뜨렸다.
+func nonBlankPositionals(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // runStatus 는 `fd status` 다. 서버 상태 배너 + 보드.
@@ -248,19 +288,52 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 	return 0
 }
 
-// runPick 은 `fd pick <id>` 다. **오프라인에서는 거절된다.**
+// runPick 은 `fd pick <id> [<id>…]` 다. **오프라인에서는 거절된다.**
+//
+// ★ 인자가 여럿이면 **묶음 선점**이다 — 첫째가 선두(브랜치가 되는 id)이고 나머지는
+// item_ids 로 그대로 실어 보낸다(claimReq.ItemIDs). 예전에는 TakeFirstPositional +
+// fs.Arg(0) 로 딱 하나만 읽어, `fd pick c1 c2` 를 주면 c2 가 **말도 없이 버려지고**
+// 종료코드는 0 이었다 — 추천 응답이 item_ids 로 묶음을 프리스크라이브하는 지금,
+// 그 침묵은 "선점됐다고 믿고 시작했는데 실은 c2 를 아무도 안 쥔" 사고로 직행한다.
+//
+// ★ 인자 하나는 **item_ids 를 아예 안 싣는다**(claimReq.ItemIDs 가 비어 nil).
+// 오늘까지의 단독 선점·재개 경로와 문자 그대로 같은 요청을 보내야 하기 때문이다 —
+// service.PickInput.ItemIDs 가 1개짜리로 차 있어도 pickBundle 이 pickExplicit 과
+// 같은 결과를 내긴 하지만(태스크 8), 요청 자체를 다르게 만들 이유가 없다.
 func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("pick")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
-	itemID, rest := TakeFirstPositional(args)
+	itemIDs, rest := TakeLeadingPositionals(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	if itemID == "" {
-		itemID = fs.Arg(0)
+	// ★ **뒤에 남은 위치 인자도 합친다** — 비었을 때만 대신 쓰지 않는다. flag.Parse 는
+	// 첫 비플래그 인자에서 멈추므로, `fd pick w1 --cc-session x w2` 처럼 id 사이에
+	// 플래그가 끼면 앞에서 이미 w1 을 건졌어도 w2 는 fs.Args() 에 따로 남는다.
+	// 여기서 안 합치면 이 갈래에서도 조용히 버려진다 — 이 태스크가 고치려는 사고 그대로다.
+	//
+	// ★ 합치는 것도 **같은 "-" 판정을 통과한 것만**이다(리뷰 라운드 1 finding 2).
+	// flag.Parse 는 첫 비플래그 인자에서 멈추므로 그 뒤에 "-" 로 시작하는 오타가 있어도
+	// (`fd pick ta --cc-session x tb --bogus`) fs.Args() 에 그대로 남는다. 이걸
+	// 검증 없이 합치면 "--bogus" 가 항목 id 로 둔갑해 서버에 그대로 실려 가고,
+	// 서버가 그것을 "못 찾음"으로 거절해도 **묶음의 나머지는 성공해 종료코드가 0** 이
+	// 된다 — 같은 오타가 자리만 옮기면 통과하는 비대칭이라 여기서 막는다.
+	tailIDs, leftover := TakeLeadingPositionals(fs.Args())
+	itemIDs = append(itemIDs, tailIDs...)
+	if len(leftover) > 0 {
+		fmt.Fprintf(out, "플래그처럼 보이는 인자를 항목 id 자리로 못 읽었다: %s\n"+
+			"플래그는 id 들 앞이나(맨 뒤 한 무더기로) 모아 써라 — id 사이에 있으면 그 뒤는 이 명령이 못 본다.\n",
+			clip(leftover[0], 80))
+		return 2
 	}
-	if strings.TrimSpace(itemID) == "" {
-		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id>")
+	// ★ 길이만 보면 안 된다(리뷰 라운드 1 finding 1 — CRITICAL). `fd pick "   "` 는
+	// len(itemIDs)==1 이라 통과했었고, 그 공백이 그대로 URL 에 실려 서버가
+	// **추천 경로**로 떨어졌다 — 아무것도 안 집었는데 종료코드 0·"브랜치: …"·
+	// 워크트리 명령이 나오는, 이 태스크가 닫으려던 바로 그 모양이다. 길이를 재기
+	// 전에 반드시 다듬어 걸러낸다.
+	itemIDs = nonBlankPositionals(itemIDs)
+	if len(itemIDs) == 0 {
+		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id> [<item-id>…] — 여럿이면 첫째가 선두(브랜치)다")
 		return 2
 	}
 	a.cli.Flush(ctx)
@@ -270,8 +343,11 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	a.cli.Session = sess
-	res, err := a.cli.Write(ctx, "pick", "/api/v1/items/"+urlPath(itemID)+"/claim",
-		claimReq{Project: a.proj.ID, SessionID: sess})
+	req := claimReq{Project: a.proj.ID, SessionID: sess}
+	if len(itemIDs) > 1 {
+		req.ItemIDs = itemIDs // 선두 포함 전체 순서 — 경로는 선두(itemIDs[0])로 보낸다
+	}
+	res, err := a.cli.Write(ctx, "pick", "/api/v1/items/"+urlPath(itemIDs[0])+"/claim", req)
 	if err != nil {
 		fmt.Fprintf(out, "선점하지 못했다: %v\n", err)
 		return 1
@@ -282,6 +358,19 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(out, mcpsrv.RenderPick(pr, a.now()))
+	// ★ **보낸 것과 돌아온 것을 대조한다.** 여기까지 오면 HTTP 는 200 이었지만
+	// 그것은 "요청한 id 를 전부 다뤘다"를 뜻하지 않는다 — item_ids 를 모르는 구서버는
+	// 그 필드를 조용히 버리고 경로의 선두 하나만 집는다(양쪽 api_version 이 "1" 이라
+	// SkewBanner 도 안 뜬다). 그 응답을 그대로 렌더하고 0 을 내면 `fd pick a b c` 가
+	// a 만 찍고 성공으로 끝난다 — b·c 는 아무도 안 쥔 채 이름조차 안 불린다.
+	//
+	// 종료코드를 1 로 낸다. 이 명령의 소비자는 사람만이 아니라 **스크립트와
+	// 에이전트의 Bash 도구**이고, 그들이 읽는 유일한 기계 신호가 종료코드다.
+	// 본문은 위에서 이미 냈다 — 선두는 실제로 집혔을 수 있으므로 지우지 않는다.
+	if missing := judge.UnaccountedIDs(itemIDs, pr.AccountedIDs()); len(missing) > 0 {
+		fmt.Fprint(out, mcpsrv.RenderBundleUnaccounted(missing))
+		return 1
+	}
 	return 0
 }
 
@@ -346,6 +435,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	title := fs.String("title", "", "판단 제목")
 	body := fs.String("body", "", "핸드오프 "+bodyFlagHelp)
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
+	closeSession := fs.Bool("close", false, "항목을 끝낸 뒤 이 세션도 닫는다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
 	if err := fs.Parse(rest); err != nil {
@@ -384,6 +474,60 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(out, mcpsrv.RenderFinish(fr))
+
+	// ★ 호출 둘이다(항목 finish → 세션 close). 한 트랜잭션이 아니므로 **끝났는데 못 닫은
+	// 상태를 그대로 낸다** — 둘 다 성공한 척하면 다음 사람이 보드에서 이 카드를 보고
+	// "아직 일하는 중"으로 읽는다.
+	if *closeSession {
+		if _, cerr := a.CloseSession(ctx, sess, "finish --close"); cerr != nil {
+			fmt.Fprintf(out, "\n항목은 끝났으나 세션을 못 닫았다: %v\n", cerr)
+			fmt.Fprintln(out, "선점은 반납됐으니 보드 ①에서는 이미 안 보인다 — 다만 겹침 판정에는 아직 잡힌다. 다시 닫으려면: fd close")
+			return 1
+		}
+		fmt.Fprintln(out, "\n그리고 이 세션을 닫았다. 다음 신호가 오면 다시 살아난다.")
+	}
+	return 0
+}
+
+// runClose 는 이 세션을 닫는다.
+//
+// ★ 선점이 남아 있으면 거절한다. 닫힌 카드는 ListLive 에서 빠지고, 그러면 그 선점이
+// **아무에게도 안 보인다** — 항목을 아무도 못 집는데 누가 잡았는지도 안 보이는 상태가 된다.
+// 우회 플래그는 두지 않는다: 우회할 필드가 있으면 우회된다.
+func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("close")
+	why := fs.String("why", "", "닫는 사유(표시 전용)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	cc := a.ccSessionID(*session)
+	if cc == "" {
+		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).")
+		return 1
+	}
+	// 선점 목록은 이 응답에 실려 온다. 따로 묻지 않는다 — 두 번 물으면 그 사이가 창이다.
+	res, _, err := a.OpenSession(ctx, cc, "")
+	if err != nil {
+		fmt.Fprintf(out, "세션 좌표를 못 얻어 닫지 못했다: %v\n", err)
+		return 1
+	}
+	if len(res.Claims) > 0 {
+		fmt.Fprintf(out, "안 닫았다 — 선점 %d건이 남아 있다: %s\n",
+			len(res.Claims), strings.Join(res.Claims, ", "))
+		fmt.Fprintln(out, "닫으면 이 선점이 보드에서 사라진다 — 보드 ①은 선점을 든 카드만 낸다.")
+		fmt.Fprintln(out, "먼저 끝내라: fd finish <item-id> --body …")
+		return 1
+	}
+
+	sess, err := a.CloseSession(ctx, res.Session.ID, *why)
+	if err != nil {
+		fmt.Fprintf(out, "닫지 못했다: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "close · 세션 %s 를 닫았다 [%s]\n", sess.ID, sess.State)
+	fmt.Fprintln(out, "다음 프롬프트·도구·MCP 호출이 오면 이 카드는 다시 살아난다 — 닫기는 판정이 아니라 관측이다.")
 	return 0
 }
 

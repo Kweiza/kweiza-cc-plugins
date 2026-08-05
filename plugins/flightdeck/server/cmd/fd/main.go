@@ -28,14 +28,19 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd mcp                                  stdio MCP 서버(플러그인이 부른다)
   fd hook <event>                         훅. stdin 으로 페이로드를 받는다
                                           (session-start|user-prompt|post-tool|pre-compact|stop)
+  fd selfcheck --db <경로>                 이 바이너리로 재기동해도 되는가에만 답한다.
+                                          fd serve 의 자동 갱신이 자식으로 부르고, 거절을
+                                          손으로 재현할 때 같은 명령을 쓴다
 
   fd status                               서버 상태 배너 + 보드
   fd open [--label …]                     세션 등록(재호출은 재개다)
   fd beat --kind prompt|tool|mcp [--path] 생존 신호
   fd next                                 추천 1건 + 탈락 사유 전부. **선점하지 않는다**
-  fd pick <item-id>                       선점(오프라인에서는 거절된다)
+  fd pick <item-id> [<item-id>…]          선점(여럿이면 첫째가 선두 · 오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
-  fd finish <item-id> --body …            판단+후속+종료+반납을 한 번에
+  fd finish <item-id> --body … [--close]  판단+후속+종료+반납을 한 번에. --close 면 세션도 닫는다
+  fd close [--why …]                      이 세션을 닫는다. 선점이 남아 있으면 거절한다.
+                                          **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
   fd land [--ok|--fail <사유>|--leave <사유>]
@@ -67,6 +72,10 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 	switch args[0] {
 	case "serve":
 		return runServe(args[1:], env, log)
+	case "selfcheck":
+		// ★ App 을 만들지 않는다. 이 명령은 재기동 검증의 피험자라, 서버 도달·세션 열기
+		// 같은 축이 끼면 그 축의 실패가 "새 판이 고장났다"로 오독된다.
+		return runSelfcheck(args[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -114,6 +123,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runAdd(ctx, args[1:], stdout)
 	case "finish":
 		return app.runFinish(ctx, args[1:], stdout)
+	case "close":
+		return app.runClose(ctx, args[1:], stdout)
 	case "move":
 		return app.runMove(ctx, args[1:], stdout)
 	case "land":

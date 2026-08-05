@@ -408,13 +408,31 @@ type healthzResponse struct {
 	DiskKnown   bool    `json:"disk_known"`
 	DiskError   string  `json:"disk_error"`
 	Auth        struct {
-		TokenSet     bool   `json:"token_set"`
-		LoopbackOpen bool   `json:"loopback_open"`
-		Notice       string `json:"notice"`
+		TokenSet bool `json:"token_set"`
+		// LoopbackOpen 은 **관측**이다 — 설정이 열려 있고 루프백 도달이 실제로 있었을 때만 참.
+		LoopbackOpen bool `json:"loopback_open"`
+		// LoopbackConfigured 는 설정값이다. 옛 서버는 이 축을 안 내므로 거짓으로 온다 —
+		// 그 침묵은 Build.Known 이 이미 알리는 "판이 낡았다"와 같은 갈래다.
+		LoopbackConfigured bool   `json:"loopback_configured"`
+		Notice             string `json:"notice"`
 	} `json:"auth"`
 	// Build 는 서버 **프로세스**의 빌드 좌표다. 이 축을 안 내는 옛 서버면 Known 이 거짓이고,
 	// 그 부재 자체가 "판이 이 축을 알리기 전만큼 낡았다"는 신호다 — 0값으로 접히지 않는다.
 	Build buildinfo.Coord `json:"build"`
+	// SelfUpdate 는 서버의 자동 갱신 축이다(internal/api.SelfUpdateStatus 와 같은 모양).
+	// 이 축을 안 내는 옛 서버면 전부 제로값이다 — Watching=false·Reason="" 이 되고,
+	// 그 침묵은 "안 보고 있다"가 아니라 "이 축을 아직 모른다"다. 옛 서버 대조는
+	// Build.Known 이 이미 그 사실을 알린다.
+	SelfUpdate struct {
+		Watching bool   `json:"watching"`
+		Reason   string `json:"reason"`
+		Stalled  string `json:"stalled"`
+		LastAt   string `json:"last_at"`
+		From     string `json:"from"`
+		To       string `json:"to"`
+		Outcome  string `json:"outcome"`
+		Detail   string `json:"detail"`
+	} `json:"self_update"`
 }
 
 func (c *Client) Healthz(ctx context.Context) (healthzResponse, error) {

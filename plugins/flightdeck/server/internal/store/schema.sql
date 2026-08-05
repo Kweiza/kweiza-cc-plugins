@@ -199,12 +199,17 @@ CREATE TABLE claim (
 
 -- 추천 1건과 탈락 사유 전부를 남긴다. 사유가 없으면 큐는 블랙박스가 되고,
 -- 블랙박스는 두 번째 세션부터 무시된다.
+-- ★ picked_with 를 여기에 안 넣는다. 신규 설치도 schema.sql(BaseSchemaVersion=1) 위에
+--   증분 전부(002..N)를 그대로 얹는다(store.go migrate() 참고) — pick_eval 은 v1 부터
+--   있던 표라 004 증분(ALTER TABLE ADD COLUMN)이 신규 설치에도 똑같이 걸린다.
+--   여기 미리 넣으면 신규 설치에서 같은 컬럼을 두 번 만들게 되어 "duplicate column" 로 죽는다
+--   (TestFreshInstallAndUpgradeProduceTheSameSchema 가 이 실수를 잡아냈다).
 CREATE TABLE pick_eval (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   project    TEXT NOT NULL,
   session_id TEXT NOT NULL,
   at         TEXT NOT NULL,
-  picked     TEXT,                     -- 항목 id 또는 NULL(적격 0건)
+  picked     TEXT,                     -- 묶음 **선두**의 항목 id 또는 NULL(적격 0건)
   rejected   TEXT NOT NULL             -- JSON: [{item, reason_code, detail}]
 );
 

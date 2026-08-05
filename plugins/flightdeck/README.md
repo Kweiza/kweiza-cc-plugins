@@ -20,12 +20,32 @@
 
 ```bash
 cd plugins/flightdeck
-docker compose up -d
+FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null)" docker compose up -d
 curl -s localhost:7420/healthz
 ```
 
 `{"ok":true,"api_version":"1","db_ok":true,…}` 가 나오면 됐다.
 화면은 <http://localhost:7420> — 읽기 전용 한 장이다.
+
+세 가지를 환경에서 받는다:
+
+- **`FD_TOKEN`** — 안 주면 인증이 꺼진 채 뜬다. 그 사실은 `/healthz` 가 말하지만,
+  **말할 뿐 막지는 않는다.** 이미 토큰을 쓰던 서버를 옮기는 중이라면 반드시 같은 값을 준다.
+  컨테이너로 띄우면 호스트에서 오는 요청도 **루프백이 아니다**(브리지 게이트웨이로 보인다) —
+  즉 토큰 면제가 안 걸리므로, 클라이언트 쪽도 `fd setup --token …` 으로 같은 값을 가져야 한다.
+- **`FD_UID`/`FD_GID`** — 볼륨 `~/.flightdeck` 와 저장소는 호스트 사용자의 것이다.
+  기본값 1000 이 아니면(`id -u`) 주지 않는 한 DB 를 열되 못 쓰고, git 은 소유권을 의심한다.
+- **`FD_REPOS`** — 저장소들이 있는 자리(기본 `~/cdo-dev`). **파생의 전부가 여기서 나온다** —
+  브랜치 · sha · 미커밋 발자국 · 경로 겹침. 안 붙이면 서버는 정상으로 보이면서 보드에
+  `브랜치 ?(못 읽음)` 만 적는다. 호스트와 컨테이너의 경로가 **같아야 한다**(워크트리의
+  `.git` 이 주 저장소를 절대경로로 가리키기 때문이다).
+
+플러그인으로 켰다면 저장소가 아니라 **설치된 캐시 자리**에서 띄운다 — 그것이
+`/plugin` 이 받아 둔 그 판이다:
+
+```bash
+cd ~/.claude/plugins/cache/<마켓플레이스>/flightdeck/<버전>
+```
 
 도커 없이 돌리려면:
 
@@ -47,7 +67,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
 | MCP 도구 7개 | `board` `pick` `note` `add` `finish` `alloc` `land` |
-| 스킬 3개 | `fd-pickup` · `fd-handoff` · `fd-setup` |
+| 스킬 4개 | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 `bin/fd` 는 셸 런처다. 첫 훅이 `server/` 를 빌드해 `${CLAUDE_PLUGIN_DATA}` 에 캐시한다.
 **Go 가 없으면 안내만 내고 세션은 그대로 진행된다**(훅은 세션을 막지 않는다).
@@ -68,7 +88,7 @@ export FD_TOKEN=<서버와 같은 토큰>   # 서버에 FD_TOKEN 을 줬을 때�
 세션 안에서는 MCP 도구를 부르면 된다.
 
 ```
-board                      지금 누가 무엇을 만지고 있나
+board                      지금 어느 작업이 잡혀 있나(선점을 든 카드만 · 활동 배지)
 pick                       추천 1건 + 왜 + 탈락 사유 전부. **선점하지 않는다**
 pick(item_id: "t2-abc")    선점 + 항목 본문 + 연결된 판단 + 브랜치·워크트리 명령
 note(kind: "ask", body: …) 남이 건드리면 곤란한 것
@@ -83,7 +103,7 @@ land                       랜딩 줄에 선다 / 내 차례를 본다. result �
 ```bash
 fd status                 # 서버 상태 배너 + 보드
 fd next                   # 추천만
-fd pick <item-id>         # 선점
+fd pick <item-id> [<item-id>…]  # 선점(여럿이면 첫째가 선두)
 fd note --kind decision --body "왜 그렇게 했나"
 fd finish <item-id> --outcome done --body "① 왜 ② 기각 ③ 안 한 것 ④ 확인만 한 것"
 fd land                   # 랜딩 줄에 선다(--ok|--fail <사유>|--leave <사유> 로 보고·이탈)
@@ -133,7 +153,7 @@ fd doctor
 
 | 증상 | 볼 곳 |
 |---|---|
-| 보드가 비어 있다 | `fd doctor` 의 `FD_URL` · 서버 로그의 `기동` 줄 · 다른 세션이 같은 서버를 보나 |
+| 보드 ①이 비어 있다 | **먼저: 아무도 항목을 안 쥐고 있으면 그것이 정상이다.** ①은 선점을 든 카드만 낸다 — 화면이 "서버 장애가 아니다"와 접은 수를 함께 말한다. 그래도 이상하면 `fd doctor` 의 `FD_URL` · 서버 로그의 `기동` 줄 · 다른 세션이 같은 서버를 보나 |
 | 훅이 아무것도 안 한다 | `bin/fd` 를 직접 돌려 봐라. Go 가 없으면 안내가 나온다 |
 | 포트가 안 열린다 | 서버 로그의 `서버를 띄우지 못했다` 줄에 처방이 함께 있다 |
 | 도구가 안 보인다 | `.mcp.json` 의 `type` 이 `stdio` 인가 — 없으면 서버가 통째로 스킵된다 |

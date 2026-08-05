@@ -15,14 +15,50 @@ import (
 
 // 화면·알림·진단 표면.
 
-// AuthStatus 는 /healthz 가 알리는 인증 설정이다.
+// LoopbackReach 는 루프백 면제가 **실제로 닿는가**에 대한 관측이다.
+//
+// ★ 설정과 관측을 가르는 이유가 실물 사고다(2026-08-05). 서버를 컨테이너로 띄우면
+// 호스트에서 온 요청의 원격 주소가 브리지 게이트웨이(172.x)이고 IsLoopback 이 false 다 —
+// **면제를 받는 클라이언트가 하나도 없다.** 그런데 설정값만 옮기는 표면은 그 상황에서도
+// "루프백 요청만 토큰 없이 통과한다"를 낸다. 운영자는 그것을 믿고 클라이언트에 토큰을
+// 안 준 채 전환하고, 첫 쓰기에서 전면 차단을 만난다. 실제로 그렇게 됐고 대응은
+// 인증을 통째로 끄는 것이었다.
+//
+// 참인 설정을 말하면서 거짓인 결론을 읽게 하는 문장은 침묵보다 나쁘다 —
+// buildinfo.Coord 의 Known 과 SelfUpdateStatus 의 Watching 이 같은 규율이다.
+type LoopbackReach struct {
+	// Configured 는 설정상 면제가 열려 있는가다(= !RequireTokenOnLoopback).
+	Configured bool
+	// Observed 는 이 서버에 루프백으로 **실제로 도달한 요청**이 있었는가다.
+	//
+	// ★ 면제가 발동했는가가 아니라 도달했는가다. 다들 토큰을 실어서 면제가 한 번도
+	// 안 걸리는 것은 정상이고, 도달 자체가 0인 것만이 배선 결함이다.
+	Observed bool
+	// InContainer 는 안 닿는 **사유를 아는 경우** 그 사실이다. 배선이 판정해 준다.
+	//
+	// 문구가 아니라 불리언인 이유: 사람이 읽을 문장은 표면의 몫이고, 배선이 문자열을
+	// 넘기면 self_update 축의 문구("자기 갱신을 안 한다")가 인증 문맥으로 새어 든다.
+	InContainer bool
+}
+
+// open 은 면제가 **실제로 열려 있는가**다. 설정과 관측이 둘 다 참일 때만 참이다.
+func (r LoopbackReach) open() bool { return r.Configured && r.Observed }
+
+// AuthStatus 는 /healthz 가 알리는 인증 상태다.
 //
 // ★ **조용한 무인증은 안 된다.** 토큰이 설정되지 않았다는 사실과 루프백 면제가
 // 켜져 있다는 사실이 여기 없으면, 운영자는 서버가 열려 있다는 것을 알 방법이 없다.
+//
+// ★ LoopbackOpen 과 LoopbackConfigured 를 **한 필드로 접지 마라.** 접으면
+// "면제를 껐다"와 "면제는 켰는데 아무도 못 받는다"가 같은 false 로 보이고,
+// 그 둘은 처방이 정반대다(전자는 의도한 상태, 후자는 배선 결함이다).
 type AuthStatus struct {
-	TokenSet     bool   `json:"token_set"`
-	LoopbackOpen bool   `json:"loopback_open"`
-	Notice       string `json:"notice"`
+	TokenSet bool `json:"token_set"`
+	// LoopbackOpen 은 **관측**이다 — 설정이 열려 있고 실제로 루프백 도달이 있었을 때만 참.
+	LoopbackOpen bool `json:"loopback_open"`
+	// LoopbackConfigured 는 설정값 그대로다.
+	LoopbackConfigured bool   `json:"loopback_configured"`
+	Notice             string `json:"notice"`
 }
 
 // HealthzBody 는 /healthz 응답이다.
@@ -50,17 +86,76 @@ type HealthzBody struct {
 	// 좌표 누출이 아니다 — sha 는 이 저장소를 읽을 수 있는 사람에게만 의미가 있고,
 	// db_path 처럼 서버의 파일 배치를 알리지 않는다.
 	Build buildinfo.Coord `json:"build"`
+	// SelfUpdate 는 이 서버가 자기 판을 따라가고 있는가다.
+	SelfUpdate SelfUpdateStatus `json:"self_update"`
 }
 
-// AuthNotice 는 지금 설정을 사람이 읽을 한 줄로 만든다. 순수 함수다.
-func AuthNotice(tokenSet, loopbackOpen bool) string {
+// SelfUpdateStatus 는 서버의 자동 갱신 축이다.
+//
+// ★ **Watching 이 먼저다.** 감시기가 안 떴는데 나머지가 비어 있으면
+// "아직 갱신이 없었다"로 읽힌다 — 그것은 "안 보고 있다"와 전혀 다르다.
+// buildinfo.Coord 의 Known 이 같은 규율이다.
+//
+// **성공은 여기 안 남는다.** 성공하면 프로세스가 갈아치워져 새 프로세스는 그 사실을 모른다.
+type SelfUpdateStatus struct {
+	Watching bool       `json:"watching"`
+	Reason   string     `json:"reason,omitempty"`
+	LastAt   *time.Time `json:"last_at,omitempty"`
+	From     string     `json:"from,omitempty"`
+	To       string     `json:"to,omitempty"`
+	Outcome  string     `json:"outcome,omitempty"` // refused | failed
+	Detail   string     `json:"detail,omitempty"`
+
+	// ★ Stalled 는 **보고는 있는데 지금 실행 파일을 못 잰다**는 사실이다.
+	// Watching=true 인데 이것이 차 있으면 "따라가는 중"이 아니라 "눈이 멀었다"다 —
+	// 그 둘을 안 가르면 지워진 바이너리를 감시하는 서버가 화면에서는 정상으로 보인다.
+	Stalled string `json:"stalled,omitempty"`
+}
+
+// AuthNotice 는 지금 인증 상태를 사람이 읽을 한 줄로 만든다. 순수 함수다.
+//
+// ★ 갈래 순서가 계약이다. **면제가 꺼진 경우를 관측보다 먼저 본다** — 끈 서버는
+// 도달이 0이어도 정상이고, 그것을 "안 닿는다"로 말하면 의도한 설정이 결함으로 읽힌다.
+func AuthNotice(tokenSet bool, reach LoopbackReach) string {
 	switch {
 	case !tokenSet:
 		return "토큰이 설정되지 않았다 — 이 서버는 전 요청을 무인증으로 통과시킨다"
-	case loopbackOpen:
-		return "토큰이 설정돼 있다. 루프백 요청만 토큰 없이 통과한다"
-	default:
+	case !reach.Configured:
 		return "토큰이 설정돼 있다. 루프백에도 토큰이 필요하다"
+	case reach.Observed:
+		return "토큰이 설정돼 있다. 루프백 요청만 토큰 없이 통과한다"
+	case reach.InContainer:
+		return "토큰이 설정돼 있다. 루프백 면제는 설정상 열려 있으나 이 서버에 루프백으로 도달한 요청이 없다 — " +
+			"컨테이너라서다(/.dockerenv). 호스트에서 오는 요청은 브리지 게이트웨이로 보이므로 루프백이 아니다. " +
+			"클라이언트도 토큰이 필요하다"
+	default:
+		return "토큰이 설정돼 있다. 루프백 면제는 설정상 열려 있으나 이 서버에 루프백으로 도달한 요청이 아직 없다 — " +
+			"면제를 받는 클라이언트가 하나도 없을 수 있다. 클라이언트에 토큰을 실어라"
+	}
+}
+
+// UnauthorizedGuidance 는 401 을 받은 사람에게 **무엇을 하면 되는지**를 낸다. 순수 함수다.
+//
+// ★ 이 문구가 관측을 따라야 하는 이유가 실물 사고다. 앞선 판은 조건 없이
+// "루프백은 토큰 없이 통과한다(/healthz 가 그 설정을 알린다)" 를 붙였고, 그래서
+// **루프백에서 401 을 맞은 응답이 자기 자신을 반박했다** — 401 을 낸 그 응답이
+// 401 이 나면 안 된다고 안내한 셈이다. 원인을 찾던 세션이 그 문장 때문에
+// 배선(도커 브리지)이 아니라 자기 토큰 설정을 의심했다.
+//
+// 거짓을 지우면서 **처방까지 지우지 않는다** — 어느 갈래든 Bearer 지시는 남는다.
+func UnauthorizedGuidance(reach LoopbackReach) string {
+	const base = "Authorization: Bearer <token> 을 실어라."
+	switch {
+	case !reach.Configured:
+		return base + " 이 서버는 루프백에도 토큰을 요구한다."
+	case reach.Observed:
+		return base + " 루프백은 토큰 없이 통과한다(/healthz 가 그 설정을 알린다)."
+	case reach.InContainer:
+		return base + " 루프백 면제는 설정상 열려 있으나 이 서버는 컨테이너라 호스트에서 오는 요청이" +
+			" 루프백으로 안 보인다 — 면제를 기대하지 마라(/healthz 의 auth 절이 그 관측을 낸다)."
+	default:
+		return base + " 루프백 면제는 설정상 열려 있으나 이 서버에 루프백으로 도달한 요청이 아직 없다" +
+			" — 면제를 기대하지 마라(/healthz 의 auth 절이 그 관측을 낸다)."
 	}
 }
 
@@ -72,13 +167,16 @@ func AuthNotice(tokenSet, loopbackOpen bool) string {
 // ★ build 를 **인자로 받는다.** service.Health 에 필드를 더하지 않는 이유가 둘이다 —
 // 빌드 좌표는 DB·디스크 상태가 아니라 프로세스의 성질이고, 인자로 받으면 이 함수가
 // tokenSet·loopbackOpen 과 같은 모양으로 순수하게 남아 시험이 값을 직접 준다.
-func HealthzOf(h service.Health, tokenSet, loopbackOpen bool, build buildinfo.Coord) HealthzBody {
+// su 도 같은 이유로 인자다 — 핸들러가 body 에 따로 얹으면 순수 함수가 불완전한 body 를
+// 만들고 그 시험은 통과한다. 실제 응답과 갈리는 그 모양을 이 저장소가 반복해서 문제 삼았다.
+func HealthzOf(h service.Health, tokenSet bool, reach LoopbackReach, build buildinfo.Coord, su SelfUpdateStatus) HealthzBody {
 	b := HealthzBody{
-		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build,
+		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build, SelfUpdate: su,
 		DiskFreePct: h.DiskFreePct, DiskKnown: h.DiskKnown, At: h.At,
 		Auth: AuthStatus{
-			TokenSet: tokenSet, LoopbackOpen: loopbackOpen,
-			Notice: AuthNotice(tokenSet, loopbackOpen),
+			TokenSet: tokenSet, LoopbackOpen: reach.open(),
+			LoopbackConfigured: reach.Configured,
+			Notice:             AuthNotice(tokenSet, reach),
 		},
 	}
 	if h.DBError != "" {
@@ -96,7 +194,15 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// buildinfo.Self 는 파일이 아니라 **이 프로세스**를 읽는다. 실측에서 설치 파일은 이미
 	// 최신으로 교체돼 있는데 프로세스는 지워진 아이노드의 옛 코드를 돌고 있었다 —
 	// 파일을 재는 진단은 그 상황에서 "최신"이라 답한다.
-	body := HealthzOf(h, s.opt.Token != "", !s.opt.RequireTokenOnLoopback, buildinfo.Self())
+	//
+	// s.opt.SelfUpdate 가 nil 인 것은 정상 갈래다(시험 조립·다른 진입점이 안 줄 수 있다).
+	// 그때 빈 구조체를 내면 "아직 갱신이 없었다"로 읽히는데 그것은 "배선이 안 됐다"와
+	// 전혀 다르다 — 그래서 사유를 채운 값으로 대신한다.
+	su := SelfUpdateStatus{Watching: false, Reason: "이 서버는 자동 갱신 축을 배선하지 않았다"}
+	if s.opt.SelfUpdate != nil {
+		su = s.opt.SelfUpdate()
+	}
+	body := HealthzOf(h, s.opt.Token != "", s.loopbackReach(), buildinfo.Self(), su)
 	status := http.StatusOK
 	if !body.OK {
 		status = http.StatusServiceUnavailable

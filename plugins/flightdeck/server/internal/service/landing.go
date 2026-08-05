@@ -460,8 +460,12 @@ func (s *Service) ReleaseLaneRow(ctx context.Context, project string, rowID int6
 
 	var out LaneReleaseResult
 	err = s.st.Tx(ctx, func(t *store.Tx) error {
+		// ★ 사람은 **"actor"** 에 싣는다. "mode" 는 형제 이벤트(lane.land)에서
+		// acquire|report|leave 를 뜻하는 자리라, 거기에 사람 이름을 넣으면 같은 키가
+		// 이벤트마다 다른 것을 뜻하게 되고 소비자가 조용히 엉뚱한 값을 읽는다.
+		// event 는 추가 전용이라 잘못 쌓인 행은 영구히 남는다 — 미루는 것 자체가 비용이다.
 		t.LogEvent("lane.release", project, "", map[string]any{
-			"row": rowID, "mode": clip(actor, 64), "bytes": len(reason),
+			"row": rowID, "actor": clip(actor, 64), "bytes": len(reason),
 		})
 
 		// 줄 전체를 **닫기 전에** 읽는다. 판단에 "그때 줄에 있던 사람"을 적어야 하고,

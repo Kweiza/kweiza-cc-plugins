@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -48,6 +49,15 @@ type SessionRow struct {
 	DeriveError string
 	IsSelf      bool
 	OpenedAge   string
+
+	// HasActivity·Activity 는 활동 배지다(ActivityOf). 불리언과 사유를 함께 든다 —
+	// 불리언만 두면 화면이 "왜"를 못 말하고, 사람은 그 "왜"로 회수를 판단한다.
+	HasActivity bool
+	Activity    string
+	// Derived 가 false 면 git 파생(브랜치·ahead·미커밋)을 **안 읽은** 행이다.
+	// 창 밖 선점자 줄이 그렇다 — 파생은 카드당 git 호출 1~4회라 창 밖까지 안 돈다.
+	// 0값과 "안 읽었다"를 가르는 축이라, 화면이 이 사실을 말해야 한다.
+	Derived bool
 }
 
 // LivePanel 은 섹션 ① 이다.
@@ -62,6 +72,17 @@ type LivePanel struct {
 	// 0건이면 빈 문자열이다 — **화면이 반드시 말한다**, MCP board 와 같은 이유다.
 	// 침묵하면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다(설계 §4).
 	OutOfWindow string
+
+	// Folded 는 **선점이 없어 안 낸** 세션이 있다는 사실이다. 0건이면 빈 문자열이다.
+	//
+	// ★ OutOfWindow 와 따로 두는 이유: 접힌 사유가 둘이고 처방이 다르다.
+	// 창 밖은 "오래 조용하다"이고 선점 없음은 "큐 밖에서 일한다"다. 한 줄로 뭉치면
+	// 읽는 사람이 손댈 자리를 못 찾는다.
+	//
+	// ★ 그리고 **조율에서 빠진 것이 아니라는 사실을 함께 말한다.** 겹침 처방은
+	// 그 세션들도 그대로 본다(prescribe.go 가 ListLive 를 직접 읽는다) — 안 그러면
+	// 사람이 "저 세션은 아무도 안 본다"고 잘못 읽는다.
+	Folded string
 }
 
 // ClaimTarget 은 회수 가능한 선점 하나다. **근거를 함께 낸다**(설계 §4 의 다섯 축 중 표시분).
@@ -182,6 +203,27 @@ type LandingPanel struct {
 	Empty     string
 	Tier      string
 	Current   string // 현재 입력(기본 브랜치 HEAD) — 스냅숏 대조의 상대
+	// 레인 절. **0건·못 읽음·어긋남을 각각 자기 문자열로 가진다** — 한 자리에 접으면
+	// "질의가 안 돌았다"와 "아무도 안 섰다"가 화면에서 같아진다.
+	Lane      []LaneRow
+	LaneErr   string
+	LaneEmpty string
+	LaneWarn  string
+}
+
+// LaneRow 는 랜딩 줄의 한 자리다.
+//
+// ★ 회수 판정은 **두 숫자**로 한다: 얼마나 오래 쥐고 있나(Held)와 마지막 신호가
+// 얼마나 낡았나(Signal). 자동 만료를 안 만든 근거가 "사람이 이 나이들을 보고 판정한다"
+// 이므로 한 축이 빠지면 판정의 근거가 없다 — 어긋남 행에서도 반드시 둘 다 낸다.
+type LaneRow struct {
+	RowID   int64
+	Session string
+	Waiting string // 대기 경과 — 줄에 선 뒤 지난 시간
+	Signal  string // 마지막 신호 나이. 빈 문자열 = 관측 실패이거나 신호가 없다
+	Holder  bool   // 지금 레인을 쥐고 있나
+	Held    string // 획득 경과. 점유자만 채운다
+	Missing bool   // 점유자인데 줄에 행이 없다(정합 어긋남) — 회수 번호가 없는 행이다
 }
 
 // HoldRow 는 자원 점유 한 줄이다.
@@ -226,7 +268,10 @@ type SearchPanel struct {
 
 // Page 는 렌더 한 장의 전부다.
 type Page struct {
-	Now        string
+	Now string
+	// RenderedAt 은 이 장을 그린 시각(unix)이다. 쓰기 폼의 멱등 키가 여기서 나온다 —
+	// WriteKey 를 보라.
+	RenderedAt int64
 	Title      string
 	Projects   []model.Project
 	Project    model.Project
@@ -249,6 +294,18 @@ type Page struct {
 	Search     SearchPanel
 }
 
+// WriteKey 는 쓰기 폼 하나의 멱등 키다. 템플릿이 폼 action 의 쿼리에 싣고,
+// api 의 withScreenWrite 가 그것을 Idempotency-Key 헤더로 올린다.
+//
+// **쓰기 종류마다 다른 값이어야 한다.** 한 장이 키 하나를 공유하면 회수를 누른 뒤
+// 폐기를 누를 때 같은 키가 되어, 두 번째가 첫 번째의 재시도로 접힌다.
+//
+// 렌더 시각을 쓰는 이유: 더블클릭은 같은 장이라 같은 키 → 접힌다.
+// 새로고침하면 새 장이라 새 키 → 다시 눌린다. 멱등이 원래 원하는 의미 그대로다.
+func (p Page) WriteKey(kind string) string {
+	return "web:" + kind + ":" + strconv.FormatInt(p.RenderedAt, 10)
+}
+
 // buildPage 는 화면 한 장을 조립한다.
 //
 // ★ 한 축이 실패해도 나머지는 낸다. 조정 화면이 파생 실패로 통째로 사라지면
@@ -257,11 +314,12 @@ type Page struct {
 func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 	now := h.now()
 	p := Page{
-		Now:     now.Format("2006-01-02 15:04:05 MST"),
-		Title:   "flightdeck",
-		Refresh: h.refresh,
-		SSEPath: h.ssePath,
-		Notice:  req.notice,
+		Now:        now.Format("2006-01-02 15:04:05 MST"),
+		RenderedAt: now.Unix(),
+		Title:      "flightdeck",
+		Refresh:    h.refresh,
+		SSEPath:    h.ssePath,
+		Notice:     req.notice,
 	}
 
 	st := h.svc.Store()
@@ -351,7 +409,10 @@ func healthLine(hz service.Health) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ① 지금 — 살아 있는 세션만
+// ① 지금 — 잡혀 있는 작업(선점을 든 카드만)
+//
+// ★ 이 섹션은 "누가 살아 있나"에 **답하지 않는다.** "어느 작업이 잡혀 있나"에 답한다.
+// 선점이 필터고 창은 아니다 — 창을 함께 걸면 회수가 가장 필요한 카드가 먼저 사라진다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *handler) livePanel(now time.Time, board service.BoardView, boardErr error, label string) LivePanel {
@@ -362,14 +423,36 @@ func (h *handler) livePanel(now time.Time, board service.BoardView, boardErr err
 		pan.Empty = "세션 표를 못 만들었다 — 위 사유를 보라. 빈 표가 아니라 실패다."
 		return pan
 	}
+	// ★★ 선점 필터. 이 섹션이 답하는 질문은 "누가 살아 있나"가 아니라
+	// **"어느 작업이 잡혀 있나"** 다. 선점 없는 카드는 안 낸다 — 자기 카드도 예외가 없다.
+	//
+	// ★ 필터가 **여기**여야 하는 이유. board.Sessions 를 줄이면 같은 슬라이스를 먹는
+	// 겹침 꼬리(judge.OverlapsWithLive)·cc 표류 배너(DriftedTwins)·⑤ 막힘 패널·
+	// 회수 폼 대상·dashboard.json 이 함께 죽는다. 그중 겹침은 **선점 없이 편집하는
+	// 세션**을 잡는 축이라, 정확히 이번에 숨기려는 그 세션이 남의 화면에서도 사라진다 —
+	// 조용한 오탐이 아니라 조용한 미탐이다. sessionRow 도 ⑤가 함께 쓰므로 거기도 아니다.
+	folded := 0
 	for _, c := range board.Sessions {
+		if len(c.View.Claims) == 0 {
+			folded++
+			continue
+		}
 		pan.Sessions = append(pan.Sessions, sessionRow(now, c))
 	}
+	// ★ 창 밖인데 항목을 쥔 세션. **창을 이 섹션에 걸지 않는다** — 걸면 회수가 가장
+	// 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
+	// 이 줄들은 git 파생을 안 읽었다(Derived=false) — 창 밖까지 파생하면 세션 수만큼 터진다.
+	for _, v := range board.OutsideClaims {
+		pan.Sessions = append(pan.Sessions, outsideClaimRow(now, v))
+	}
 	if len(pan.Sessions) == 0 {
-		// ★ 0건을 빈칸으로 두지 않는다. 창을 함께 말해야 "아무도 없다"와
-		//   "창이 좁아 안 보인다"가 구분된다.
-		pan.Empty = fmt.Sprintf("살아 있는 세션 0건 — 최근 %s 안에 신호가 있거나 그 뒤에 열린 세션이 없다.",
-			span(board.Window))
+		// ★ 0건을 빈칸으로 두지 않는다. **그리고 이제 0건은 정상 상태다** —
+		//   아무도 항목을 안 쥐고 있다는 뜻이지 서버가 죽었다는 뜻이 아니다.
+		pan.Empty = "잡혀 있는 작업 0건 — 지금 아무 세션도 큐 항목을 쥐고 있지 않다. 서버 장애가 아니다."
+	}
+	if folded > 0 {
+		pan.Folded = fmt.Sprintf(
+			"선점 없는 세션 %d건은 안 낸다 — 겹침 처방은 그 세션들도 그대로 본다.", folded)
 	}
 	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
 	// MCP board 는 이미 말하는데 이 화면만 빠뜨리면 같은 사실이 표면마다 다르게 읽힌다.
@@ -394,6 +477,7 @@ func sessionRow(now time.Time, c service.SessionCard) SessionRow {
 		Worktree:    v.Session.Worktree,
 		Signals:     SignalAges(now, v.Signals),
 		Claims:      v.Claims,
+		Derived:     true,
 		DeriveError: c.DeriveError,
 		IsSelf:      c.IsSelf,
 		HasPaths:    v.HasFootprint,
@@ -431,6 +515,38 @@ func sessionRow(now time.Time, c service.SessionCard) SessionRow {
 		n := noteRow(now, *v.LastNote)
 		r.LastNote = &n
 	}
+	r.HasActivity, r.Activity = ActivityOf(now, v.Signals)
+	return r
+}
+
+// outsideClaimRow 는 **창 밖인데 항목을 쥔 세션** 한 줄이다.
+//
+// ★ 카드가 아니라 줄이다. git 파생(브랜치·ahead·미커밋)이 없다 — 창 밖까지 파생하면
+// 카드당 git 호출 1~4회가 세션 수만큼 터진다(gitreader 에 캐시가 없다). 그래서
+// Derived=false 로 두고 **화면이 "이 축은 안 읽었다"를 말한다.** 0값과 미관측을
+// 뭉개지 않는 것이 이 패키지의 규율이다.
+//
+// 그래도 반드시 낸다: 이 줄이 없으면 회수가 가장 필요한 카드가 정확히 창 때문에
+// 사라진다(실측: 활동 709분 전 세션이 항목 하나를 12시간째 쥐고 있었다).
+func outsideClaimRow(now time.Time, v model.SessionView) SessionRow {
+	r := SessionRow{
+		ID:         v.Session.ID,
+		Short:      short(v.Session.ID),
+		Label:      v.Session.Label,
+		State:      string(v.Session.State),
+		BlockedWhy: v.Session.BlockedWhy,
+		Worktree:   v.Session.Worktree,
+		Signals:    SignalAges(now, v.Signals),
+		Claims:     v.Claims,
+		BranchNote: "창 밖이라 파생을 안 읽었다",
+		AheadNote:  "안 읽음",
+		Footprint:  "안 읽음(창 밖)",
+		Derived:    false,
+	}
+	if !v.Session.OpenedAt.IsZero() {
+		r.OpenedAge = Age(now.Sub(v.Session.OpenedAt))
+	}
+	r.HasActivity, r.Activity = ActivityOf(now, v.Signals)
 	return r
 }
 
@@ -633,7 +749,76 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 	if len(pan.Snapshots) == 0 && pan.SnapErr == "" {
 		pan.SnapErr = "스냅숏 0건 — 전수 판정 수치가 아직 하나도 보관되지 않았다."
 	}
+	h.fillLane(ctx, &pan, proj.ID, now)
 	return pan
+}
+
+// fillLane 은 랜딩 줄을 패널에 채운다.
+//
+// ★ **조회는 service.LandingLane 하나로 한다.** query.go 에 생 SQL 을 두 번째로
+// 만들면 판정이 두 자리에 생기고, 한쪽만 고치는 순간 화면과 보드가 조용히 어긋난다
+// (board.go 가 같은 규율을 적어 뒀다). 그 함수는 점유자·줄의 정합 재확인까지 한다.
+//
+// ★ **생존 창으로 거르지 않는다.** 창 밖 세션이 맨 앞에서 막고 있는 상황이야말로
+// 사람이 봐야 하는 상황이고, 거르면 화면이 "줄이 비었는데 아무도 못 잡는다"가 된다.
+func (h *handler) fillLane(ctx context.Context, pan *LandingPanel, project string, now time.Time) {
+	lane, err := h.svc.LandingLane(ctx, project)
+	if err != nil {
+		// 못 읽은 것을 0건으로 적지 않는다. 빈 표가 아니라 실패다.
+		pan.LaneErr = "랜딩 줄을 못 읽었다: " + Clip(err.Error(), 400)
+		h.log.ErrorContext(ctx, "랜딩 줄 조회 실패", "project", project, "error", err.Error())
+		return
+	}
+
+	holderSeen := false
+	for _, e := range lane.Entries {
+		row := LaneRow{
+			RowID:   e.RowID,
+			Session: e.SessionID,
+			Waiting: Age(now.Sub(e.EnqueuedAt)),
+			Signal:  signalAge(now, e.LastSignalAt),
+		}
+		if lane.Holder != nil && lane.Holder.SessionID == e.SessionID {
+			row.Holder = true
+			row.Held = Age(now.Sub(lane.Holder.AcquiredAt))
+			holderSeen = true
+		}
+		pan.Lane = append(pan.Lane, row)
+	}
+
+	// 점유자가 줄에 없다 — 정합 어긋남이다. **행을 지우지 않고 낸다.**
+	// 이 행이 화면에서 사라지면 "레인은 물렸는데 화면은 비었다"가 되고,
+	// 그때가 정확히 사람이 회수해야 하는 순간이다.
+	if lane.Holder != nil && !holderSeen {
+		pan.Lane = append(pan.Lane, LaneRow{
+			Session: lane.Holder.SessionID,
+			Waiting: "", // 줄 행이 없으므로 대기 경과라는 것이 없다
+			Signal:  signalAge(now, lane.Holder.LastSignalAt),
+			Holder:  true,
+			Held:    Age(now.Sub(lane.Holder.AcquiredAt)),
+			Missing: true,
+		})
+		pan.LaneWarn = "정합 어긋남 — 레인을 쥔 세션의 줄 행이 없다. " +
+			"회수는 줄 행 번호로 하는데 그 번호가 없으므로, 이 자리는 CLI 로도 화면으로도 못 푼다 — " +
+			"점유자가 land 로 빠지거나 서버가 다시 읽어 스스로 아무는 것이 정상 경로다."
+	}
+
+	if len(pan.Lane) == 0 {
+		pan.LaneEmpty = "줄이 비었다 — 질의는 돌았고 아무도 안 섰다."
+	}
+}
+
+// signalAge 는 마지막 신호의 나이다. nil 이면 빈 문자열이다.
+//
+// ★ **"관측 실패"와 "신호가 없다"를 화면에서 가르지 않는다.** service.LandingLane 이
+// 그 자리에서 이미 그렇게 정했다(둘 다 nil 로 오고 실패 사유는 서버 WARN 에 남는다).
+// 화면이 그 둘을 갈라 적으려면 없는 정보를 지어내야 한다. 이 축을 반드시 봐야 하는
+// 곳은 불변으로 남는 판단 본문이고, 그쪽(ReleaseLaneRow)은 두 경우를 다른 문장으로 적는다.
+func signalAge(now time.Time, at *time.Time) string {
+	if at == nil {
+		return ""
+	}
+	return Age(now.Sub(*at))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

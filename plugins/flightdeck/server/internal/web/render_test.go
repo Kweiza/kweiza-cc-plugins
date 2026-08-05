@@ -43,8 +43,26 @@ type fixture struct {
 
 const testProject = "cp"
 
-func newFixture(t *testing.T) *fixture {
+// fixtureOpt 는 하네스의 축을 바꾼다. 지금 있는 축은 시계 하나다.
+type fixtureOpt func(*fixtureConfig)
+
+type fixtureConfig struct{ clock func() time.Time }
+
+// withClock 은 **서비스와 화면 양쪽에 같은 시계**를 준다.
+//
+// 한쪽만 주면 경과가 두 좌표계에서 계산돼 시험이 무엇을 재는지 알 수 없게 된다.
+// 경과를 숫자로 단정하려면 시계가 서야 한다 — 안 그러면 전부 "방금"이라
+// 대기 경과·획득 경과·신호 나이가 **같은 값을 세 번 찍어도** 시험이 초록이다.
+func withClock(f func() time.Time) fixtureOpt {
+	return func(c *fixtureConfig) { c.clock = f }
+}
+
+func newFixture(t *testing.T, opts ...fixtureOpt) *fixture {
 	t.Helper()
+	var cfg fixtureConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
 	if err != nil {
@@ -52,10 +70,16 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	svc := service.New(st, log)
+	var svcOpts []service.Option
+	webOpts := []Option{WithLogger(log), WithRefresh(7)}
+	if cfg.clock != nil {
+		svcOpts = append(svcOpts, service.WithClock(cfg.clock))
+		webOpts = append(webOpts, WithClock(cfg.clock))
+	}
+	svc := service.New(st, log, svcOpts...)
 	return &fixture{
 		t: t, st: st, svc: svc,
-		h: New(svc, WithLogger(log), WithRefresh(7)),
+		h: New(svc, webOpts...),
 	}
 }
 
@@ -163,9 +187,13 @@ func TestPageHasSixSectionsAndSurvivesZeroLiveSessions(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, 기대 200\n%s", code, html)
 	}
-	// ① 0건이 빈칸이 아니라 문장이다. 창을 함께 말해야 "아무도 없다"와 "창이 좁다"가 갈린다.
-	mustContain(t, html, "살아 있는 세션 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
-	mustContain(t, html, "2시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
+	// ① 0건이 빈칸이 아니라 문장이다.
+	// ★ 섹션 ①이 선점을 필터로 쓰면서 0건의 **뜻이 바뀌었다**: 예전에는 "창 안에 신호가
+	//    없다"였고 지금은 "아무도 항목을 안 쥐고 있다"다. 후자는 **정상 상태**라, 문장이
+	//    그 사실을 말해야 사람이 서버 장애를 찾아 헤매지 않는다.
+	mustContain(t, html, "잡혀 있는 작업 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
+	mustContain(t, html, "서버 장애가 아니다", "0건이 정상 상태라는 것을 화면이 말해야 한다")
+	mustContain(t, html, "2시간", "자른 창을 안 밝히면 다른 절의 0건 뜻이 정해지지 않는다")
 
 	// ② 섹션 여섯이 전부 있다(그 이상도 만들지 않는다).
 	for _, h := range []string{
@@ -221,6 +249,10 @@ func TestDashboardSaysWhatTheWindowCutOff(t *testing.T) {
 func TestLiveSessionShowsFourSignalAgesAndNoFootprintExplicitly(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	sess := f.openSession("cc-1", "트랙2")
+	// ★ 선점을 붙인다. 섹션 ①은 선점을 든 카드만 내므로 선점이 없으면 이 시험이 재려는
+	//    축(신호 다섯 병렬 표기·발자국 명시)이 화면에 아예 안 나온다. 이 시험의 의도는
+	//    필터가 아니라 **카드 안의 표기**다.
+	f.claimOne(sess.ID, "it-signals")
 	if err := f.svc.Beat(context.Background(), sess.ID, model.SignalPrompt, nil); err != nil {
 		t.Fatalf("신호 기록 실패: %v", err)
 	}
@@ -245,6 +277,7 @@ func TestLiveSessionShowsFourSignalAgesAndNoFootprintExplicitly(t *testing.T) {
 func TestSessionWithFootprintDoesNotSayNoFootprint(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	sess := f.openSession("cc-1", "트랙2")
+	f.claimOne(sess.ID, "it-footprint") // 섹션 ①은 선점을 든 카드만 낸다
 	// 훅이 주는 절대경로 발자국.
 	if err := f.svc.Beat(context.Background(), sess.ID, model.SignalTool,
 		[]string{filepath.Join(f.wt, "internal/web/web.go")}); err != nil {
@@ -357,17 +390,26 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 
 	_, html := f.get("")
 
-	// 폼은 넷을 넘지 않는다(설계 §6: 버튼 넷 + 그 외 쓰기 없음).
+	// 폼은 넷이다: Tier A 쓰기 셋 + 프로젝트 고르기 GET 하나.
+	// Tier B 버튼 둘은 폼이 아니라 비활성 <button> 이라 여기 안 센다.
+	//
+	// ★ 이 상한이 지키는 것은 **개수가 아니라 성질**이다 — 파생물에 손대는 폼이
+	// 하나라도 늘면 대시보드가 다시 손 기재 저장소가 되고, 그것이 이 제품이
+	// 없애려던 병목 1위다. 여유를 안 둔다: 늘리려면 이 줄을 고치면서
+	// "그 폼이 무엇을 쓰는가"에 먼저 답하게 만드는 것이 이 락의 목적이다.
 	if n := strings.Count(html, "<form"); n > 4 {
 		t.Fatalf("폼 %d개 — 넷을 넘었다. 파생물에 손대는 폼이 늘면 대시보드가 다시 손 기재 저장소가 된다", n)
 	}
-	// 그중 쓰기(POST)는 Tier A 의 둘뿐이다.
-	if n := strings.Count(html, `method="post"`); n != 2 {
-		t.Fatalf("POST 폼 %d개, 기대 2개(선점 회수·항목 폐기). 나머지 둘은 Tier B 라 비활성 버튼이다", n)
+	// 그중 쓰기(POST)는 Tier A 의 셋이다: 선점 회수 · 항목 폐기 · 랜딩 줄 행 회수.
+	// 줄 행 회수가 Tier A 인 이유는 **이 서버가 실제로 그 일을 하기 때문**이다 —
+	// 레인에 자동 만료가 없어서 사람이 푸는 이 길이 유일한 탈출구다.
+	if n := strings.Count(html, `method="post"`); n != 3 {
+		t.Fatalf("POST 폼 %d개, 기대 3개(선점 회수·항목 폐기·랜딩 줄 행 회수). "+
+			"남은 하나(잡 우회 기록)는 Tier B 라 비활성 버튼이다", n)
 	}
-	// 그리고 둘 다 사유가 필수다.
-	if n := strings.Count(html, `name="reason" required`); n != 2 {
-		t.Fatalf("사유 필수 입력 %d개, 기대 2개 — 사유 없는 회수·폐기는 되짚을 수 없다", n)
+	// 그리고 셋 다 사유가 필수다.
+	if n := strings.Count(html, `name="reason" required`); n != 3 {
+		t.Fatalf("사유 필수 입력 %d개, 기대 3개 — 사유 없는 회수·폐기는 되짚을 수 없다", n)
 	}
 	// Tier B 버튼은 지우지 않고 비활성으로 남긴다("없다"와 "안 본다"를 가른다).
 	mustContain(t, html, "레인 정지/재개(사유 필수) · Tier B", "Tier B 버튼 자리가 사라졌다")
@@ -514,4 +556,19 @@ func TestDarkAndLightBothStyled(t *testing.T) {
 	_, html := f.get("")
 	mustContain(t, html, "prefers-color-scheme: dark", "다크 모드 스타일이 없다")
 	mustContain(t, html, "color-scheme: light dark", "라이트·다크 둘 다 선언돼야 한다")
+}
+
+// claimOne 은 항목 하나를 등록하고 그 세션에 선점시킨다.
+//
+// ★ 섹션 ①이 **선점을 든 카드만** 내기 때문에 필요하다. 카드 안의 표기를 재는 시험은
+// 그 카드가 화면에 나오게 만들어 놓고 재야 한다 — 선점을 안 붙이면 단정이 재려는 축이
+// 아니라 필터를 재게 되고, 그것은 다른 시험의 일이다.
+func (f *fixture) claimOne(sessionID, itemID string) {
+	f.t.Helper()
+	f.addItem(itemID, itemID+" 제목", nil, nil)
+	if _, err := f.svc.Pick(context.Background(), service.PickInput{
+		Project: testProject, SessionID: sessionID, ItemID: itemID,
+	}); err != nil {
+		f.t.Fatalf("선점 실패(%s): %v", itemID, err)
+	}
 }

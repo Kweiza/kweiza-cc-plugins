@@ -187,6 +187,245 @@ func TestRenderPickPrintsAGenuineZero(t *testing.T) {
 	}
 }
 
+// ★ 이 시험이 이 태스크에서 가장 중요하다.
+// 묶음 축이 없는 응답(구서버·옛 캐시)이 "묶을 게 없다"로 읽히면 안 된다.
+func TestRenderPickNeverCallsAnAbsentBundleSolo(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다", Bundle: nil,
+	}, t0)
+	if !strings.Contains(got, "이 응답은 그 축을 읽지 않았다") {
+		t.Fatalf("묶음 축 부재를 안 말한다:\n%s", got)
+	}
+	if strings.Contains(got, "묶을 게 없어 단독이다") {
+		t.Fatalf("안 읽은 축을 '단독'으로 단정했다:\n%s", got)
+	}
+}
+
+// 구성원 0건이면 단독이라고 **말한다**. 침묵하면 부재와 같은 화면이 된다.
+func TestRenderPickSaysSoloWhenBundleIsEmpty(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Bundle: &service.BundleInfo{Reason: "의존자 합 0 · 묶음 1건"},
+	}, t0)
+	if !strings.Contains(got, "단독") {
+		t.Fatalf("단독임을 안 말한다:\n%s", got)
+	}
+}
+
+func TestRenderPickShowsWhyEachMemberIsBundled(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item:   &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+		Branch: "lead",
+		Bundle: &service.BundleInfo{
+			Reason: "의존자 합 0 · 묶음 2건 · 최고령 2026-08-04 23:50 · 선두 lead",
+			Members: []service.BundleMember{{
+				Item: model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen,
+					Paths: []string{"x.go"}, CreatedAt: t0},
+				Link: judge.Link{Item: "mem",
+					Axes:   []judge.BundleAxis{judge.AxisSibling, judge.AxisAfter},
+					Detail: "판단 J1 가 둘을 함께 가리킨다 · 선행이 같다(sha:47421b4)"},
+			}},
+		},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{"mem", "묶은 근거", "sibling", "after", "J1", "47421b4"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다:\n%s", want, got)
+		}
+	}
+	// 브랜치는 선두 하나다.
+	if strings.Count(got, "브랜치: ") != 1 {
+		t.Fatalf("브랜치 줄이 하나가 아니다:\n%s", got)
+	}
+}
+
+// 못 집은 구성원은 사유 코드 그대로 보인다.
+func TestRenderPickShowsUnclaimedMemberReason(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선두를 선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:      model.Item{ID: "blocked", Title: "막힘", CreatedAt: t0},
+			Claimed:   false,
+			Rejection: &model.Rejection{Item: "blocked", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"},
+		}}},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{"못 집었다", judge.RejectClaimed, "S2"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다:\n%s", want, got)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 리뷰 라운드 1 — findings 1·2·3·4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRenderPickBundleMemberMarksDistinguishThreeStates 는 finding 1·2 를 잠근다.
+//
+// Claimed 필드 하나로 표식을 가르면(!Claimed) "아직 안 시도함"(추천 후보, Rejection=nil)과
+// "시도했지만 실패함"(Rejection!=nil)이 같은 표식이 된다. 리뷰어가 실측한 시나리오:
+// 4건 추천에서 넷 다 ✗ 로 찍히면 에이전트가 "셋이 탈락했다"로 읽고 판정이 방금
+// 지어 준 묶음을 버린 채 혼자 다시 집는다. 세 표식을 각자 다른 구성원 id 옆에
+// 정확히 박아서, 어느 둘을 맞바꿔도 최소 하나는 어긋나게 만든다(finding 2 의
+// "완전히 뒤집을 수 있는 술어" 문제 — 표식 둘만으로는 스왑이 시험을 안 건드렸다).
+func TestRenderPickBundleMemberMarksDistinguishThreeStates(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+		Bundle: &service.BundleInfo{
+			Members: []service.BundleMember{
+				{Item: model.Item{ID: "claimed-mem", Title: "집음", State: model.ItemClaimed, CreatedAt: t0},
+					Claimed: true},
+				{Item: model.Item{ID: "rejected-mem", Title: "거절됨", CreatedAt: t0},
+					Rejection: &model.Rejection{Item: "rejected-mem", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"}},
+				{Item: model.Item{ID: "proposed-mem", Title: "제안됨", State: model.ItemOpen, CreatedAt: t0},
+					Link: judge.Link{Item: "proposed-mem",
+						Axes: []judge.BundleAxis{judge.AxisSibling}, Detail: "판단 J2"}},
+			},
+		},
+	}
+	got := RenderPick(res, t0)
+	for _, want := range []string{
+		"\n  + claimed-mem — 집음",
+		"\n  ✗ rejected-mem — 거절됨",
+		"\n  ○ proposed-mem — 제안됨",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 응답에 없다(세 표식이 구분되지 않는다):\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderPickStatesOverlapScopeCoversTheWholeBundle 은 finding 3 의 절반을 잠근다.
+//
+// 브리프가 이 줄에 준 근거는 "이 줄이 없으면 꼬리의 겹침: 줄이 선두 경로만 본
+// 결과로 읽힌다"다 — 침묵 방지용 줄인데 리뷰어가 통째로 지워도 스위트가 초록이었다.
+// 대조도 함께 못박는다: 묶음이 없으면 두 문구 다 안 나와야 한다(묶음 전용 문구가
+// 단독 pick 에 남으면 그 자체가 새로운 오독이다).
+func TestRenderPickStatesOverlapScopeCoversTheWholeBundle(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item:   &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Branch: "lead",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item: model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0}, Claimed: true,
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "겹침 판정 범위: 묶음 2건의 경로를 전부 합쳐서 봤다") {
+		t.Fatalf("묶음 겹침 범위 문장이 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "묶음 선두의 id 다. 2건을 이 워크트리에서 함께 한다.") {
+		t.Fatalf("브랜치가 묶음 선두라는 사실이 없다:\n%s", got)
+	}
+
+	// ★ 대조의 모양이 리뷰 라운드 2 finding 5 로 바뀌었다.
+	//
+	// 예전 대조는 Bundle 을 nil 로 두고 "겹침 판정 범위:" 가 **안 나와야 한다"**고
+	// 했다. 그런데 nil 은 이 브랜치의 계약상 "이 응답은 그 축을 안 읽었다" 하나만
+	// 뜻해야 하고, 현행 서버의 단독 선점은 축을 **읽는다**(pickExplicit 이 구성원
+	// 0건짜리 BundleInfo 를 낸다). 즉 옛 대조는 실재하지 않는 응답 모양에 대고
+	// 단정하고 있었고, 그 대가로 진짜 단독 응답이 겹침 범위를 침묵했다 —
+	// 꼬리의 "겹침: 없음"이 이 세션 전체에 대한 판정으로 읽히는 자리다.
+	//
+	// 그래서 대조를 **실재하는 모양**(구성원 0건, non-nil)으로 바꾸고, 지키려던
+	// 것은 그대로 지킨다: 묶음 전용 문구가 단독 pick 에 새면 안 된다.
+	solo := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0}, Branch: "lead",
+		Bundle: &service.BundleInfo{Reason: "이웃을 찾지 않았다", Scope: "이웃 후보를 아예 안 봤다"},
+	}
+	soloGot := RenderPick(solo, t0)
+	// 묶음 전용 문구는 여전히 새면 안 된다 — 그것이 이 대조의 원래 목적이다.
+	if strings.Contains(soloGot, "묶음 2건의 경로") || strings.Contains(soloGot, "묶음 1건의 경로") {
+		t.Fatalf("구성원이 없는데 묶음 단위 겹침 문구가 나왔다:\n%s", soloGot)
+	}
+	if strings.Contains(soloGot, "묶음 선두의 id 다") {
+		t.Fatalf("구성원이 없는데 묶음 브랜치 설명이 나왔다:\n%s", soloGot)
+	}
+	// 그러나 **침묵하지도 않는다**: 겹침이 무엇을 본 값인지는 말해야 한다.
+	if !strings.Contains(soloGot, "겹침 판정 범위: 항목 lead 의 경로만 봤다") {
+		t.Fatalf("단독 응답이 겹침 범위를 침묵한다 — 꼬리의 '겹침 없음'이 세션 전체로 읽힌다:\n%s", soloGot)
+	}
+}
+
+// TestRenderPickHeaderNamesBundleSize 는 finding 3 의 나머지 절반이다 — 머리줄이
+// 묶음 크기를 반영한다는 것을 **머리줄 자체**에서 못박는다. Reason 문구가
+// 비슷한 말("묶음 N건 중 M건을 집었다")을 이미 담고 있어서, 머리줄 분기가
+// 통째로 사라져도 그 문구 하나로 다른 시험이 계속 초록일 수 있었다
+// (실측: 리뷰어가 머리줄 분기를 지워도 스위트가 안 빨개졌다). HasPrefix 로
+// 정확히 첫 줄을 겨눈다.
+func TestRenderPickHeaderNamesBundleSize(t *testing.T) {
+	rec := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "사유",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{
+			{Item: model.Item{ID: "a"}}, {Item: model.Item{ID: "b"}},
+		}},
+	}, t0)
+	if !strings.HasPrefix(rec, "pick · 추천 묶음 3건 — **아직 선점하지 않았다**\n") {
+		t.Fatalf("추천 머리줄이 묶음 크기를 안 말한다:\n%s", rec)
+	}
+
+	claimed := RenderPick(service.PickResult{
+		Mode: service.PickClaimed, Reason: "사유",
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{
+			{Item: model.Item{ID: "a"}, Claimed: true},
+			{Item: model.Item{ID: "b"}, Rejection: &model.Rejection{Item: "b", Reason: judge.RejectClaimed}},
+		}},
+	}, t0)
+	if !strings.HasPrefix(claimed, "pick · 선점했다 — 묶음 3건 중 2건\n") {
+		t.Fatalf("선점 머리줄이 묶음 크기·집은 수를 안 말한다:\n%s", claimed)
+	}
+}
+
+// TestRenderPickBundleSectionHeaderAndMemberNotes 는 finding 3 의 나머지 둘을 잠근다:
+// 구성원 절 머리줄("묶음 구성원 N건")과, 집은 구성원에 실리는 연결된 판단 전문.
+// 둘 다 브리프가 명시한 출력인데 어느 시험도 짚지 않고 있었다.
+func TestRenderPickBundleSectionHeaderAndMemberNotes(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "사유",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:    model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0},
+			Claimed: true,
+			Notes:   []model.Judgment{{Kind: model.JudgmentDecision, At: t0, Title: "설계 노트", Body: "본문이다"}},
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "묶음 구성원 1건 (선두는 위의 항목이다):") {
+		t.Fatalf("구성원 절 머리줄이 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "연결된 판단 1건 (전문):") ||
+		!strings.Contains(got, "설계 노트") || !strings.Contains(got, "본문이다") {
+		t.Fatalf("구성원에 연결된 판단 전문이 없다:\n%s", got)
+	}
+}
+
+// TestRenderPickShowsBundleEvidenceEvenWithoutAxes 는 finding 4 를 잠근다.
+//
+// pickBundle(item_ids 로 지정한 묶음 전체 경로)이 만드는 Link 는 Axes 가 없다 —
+// 판정 없이 세션이 그대로 지정했기 때문이다(pick.go:427, Link{Detail: "세션이 함께
+// 지정했다"}). len(Axes)>0 으로만 게이트를 걸면 **item_ids 로 집는 경로 전체**의
+// 구성원이 "왜 묶였나" 줄을 영원히 못 낸다.
+func TestRenderPickShowsBundleEvidenceEvenWithoutAxes(t *testing.T) {
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선점했다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		Bundle: &service.BundleInfo{Members: []service.BundleMember{{
+			Item:    model.Item{ID: "mem", Title: "구성원", State: model.ItemOpen, CreatedAt: t0},
+			Link:    judge.Link{Item: "mem", Detail: "세션이 함께 지정했다"}, // Axes 없음
+			Claimed: true,
+		}}},
+	}
+	got := RenderPick(res, t0)
+	if !strings.Contains(got, "묶은 근거: 세션이 함께 지정했다") {
+		t.Fatalf("축이 없어도 근거 문장이 나와야 한다:\n%s", got)
+	}
+}
+
 // synthBoard 는 세션 n개짜리 보드를 짓는다(순수 함수 시험용).
 func synthBoard(n int) service.BoardView {
 	v := service.BoardView{
@@ -222,11 +461,6 @@ func synthBoard(n int) service.BoardView {
 		v.OpenItems = append(v.OpenItems, model.Item{
 			ID: fmt.Sprintf("q-%d", i), Title: "열린 항목 제목", State: model.ItemOpen})
 	}
-	// ★ 실제 service.Board() 는 Sessions 와 같은 호출 안에서 Conversations 를
-	// 채운다(board.go). 이 헬퍼가 그것을 안 하면 RenderBoard 가 이제 카드 루프의
-	// 근거로 삼는 v.Conversations 가 항상 비어, 세션을 아무리 넣어도 카드가 0장 —
-	// synthBoard 를 쓰는 시험이 전부 "카드가 없다"는 거짓 신호로 죽는다.
-	v.Conversations = service.FoldConversations(v.Sessions)
 	return v
 }
 
@@ -449,11 +683,6 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	v.Sessions[0].AheadKnown = false
 	v.Sessions[0].View.Paths = nil
 	v.Sessions[0].View.HasFootprint = false
-	// ★ RenderBoard 는 이제 v.Conversations 의 카드를 그린다(conversationCard), v.Sessions 를
-	// 직접 그리지 않는다. FoldConversations 는 SessionCard 를 **값으로 복사**해 Conversation.Cards
-	// 에 담으므로(service/board.go), synthBoard 가 이미 접어 둔 뒤에 v.Sessions 를 고쳐도
-	// 그 복사본은 안 따라간다 — 다시 접어야 이 시험이 실제로 의도한 입력을 렌더한다.
-	v.Conversations = service.FoldConversations(v.Sessions)
 
 	got := RenderBoard(v, BoardRenderOptions{Now: t0})
 	if !strings.Contains(got, "브랜치 ?(못 읽음)") {
@@ -474,13 +703,13 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 // 전역 꼬리만으로는 누가 남겼는지가 안 이어진다.
 func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	sessions := []service.SessionCard{
-		{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
-		{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
-	}
 	v := service.BoardView{
-		Sessions:      sessions,
-		Conversations: service.FoldConversations(sessions),
+		// 선점을 붙인다 — 화면 ①은 선점을 든 카드만 낸다. 이 시험의 의도는 필터가
+		// 아니라 **사건이 자기 카드에 붙는가**이므로 카드가 나오게 해 놓고 잰다.
+		Sessions: []service.SessionCard{
+			{View: model.SessionView{Session: model.Session{ID: "01AAA"}, Claims: []string{"it-aaa"}}},
+			{View: model.SessionView{Session: model.Session{ID: "01BBB"}, Claims: []string{"it-bbb"}}},
+		},
 		Asks: []model.Judgment{
 			{ID: "j1", SessionID: "01AAA", At: now.Add(-12 * time.Minute),
 				Title: "mcpbackend.go 를 잡는다"},
@@ -523,12 +752,14 @@ func TestFoldKeepsEventCardsOverSilentOnes(t *testing.T) {
 			View: model.SessionView{
 				Session: model.Session{ID: fmt.Sprintf("01S%02d", i)},
 				Paths:   []string{"some/long/path/that/costs/tokens.go"},
+				// 선점을 붙인다 — ①이 선점을 든 카드만 내므로, 안 붙이면 이 시험이
+				// 재려는 축(예산이 사건 붙은 카드를 먼저 남기나)이 아니라 필터를 재게 된다.
+				Claims: []string{fmt.Sprintf("it-%02d", i)},
 			},
 		})
 	}
 	v := service.BoardView{
-		Sessions:      sessions,
-		Conversations: service.FoldConversations(sessions),
+		Sessions: sessions,
 		Asks: []model.Judgment{
 			{ID: "j1", SessionID: "01S19", At: now, Title: "마지막 세션이 남긴 요청"},
 		},
@@ -549,11 +780,14 @@ func TestFoldAlwaysKeepsSelfFirst(t *testing.T) {
 	var sessions []service.SessionCard
 	for i := 0; i < 20; i++ {
 		sessions = append(sessions, service.SessionCard{
-			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}},
+			// ★ 자기 카드에도 선점을 준다. 규칙에 예외가 없어서(선점 없으면 자기 카드도
+			// 안 낸다), 선점 없이 이 시험을 두면 "나는 언제나 첫 카드다"가 아니라
+			// "나도 접힌다"를 재게 된다 — 그 축은 web 의 TestNowSectionGivesSelfNoException 이 잰다.
+			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}, Claims: []string{fmt.Sprintf("it-%02d", i)}},
 			IsSelf: i == 19,
 		})
 	}
-	got := RenderBoard(service.BoardView{Sessions: sessions, Conversations: service.FoldConversations(sessions)},
+	got := RenderBoard(service.BoardView{Sessions: sessions},
 		BoardRenderOptions{Now: now, Self: "01S19", Budget: 300})
 	if !strings.Contains(got, "01S19") {
 		t.Fatalf("내 카드가 접혔다:\n%s", got)
@@ -838,10 +1072,8 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 // 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
 // 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
 func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
-	sessions := []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}}
 	got := RenderBoard(service.BoardView{
-		Sessions:      sessions,
-		Conversations: service.FoldConversations(sessions),
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
 		Lane: &service.LaneView{
 			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{
@@ -857,11 +1089,8 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 		t.Fatalf("경고가 어느 세션의 점유인지 말하지 않는다 — 누구를 회수해야 하는지 답이 없다:\n%s", got)
 	}
 	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
-	// ★ Conversations 를 채운다 — 안 채우면 이번 수정으로 새로 생긴 "Sessions·Conversations
-	//   불일치" 경고도 "⚠" 라 이 대조(레인 정합 경고 부재)와 뒤섞여 오검출된다.
 	ok := RenderBoard(service.BoardView{
-		Sessions:      sessions,
-		Conversations: service.FoldConversations(sessions),
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
 		Lane: &service.LaneView{
 			Holder: &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{
@@ -914,5 +1143,23 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
 	if !strings.Contains(waiterSeg, "신호 없음") {
 		t.Fatalf("신호가 없는 대기자의 그 사실이 안 보인다: %q\n전체:\n%s", waiterSeg, got)
+	}
+}
+
+// 건너뛴 후속은 **화면에 나온다.** 응답 구조체에만 있으면 세션은 못 본다.
+//
+// ★ 이 줄이 없으면 finish 의 흡수가 조용한 거짓이 된다 — "후속 1건 등록"만 보고
+// 세션이 떠나는데, 실제로 그 id 의 항목은 남이 만든 다른 것이다.
+func TestRenderFinishSaysWhichFollowupsWereSkipped(t *testing.T) {
+	out := RenderFinish(service.FinishResult{
+		Item:             model.Item{ID: "batch7", State: model.ItemDone},
+		Judgment:         model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+		Followups:        []model.Item{{ID: "batch8"}},
+		SkippedFollowups: []string{"taken-id"},
+	})
+	for _, want := range []string{"taken-id", "이미 있"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("건너뛴 후속 화면에 %q 가 없다 — 세션은 안 들어간 것을 들어간 줄 안다:\n%s", want, out)
+		}
 	}
 }
