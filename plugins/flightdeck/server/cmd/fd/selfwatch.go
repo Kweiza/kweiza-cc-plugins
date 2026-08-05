@@ -1,20 +1,14 @@
-//go:build unix
-
 package main
 
-import (
-	"fmt"
-	"os"
-	"syscall"
-)
+import "fmt"
 
 // ExeID 는 실행 파일 하나의 정체다. 순수 값이다.
 //
 // ★ **OK 가 먼저다.** false 면 나머지 필드는 값이 아니라 빈칸이다.
 // 관측 못 한 것을 0 으로 접으면 "둘 다 0이니 같다"가 되고, 그 순간 이 축의 판별력이 사라진다.
 //
-// Dev·Ino 는 유닉스 전제다. 이 파일 전체가 unix 빌드 태그 뒤에 있고,
-// 비유닉스는 selfwatch_other.go 의 no-op 이 받는다.
+// Dev·Ino 는 유닉스 고유이지만, ExeID 자체는 모든 플랫폼에서 같은 형태를 갖는다.
+// 단지 exeIDOfPath 만 플랫폼 고유이다.
 type ExeID struct {
 	OK        bool
 	Dev, Ino  uint64
@@ -83,21 +77,5 @@ func Decide(start, now, lastFailed ExeID, statErr error) (Action, string) {
 	return ActVerify, fmt.Sprintf("실행 파일이 교체됐다: %s → %s", start, now)
 }
 
-// exeIDOfPath 는 경로 하나를 잰다.
-func exeIDOfPath(path string) (ExeID, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return ExeID{}, err
-	}
-	sys, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return ExeID{}, fmt.Errorf("stat 을 해석하지 못했다(path=%q)", path)
-	}
-	return ExeID{
-		OK: true, Dev: uint64(sys.Dev), Ino: uint64(sys.Ino),
-		Size: fi.Size(), MtimeNano: fi.ModTime().UnixNano(),
-	}, nil
-}
-
-// selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
-func selfWatchSupported() bool { return true }
+// exeIDOfPath 와 selfWatchSupported 는 플랫폼별 구현을 제공한다.
+// selfwatch_unix.go 와 selfwatch_other.go 를 본다.
