@@ -134,9 +134,22 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	all := judge.Prescribe(in)
 	shown, folded := judge.FoldPrescriptions(all)
 
-	// **접힌 것도 기록한다.** 요약된 것은 "안 낸 것"이 아니다 —
-	// 안 기록하면 다음 턴에 그대로 다시 떠서 상한이 무의미해진다.
-	for _, p := range all {
+	// **표시된 것만 기록한다(2026-08-06 개정).** 앞선 판은 접힌 것까지 기록하고 그 근거를
+	// "안 기록하면 다음 턴에 그대로 다시 떠서 상한이 무의미해진다"라고 적었는데, 그 조합이
+	// **접힌 처방을 영구히 지웠다**: 기록되면 suppressed 가 그 키를 누르고(해제 규칙은
+	// silent 에만 있다), 세션은 그 문구를 **한 번도 못 본 채** 원장에는 "정상적으로 접혔다"로만
+	// 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다) 나 `unclaimed` 면
+	// 그 사실을 아무도 못 듣는다.
+	//
+	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 앞의 셋은 기록되어 눌리므로 다음 턴엔
+	// 넷째가 첫 칸으로 올라온다. 즉 조건이 지속되는 동안 전부 결국 한 번씩 표시되고,
+	// 그 뒤에는 전부 눌린다. 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴 반복)이 아니라
+	// 한 턴에 읽을 양을 제한하는 본래 목적 그대로다.
+	//
+	// ★ 재측(2026-08-06): 처방이 뜬 턴 129개 중 접힌 턴 **15개**(11.6%)이고 한 턴 최대는
+	// **7건**이다. 접혀서 사라지던 축은 overlap 11 · unclaimed 11 · silent 4 · outside 2 —
+	// 앞선 판의 "35턴 중 2개"는 lane-turn 이 축에 들어오기 전 값이었다.
+	for _, p := range shown {
 		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID,
 			prescribePayload{Key: p.Key, Reason: p.Reason})
 	}

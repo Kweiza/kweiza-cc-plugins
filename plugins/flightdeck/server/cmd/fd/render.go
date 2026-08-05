@@ -176,7 +176,10 @@ func RenderPrescriptions(shown []PrescriptionLine, folded int) string {
 		fmt.Fprintf(&b, "  %s\n", strings.ReplaceAll(p.Text, "\n", "\n  "))
 	}
 	if folded > 0 {
-		fmt.Fprintf(&b, "  … %d건을 접었다. 접힌 것도 이미 발화된 것이라 다시 안 뜬다\n", folded)
+		// ★ 문구가 사실을 따라 바뀌었다(2026-08-06). 앞선 판은 "접힌 것도 이미 발화된 것이라
+		// 다시 안 뜬다"라고 적었고 실제로 그랬다 — 그래서 접힌 처방은 세션이 **한 번도 못 본 채**
+		// 사라졌다. 이제 접힌 것은 발화로 안 세므로 같은 조건이 오면 다시 뜬다.
+		fmt.Fprintf(&b, "  … %d건을 접었다. 접힌 것은 발화로 안 세므로 같은 조건이면 다시 뜬다\n", folded)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
