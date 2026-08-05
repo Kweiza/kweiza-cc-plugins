@@ -328,3 +328,84 @@ func TestToolPickStaysCleanWhenEveryIDIsAccountedFor(t *testing.T) {
 		t.Fatalf("전부 설명된 응답에 경고가 붙었다:\n%s", text)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 겹침 판정 범위는 **모드마다 다르다** — 한 규칙으로 뭉치면 한쪽이 거짓이 된다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 이 두 시험은 **쌍으로** 읽어야 한다. 실제로 난 사고가 "두 갈래를 한 규칙(heldN)으로
+// 뭉쳐서 한쪽을 뒤집은 것"이었기 때문이다. 그래서 각 시험은 자기 문장이 나오는지만
+// 보지 않고 **반대편 문장이 안 나오는지도** 본다 — 그래야 둘을 맞바꾸는 변경이
+// 반드시 빨간불을 낸다(하나만 보면 스왑이 한쪽에서만 걸리거나, 최악의 경우 둘 다 통과한다).
+
+// TestRenderPickRecommendScopeCoversTheWholeBundle 은 추천 갈래를 잠근다.
+//
+// 추천은 아무것도 안 집었지만 **판정 범위는 묶음 전체**다:
+// judge.EligibleBundle 이 bundlePaths(선두 ∪ 구성원 전부)로 Lead.Overlaps 를 내고
+// service.pickRecommend 가 그것을 그대로 싣는다(judge 쪽 전제는
+// TestEligibleBundleOverlapsCoverEveryMemberPath 가 따로 못박는다).
+//
+// 여기서 "선두 경로만 봤다"고 말하면 **관측한 것을 안 했다고 말하는 것**이고,
+// 꼬리의 "겹침: 없음" 이 실제보다 좁은 판정으로 읽힌다.
+func TestRenderPickRecommendScopeCoversTheWholeBundle(t *testing.T) {
+	rec := bundleResult(service.PickRecommended, []string{"q-next"}, []bool{false})
+	rec.Item.ID, rec.Branch = "q-lead", "q-lead"
+	rec.Bundle.Members[0].Rejection = nil // 추천 후보는 시도 자체가 없다
+	got := RenderPick(rec, t0)
+
+	if !strings.Contains(got, "겹침 판정 범위: 묶음 2건의 경로를 전부 합쳐서 봤다") {
+		t.Fatalf("추천인데 묶음 전체를 봤다고 말하지 않는다 — 관측한 것을 안 했다고 말한다:\n%s", got)
+	}
+	// 반대편 문장이 새면 안 된다.
+	if strings.Contains(got, "겹침 판정 범위: 항목 q-lead 의 경로만 봤다") {
+		t.Fatalf("추천에 선점 갈래의 문장(선두 경로만 봤다)이 나왔다:\n%s", got)
+	}
+	// 구성원 경로도 **판정에 들어갔으므로** 제외 줄이 있으면 안 된다.
+	if strings.Contains(got, "안 들어갔다") {
+		t.Fatalf("판정에 들어간 구성원을 안 들어갔다고 말한다:\n%s", got)
+	}
+	if strings.Contains(got, "겹침을 관측하지 않았다") {
+		t.Fatalf("관측한 항목을 관측 안 했다고 말한다:\n%s", got)
+	}
+}
+
+// TestRenderPickClaimedScopeCoversOnlyHeldMembers 는 선점 갈래를 잠근다.
+//
+// service.pickBundle 은 **집은 것만** allPaths 에 합쳐 겹침을 다시 낸다. 그러니
+// 3건 중 2건만 집힌 응답이 "묶음 3건을 전부 합쳐서 봤다"고 말하면 커버리지 과장이고,
+// 그걸 본 세션은 겹침 0건을 못 집은 항목까지 안전으로 읽는다.
+func TestRenderPickClaimedScopeCoversOnlyHeldMembers(t *testing.T) {
+	got := RenderPick(bundleResult(service.PickClaimed,
+		[]string{"m-a", "m-b"}, []bool{true, false}), t0)
+
+	if !strings.Contains(got, "겹침 판정 범위: 묶음 2건의 경로를 전부 합쳐서 봤다") {
+		t.Fatalf("집은 2건을 말하지 않는다:\n%s", got)
+	}
+	if strings.Contains(got, "묶음 3건의 경로") {
+		t.Fatalf("요청 수(3)를 커버리지로 말한다 — 추천 갈래의 규칙이 샜다:\n%s", got)
+	}
+	// 판정 밖의 구성원은 이름으로 불려야 한다.
+	if !strings.Contains(got, "안 집은 구성원 1건(m-b)의 경로는 이 판정에 **안 들어갔다**") {
+		t.Fatalf("판정 밖 구성원을 이름으로 안 부른다:\n%s", got)
+	}
+
+	// 하나도 못 집은 선점도 같은 규칙이다 — 선두 경로만 합쳐졌다.
+	none := RenderPick(bundleResult(service.PickClaimed,
+		[]string{"m-a", "m-b"}, []bool{false, false}), t0)
+	if !strings.Contains(none, "겹침 판정 범위: 항목 lead 의 경로만 봤다") {
+		t.Fatalf("구성원을 하나도 못 집었는데 선두 경로만 봤다고 말하지 않는다:\n%s", none)
+	}
+	if strings.Contains(none, "묶음 3건의 경로") {
+		t.Fatalf("아무도 못 집었는데 묶음 3건을 봤다고 말한다:\n%s", none)
+	}
+
+	// 재개도 선점과 같은 규칙이다(pickBundle 이 같은 allPaths 를 쓴다).
+	res := RenderPick(bundleResult(service.PickResumed,
+		[]string{"m-a", "m-b"}, []bool{true, false}), t0)
+	if !strings.Contains(res, "겹침 판정 범위: 묶음 2건의 경로를 전부 합쳐서 봤다") {
+		t.Fatalf("재개가 쥔 2건을 말하지 않는다:\n%s", res)
+	}
+	if !strings.Contains(res, "안 집은 구성원 1건(m-b)") {
+		t.Fatalf("재개에서 판정 밖 구성원을 안 부른다:\n%s", res)
+	}
+}

@@ -427,3 +427,63 @@ func TestFinishStillHeldIsEmptyNotNilWhenNothingRemains(t *testing.T) {
 		t.Fatalf("남은 선점이 %v 다 — 0건이어야 한다(방금 닫은 것을 다시 세면 안 된다)", *out.StillHeld)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 추천 겹침은 묶음 전체다 — 렌더의 "겹침 판정 범위" 문장이 기대는 전제
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPickRecommendOverlapsCoverTheWholeBundle 은 사슬의 가운데 고리를 잠근다.
+//
+// 사슬은 셋이다:
+//
+//	judge   — EligibleBundle 이 bundlePaths(선두 ∪ 구성원 전부)로 Lead.Overlaps 를 낸다
+//	         (judge/TestEligibleBundleOverlapsCoverEveryMemberPath 가 잠근다)
+//	service — pickRecommend 가 그 값을 res.Overlaps 에 **그대로** 싣는다  ← 여기
+//	render  — 그래서 추천 응답이 "묶음 N건의 경로를 전부 합쳐서 봤다"고 말한다
+//	         (mcpsrv/TestRenderPickRecommendScopeCoversTheWholeBundle 이 잠근다)
+//
+// 가운데가 빠지면 양 끝은 각자 초록인 채로 응답만 거짓이 된다. 실제로 그 모양의
+// 사고가 났다 — 렌더가 추천 모드에서 "선두 경로만 봤다"고 말했고, 어느 시험도 안 걸렸다.
+//
+// 대조를 세게 잡는다: 남이 **구성원 경로만** 만진다. 선두 경로와는 안 겹치므로
+// 합집합을 안 보면 res.Overlaps 가 반드시 빈다.
+func TestPickRecommendOverlapsCoverTheWholeBundle(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "나")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "남")
+
+	if err := s.Beat(ctx(), other.Session.ID, model.SignalTool,
+		[]string{filepath.Join(repo, "services", "mem.go")}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	addItem(t, s, "p", "r-lead", []string{"services/lead.go"}, nil)
+	addItem(t, s, "p", "r-mem", []string{"services/mem.go"}, nil)
+	makeSiblings(t, st, "p", "r-lead", "r-mem") // 형제 축으로 묶이게 한다
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("추천 실패: %v", err)
+	}
+
+	// ── 전제 확인 ── 결과를 읽기 전에, 이것이 정말 구성원 있는 추천인가.
+	if res.Mode != PickRecommended {
+		t.Fatalf("전제가 깨졌다 — mode 가 %q 다", res.Mode)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("전제가 깨졌다 — 구성원 1건짜리 추천이 아니다: %+v", res.Bundle)
+	}
+	if res.Bundle.Members[0].Claimed {
+		t.Fatal("전제가 깨졌다 — 추천인데 구성원이 집혔다")
+	}
+	// 선두 경로 단독으로는 안 겹쳐야 대조가 성립한다.
+	if len(res.Item.Paths) != 1 || res.Item.Paths[0] != "services/lead.go" {
+		t.Fatalf("전제가 깨졌다 — 선두 경로가 %v 다", res.Item.Paths)
+	}
+
+	if len(res.Overlaps) != 1 || res.Overlaps[0].SessionID != other.Session.ID {
+		t.Fatalf("구성원 경로의 겹침이 추천 응답에 안 실렸다: %+v\n"+
+			"추천의 겹침은 묶음 전체 합집합이어야 한다 — 아니면 렌더의 "+
+			"'묶음 N건의 경로를 전부 합쳐서 봤다'가 거짓말이 된다", res.Overlaps)
+	}
+}
