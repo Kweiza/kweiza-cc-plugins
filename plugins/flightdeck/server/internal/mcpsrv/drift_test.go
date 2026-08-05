@@ -2,6 +2,7 @@ package mcpsrv
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +164,40 @@ func TestRenderDriftNamesTheAxisAndWhyRepairDidNotHappen(t *testing.T) {
 }
 
 // why 가 비어도 문구가 잘 맺어지는지("because:" 만 남고 뒤가 없는 꼴이 아닌지) 본다.
+// TestRenderDriftCapsNamedTwins 는 배너가 이름을 적는 줄에 상한이 있는지 본다.
+//
+// 이 배너는 board 의 **고정분**이다 — 예산이 자르는 것은 카드뿐이라, 여기 한 줄이 늘면
+// 카드가 한 장 밀려난다. 그런데 갈린 카드 수는 /clear·compact 때마다 자라고 상한이 없었다.
+// 실측(2026-08-05): 쌍둥이 10건일 때 이 배너 혼자 예산 1200 의 44%.
+func TestRenderDriftCapsNamedTwins(t *testing.T) {
+	const n = 10
+	var tw []CoordinateTwin
+	for i := 0; i < n; i++ {
+		tw = append(tw, CoordinateTwin{
+			SessionID:   fmt.Sprintf("01KZ7CARD%013d", i),
+			CCSessionID: fmt.Sprintf("%08d-6ca4-4321-9912-f713e791f3fe", i),
+		})
+	}
+	got := RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+
+	if named := strings.Count(got, "갈린 카드: "); named > driftTwinLimit {
+		t.Fatalf("이름을 %d개 적었다 — 상한 %d\n%s", named, driftTwinLimit, got)
+	}
+	// 수는 첫 줄이 **참값**으로 낸다. 상한을 수에도 적용하면 배너가 거짓말을 한다.
+	if !strings.Contains(got, fmt.Sprintf("갈린 세션이 %d건 더", n)) {
+		t.Fatalf("첫 줄이 참 건수 %d 를 안 낸다:\n%s", n, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d건 더 —", n-driftTwinLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%s", got)
+	}
+
+	// 대조 — 상한 이하면 전부 이름이 나온다.
+	few := RenderDrift(tw[:2], "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+	if named := strings.Count(few, "갈린 카드: "); named != 2 {
+		t.Fatalf("쌍둥이 2건인데 이름이 %d개다:\n%s", named, few)
+	}
+}
+
 func TestRenderDriftIsWellFormedWithoutAReason(t *testing.T) {
 	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "cc-new", "")
 	if got == "" {

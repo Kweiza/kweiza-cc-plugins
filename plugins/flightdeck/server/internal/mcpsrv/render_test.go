@@ -263,6 +263,141 @@ func TestRenderBoardBudget(t *testing.T) {
 	}
 }
 
+// heavyTail 은 **실제로 관측된 모양의** 무거운 고정분을 만든다 — 겹침 다수 + 표류 배너.
+//
+// ★ TestRenderBoardBudget 이 쓰는 꼬리는 알림 0·겹침 0·배너 없음이라 두 줄짜리다.
+// 그래서 그 시험은 "고정분이 크면 어떻게 되나"를 **원리적으로 못 본다.** 카드가 0장이 된
+// 2026-08-05 의 실제 응답이 초록으로 지나간 이유가 그것이다. 이 헬퍼가 그 구멍을 메운다.
+// countCards 는 렌더된 보드에 실제로 남은 카드 수다.
+// synthBoard 의 id 는 ShortID 로 "01SESSIO…" 까지만 찍히므로 그 접두로 센다.
+func countCards(rendered string) int { return strings.Count(rendered, "01SESSIO") }
+
+func heavyTail(overlaps, twins int) string {
+	var ol []judge.Overlap
+	for i := 0; i < overlaps; i++ {
+		ol = append(ol, judge.Overlap{
+			SessionID: fmt.Sprintf("01OTHER%04d", i),
+			Pairs: [][2]string{
+				{".superpowers/sdd/2026-08-05-x/progress.md", ".superpowers/sdd/2026-08-05-x/progress.md"},
+				{"plugins/flightdeck/server/internal/service/board.go", "plugins/flightdeck/server/internal/service/board.go"},
+				{"plugins/flightdeck/server/internal/mcpsrv/render.go", "plugins/flightdeck/server/internal/mcpsrv/render.go"},
+			},
+		})
+	}
+	var tw []CoordinateTwin
+	for i := 0; i < twins; i++ {
+		tw = append(tw, CoordinateTwin{
+			SessionID:   fmt.Sprintf("01KZ7CARD%013d", i),
+			CCSessionID: fmt.Sprintf("%08d-6ca4-4321-9912-f713e791f3fe", i),
+		})
+	}
+	return RenderTail(TailInput{
+		Now: t0, NotesObserved: true, OverlapsObserved: true, Overlaps: ol,
+		Banner: RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", ""),
+	})
+}
+
+// TestRenderBoardKeepsCardFloorWhenFixedPartIsHuge 는 **카드 0장인 보드를 금지한다.**
+//
+// 2026-08-05 01:12 UTC 실측: 살아 있는 세션 34건인데 카드 0장, "34건을 접었다" 한 줄만.
+// 고정분(머리·발·꼬리·배너)이 예산 1200 을 156% 먹어서 예산 루프가 첫 블록에서 즉시
+// break 했다. 그 출력은 예산도 못 지키고(고정분이 이미 넘었다) 본체도 100% 잃는다.
+func TestRenderBoardKeepsCardFloorWhenFixedPartIsHuge(t *testing.T) {
+	// ── ① 실측된 그 모양 ── 2026-08-05 01:12 의 응답(세션 34건·겹침 16건·쌍둥이 10건)이
+	// 이제 카드를 낸다. **예산 안이라고는 단정하지 않는다** — 고정분이 그만큼 크면 예산을
+	// 넘기는 것이 설계된 거동이고(바닥이 예산을 이긴다), 그때 넘겼다고 말하는지를 대신 본다.
+	observed := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0, Tail: heavyTail(16, 10)})
+	if cards := countCards(observed); cards < 1 {
+		t.Fatalf("실측된 그 입력에서 카드가 0장이다 — 카드 0장인 보드는 보드가 아니다:\n%s", observed)
+	}
+	// 상한 둘이 실제로 걸렸는지 — 이 두 단정이 drift·꼬리 상한의 회귀 가드다.
+	if !strings.Contains(observed, "11건 더") {
+		t.Fatalf("겹침 16건인데 꼬리 상한이 안 걸렸다:\n%s", observed)
+	}
+	if !strings.Contains(observed, "7건 더") {
+		t.Fatalf("쌍둥이 10건인데 배너 상한이 안 걸렸다:\n%s", observed)
+	}
+
+	// ── ② 바닥 자체 ── 고정분이 예산을 넘기는 갈래를 직접 지난다.
+	// 상한 둘이 붙은 뒤로는 현실적인 꼬리로 예산을 못 넘기므로(그것이 상한의 목적이다)
+	// 예산을 좁혀서 그 갈래를 만든다 — 바닥은 예산 값과 무관한 성질이어야 한다.
+	tail := heavyTail(16, 10)
+	const tight = 400
+
+	// 대조 먼저: 고정분만으로 이 예산을 넘겨야 바닥이 발동하는 갈래를 실제로 지난다.
+	empty := RenderBoard(service.BoardView{
+		Project: model.Project{ID: "sample-platform", DefaultBranch: "main"},
+		At:      t0, Window: 8 * time.Hour,
+	}, BoardRenderOptions{Now: t0, Tail: tail, Budget: tight})
+	if got := EstimateTokens(empty); got <= tight {
+		t.Fatalf("대조가 성립하지 않았다: 카드 0장인 고정분이 %d토큰이라 예산 %d 를 안 넘는다 — "+
+			"이 입력으로는 바닥이 발동하는 갈래가 안 돈다", got, tight)
+	}
+
+	got := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0, Tail: tail, Budget: tight})
+
+	// ★ **깨질 수 없는 계약을 리터럴로 단정한다.** 여기를 `cards < boardCardFloor` 로 쓰면
+	// 시험이 자기가 지켜야 할 상수를 자기 기준으로 재게 되어, 바닥을 0 으로 만드는 변이가
+	// `0 < 0`(거짓)으로 **초록을 낸다** — 실제로 그렇게 썼다가 변이 시험에서 잡혔다.
+	// 계약은 "0장이면 안 된다"이고 3은 조율값이다. 둘을 따로 단정한다.
+	cards := countCards(got)
+	if cards < 1 {
+		t.Fatalf("카드가 0장이다 — 카드 0장인 보드는 보드가 아니다:\n%s", got)
+	}
+	if cards < boardCardFloor {
+		t.Fatalf("카드가 %d장이다 — 바닥 %d장을 못 지켰다:\n%s", cards, boardCardFloor, got)
+	}
+	// 예산을 넘겼다는 사실과 **넘긴 주체**를 말한다. 조용히 넘기면 계약이 거짓이 된다.
+	if !strings.Contains(got, "고정분") {
+		t.Fatalf("예산을 넘겼는데 무엇이 넘겼는지 안 말한다:\n%s", got)
+	}
+	// 접은 사실은 여전히 따로 말한다 — 원인이 둘이라 뭉치면 손댈 자리를 못 찾는다.
+	if !strings.Contains(got, "접었다") {
+		t.Fatalf("접었는데 접었다는 사실이 없다:\n%s", got)
+	}
+
+	// ── ③ 바닥은 예산이 넉넉할 때 **아무것도 안 바꾼다.** 상시 발동하면 판별력이 0이 된다.
+	light := RenderBoard(synthBoard(34), BoardRenderOptions{Now: t0,
+		Tail: RenderTail(TailInput{Now: t0, NotesObserved: true, OverlapsObserved: true})})
+	if strings.Contains(light, "고정분") {
+		t.Fatalf("가벼운 꼬리인데 예산 초과를 말한다 — 바닥이 상시 발동한다:\n%s", light)
+	}
+	if got := EstimateTokens(light); got > BoardTokenBudget {
+		t.Fatalf("가벼운 꼬리인데 기본 출력이 %d토큰이다 — 상한 %d", got, BoardTokenBudget)
+	}
+}
+
+// TestRenderTailCapsOverlapLines 는 꼬리의 **바깥 차원**에 상한이 있는지 본다.
+//
+// 안쪽 차원(겹침 한 건 안의 경로쌍)은 원래 4개로 잘렸는데 겹침 **건수**는 안 잘렸다.
+// 꼬리는 모든 응답에 붙고 board 에서는 고정분이라, 그 축이 세션 수에 O(N) 으로 자랐다.
+func TestRenderTailCapsOverlapLines(t *testing.T) {
+	const n = 16
+	got := heavyTail(n, 0)
+
+	lines := strings.Count(got, "  · 01OTHER")
+	if lines > tailOverlapLimit {
+		t.Fatalf("겹침 줄이 %d개다 — 상한 %d\n%s", lines, tailOverlapLimit, got)
+	}
+	// 자른 것을 조용히 하지 않는다. 그리고 **건수는 참값**이 나와야 한다 —
+	// 상한을 건수에도 적용하면 화면이 "겹침 5건"이라 거짓말을 한다.
+	if !strings.Contains(got, fmt.Sprintf("겹침 %d건", n)) {
+		t.Fatalf("머리줄이 참 건수 %d 를 안 낸다:\n%s", n, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d건 더", n-tailOverlapLimit)) {
+		t.Fatalf("잘랐는데 몇 건을 잘랐는지 안 말한다:\n%s", got)
+	}
+
+	// 대조 — 상한 이하면 전부 낸다.
+	few := heavyTail(2, 0)
+	if strings.Contains(few, "건 더") {
+		t.Fatalf("겹침 2건인데 잘랐다:\n%s", few)
+	}
+	if c := strings.Count(few, "  · 01OTHER"); c != 2 {
+		t.Fatalf("겹침 2건인데 줄이 %d개다:\n%s", c, few)
+	}
+}
+
 // TestRenderBoardKeepsUnknownApartFromZero 는 0값과 "못 읽었다"를 화면에서 가른다.
 func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	v := synthBoard(1)
