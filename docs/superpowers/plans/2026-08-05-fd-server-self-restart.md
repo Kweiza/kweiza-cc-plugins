@@ -246,12 +246,23 @@ EOF
 
 ---
 
-### Task 2: `ExeID` · `Replaced` · `Decide` — 판정을 순수 함수로
+### Task 2: `ExeID` · `Same` · `Decide` — 판정을 순수 함수로
+
+> **계획 정정 (Task 2 리뷰가 드러낸 것 — 이 태스크 본문에 먼저 적용한다).**
+> 원래 이 태스크는 파일을 둘로 나누고 `selfwatch.go` 전체를 `//go:build unix` 뒤에 두라고 적혀 있었다.
+> 그러면 `ExeID`·`Action`·`Decide`·`String()` 이 **빌드 태그 양쪽에 두 벌**로 생기고,
+> 필드 집합이 갈리는 순간 태그 없는 `_test.go` 가 다른 플랫폼에서만 컴파일에 실패한다.
+> `GOOS=windows go vet ./cmd/fd/` 이 실제로 그것을 잡았고 `go build` 는 못 잡았다(`_test.go` 를 건너뛴다).
+>
+> 그래서 파일을 **셋**으로 가른다. 중립 파일(태그 없음)에 값·판정·감시기 본체를 한 벌만 두고,
+> 플랫폼별 파일에는 진짜로 갈리는 셋(`exeIDOfPath` · `selfWatchSupported` · `execSelf`)만 둔다.
+> 아래 Files·Interfaces·Step 3 은 그렇게 고쳐 적은 것이고, **실제로 그렇게 실렸다.**
 
 **Files:**
-- Create: `plugins/flightdeck/server/cmd/fd/selfwatch.go`
-- Create: `plugins/flightdeck/server/cmd/fd/selfwatch_other.go`
-- Test: `plugins/flightdeck/server/cmd/fd/selfwatch_test.go`
+- Create: `plugins/flightdeck/server/cmd/fd/selfwatch.go` — **빌드 태그 없음.** `ExeID`·`Same`·`Action`·`Decide` 와 감시기 본체
+- Create: `plugins/flightdeck/server/cmd/fd/selfwatch_unix.go` — `//go:build unix`. 위 셋만
+- Create: `plugins/flightdeck/server/cmd/fd/selfwatch_other.go` — `//go:build !unix`. 같은 셋을 **오류로**
+- Test: `plugins/flightdeck/server/cmd/fd/selfwatch_test.go` — 태그 없음(그래서 양쪽 플랫폼에서 컴파일된다)
 
 **Interfaces:**
 - Produces:
@@ -259,8 +270,9 @@ EOF
   - `func (e ExeID) Same(o ExeID) bool`
   - `type Action int` — `ActNothing`, `ActVerify`, `ActExec`, `ActRefuse`
   - `func Decide(start, now, lastFailed ExeID, statErr error) (Action, string)` — **`ActNothing` 또는 `ActVerify` 만 낸다.** `ActExec`·`ActRefuse` 는 Task 4 의 검증 단계가 낸다.
-  - `func exeIDOfPath(path string) (ExeID, error)` (유닉스) / 비유닉스는 `selfwatch_other.go` 에서 `ErrSelfWatchUnsupported`
-  - `func selfWatchSupported() bool`
+  - `func exeIDOfPath(path string) (ExeID, error)` — `selfwatch_unix.go` / `selfwatch_other.go` 두 벌.
+    비유닉스는 `errSelfWatchUnsupported`(**소문자다** — 패키지 밖으로 안 나간다)를 감싼 오류를 낸다
+  - `func selfWatchSupported() bool` — 같은 두 파일
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -352,17 +364,13 @@ go test ./cmd/fd/ -run 'TestDecide|TestSame' -v
 
 - [ ] **Step 3: 최소 구현**
 
-`cmd/fd/selfwatch.go`:
+`cmd/fd/selfwatch.go` — **빌드 태그를 붙이지 마라.** 아래 전부가 플랫폼 중립이다:
 
 ```go
-//go:build unix
-
 package main
 
 import (
 	"fmt"
-	"os"
-	"syscall"
 )
 
 // ExeID 는 실행 파일 하나의 정체다. 순수 값이다.
@@ -370,8 +378,8 @@ import (
 // ★ **OK 가 먼저다.** false 면 나머지 필드는 값이 아니라 빈칸이다.
 // 관측 못 한 것을 0 으로 접으면 "둘 다 0이니 같다"가 되고, 그 순간 이 축의 판별력이 사라진다.
 //
-// Dev·Ino 는 유닉스 전제다. 이 파일 전체가 unix 빌드 태그 뒤에 있고,
-// 비유닉스는 selfwatch_other.go 의 no-op 이 받는다.
+// Dev·Ino 는 유닉스 고유이지만, ExeID 자체는 모든 플랫폼에서 같은 형태를 갖는다.
+// 단지 exeIDOfPath 만 플랫폼 고유이다 — 구조체를 태그로 복제하면 필드 집합이 갈린다.
 type ExeID struct {
 	OK        bool
 	Dev, Ino  uint64
@@ -440,6 +448,23 @@ func Decide(start, now, lastFailed ExeID, statErr error) (Action, string) {
 	return ActVerify, fmt.Sprintf("실행 파일이 교체됐다: %s → %s", start, now)
 }
 
+// exeIDOfPath 와 selfWatchSupported 는 플랫폼별 구현을 제공한다.
+// selfwatch_unix.go 와 selfwatch_other.go 를 본다.
+```
+
+`cmd/fd/selfwatch_unix.go` — 갈리는 것만 여기 있다:
+
+```go
+//go:build unix
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+)
+
 // exeIDOfPath 는 경로 하나를 잰다.
 func exeIDOfPath(path string) (ExeID, error) {
 	fi, err := os.Stat(path)
@@ -458,9 +483,12 @@ func exeIDOfPath(path string) (ExeID, error) {
 
 // selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
 func selfWatchSupported() bool { return true }
+
+// execSelf 는 Task 4 에서 여기 들어온다(진짜 syscall.Exec).
 ```
 
-`cmd/fd/selfwatch_other.go`:
+`cmd/fd/selfwatch_other.go` — **같은 세 이름만 둔다.**
+`ExeID`·`Action`·`Decide`·`String()` 을 여기 다시 쓰지 마라. 그것이 리뷰가 잡은 결함 그대로다:
 
 ```go
 //go:build !unix
@@ -479,31 +507,15 @@ import (
 // syscall.Exec 이 없는 플랫폼이라 애초에 자기 재기동을 할 수 없다.
 var errSelfWatchUnsupported = errors.New("이 플랫폼은 자기 재기동을 지원하지 않는다(syscall.Exec 부재)")
 
-type ExeID struct{ OK bool }
-
-func (e ExeID) Same(o ExeID) bool { return false }
-func (e ExeID) String() string    { return "관측 안 됨" }
-
-type Action int
-
-const (
-	ActNothing Action = iota
-	ActVerify
-	ActExec
-	ActRefuse
-)
-
-func (a Action) String() string { return "nothing" }
-
-func Decide(start, now, lastFailed ExeID, statErr error) (Action, string) {
-	return ActNothing, errSelfWatchUnsupported.Error()
-}
-
+// exeIDOfPath 는 경로 하나를 잰다.
 func exeIDOfPath(path string) (ExeID, error) {
 	return ExeID{}, fmt.Errorf("%w (path=%q)", errSelfWatchUnsupported, path)
 }
 
+// selfWatchSupported 는 이 플랫폼에서 자기 재기동이 가능한가다.
 func selfWatchSupported() bool { return false }
+
+// execSelf 는 Task 4 에서 여기 들어온다(**빈 성공이 아니라 오류를 낸다**).
 ```
 
 - [ ] **Step 4: 시험이 통과하는 것을 확인한다**
