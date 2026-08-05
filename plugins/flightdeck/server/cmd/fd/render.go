@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
@@ -107,12 +108,20 @@ func RenderHealth(h healthzResponse, reachable bool, url string) string {
 	} else {
 		fmt.Fprintf(&b, "\n    디스크 여유 **못 쟀다**(0%% 가 아니다): %s", clip(h.DiskError, 200))
 	}
+	// ★ 서버가 도는 판. **부재도 찍는다** — 이 축을 안 내는 서버라는 사실 자체가
+	// "판이 이 축을 알리기 전만큼 낡았다"는 신호이고, 침묵하면 그 신호가 사라진다.
+	fmt.Fprintf(&b, "\n    서버 판 %s", buildinfo.Short(h.Build))
 	fmt.Fprintf(&b, "\n    인증: 토큰 설정 %v · 루프백 개방 %v", h.Auth.TokenSet, h.Auth.LoopbackOpen)
 	if h.Auth.Notice != "" {
 		fmt.Fprintf(&b, "\n    %s", clip(h.Auth.Notice, 300))
 	}
 	if s := SkewBanner(clientAPIVersion, h.APIVersion); s != "" {
 		fmt.Fprintf(&b, "\n    %s", s)
+	}
+	// 스큐 배너 **다음**에, 따로 낸다. 계약 버전이 같아도 판 나이는 갈릴 수 있고
+	// 그 구간이 정확히 이 줄이 없어 침묵했던 자리다.
+	if v := buildinfo.VintageBanner(buildinfo.Self(), h.Build); v != "" {
+		fmt.Fprintf(&b, "\n    %s", v)
 	}
 	return b.String()
 }

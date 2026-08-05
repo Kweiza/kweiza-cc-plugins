@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 )
 
 // REST 클라이언트 — **모든 서브명령이 이것만 쓴다.**
@@ -386,6 +388,9 @@ type healthzResponse struct {
 		LoopbackOpen bool   `json:"loopback_open"`
 		Notice       string `json:"notice"`
 	} `json:"auth"`
+	// Build 는 서버 **프로세스**의 빌드 좌표다. 이 축을 안 내는 옛 서버면 Known 이 거짓이고,
+	// 그 부재 자체가 "판이 이 축을 알리기 전만큼 낡았다"는 신호다 — 0값으로 접히지 않는다.
+	Build buildinfo.Coord `json:"build"`
 }
 
 func (c *Client) Healthz(ctx context.Context) (healthzResponse, error) {

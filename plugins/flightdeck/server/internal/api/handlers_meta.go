@@ -8,6 +8,7 @@ import (
 
 	"context"
 	"errors"
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/service"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -40,6 +41,15 @@ type HealthzBody struct {
 	DiskError   string     `json:"disk_error,omitempty"`
 	At          time.Time  `json:"at"`
 	Auth        AuthStatus `json:"auth"`
+	// Build 는 **응답하는 이 프로세스**의 빌드 좌표다. 파일의 것이 아니다.
+	//
+	// ★ api_version 으로는 판 나이를 못 나른다 — 그 값은 계약이 깨질 때만 오르므로
+	// 판이 수십 커밋 벌어져도 "1" == "1" 이다. 그 구간에서 응답의 축 하나가 조용히
+	// 사라지는 것이 실제로 관측됐다(fd-binary-vintage-has-no-signal).
+	//
+	// 좌표 누출이 아니다 — sha 는 이 저장소를 읽을 수 있는 사람에게만 의미가 있고,
+	// db_path 처럼 서버의 파일 배치를 알리지 않는다.
+	Build buildinfo.Coord `json:"build"`
 }
 
 // AuthNotice 는 지금 설정을 사람이 읽을 한 줄로 만든다. 순수 함수다.
@@ -59,9 +69,12 @@ func AuthNotice(tokenSet, loopbackOpen bool) string {
 // 오류 **전문**을 고정 문구로 갈아 끼운다. 그 문자열에는 DB 파일 경로와
 // 드라이버 이름이 섞여 들어오고, 그것을 그대로 내면 걷어낸 db_path 가
 // 다른 필드로 되살아난다 — 실제로 그 모양의 누출이 흔하다.
-func HealthzOf(h service.Health, tokenSet, loopbackOpen bool) HealthzBody {
+// ★ build 를 **인자로 받는다.** service.Health 에 필드를 더하지 않는 이유가 둘이다 —
+// 빌드 좌표는 DB·디스크 상태가 아니라 프로세스의 성질이고, 인자로 받으면 이 함수가
+// tokenSet·loopbackOpen 과 같은 모양으로 순수하게 남아 시험이 값을 직접 준다.
+func HealthzOf(h service.Health, tokenSet, loopbackOpen bool, build buildinfo.Coord) HealthzBody {
 	b := HealthzBody{
-		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK,
+		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build,
 		DiskFreePct: h.DiskFreePct, DiskKnown: h.DiskKnown, At: h.At,
 		Auth: AuthStatus{
 			TokenSet: tokenSet, LoopbackOpen: loopbackOpen,
@@ -80,7 +93,10 @@ func HealthzOf(h service.Health, tokenSet, loopbackOpen bool) HealthzBody {
 // handleHealthz 는 서버 상태와 **인증 설정**을 알린다. 인증 게이트 앞에 있다.
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h := s.svc.Health(r.Context())
-	body := HealthzOf(h, s.opt.Token != "", !s.opt.RequireTokenOnLoopback)
+	// buildinfo.Self 는 파일이 아니라 **이 프로세스**를 읽는다. 실측에서 설치 파일은 이미
+	// 최신으로 교체돼 있는데 프로세스는 지워진 아이노드의 옛 코드를 돌고 있었다 —
+	// 파일을 재는 진단은 그 상황에서 "최신"이라 답한다.
+	body := HealthzOf(h, s.opt.Token != "", !s.opt.RequireTokenOnLoopback, buildinfo.Self())
 	status := http.StatusOK
 	if !body.OK {
 		status = http.StatusServiceUnavailable
