@@ -124,6 +124,11 @@ func TestValidateLandingLeave(t *testing.T) {
 		{"force 는 사유 필수(없으면 거절)", model.LandingLeftForce, "", true},
 		{"force + 사유", model.LandingLeftForce, "세션이 죽은 것을 확인함", false},
 		{"모르는 종류는 사유가 있어도 거절", model.LandingLeftKind("bogus"), "아무 사유", true},
+		// 공백만 있는 사유는 사유가 아니다. `detail == ""` 만 보면 이 값이 Go 가드와
+		// DB CHECK(left_detail <> '')를 **둘 다** 통과해 공백이 사유로 원장에 박힌다.
+		{"fail + 공백만 있는 사유는 거절", model.LandingLeftFail, "   ", true},
+		{"leave + 탭·줄바꿈만 있는 사유는 거절", model.LandingLeftLeave, "\t\n", true},
+		{"force + 공백만 있는 사유는 거절", model.LandingLeftForce, " ", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -185,6 +190,56 @@ func TestLandingQueueOneLivePerSessionIsEnforcedByTheIndex(t *testing.T) {
 	if err := insertLive(); err != nil {
 		t.Fatalf("인덱스를 지웠는데도 중복 삽입이 막혔다 — 앱 어딘가에 숨은 판정이 있다는 뜻이라 "+
 			"이 시험의 전제 자체가 틀렸다: %v", err)
+	}
+}
+
+// TestLandingLeftKindEnumIsEnforcedBySchema — left_kind 열거를 **스키마가** 막는다.
+//
+// ★ 이 CHECK 는 Go 경로로는 원리적으로 못 밟는다: left_kind 를 쓰는 모든 경로가 먼저
+// ValidateLandingLeave 를 지나 모르는 종류를 거절하기 때문이다. 그래서 003 의 열거에
+// 오타가 있어도(예: 'ok' 가 빠져도) 전 시험이 초록이다 —
+// TestFreshInstallAndUpgradeProduceTheSameSchema 도 못 잡는다(신규·업그레이드가 같은
+// 파일에서 오므로 오타가 대칭으로 들어간다). 003 주석이 스스로 "Go 가 1차 방어이고
+// 이것이 최종 방어다"라고 적었는데, 그 방어가 존재한다는 증거가 이 시험뿐이다.
+//
+// 형제(TestLandingQueueOneLivePerSessionIsEnforcedByTheIndex)와 같은 모양으로 **대조 전제**를
+// 함께 단정한다: 같은 문장이 'force' 로는 통과해야 한다. 안 그러면 "CHECK 가 막았다"와
+// "다른 제약(left_at/left_kind 짝 · left_detail 비었음 · FK)이 막았다"가 안 갈린다.
+func TestLandingLeftKindEnumIsEnforcedBySchema(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	// 저장층을 통하지 않고 **raw INSERT** 로 넣는다 — Go 가드를 지나면 이 CHECK 에 닿지 않는다.
+	// 나머지 두 CHECK 를 만족시키려고 left_at·left_detail 을 함께 채운다.
+	insertClosed := func(kind string) error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO landing_queue(project, session_id, enqueued_at, left_at, left_kind, left_detail)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			"p", a.ID, fmtTime(nowStamp()), fmtTime(nowStamp()), kind, "사람이 회수함")
+		return err
+	}
+
+	// ── 대조 전제: 열거에 있는 종류는 같은 문장이 통과한다 ──
+	if err := insertClosed("force"); err != nil {
+		t.Fatalf("대조가 깨졌다 — 열거 안의 종류 'force' 도 거절됐다. 그러면 아래 거절이 "+
+			"열거 CHECK 때문인지 다른 제약 때문인지 갈리지 않는다: %v", err)
+	}
+
+	// ── 본 단정: 열거 밖의 종류는 거절된다 ──
+	if err := insertClosed("bogus"); err == nil {
+		t.Fatal("left_kind='bogus' 가 통과했다 — 003 의 열거 CHECK 가 없거나 낱말이 빠졌다. " +
+			"Go 경로가 전부 ValidateLandingLeave 를 지나므로 이 시험이 그 방어의 유일한 증거다")
+	}
+
+	// 열거의 다섯 낱말이 **전부** 살아 있는지 본다. 하나가 빠지면 그 종류로 닫는 경로가
+	// 런타임에 죽는데, Go 가드는 통과시키므로 그 사실이 배포될 때까지 안 보인다.
+	for _, kind := range []string{"ok", "fail", "leave", "finish", "force"} {
+		if err := insertClosed(kind); err != nil {
+			t.Errorf("열거에 있어야 할 left_kind=%q 가 스키마에서 거절됐다 — "+
+				"그 종류로 줄 행을 닫는 경로가 런타임에 죽는다: %v", kind, err)
+		}
 	}
 }
 

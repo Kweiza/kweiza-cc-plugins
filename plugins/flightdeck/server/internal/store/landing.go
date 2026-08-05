@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -35,7 +36,11 @@ func ValidateLandingLeave(kind model.LandingLeftKind, detail string) error {
 		// 정상 종료다 — "왜"가 종류 자체에 들어 있으므로 사유가 면제된다.
 		return nil
 	case model.LandingLeftFail, model.LandingLeftLeave, model.LandingLeftForce:
-		if detail == "" {
+		// ★ TrimSpace 로 본다. `detail == ""` 만 보면 공백 한 칸이 이 가드와 DB CHECK
+		// (`left_detail <> ''`)를 **둘 다** 통과해 사유 자리에 공백이 원장에 박힌다 —
+		// 사유가 있는 회수와 없는 회수가 조회에서 구분되지 않는다.
+		// 형제인 service.ReleaseLaneRow 가 이미 strings.TrimSpace 로 막는다.
+		if strings.TrimSpace(detail) == "" {
 			return fmt.Errorf("종류 %q 는 사유가 필수다 — 사유 없는 이탈은 나중에 되짚을 수 없다",
 				kind)
 		}
