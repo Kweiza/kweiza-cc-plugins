@@ -501,21 +501,106 @@ func TestEligibleBundleNeedsEveryBlockerInBundle(t *testing.T) {
 	}
 }
 
+// 사유가 둘 이상 섞이면 — 하나는 after-unmet-item, 하나는 다른 축(자원 점유) —
+// 흡수하지 않는다. "사유 중 **하나라도** after-unmet-item"으로 완화하면, 자원을
+// 남이 쥔 항목도 선행만 선두에 있으면 흡수돼 그 resource-held 줄이 원장에서
+// 지워진다 — 선점 세션은 자원이 막힌 줄 모르고 그 항목을 받는다.
+// (모든 기존 흡수 시험은 사유가 하나뿐인 항목만 쓰므로 any 와 every 를 못 가른다.)
+func TestEligibleBundleDoesNotAbsorbWhenAnyRejectionIsNotUnmetItem(t *testing.T) {
+	blocker := cand("B-lead", 0, nil)
+	blocked := cand("A-blocked", 1, nil, afterItem("B-lead"))
+	blocked.Needs = []string{"db"}
+	in := EligibleInput{
+		Self:          "S1",
+		Candidates:    []Candidate{blocker, blocked},
+		Facts:         AfterFacts{ItemStates: map[string]model.ItemState{"B-lead": model.ItemOpen}},
+		HeldResources: map[string]string{"db": "S2"},
+	}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("사유가 섞였는데(after-unmet-item + resource-held) 흡수했다 — 구성원 %v", memberIDs(b))
+	}
+	codes := codesFor(rej, "A-blocked")
+	if !contains(codes, AfterUnmetItem) || !contains(codes, RejectResourceHeld) {
+		t.Fatalf("사유 두 줄이 원장에 다 있어야 한다: %v", codes)
+	}
+}
+
+// ★ 흡수 규칙의 좁힘을 못박는다. 이 항목의 선행은 둘이다 — 이미 충족된 sha:cafe000 과
+// 미충족 item:B-lead. **미충족분만** 보면 흡수 대상(선두가 유일한 미충족 선행)이지만,
+// 이 구현은 흡수하지 않는다 — blockedOnlyBy 가 충족 여부와 무관하게 After 전체를 본다.
+// "미충족 선행만 전부 묶음 안이면 된다"로 넓히려면 판정 함수가 AfterFacts 를 받아야
+// 하고, 그건 조용히 할 일이 아니라 결정으로 해야 한다 — 이 시험이 그 결정 없이
+// 조용히 넓어지는 것을 막는다(design.md §2.3 이 같은 근거를 문서에 싣는다).
+func TestEligibleBundleDoesNotAbsorbWhenASatisfiedPrerequisiteIsAlsoPresent(t *testing.T) {
+	blocker := cand("B-lead", 0, nil)
+	blocked := cand("A-blocked", 1, nil, afterItem("B-lead"), afterSHA("cafe000"))
+	in := EligibleInput{
+		Self:       "S1",
+		Candidates: []Candidate{blocker, blocked},
+		Facts: AfterFacts{
+			ItemStates:  map[string]model.ItemState{"B-lead": model.ItemOpen},
+			SHAAncestry: map[string]AncestryResult{"cafe000": AncestryYes}, // 이미 충족
+		},
+	}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if contains(memberIDs(b), "A-blocked") {
+		t.Fatalf("충족된 선행이 섞였는데 흡수했다(미충족분만 보면 선두뿐인데도) — 구성원 %v", memberIDs(b))
+	}
+	if !contains(codesFor(rej, "A-blocked"), AfterUnmetItem) {
+		t.Fatalf("미충족 사유(after-unmet-item)가 원장에 없다: %v", codesFor(rej, "A-blocked"))
+	}
+}
+
 // ★ 이 시험이 이 태스크의 핵심이다.
 // 아홉 코드 중 흡수 가능한 것은 after-unmet-item 하나뿐이다.
 // 나머지를 흡수하면 "모르는 것"이나 "영영 안 풀리는 것"이 충족으로 접힌다.
+// 여섯 코드를 코드별로 못박는다: after-dropped-dep · after-unknown · after-bad-state
+// (item 축) · after-bad-ref · after-unmet-sha · after-failed-job(sha·job 축).
+// after-unmet-job 은 after-unmet-sha·after-failed-job 과 같은 "잡 축" 판정 경로를
+// 공유하고, after-malformed 는 스키마 CHECK 를 우회한 입력에서만 나와 이 시험의
+// 정상 입력 구성으로는 만들 이유가 약해 뺐다.
+//
+// ★ 이 여섯 줄이 전부 **같은 이유로** 안 흡수되는 것은 아니다. 처음 셋(item 축)은
+// 이 파일 아래의 "코드 필터"(all==after-unmet-item) 하나로 막힌다 — 그 필터를
+// 무력화하면(대입 조건을 늘 참으로 바꾸면) 처음 셋만 붉어진다. 나머지 셋(sha·job 축)은
+// 애초에 item 이 아닌 선행이라 blockedOnlyBy 의 구조적 가드(비-item 선행은 무조건
+// 거른다)가 코드 필터와 **무관하게** 이중으로 막는다 — 코드 필터만 무력화해선 안
+// 붉어진다(TestEligibleBundleDoesNotAbsorbSHABlocked 의 주석과 같은 사정). 그래도
+// 이 셋을 남긴 이유는, 코드가 실제로 after-bad-ref·after-unmet-sha·after-failed-job
+// 인지(예를 들어 항상 after-unknown 으로 새지 않는지)를 원장에서 직접 확인하는
+// 값어치가 있어서다 — 방어가 겹친다고 사유 코드 자체가 맞는지 안 볼 이유는 없다.
 func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
 	cases := []struct {
 		name  string
+		after model.After
 		facts AfterFacts
 		code  string
 	}{
 		{"폐기된 선행은 흡수 불가 — 영영 안 풀린다",
+			afterItem("B-blocker"),
 			AfterFacts{ItemStates: map[string]model.ItemState{"B-blocker": model.ItemDropped}},
 			AfterDroppedDep},
 		{"조회 못 한 선행은 흡수 불가 — 판정 자체를 안 했다",
+			afterItem("B-blocker"),
 			AfterFacts{ItemStates: map[string]model.ItemState{}}, // 키 부재 = after-unknown
 			AfterUnknown},
+		{"열거에 없는 항목 상태는 흡수 불가 — 스키마와 코드가 어긋난 정합성 결함이다",
+			afterItem("B-blocker"),
+			AfterFacts{ItemStates: map[string]model.ItemState{"B-blocker": model.ItemState("bogus")}},
+			AfterBadState},
+		{"오타 ref 인 sha 선행은 흡수 불가 — 오타이거나 지워진 커밋이다",
+			afterSHA("deadbee"),
+			AfterFacts{SHAAncestry: map[string]AncestryResult{"deadbee": AncestryBadRef}},
+			AfterBadRef},
+		{"아직 조상이 아닌 sha 선행은 흡수 불가 — 이 세션이 만들 수 없는 사실을 기다린다",
+			afterSHA("deadbee"),
+			AfterFacts{SHAAncestry: map[string]AncestryResult{"deadbee": AncestryNo}},
+			AfterUnmetSHA},
+		{"실패한 잡 선행은 흡수 불가 — 재실행 없이는 안 풀린다",
+			model.After{Job: "ci-1"},
+			AfterFacts{JobStates: map[string]string{"ci-1": "fail"}},
+			AfterFailedJob},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -523,7 +608,7 @@ func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
 				Self: "S1",
 				Candidates: []Candidate{
 					cand("B-blocker", 0, nil),
-					cand("A-blocked", 1, nil, afterItem("B-blocker")),
+					cand("A-blocked", 1, nil, tc.after),
 				},
 				Facts: tc.facts,
 			}
@@ -539,6 +624,11 @@ func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
 }
 
 // sha 선행은 흡수 대상이 아니다 — 이 세션이 만들 수 없는 사실을 기다린다.
+//
+// SHAAncestry 에 deadbee: AncestryNo 를 명시해 실제로 after-unmet-sha 코드가 나는지까지
+// 확인한다. 예전에는 SHAAncestry 를 빈 맵으로 뒀는데, 그러면 키 부재로 after-unknown 이
+// 나가 TestEligibleBundleAbsorbsOnlyUnmetItem 의 "조회 못 한 선행" 사례와 코드가
+// 똑같아진다 — sha 축을 하나도 안 거치면서 이름만 sha 시험이었다.
 func TestEligibleBundleDoesNotAbsorbSHABlocked(t *testing.T) {
 	in := EligibleInput{
 		Self: "S1",
@@ -546,11 +636,14 @@ func TestEligibleBundleDoesNotAbsorbSHABlocked(t *testing.T) {
 			cand("B-lead", 0, nil),
 			cand("A-blocked", 1, nil, afterSHA("deadbee")),
 		},
-		Facts: AfterFacts{SHAAncestry: map[string]AncestryResult{}},
+		Facts: AfterFacts{SHAAncestry: map[string]AncestryResult{"deadbee": AncestryNo}},
 	}
-	b, _ := EligibleBundle(in, SiblingIndex{})
+	b, rej := EligibleBundle(in, SiblingIndex{})
 	if contains(memberIDs(b), "A-blocked") {
 		t.Fatalf("sha 선행을 흡수했다 — 구성원 %v", memberIDs(b))
+	}
+	if !contains(codesFor(rej, "A-blocked"), AfterUnmetSHA) {
+		t.Fatalf("sha 미충족 사유(after-unmet-sha)가 원장에 없다: %v", codesFor(rej, "A-blocked"))
 	}
 }
 

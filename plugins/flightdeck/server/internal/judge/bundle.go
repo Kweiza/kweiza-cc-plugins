@@ -170,6 +170,14 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 	rejByItem := make(map[string][]model.Rejection, len(in.Candidates))
 	order := make([]string, 0, len(in.Candidates))
 
+	// ★ 이 아래 세 맵·슬라이스는 in.Candidates 안에서 Item.ID 가 유일하다고 가정한다
+	// (store 의 item.id 는 기본키다). 어겨지면 조용히 죽지 않고 뚜렷하게 어긋난다 —
+	// order 에는 그 id 가 두 번 남지만 rejByItem[id] 는 마지막에 쓴 값으로 **덮인다**
+	// (append 가 아니라 대입). flatten 은 order 를 그대로 두 번 훑으므로 나중 후보의
+	// 사유를 두 번 내고 먼저 후보의 사유는 아예 안 낸다 — 사라지진 않지만(뭔가는
+	// 원장에 남는다) 누구 것인지 틀린다. id 아닌 별도 키(예: 입력 인덱스)로 바꾸면
+	// 이 가정이 필요 없어지지만, byID·picked·absorbable 이 전부 id 로 서로를 찾는
+	// 지금 구조를 바꾸는 비용이 이 가정 하나를 문서화하는 비용보다 크다.
 	for _, c := range in.Candidates {
 		byID[c.Item.ID] = c
 		order = append(order, c.Item.ID)
@@ -262,8 +270,16 @@ func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candida
 			add(c, *l)
 		}
 	}
-	// 흡수 — 선두가 그 항목의 **미충족 선행 전부**여야 한다.
-	// 하나라도 밖에 있으면 밖의 것을 기다려야 하는 사실이 안 바뀐다.
+	// 흡수 — 이 항목의 **선행 전체**(충족 여부와 무관하게)가 선두 하나만 가리켜야 한다.
+	//
+	// ★ 이것은 "미충족 선행만 전부 선두면 된다"보다 **좁다.** 이미 충족된 sha:cafe
+	// 하나와 미충족 item:B-lead 하나를 같이 가진 항목은, 미충족분만 보면 흡수
+	// 대상이지만 여기서는 흡수하지 않는다(TestEligibleBundleDoesNotAbsorbWhenA
+	// SatisfiedPrerequisiteIsAlsoPresent 가 못박는다). 충족 여부를 다시 매기려면
+	// 이 함수가 AfterFacts 를 받아야 하는데, 그러면 AfterSatisfied 의 사본이 여기
+	// 하나 더 생기고 순수 판정 표면이 넓어진다. 실측(2026-08-05, 열린 큐)에서 sha
+	// 선행과 item 선행을 동시에 가진 open 항목이 **0건**이라 이 좁힘의 비용은 지금
+	// 0이다 — 넓히는 건 그 실측이 바뀌었을 때 다시 잴 결정이지, 조용히 넓힐 일이 아니다.
 	for _, c := range sortedCands(absorbable) {
 		if blockedOnlyBy(c, lead.Item.ID) {
 			add(c, Link{Item: c.Item.ID, Axes: []BundleAxis{AxisAfter},
@@ -282,9 +298,10 @@ func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candida
 	return b
 }
 
-// blockedOnlyBy 는 이 항목의 선행이 **정확히 그 항목 하나**뿐인지 본다.
-// 항목 선행이 여럿이면 전부 묶음 안이어야 하는데, 방사형 묶음의 구성원은
-// 선두와만 직접 이어지므로 "전부"가 성립하는 경우가 곧 "하나뿐"이다.
+// blockedOnlyBy 는 이 항목의 선행 **전체**가 정확히 그 항목 하나뿐인지 본다
+// (충족된 선행이 섞여 있어도 마찬가지다 — 충족 여부는 안 본다. 위 bundleAround 의
+// 흡수 주석 참고). 항목 선행이 여럿이면 전부 묶음 안이어야 하는데, 방사형 묶음의
+// 구성원은 선두와만 직접 이어지므로 "전부"가 성립하는 경우가 곧 "하나뿐"이다.
 func blockedOnlyBy(c Candidate, leadID string) bool {
 	n := 0
 	for _, a := range c.Item.After {
