@@ -2853,7 +2853,124 @@ EOF
 
 ---
 
-### Task 11: 왕복 — 서버 → JSON → 클라이언트 → 렌더
+### Task 11: REST 계약 — 묶음 선점이 서버 밖으로 나가게 한다
+
+**이 태스크는 계획에 없었다. 태스크 10 직후 코드를 읽다 구멍을 찾아 넣었다.**
+
+지금 묶음 선점은 `internal/service` 안에서만 완성돼 있고 **바깥으로 나가는 길이 없다.** 확정 근거 넷:
+
+| 자리 | 실측 |
+|---|---|
+| `cmd/fd/mcpbackend.go` `Pick` | `in.ItemID == ""` 이면 **추천 경로**(`GET /items/next`)로 분기한다 — `item_ids` 만 준 요청은 아무것도 안 집고 추천을 돌려준다 |
+| `cmd/fd/wire.go` `claimReq` | `{Project, SessionID}` 뿐 |
+| `internal/api/handlers_items.go` `claimRequest` | 동일 |
+| `handleClaimItem` | `PickInput{ItemID: r.PathValue("id")}` 를 만든다 — 본문의 `item_ids` 를 버린다 |
+
+태스크 9의 시험이 통과한 이유는 `mcpsrv` 하네스(`newServer`)가 **서비스를 직접 주입**하기 때문이다. 실제 `fd mcp` 는 `mcpBackend` → REST 를 탄다.
+
+**그리고 이것이 태스크 7의 Critical 을 배포 경로에서 되살린다** — 추천이 `item_ids` 를 처방하는데 그 인자가 REST 를 못 건넌다.
+
+**사람 결정(2026-08-05):** 기존 라우트 `POST /api/v1/items/{id}/claim` 을 **유지**하고 본문에 `item_ids` 를 싣는다. 라우트를 안 늘려 설계 §1② 를 지키고, 멱등 키·오프라인 거절 축이 그대로 산다.
+
+**Files:**
+- Modify: `plugins/flightdeck/server/internal/api/handlers_items.go` (`claimRequest`, `handleClaimItem`)
+- Modify: `plugins/flightdeck/server/cmd/fd/wire.go` (`claimReq`)
+- Modify: `plugins/flightdeck/server/cmd/fd/mcpbackend.go` (`Pick` 분기)
+- Test: `plugins/flightdeck/server/internal/api/` · `plugins/flightdeck/server/cmd/fd/`
+
+**Interfaces:**
+- Produces: `claimRequest.ItemIDs []string` / `claimReq.ItemIDs []string` — **선두를 포함한 순서대로**
+- `mcpBackend.Pick` 의 분기 순서: `len(ItemIDs) > 0` → 묶음 선점(경로는 `ItemIDs[0]`) · `ItemID == ""` → 추천 · 그 외 → 단독 선점
+
+- [ ] **Step 1: 실패하는 시험을 쓴다**
+
+`internal/api` 에 계약 시험을, `cmd/fd` 에 배선 시험을 둔다. 이 패키지들의 기존 하네스를 쓴다(새 조립기를 만들지 마라 — 두 벌이 되면 한쪽만 배선이 바뀌어도 안 보인다).
+
+단정할 것 넷:
+1. `POST /items/lead/claim` 에 본문 `{"item_ids":["lead","m1"]}` 를 주면 **둘 다 선점된다**(claim 행 2개).
+2. `item_ids` 가 비면 오늘과 **똑같이** 동작한다(경로 id 단독 선점).
+3. `item_ids[0]` 가 경로 id 와 다르면 **거절**하고 아무것도 안 쓴다(claim 행 0개).
+4. `mcpBackend.Pick` 이 `ItemIDs` 만 받았을 때 **추천 경로로 안 빠진다** — 실제 서버를 띄운 하네스로 확인한다.
+
+- [ ] **Step 2: 시험이 실패하는지 확인한다** — `claimRequest.ItemIDs undefined` 컴파일 실패이거나, ④가 "선점 안 됨"으로 빨간불.
+
+- [ ] **Step 3: 구현한다**
+
+```go
+// internal/api/handlers_items.go
+type claimRequest struct {
+	Project   string   `json:"project"`
+	SessionID string   `json:"session_id"`
+	// ItemIDs 는 묶음 선점이다. **선두를 포함한 순서대로**이고, 비면 경로 id 단독 선점이다.
+	//
+	// ★ 라우트를 안 늘린 이유: 새 라우트는 "어느 것을 써야 하나"를 새 개념으로 만든다(설계 §1②).
+	// 경로에 선두가 남아 있으므로 멱등 키·오프라인 거절·이벤트 라벨이 그대로 산다.
+	ItemIDs []string `json:"item_ids"`
+}
+```
+
+`handleClaimItem` 안에서 **경로와 본문이 어긋나면 거절한다.** 합치거나 한쪽을 우선하면 "무엇을 집었는가"가 모호해지고, 그 사실은 `pick` 응답이 나르는 것 중 가장 중요한 하나다.
+
+```go
+	pathID := r.PathValue("id")
+	if len(req.ItemIDs) > 0 && req.ItemIDs[0] != pathID {
+		s.fail(w, r, &service.RefusedError{What: "claim",
+			Reason: fmt.Sprintf("경로의 항목(%s)과 item_ids 의 선두(%s)가 다르다",
+				clip(pathID, 64), clip(req.ItemIDs[0], 64)),
+			Guidance: "선두가 브랜치 이름이 된다 — 경로와 item_ids[0] 을 같게 맞춰라."})
+		return
+	}
+	in := service.PickInput{Project: req.Project, SessionID: req.SessionID, ItemID: pathID}
+	if len(req.ItemIDs) > 0 {
+		in = service.PickInput{Project: req.Project, SessionID: req.SessionID, ItemIDs: req.ItemIDs}
+	}
+	res, err := s.svc.Pick(r.Context(), in)
+```
+
+> `RefusedError` 의 실제 필드 이름과 `s.fail` 이 그것을 4xx 로 접는지 **확인하고 맞춰라**. 이 계획의 브리프에서 API 모양을 사실로 적었다가 여섯 번 틀렸다.
+
+`cmd/fd/wire.go` 의 `claimReq` 에 같은 필드를, `mcpbackend.go` 의 `Pick` 에 분기를 더한다:
+
+```go
+	if n := len(in.ItemIDs); n > 0 {
+		b.app.cli.Session = in.SessionID
+		raw, err := b.write(ctx, "pick", "/api/v1/items/"+urlPath(in.ItemIDs[0])+"/claim",
+			claimReq{Project: in.Project, SessionID: in.SessionID, ItemIDs: in.ItemIDs})
+		…
+	}
+	if strings.TrimSpace(in.ItemID) == "" { … 추천 … }
+```
+
+**분기 순서가 중요하다.** `ItemIDs` 검사를 `ItemID == ""` 뒤에 두면 묶음 요청이 추천으로 빠진다 — 지금 나는 그 결함이다.
+
+- [ ] **Step 4: 시험이 통과하는지 확인한다** — `go test ./...` 전 패키지.
+
+- [ ] **Step 5: 빨간불을 확인한다** — 분기 순서를 뒤집어(`ItemID == ""` 를 먼저) ④가 빨개지는지 본다. 안 빨개지면 그 시험은 이 태스크가 고치는 결함을 안 무는 것이다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git commit -m "$(cat <<'EOF'
+feat(api): 묶음 선점이 REST 를 건넌다 — 라우트는 그대로, 본문에 item_ids
+
+묶음 선점이 service 안에서만 완성돼 있었다. mcpBackend.Pick 이 ItemID 만 보고
+분기해서, item_ids 만 준 요청이 추천 경로로 빠지고 아무것도 안 집었다.
+claimRequest·claimReq 에도 담을 자리가 없었고 handleClaimItem 은 경로 id 만 읽었다.
+
+라우트를 안 늘린다. 새 라우트는 "어느 것을 써야 하나"를 새 개념으로 만들고,
+경로에 선두가 남아 있으면 멱등 키·오프라인 거절·이벤트 라벨이 그대로 산다.
+
+경로와 item_ids[0] 이 어긋나면 거절한다 — 합치거나 한쪽을 우선하면
+"무엇을 집었는가"가 모호해지고, 그것이 pick 응답이 나르는 가장 중요한 사실이다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 11B: 왕복 — 서버 → JSON → 클라이언트 → 렌더
 
 렌더 시험은 `PickResult` 를 손으로 구성한다. 그러면 서버가 실제로 그 값을 채우는 경로와 렌더가 그 값을 읽는 경로가 **각각** 고정될 뿐, 이음매에서 값이 뒤바뀌어도 아무 시험도 안 죽는다. 큐에 그 부류의 결함이 이미 열려 있다(`fd-itempath-move-not-verified-end-to-end`).
 
