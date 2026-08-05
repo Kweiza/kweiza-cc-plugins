@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/buildinfo"
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -429,11 +430,22 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 			fmt.Fprintf(out, "  ✗ %-24s 관측 안 됨 — %s\n", ax.Name, clip(ax.Detail, 160))
 		}
 	}
+	// ★ **판 나이를 맨 위에 찍는다.** 아래 축이 전부 맞는데 답이 이상한 경우의 원인이
+	// 여기였다 — 코드는 멀쩡하고 도는 판이 낡았을 뿐인데 그 사실이 어디에도 안 보였다.
+	// api_version 은 계약이 깨질 때만 오르므로 이 축을 못 나른다.
+	fmt.Fprintf(out, "  이 판 %s\n", buildinfo.Short(buildinfo.Self()))
+	for _, line := range ExeLines(os.Executable()) {
+		fmt.Fprintln(out, "  "+line)
+	}
 	fmt.Fprintf(out, "  상태 디렉토리 %s (%s)\n", a.sd.Path, a.sd.Source)
 	// 머신 id 는 세션 정체 3중키의 첫 축이다. **값만 찍으면 부족하고 읽은 자리를 함께 찍는다** —
 	// 이 축이 채널마다 갈려 한 세션이 카드 세 장으로 떴을 때, 값이 다르다는 것보다
 	// "어느 파일에서 왔나"가 원인에 이르는 열쇠였다(그 줄이 없어 /proc 을 뒤져야 했다).
 	fmt.Fprintf(out, "  머신 %s (%s)\n", a.machine, a.machineSrc)
+	// ★ 비콘 자리도 **사유를 함께** 찍는다. 머신 id 와 같은 이유다 — 이제 세션 정체가
+	// 이 자리를 거쳐 오는데(07e5df4), 워크트리 불일치 알림을 본 사람이 여기를 못 보면
+	// 자기 셸 채널의 워크트리만 보고 MCP 의 것은 못 본다. 그 불일치가 불일치의 전부인데.
+	fmt.Fprintf(out, "  창 비콘 %s (%s)\n", a.beaconDir, a.beaconSrc)
 	// ★ 주소·토큰도 **어디서 읽었는지**를 찍는다. machineSrc 가 그 선례다 —
 	// 값이 예상과 다를 때 "왜 저 값인가"에 답할 자리가 없으면 /proc 을 뒤지게 된다.
 	fmt.Fprintf(out, "  서버 주소 %s (%s)\n", a.cli.URL, a.cli.Endpoint.URLSource)
