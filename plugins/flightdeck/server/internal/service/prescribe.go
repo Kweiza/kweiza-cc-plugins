@@ -3,19 +3,24 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 처방 — 발화 지점(설계 §6). 판정은 judge.Prescribe 가 하고 이 파일은 입력을 모으고 결과를 남긴다.
 //
 // ★ **세션 카드 파생을 안 돈다.** 이 경로는 턴마다 돌므로, git worktree list +
 // 세션별 ChangedPaths·UncommittedPaths 를 얹으면 **모든 턴 종료에 저장소 전수 훑기가 붙는다**.
-// 필요한 입력(footprint·claim·judgment·session)은 전부 DB 표라 git 을 안 탄다.
+// 필요한 입력(footprint·claim·judgment·session·레인)은 전부 DB 표라 git 을 안 탄다.
 // 설계 §6 이 /notices 를 /dashboard.json 에서 가른 것과 같은 판정이다.
+//
+// ★ 레인도 같은 이유로 **줄 전체가 아니라 맨 앞 하나와 점유 유무**만 읽는다.
+// 무엇을 기각했는지는 laneTurnRow 주석에 있다.
 
 const (
 	eventPrescribe    = "prescribe"
@@ -123,6 +128,9 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		})
 	}
 
+	// 랜딩 줄의 차례. 0 이면 차례가 아니고, 그 판정을 하는 자리는 아래 하나다.
+	in.LaneTurnRow = s.laneTurnRow(ctx, sess.Project, sessionID)
+
 	all := judge.Prescribe(in)
 	shown, folded := judge.FoldPrescriptions(all)
 
@@ -137,6 +145,54 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 			"session_id", sessionID, "count", len(all), "shown", len(shown), "folded", folded)
 	}
 	return PrescribeResult{Shown: shown, Folded: folded, All: all}, nil
+}
+
+// laneTurnRow 는 랜딩 줄에서 **지금 이 세션 차례가 된 줄 행**의 번호다. 0 이면 차례가 아니다.
+//
+// 차례의 정의는 곱이다: 줄 맨 앞이 이 세션이고 **그리고** 레인을 쥔 사람이 없다.
+//
+// ★ **쥔 사람이 있으면 안 낸다 — 남이든 나든.** 남이 쥔 채 내가 맨 앞인 것은 두 표가
+// 어긋난 상태이고(Land 가 그 상태를 오류가 아니라 waiting 으로 인정한다. landing.go 의
+// "맨 앞인데 남이 쥐고 있다" 분기), 거기서 "네 차례다"를 내면 세션을 AcquireResource 가
+// 반드시 실패할 자리로 보낸다. 그 상태를 푸는 것은 사람의 회수다. 내가 쥐었으면 이미
+// land 응답이 turn 으로 답했으니 같은 말을 두 번 하는 것이다. 둘 다 0 이다.
+//
+// ★ **LandingLane 을 기각했다.** 새 SQL 을 안 만드는 것은 어느 쪽이든 같지만, LandingLane 은
+// 줄 전체(ListLandingQueue) + 점유 + (어긋나 보이면 줄 재조회) + **행마다 lastSignal 한 번씩**
+// 을 돈다(그 함수가 스스로 N+1 을 인정한다). 처방은 모든 세션의 모든 턴 종료에 도는데
+// 여기서 필요한 것은 맨 앞 하나와 점유 유무뿐이라 그 신호 나이들은 전부 버려질 값이다.
+// 그리고 LaneView.Entries[0] 으로 "맨 앞"을 다시 표현하면 순서 집행이 두 자리가 된다 —
+// FrontLandingRow 의 독스트링이 자기가 그 유일한 자리라고 선언한 것을 깨는 모양이다.
+// (앞사람의 신호 나이 같은 것을 처방 문구에 싣기로 하면 그때 갈아탈 자리다.)
+//
+// ★ **오류를 안 올린다.** ErrNotFound 둘은 정상 상태다 — 줄이 비었거나(줄에 한 번도 안 선
+// 세션이 다수다) 아무도 안 쥐었거나. 그 밖의 오류도 처방 전부를 죽일 이유가 아니다:
+// 여기서 return err 를 하면 레인 조회 하나가 unclaimed·outside·silent 까지 통째로 막는다.
+// 위 선점·반납 항목 조회와 같은 관용(WARN 을 남기고 계속)이고, 0 은 judge 쪽에서
+// "차례 아님"과 같은 값으로 접힌다(laneTurnPrescription 이 그 합침을 의도로 적어 뒀다).
+func (s *Service) laneTurnRow(ctx context.Context, project, sessionID string) int64 {
+	front, err := s.st.FrontLandingRow(ctx, project)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.WarnContext(ctx, "처방: 랜딩 줄 맨 앞을 못 읽었다",
+				"session_id", sessionID, "project", project, "error", err.Error())
+		}
+		return 0 // 줄이 비었거나(정상) 못 읽었다
+	}
+	if front.SessionID != sessionID {
+		return 0 // 앞에 사람이 있다. 점유까지 물을 이유가 없다
+	}
+
+	// 맨 앞이 나다. 남은 질문은 레인이 비었나 하나뿐이다.
+	if _, herr := s.st.HeldBy(ctx, project, LaneResource); herr != nil {
+		if !errors.Is(herr, store.ErrNotFound) {
+			s.log.WarnContext(ctx, "처방: 랜딩 레인 점유를 못 읽었다",
+				"session_id", sessionID, "project", project, "error", herr.Error())
+			return 0
+		}
+		return front.ID // 아무도 안 쥐었고 맨 앞이 나다 = 차례다
+	}
+	return 0
 }
 
 // emittedKeys 는 이미 낸 키와 그 시각, 그리고 마지막 발화 시각을 낸다.
