@@ -210,14 +210,20 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	head = append(head,
 		fmt.Sprintf("보드 · %s · %s · %s",
 			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
-		fmt.Sprintf("살아 있는 세션 %d건 (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
-			len(v.Sessions), FormatAge(v.Window)),
+		// ★ 대화 수가 먼저다. 카드 수는 괄호 안이다 — 사람이 이 줄로 하는 판단은
+		//   "지금 몇 개가 동시에 돌고 있나"이고, 그 답은 카드가 아니라 대화다.
+		//   실측(2026-08-05): 카드 88장이 대화 23개였다 — 3.8배로 부풀린 수였다.
+		fmt.Sprintf("대화 %d개(카드 %d장) (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
+			len(v.Conversations), len(v.Sessions), FormatAge(v.Window)),
 	)
+	if b := splitBanner(v.Splits); b != "" {
+		head = append(head, b)
+	}
 
-	ranked := rankCards(v, opt.Self, now)
+	ranked := rankConversations(v, opt.Self, now)
 	blocks := make([]string, 0, len(ranked))
 	for _, c := range ranked {
-		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
+		blocks = append(blocks, conversationCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
 	var foot []string
@@ -386,6 +392,143 @@ func rankCards(v service.BoardView, self string, now time.Time) []service.Sessio
 		out[i] = r.card
 	}
 	return out
+}
+
+// splitBanner 는 갈림 보고를 머리 한 줄로 낸다.
+//
+// ★ 없으면 **빈 문자열**이다. 항상 찍으면 배너가 배경이 되고 배경은 아무도 안 읽는다.
+// ★ 카드 절이 아니라 머리에 두는 이유: 이것은 특정 카드의 성질이 아니라 이 관측
+//
+//	전체가 낡은 클라이언트에서 왔다는 사실이다.
+func splitBanner(reports []judge.SplitReport) string {
+	if len(reports) == 0 {
+		return ""
+	}
+	// ★ len(reports) 를 세지 않는다. 보고는 **갈림 그룹** 단위이고 한 대화가 무관한
+	// 그룹을 둘 이상 가질 수 있다 — 그대로 세면 대화 하나가 여러 개로 부풀어
+	// 보이고, 그러면 이 배너가 고치려던 바로 그 부풀림을 스스로 저지른다.
+	ccs := map[string]bool{}
+	for _, r := range reports {
+		ccs[r.CCSessionID] = true
+	}
+	return fmt.Sprintf(
+		"⚠ 대화 %d개의 카드가 상하위 경로로 갈렸다 — 그 카드를 연 클라이언트에서 "+
+			"워크트리 정규화(4de4b21)가 안 돈다. 정규화가 도는 판은 이 모양을 만들 수 없다.",
+		len(ccs))
+}
+
+// rankConversations 는 묶음을 정렬한다.
+//
+// ★ 사건(ask·blocked)이 붙은 형제가 **하나라도** 있으면 묶음 전체가 그 등급을 받는다.
+// 카드 단위로 보면 판단이 붙은 카드와 발자국이 있는 카드가 갈려 있을 때
+// 묶음이 맨 아래로 떨어진다 — 그것이 이 항목이 고치려는 갈림 그 자체다.
+func rankConversations(v service.BoardView, self string, now time.Time) []service.Conversation {
+	hasNote := map[string]bool{}
+	for _, j := range v.Asks {
+		hasNote[j.SessionID] = true
+	}
+	for _, j := range v.Blocked {
+		hasNote[j.SessionID] = true
+	}
+
+	var selfPaths []string
+	for _, c := range v.Conversations {
+		if c.IsSelf {
+			for _, k := range c.Cards {
+				selfPaths = append(selfPaths, k.View.Paths...)
+			}
+		}
+	}
+
+	rank := func(c service.Conversation) int {
+		noted := false
+		for _, k := range c.Cards {
+			if k.View.Session.ID == self {
+				return 0
+			}
+			if hasNote[k.View.Session.ID] {
+				noted = true
+			}
+		}
+		switch {
+		case c.IsSelf:
+			return 0
+		case noted:
+			return 1
+		}
+		if len(selfPaths) > 0 {
+			for _, k := range c.Cards {
+				if judge.PathsOverlap(selfPaths, k.View.Paths) {
+					return 2
+				}
+			}
+		}
+		return 3
+	}
+
+	out := append([]service.Conversation{}, v.Conversations...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := rank(out[i]), rank(out[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return lastSignalOfConversation(out[i], now).After(lastSignalOfConversation(out[j], now))
+	})
+	return out
+}
+
+// lastSignalOfConversation 은 묶음 안 카드들의 마지막 신호 중 가장 최근이다.
+func lastSignalOfConversation(c service.Conversation, now time.Time) time.Time {
+	var last time.Time
+	for _, k := range c.Cards {
+		if t := lastSignal(k, now); t.After(last) {
+			last = t
+		}
+	}
+	return last
+}
+
+// conversationCard 는 묶음 하나를 그린다.
+//
+// 기본은 요약 한 줄 묶음이고, detail 일 때만 워크트리별로 전개한다.
+// 합집합 경로 **목록**은 어느 경우에도 안 낸다 — 대화가 만지는 자리가 실제보다
+// 넓어 보이고, 그러면 겹침 축을 읽는 사람이 없는 다툼을 본다.
+func conversationCard(c service.Conversation, now time.Time, pathLimit int, detail bool,
+	asks, blocked []model.Judgment) string {
+	if len(c.Cards) == 0 {
+		return ""
+	}
+	// 카드가 한 장이면 접을 것이 없다 — 기존 카드 모양 그대로 낸다.
+	if len(c.Cards) == 1 {
+		return boardCard(c.Cards[0], now, pathLimit, detail, asks, blocked)
+	}
+
+	lead := c.Cards[0]
+	var b strings.Builder
+	mark := " "
+	if c.IsSelf {
+		mark = "*"
+	}
+	fmt.Fprintf(&b, "%s%s… · 대화 1개(카드 %d장 · 워크트리 %d개) · %s\n",
+		mark, ShortID(lead.View.Session.ID), len(c.Cards), c.Worktrees, lead.View.Session.State)
+	fmt.Fprintf(&b, "   경로 %d개(워크트리 %d개에 걸쳐)", c.PathCount, c.Worktrees)
+	for _, k := range c.Cards {
+		for _, cl := range k.View.Claims {
+			fmt.Fprintf(&b, " | 선점 %s @ %s", cl, k.View.Session.Worktree)
+		}
+	}
+	b.WriteString("\n")
+	if detail {
+		for _, k := range c.Cards {
+			fmt.Fprintf(&b, "   ├ %s  경로 %d\n", k.View.Session.Worktree, len(k.View.Paths))
+		}
+	}
+	for _, k := range c.Cards {
+		for _, l := range noteLines(k.View.Session.ID, asks, blocked, now) {
+			b.WriteString(l + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.

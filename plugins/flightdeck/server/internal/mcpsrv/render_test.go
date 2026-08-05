@@ -222,6 +222,11 @@ func synthBoard(n int) service.BoardView {
 		v.OpenItems = append(v.OpenItems, model.Item{
 			ID: fmt.Sprintf("q-%d", i), Title: "열린 항목 제목", State: model.ItemOpen})
 	}
+	// ★ 실제 service.Board() 는 Sessions 와 같은 호출 안에서 Conversations 를
+	// 채운다(board.go). 이 헬퍼가 그것을 안 하면 RenderBoard 가 이제 카드 루프의
+	// 근거로 삼는 v.Conversations 가 항상 비어, 세션을 아무리 넣어도 카드가 0장 —
+	// synthBoard 를 쓰는 시험이 전부 "카드가 없다"는 거짓 신호로 죽는다.
+	v.Conversations = service.FoldConversations(v.Sessions)
 	return v
 }
 
@@ -444,6 +449,11 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 	v.Sessions[0].AheadKnown = false
 	v.Sessions[0].View.Paths = nil
 	v.Sessions[0].View.HasFootprint = false
+	// ★ RenderBoard 는 이제 v.Conversations 의 카드를 그린다(conversationCard), v.Sessions 를
+	// 직접 그리지 않는다. FoldConversations 는 SessionCard 를 **값으로 복사**해 Conversation.Cards
+	// 에 담으므로(service/board.go), synthBoard 가 이미 접어 둔 뒤에 v.Sessions 를 고쳐도
+	// 그 복사본은 안 따라간다 — 다시 접어야 이 시험이 실제로 의도한 입력을 렌더한다.
+	v.Conversations = service.FoldConversations(v.Sessions)
 
 	got := RenderBoard(v, BoardRenderOptions{Now: t0})
 	if !strings.Contains(got, "브랜치 ?(못 읽음)") {
@@ -464,11 +474,13 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 // 전역 꼬리만으로는 누가 남겼는지가 안 이어진다.
 func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	sessions := []service.SessionCard{
+		{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
+		{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
+	}
 	v := service.BoardView{
-		Sessions: []service.SessionCard{
-			{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
-			{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
-		},
+		Sessions:      sessions,
+		Conversations: service.FoldConversations(sessions),
 		Asks: []model.Judgment{
 			{ID: "j1", SessionID: "01AAA", At: now.Add(-12 * time.Minute),
 				Title: "mcpbackend.go 를 잡는다"},
@@ -515,7 +527,8 @@ func TestFoldKeepsEventCardsOverSilentOnes(t *testing.T) {
 		})
 	}
 	v := service.BoardView{
-		Sessions: sessions,
+		Sessions:      sessions,
+		Conversations: service.FoldConversations(sessions),
 		Asks: []model.Judgment{
 			{ID: "j1", SessionID: "01S19", At: now, Title: "마지막 세션이 남긴 요청"},
 		},
@@ -540,7 +553,7 @@ func TestFoldAlwaysKeepsSelfFirst(t *testing.T) {
 			IsSelf: i == 19,
 		})
 	}
-	got := RenderBoard(service.BoardView{Sessions: sessions},
+	got := RenderBoard(service.BoardView{Sessions: sessions, Conversations: service.FoldConversations(sessions)},
 		BoardRenderOptions{Now: now, Self: "01S19", Budget: 300})
 	if !strings.Contains(got, "01S19") {
 		t.Fatalf("내 카드가 접혔다:\n%s", got)
