@@ -345,9 +345,8 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 ```
 POST   /sessions                    PATCH  /sessions/{id}
-POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces
+POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라이언트 0건(아래)
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
-POST   /footprints
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /judgments                   GET    /judgments?q=
@@ -356,6 +355,23 @@ GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
 ```
+
+**`POST /footprints` 는 이 표에서 지웠다(2026-08-05, 실제로 코드에서 제거).**
+신호 없이 발자국만 남기는 표면이었고 `origin=declared|claimed` 를 받을 수 있어
+`Beat`(observed 고정)와 표현력이 달랐다. 지운 근거는 그 차이가 **쓰이는 자리가
+없다**는 실측 셋이다 — 비시험 클라이언트 0건, `origin=declared` 행 **0건**(observed
+592 · claimed 140), 그리고 `claimed` 는 `service.Pick` 이 선점 트랜잭션에서 직접
+넣는다. 즉 차이는 실재했으나 그 차이가 만든 데이터가 한 행도 없었다.
+발자국이 들어오는 문은 이제 **둘**이고(`service.Beat`·`service.Pick`) 그 개수는
+`service.TestFootprintDoorsAreExactlyTwo` 가 전수로 잠근다.
+
+**`POST /sessions/{id}/workspaces` 는 클라이언트가 0건이지만 남긴다.**
+같은 "호출자 없음"인데 결론이 갈리는 기준은 **대체재**다 — 발자국은 위 두 문으로
+들어오지만, 부(副) 워크스페이스를 넣을 문은 이것 하나뿐이다. 다만 지금 이 표에는
+세션 행이 이미 갖고 있지 않은 값이 **한 건도** 없다(2026-08-05 재측정: 126행 ·
+non_primary 0 · `session.worktree` 와 다른 값 0). **이 표를 근거로 세션 키에서
+worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 근거 전문은
+`store/session.go` 의 `AddWorkspace` 주석에 있다.
 
 **`/notices` 는 응답 꼬리(미확인 알림) 전용이고 세션 카드 파생을 돌지 않는다.**
 꼬리는 MCP 응답 **전부**에 붙으므로, 그 값을 `/dashboard.json` 에서 가져오면
