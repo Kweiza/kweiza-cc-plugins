@@ -141,7 +141,8 @@ func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
 // 자동 초안까지 들어온다. 포함하면 아무 일도 안 한 세션이 점등돼 판별력이 0이 된다.
 // push 는 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
 // (옛 근거였던 "세션 열기·상태 전이가 찍는다"는 그 두 자리를 지워 사라졌다 —
-//  web/format.go 의 같은 주석과 함께 읽어라.)
+//
+//	web/format.go 의 같은 주석과 함께 읽어라.)
 var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
 
 // activityOf 는 "이 세션이 일하고 있나"와 그 사유를 낸다. 순수 함수다.
