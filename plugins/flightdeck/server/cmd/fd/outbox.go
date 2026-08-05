@@ -366,7 +366,15 @@ func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int
 			// 지금 작성기는 빈 키를 안 만들지만(FreshKey·IdempotencyKey 가 nosession 을
 			// 채운다) 손편집·부분 기록으로 들어온 줄까지 잃을 이유는 없다. 남기고 말한다.
 			if e.Key == "" {
-				o.warn("키 없는 줄이 큐에 있다 — 재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)",
+				// ★ 이 문구는 오래 "재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)"였고
+				// **둘 다 거짓이었다.** Replay 에는 키 가드가 없어 이 줄을 매번 다시 보내고,
+				// doctor 는 대기 건수만 찍지 이 줄의 자리를 안 찍는다. 그 문구를 읽은 사람은
+				// 이미 처리된 줄로 알고 넘어가는데, 실제로는 재생마다 거절당해 격리 파일이
+				// **fd 호출당 한 줄씩** 자란다 — 이 파일의 유일한 무한 증가원이다.
+				// 여기서 그 생성기를 닫지는 않는다(§9 판정이 따로 필요하다 — 후속으로 냈다).
+				o.warn("키 없는 줄이 큐에 있다 — 큐에 남기고 재생 대상에서도 안 뺀다. "+
+					"재생마다 다시 보내므로 거절당하면 격리가 fd 호출마다 한 줄씩 는다"+
+					"(fd doctor 의 '키 없는 N줄' 이 그 수다)",
 					"dir", o.dir, "path", e.Path)
 				out = append(out, e)
 				continue
@@ -572,12 +580,70 @@ func (o *Outbox) quarantine(r RejectedEntry) error {
 // Rejected 는 격리된 줄 전부다. 파일이 없으면 빈 목록이다(오류가 아니다).
 func (o *Outbox) Rejected() ([]RejectedEntry, error) { return readRejected(o.rejectedPath()) }
 
+// RejectedTally 는 격리 파일 하나를 사람이 읽을 수 있는 수 셋으로 접는다.
+//
+// ★ **줄 수와 판단 수는 다른 수다.** 겹친 재생 둘은 잠금 밖에서 각자 스냅숏을 뜨고
+// (Replay 의 첫 List) 각자 send 해서 각자 영구 거절 판정을 받는다. 그래서 격리는 두 번
+// **결정**되고, 그 뒤에 무엇을 잠가도 append 는 두 번 난다 — 재현 실측(300라운드×6판):
+// 오늘 286~299/300 중복, quarantine 을 잠금 안에 넣어도 284~296/300 으로 분포가 겹친다.
+// 12판 전부에서 오차 없이 성립한 항등식이 이유를 말한다: **격리 줄 수 = 4xx 를 받은
+// send 횟수.** 잠금은 순서만 정하고 개수를 안 바꾼다.
+//
+// 그래서 이 축의 피해는 유실이 아니라 "세는 수가 부푼다"이고, 처방이 여기 있다.
+type RejectedTally struct {
+	// Lines 는 파일에 있는 그대로다. **이것이 진실이고 아래 둘은 요약이다.**
+	Lines int
+	// Judgments 는 고유 키 수다. 키는 판단의 정체성이고(IdempotencyKey 는 세션+본문 해시라
+	// 시각이 안 들어간다) **거절 사건의 정체성이 아니다** — 같은 판단이 400 으로 격리된 뒤
+	// 다시 쌓여 404 로 또 거절될 수 있고(appendLocked 는 pending 만 보고 격리는 안 본다),
+	// 그 둘은 서로 다른 사건이다. 그래서 이 수는 줄을 **대체하지 않고 나란히 선다.**
+	Judgments int
+	// Keyless 는 키가 빈 줄 수다. **하나도 안 접는다.**
+	//
+	// ★ settle 이 같은 이유로 빈 키 줄을 큐에서 안 지운다: 빈 키끼리 서로 별칭이라
+	// 접으면 서로 다른 판단들이 한 건으로 뭉개진다. 세는 자리에서 그 방어를 되돌리면
+	// doctor 가 **아래로** 거짓말한다 — 부푸는 것보다 나쁜 방향이다(설계 §9).
+	Keyless int
+}
+
+// TallyRejected 는 격리 줄을 센다. 순수 함수다.
+//
+// ★ 판별자는 **파일 전체에 걸친 키 집합**이다. 두 가지 더 싼 판별자가 틀렸고, 둘 다
+// 변이 실험에서 이 패키지를 통째로 초록으로 통과했다:
+//   - **사유로 접기** — JudgeReplayFailure 의 4xx 가지는 사유를 상태코드와 서버 메시지로만
+//     짓는다. 키도 경로도 안 들어가므로 **서로 다른 두 판단이 같은 400 을 받으면 사유가
+//     바이트 동일**하고, 접으면 재생성 불가한 판단 둘이 한 건으로 보고된다.
+//   - **이웃만 접기** — 실제 배치 경합이 만드는 파일의 다수가 흩어져 있다(2건 큐·300라운드
+//     실측에서 `A B A B` 가 142~199/300). 이웃만 보면 그 다수에 안 닿는다.
+func TallyRejected(rs []RejectedEntry) RejectedTally {
+	t := RejectedTally{Lines: len(rs)}
+	seen := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		if r.Entry.Key == "" {
+			t.Keyless++
+			continue
+		}
+		if !seen[r.Entry.Key] {
+			seen[r.Entry.Key] = true
+			t.Judgments++
+		}
+	}
+	return t
+}
+
 // Leftover 는 옛 자리 하나에 아직 남아 있는 것이다.
 type Leftover struct {
 	Dir      string
-	Pending  int    // 대기열 줄 수
-	Rejected int    // 격리 줄 수 — 이것은 안 비워진다(보관소는 제 큐 옆에 남는다)
-	Err      string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
+	Pending  int // 대기열 줄 수
+	Rejected int // 격리 줄 수 — 이것은 안 비워진다(보관소는 제 큐 옆에 남는다)
+	// RejectedJudgments 는 그 줄들이 담은 **고유 판단 수**다(TallyRejected 참조).
+	//
+	// ★ Rejected 를 이 값으로 **갈아 끼우지 마라.** LegacyLeftovers 가 이 자리를 화면에
+	// 낼지 말지를 `lo.Rejected == 0` 으로 정하는데, 거기를 고유 수로 바꾸면 키 없는 줄만
+	// 든 옛 자리가 고유 0 이라 **디렉토리째 화면에서 사라진다** — 조용히 버리는 것이
+	// 하나도 없어야 한다(설계 §9). 줄 수가 존재 판정이고 판단 수는 요약이다.
+	RejectedJudgments int
+	Err               string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
 }
 
 // leftover 는 이 큐에 남은 것을 **읽기만 해서** 센다.
@@ -594,7 +660,8 @@ func (o *Outbox) leftover() Leftover {
 	if rs, err := o.Rejected(); err != nil {
 		lo.Err = strings.TrimSpace(lo.Err + " " + err.Error())
 	} else {
-		lo.Rejected = len(rs)
+		tal := TallyRejected(rs)
+		lo.Rejected, lo.RejectedJudgments = tal.Lines, tal.Judgments
 	}
 	return lo
 }

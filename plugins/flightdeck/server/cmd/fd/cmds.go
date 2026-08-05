@@ -892,6 +892,17 @@ func (a *App) runAlloc(ctx context.Context, args []string, out io.Writer) int {
 	return 0
 }
 
+// rejectedKeyLabel 은 격리 줄의 키를 화면용으로 낸다.
+//
+// ★ 빈 키를 빈 칸으로 찍지 않는다. 그러면 구분자만 둘 남아 사람이 "잘린 출력"으로 읽고,
+// 정작 그 줄이 이 파일에서 유일하게 **무한히 늘어나는** 종류라는 사실이 안 보인다.
+func rejectedKeyLabel(r RejectedEntry) string {
+	if r.Entry.Key == "" {
+		return "(키 없음)"
+	}
+	return clip(r.Entry.Key, 48)
+}
+
 // runDoctor 는 `fd doctor` 다. 서버 축과 **이 머신의 축**을 함께 낸다.
 func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("doctor")
@@ -968,19 +979,54 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 			len(pend), a.cli.Outbox.Dir(), a.cli.Outbox.Source())
 	}
 	// 격리된 판단은 **버려진 것이 아니라 옮겨진 것**이다. 안 찍으면 조용히 사라진 것과 같다.
+	//
+	// ★ **줄 수와 판단 수를 갈라 낸다.** 앞선 판은 `len(rej)` 하나를 "격리된 판단 N건"으로
+	// 찍었는데, 겹친 재생 둘이 같은 판단을 두 줄로 남기므로(TallyRejected 주석에 실측)
+	// 그 수는 판단 수가 아니라 줄 수였다. 사람은 판단 둘이 거절된 줄 읽었다.
+	//
+	// ★ 줄 목록은 **접지 않고 전량 낸다.** 같은 키의 두 줄이 400 과 404 로 사유가 다를 수
+	// 있고, 그것은 중복이 아니라 서로 다른 두 사건이다. 파일에서 접으면 나중 사실이
+	// 사라지고 그 자리는 회수가 없다(격리는 추가 전용이고 비우는 경로가 없다).
+	// **여기서 하는 것은 세는 방식을 고치는 것뿐이고, 기록은 하나도 안 줄인다.**
 	if rej, err := a.cli.Outbox.Rejected(); err != nil {
 		fmt.Fprintf(out, "  ! 격리 파일을 못 읽었다: %v\n", err)
 	} else if len(rej) > 0 {
-		fmt.Fprintf(out, "  ! 격리된 판단 %d건 — 영구 거절이라 큐에서 뺐다(버리지 않았다)\n", len(rej))
+		tal := TallyRejected(rej)
+		// ★ 꼬리가 조건부인 이유: 격리 줄이 **전부** 키 없는 줄이면 큐에서 빠진 것이 하나도
+		// 없다. 그때 "큐에서 뺐다"를 찍으면 바로 아래 줄이 그것을 부정하고, 사람은 둘 중
+		// 무엇이 참인지 골라야 한다. 화면 안에서 자기모순을 만들지 않는다.
+		moved := "영구 거절이라 큐에서 뺐다(버리지 않았다)"
+		if tal.Keyless == tal.Lines {
+			moved = "영구 거절이라 격리했다(버리지 않았다)"
+		}
+		fmt.Fprintf(out, "  ! 격리 %d줄 · 고유 판단 %d건 — %s\n", tal.Lines, tal.Judgments, moved)
+		// ★ 위 문장은 **키 없는 줄에 대해서는 거짓이다.** settle 이 그 줄을 일부러 큐에
+		// 남기고(빈 키끼리 별칭이 되므로 지우면 남의 판단이 사라진다) Replay 에는 빈 키
+		// 가드가 없어 재생마다 다시 보내고 다시 격리한다. Flush 는 모든 명령 앞에서 도므로
+		// 그 줄은 **fd 호출당 한 줄씩** 이 파일을 키운다 — 이 파일의 유일한 무한 증가원이다.
+		// 여기서 그 생성기를 닫지는 않는다(닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로
+		// 열린다 — 후속으로 냈다). 화면이 거짓말하는 것만 막는다.
+		if tal.Keyless > 0 {
+			fmt.Fprintf(out, "  ! 그중 키 없는 %d줄은 큐에서 안 빠진다 — "+
+				"재생마다 다시 보내고 다시 격리한다(fd 호출마다 한 줄씩 는다)\n", tal.Keyless)
+		}
 		for _, r := range rej {
-			fmt.Fprintf(out, "      %s · %s\n", r.At.Format(time.RFC3339), clip(r.Reason, 200))
+			// ★ 키를 함께 찍는다. 안 찍으면 위 `N줄 · M건` 을 사람이 화면에서 검증할 수
+			// 없다 — 어느 두 줄이 같은 판단인지 알 자리가 없기 때문이다.
+			fmt.Fprintf(out, "      %s · %s · %s\n",
+				r.At.Format(time.RFC3339), rejectedKeyLabel(r), clip(r.Reason, 200))
 		}
 	}
 	// ★ 옛 채널 자리에 남은 것. 대기는 다음 재생이 **보내서** 비우고, 격리는 그 자리에 남는다
 	// (보관소는 제 큐 옆에 남는 것이 설계다 — '어디서 온 것인가'가 사라지면 안 된다).
+	//
+	// ★ 격리 쪽은 고정 자리와 **같은 축으로** 가른다. 이 자리를 빼면 처방이 이 머신에 안
+	// 닿는다 — 실측(2026-08-06): 이 머신의 격리는 `~/.local/state/flightdeck/outbox` 의
+	// 1줄이 전부이고 고정 자리에는 파일이 없다. 여기서 안 가르면 겹친 재생의 흔적이
+	// 이 머신에서는 영영 건수 하나로만 보인다.
 	for _, lo := range a.cli.LegacyLeftovers() {
-		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 %d건(그 자리에 남는다)\n",
-			lo.Dir, lo.Pending, lo.Rejected)
+		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 %d줄 · 고유 판단 %d건(그 자리에 남는다)\n",
+			lo.Dir, lo.Pending, lo.Rejected, lo.RejectedJudgments)
 		if lo.Err != "" {
 			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))
 		}
