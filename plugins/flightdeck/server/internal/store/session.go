@@ -31,8 +31,9 @@ import (
 // 두 번째 반환값 created 는 "새로 만들었나"다. 재개와 신규를 호출부가 구분해야
 // 배너 문구가 달라지는데, 세션 구조체만 보면 그 구분이 불가능하다.
 //
-// label 은 표시 전용이라 재개 때 최신 선언이 이긴다. 그 외 컬럼은 건드리지 않는다 —
-// 재개는 관측이지 재선언이 아니다.
+// label 은 표시 전용이라 재개 때 최신 선언이 이긴다. 그리고 **state 가 done 이면 active 로
+// 되살린다** — 여는 것은 관측이고, 사실이 앞선 판정을 이겨야 하기 때문이다(아래 ★ 참고).
+// 그 둘 말고 다른 컬럼은 건드리지 않는다 — 재개는 관측이지 재선언이 아니다.
 func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string) (model.Session, bool, error) {
 	if project == "" || machineID == "" || worktree == "" || ccSessionID == "" {
 		return model.Session{}, false, fmt.Errorf(
