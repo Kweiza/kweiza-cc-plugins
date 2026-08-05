@@ -692,3 +692,75 @@ func TestRenderPickOmitsPathAxisWhenThereIsNoItem(t *testing.T) {
 		t.Fatalf("항목이 없는데 경로 축 줄이 나왔다:\n%s", got)
 	}
 }
+
+// TestRenderBoardLaneNilStaysSilent 는 v.Lane == nil(안 읽었다)일 때 레인 절 자체가
+// 안 나온다는 것을 잠근다. **찍을 말이 없으면 아예 안 찍는다** — "0건"으로 지어내면
+// "안 읽었다"와 "질의는 돌았는데 0건이다"가 같은 문구가 된다.
+func TestRenderBoardLaneNilStaysSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 nil 인데 레인 절이 찍혔다 — '안 읽었다'와 '0건'이 같은 문구가 됐다:\n%s", got)
+	}
+}
+
+// TestRenderBoardLaneEmptySaysTheQueryRan 은 브리프의 핵심 요구다: Lane 이 있지만
+// Entries 가 빈 것과 Lane 자체가 nil 인 것을 렌더가 **다른 문장**으로 낸다.
+// 0건 문장은 "질의는 돌았다"를 반드시 말해야 한다 — 안 그러면 위 시험과 이 시험의
+// 두 출력이 우연히 같아질 수 있고, 그러면 화면에서 둘이 구분 안 된다.
+func TestRenderBoardLaneEmptySaysTheQueryRan(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane:     &service.LaneView{Entries: []service.LaneEntry{}},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인") {
+		t.Fatalf("Lane 이 비었을 뿐 nil 이 아닌데 레인 절이 안 찍혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "질의는 돌았다") {
+		t.Fatalf("0건 문구가 '질의는 돌았다'를 안 말한다 — nil 과 구분이 안 된다:\n%s", got)
+	}
+
+	// 대조군: nil 일 때와 정확히 갈라야 한다.
+	nilGot := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+	}, BoardRenderOptions{Now: t0})
+	if got == nilGot {
+		t.Fatalf("Lane==nil 출력과 Lane 빈 슬라이스 출력이 똑같다 — 두 상태가 화면에서 안 갈린다")
+	}
+}
+
+// TestRenderBoardLaneListsEntriesAndMarksTheHolder 는 줄 항목이 실제로 나오는지,
+// 그리고 지금 점유자가 어느 항목인지 표시가 갈리는지를 본다.
+func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
+	enq := t0.Add(-90 * time.Second)
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-1 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: enq},
+				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "레인 2건") {
+		t.Fatalf("레인 항목 수(2건)가 안 나온다:\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01HOLDERSESSION")) || !strings.Contains(got, ShortID("01WAITERSESSION")) {
+		t.Fatalf("줄에 선 세션 둘이 다 안 보인다:\n%s", got)
+	}
+	// 점유자 쪽에만 표시가 붙어야 한다 — 대기자와 점유자가 화면에서 구분돼야 한다.
+	holderLine := got
+	idx := strings.Index(holderLine, ShortID("01HOLDERSESSION"))
+	waitIdx := strings.Index(holderLine, ShortID("01WAITERSESSION"))
+	if idx < 0 || waitIdx < 0 {
+		t.Fatalf("세션 표시를 못 찾았다:\n%s", got)
+	}
+	if !strings.Contains(got, "점유") {
+		t.Fatalf("지금 점유자가 화면에 안 보인다:\n%s", got)
+	}
+}

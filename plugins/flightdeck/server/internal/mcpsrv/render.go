@@ -246,7 +246,13 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	} else {
 		foot = append(foot, boardBriefFoot(v)...)
 	}
-	// ★ 레인 절 자리다. service.BoardView 에 Lane *LaneView 가 아직 없다(Task 8 이 붙인다) — 생기면 여기서 낸다.
+	// 레인 절 — v.Lane 이 nil 이면 이 조회가 레인을 안 읽은 것이라 아예 안 찍는다.
+	// 읽었으면(0건이어도) 반드시 한 줄을 낸다 — renderLane 이 그 0건 문장에
+	// "질의는 돌았다"를 적어 nil(안 읽음)과 빈 슬라이스(질의는 돌았는데 아무도 없음)를 가른다
+	// (service.BoardView.Lane 주석과 같은 판정).
+	if v.Lane != nil {
+		foot = append(foot, renderLane(v.Lane, now))
+	}
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
 	} else if len(v.Derived.Failures) > 0 {
@@ -554,6 +560,44 @@ func boardDetailFoot(v service.BoardView) []string {
 		}
 	}
 	return out
+}
+
+// renderLane 은 보드의 레인 절 한 줄이다. 순수 함수다.
+//
+// ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
+// 이상 질의는 이미 돈 것이고, Entries 가 비었어도 그 사실("질의는 돌았다")을 문장에
+// 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Entries)가
+// 화면에서 같아진다(service.LaneView 주석과 같은 판정).
+func renderLane(l *service.LaneView, now time.Time) string {
+	if len(l.Entries) == 0 {
+		return "랜딩 레인: 비어 있음(질의는 돌았다 — 지금 아무도 안 섰다)"
+	}
+	parts := make([]string, 0, len(l.Entries))
+	for i, e := range l.Entries {
+		mark := ""
+		if l.Holder != nil && l.Holder.SessionID == e.SessionID {
+			mark = "◀점유"
+		}
+		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전%s)",
+			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), mark))
+	}
+	line := fmt.Sprintf("랜딩 레인 %d건: %s", len(l.Entries), strings.Join(parts, " "))
+	if l.Holder != nil && !laneHolderIsQueued(l) {
+		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
+		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
+		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남)", ShortID(l.Holder.SessionID))
+	}
+	return line
+}
+
+// laneHolderIsQueued 는 지금 점유자가 줄 목록에도 있는지다.
+func laneHolderIsQueued(l *service.LaneView) bool {
+	for _, e := range l.Entries {
+		if e.SessionID == l.Holder.SessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func heldLine(held []model.ResourceHold) string {
