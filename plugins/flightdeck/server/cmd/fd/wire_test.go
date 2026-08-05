@@ -366,3 +366,57 @@ func TestPickBundleSurvivesTheWire(t *testing.T) {
 		}
 	}
 }
+
+// 리뷰 라운드 1 finding 1(CRITICAL) — 공백뿐인 위치 인자를 길이만으로 걸렀더니
+// `fd pick "   "` 가 종료코드 0·"브랜치: …"·워크트리 명령을 냈다. 이 태스크가
+// 닫으려던 "성공을 보고하지만 아무것도 안 집었다"가 인자 축 하나로 되살아난
+// 것이다. 옛 코드(TakeFirstPositional 시절)의 `strings.TrimSpace(itemID) == ""`
+// 판정을 다시 세운다 — **종료코드와 문구**를 단정한다(출력 텍스트만 보면
+// "브랜치: wa" 처럼 무해해 보이는 문구도 통과시킨다).
+func TestPickRejectsBlankPositionalIDs(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open", "--label", "공백id"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, arg := range []string{"", "   "} {
+		code, out := h.run("", "pick", arg)
+		if code != 2 {
+			t.Fatalf("공백 id(%q)인데 종료코드가 %d 다(2 를 기대):\n%s", arg, code, out)
+		}
+		mustContain(t, "공백 id 거절", out, "집을 항목 id 를 줘라")
+		if strings.Contains(out, "브랜치:") {
+			t.Fatalf("공백 id(%q)인데 브랜치 줄이 나왔다 — 추천 경로로 빠졌다는 뜻이다:\n%s", arg, out)
+		}
+	}
+}
+
+// 리뷰 라운드 1 finding 2 — id 사이에 플래그가 끼면 flag.Parse 는 그 뒤를 전부
+// 위치 인자로 남긴다. 오타(`--bogus`)도 예외가 아니라서, 뒤쪽 병합이 "-" 판정
+// 없이 그대로 다 삼키면 오타가 항목 id 로 둔갑해 서버에 실려 가고, 서버가
+// 그것만 "못 찾음"으로 거절해도 묶음의 나머지는 성공해 **종료코드가 0** 이 된다.
+// 같은 오타가 맨 앞에 오면(`fd pick ua --bogus`) flag 오류로 정상 거절되므로,
+// 자리만 옮기면 통과하는 비대칭을 여기서 막는다.
+func TestPickRejectsFlagLikeTailArgument(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open", "--label", "꼬리플래그"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, id := range []string{"ta-tail", "tb-tail"} {
+		if code, out := h.run("", "add", "--id", id, "--title", id+" 제목", "--body", id+" 본문"); code != 0 {
+			t.Fatalf("항목 등록 실패(%s, %d):\n%s", id, code, out)
+		}
+	}
+
+	code, out := h.run("", "pick", "ta-tail", "--cc-session", "cc-session-uuid-1", "tb-tail", "--bogus")
+	if code != 2 {
+		t.Fatalf("플래그처럼 보이는 꼬리 인자(--bogus)인데 종료코드가 %d 다(2 를 기대):\n%s", code, out)
+	}
+	mustContain(t, "꼬리 플래그 거절", out, "--bogus")
+
+	// 거절이 반쪽 선점을 허용하면 안 된다 — store 에 아무것도 안 남아야 한다.
+	for _, id := range []string{"ta-tail", "tb-tail"} {
+		if _, err := h.st.GetClaim(context.Background(), h.project, id); err == nil {
+			t.Fatalf("거절됐는데 %s 가 선점됐다", id)
+		}
+	}
+}

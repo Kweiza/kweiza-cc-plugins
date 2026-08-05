@@ -103,7 +103,7 @@ land                       랜딩 줄에 선다 / 내 차례를 본다. result �
 ```bash
 fd status                 # 서버 상태 배너 + 보드
 fd next                   # 추천만
-fd pick <item-id>         # 선점
+fd pick <item-id> [<item-id>…]  # 선점(여럿이면 첫째가 선두)
 fd note --kind decision --body "왜 그렇게 했나"
 fd finish <item-id> --outcome done --body "① 왜 ② 기각 ③ 안 한 것 ④ 확인만 한 것"
 fd land                   # 랜딩 줄에 선다(--ok|--fail <사유>|--leave <사유> 로 보고·이탈)
