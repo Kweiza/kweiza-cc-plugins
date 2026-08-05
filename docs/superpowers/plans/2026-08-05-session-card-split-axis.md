@@ -499,13 +499,18 @@ func FoldConversations(cards []SessionCard) []Conversation {
 
 	for _, c := range cards {
 		cc := c.View.Session.CCSessionID
-		if i, ok := idx[cc]; ok && judge.SameConversation(cc, out[i].CCSessionID) {
+		if i, ok := idx[cc]; ok {
 			out[i].Cards = append(out[i].Cards, c)
 			out[i].IsSelf = out[i].IsSelf || c.IsSelf
 			continue
 		}
 		out = append(out, Conversation{CCSessionID: cc, Cards: []SessionCard{c}, IsSelf: c.IsSelf})
-		if judge.SameConversation(cc, cc) { // 빈 cc 면 false — 색인에 안 담긴다
+		// ★ 색인에 담을지를 judge 가 정한다. SameConversation(cc, cc) 는 cc 가 비면
+		//   false 라서, 빈 cc 는 색인에 안 들어가고 따라서 **다음 빈 cc 카드와 절대
+		//   안 묶인다.** "빈 값끼리는 같지 않다"는 판정을 여기서 다시 쓰지 않고
+		//   그 함수 하나에 남겨 두기 위한 형태다 — cc != "" 로 적으면 같은 판정이
+		//   두 자리에 살고, 한쪽만 고치는 순간 조용히 어긋난다.
+		if judge.SameConversation(cc, cc) {
 			idx[cc] = len(out) - 1
 		}
 	}
