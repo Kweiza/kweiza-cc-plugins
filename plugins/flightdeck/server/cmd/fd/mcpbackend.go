@@ -242,6 +242,24 @@ func (b *mcpBackend) Board(ctx context.Context, project string, opt service.Boar
 
 func (b *mcpBackend) Pick(ctx context.Context, in service.PickInput) (service.PickResult, error) {
 	var r service.PickResult
+	// ★ 분기 순서가 중요하다. ItemIDs 검사를 ItemID == "" 검사 뒤에 두면 item_ids 만
+	// 준 묶음 요청이(ItemID 는 비었으니) 추천 경로로 빠져 아무것도 안 집는다 —
+	// 그것이 이 함수가 고치는 결함이었다(TestMCPBackendPickBundleDoesNotFallToRecommend
+	// 가 이 순서를 잠근다: 뒤집으면 그 시험이 빨개진다).
+	if len(in.ItemIDs) > 0 {
+		// 묶음 선점 — 경로는 선두(ItemIDs[0])다. 본문은 전체 순서를 그대로 싣는다.
+		// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
+		b.app.cli.Session = in.SessionID
+		raw, err := b.write(ctx, "pick", "/api/v1/items/"+urlPath(in.ItemIDs[0])+"/claim",
+			claimReq{Project: in.Project, SessionID: in.SessionID, ItemIDs: in.ItemIDs})
+		if err != nil {
+			return r, err
+		}
+		if uerr := json.Unmarshal(raw, &r); uerr != nil {
+			return r, fmt.Errorf("묶음 선점 응답 해석 실패: %w", uerr)
+		}
+		return r, nil
+	}
 	// 인자 없는 pick 은 **추천**이라 읽기다(GET /items/next 는 선점하지 않는다).
 	// 인자 있는 pick 만 쓰기이고, 그것이 오프라인에서 거절되는 축이다.
 	if strings.TrimSpace(in.ItemID) == "" {

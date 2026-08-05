@@ -54,6 +54,9 @@ type addReq struct {
 type claimReq struct {
 	Project   string `json:"project"`
 	SessionID string `json:"session_id"`
+	// ItemIDs 는 묶음 선점이다. internal/api 의 claimRequest.ItemIDs 와 이름이 같아야 한다 —
+	// 어긋나면 서버가 조용히 0값을 받아 단독 선점으로 접힌다.
+	ItemIDs []string `json:"item_ids,omitempty"`
 }
 
 type followupReq struct {
