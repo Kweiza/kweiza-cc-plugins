@@ -253,6 +253,48 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   </table>
   {{end}}
 
+  {{/* 레인 절. **새 <section> 이 아니라 ④ 안쪽 <h3>** 이다 — 절 개수는 여섯으로 고정이고
+       그 수가 화면의 골격을 잠근다(render_test.go). */}}
+  <h3>랜딩 레인 — 줄과 회수 <span class="count">{{len .Landing.Lane}}줄</span></h3>
+  <p class="k">자동 만료는 없다. 회수는 사람이 하고, 대상은 레인이 아니라 <b>줄 행</b>이다 —
+     대기 중 좀비도 같은 문법으로 빠진다. 판정 근거는 아래 두 숫자다: 획득 경과와 마지막 신호 나이.</p>
+  {{with .Landing.LaneErr}}<p class="err">{{.}}</p>{{end}}
+  {{with .Landing.LaneWarn}}<p class="err">{{.}}</p>{{end}}
+  {{with .Landing.LaneEmpty}}<p class="empty">{{.}}</p>{{end}}
+  {{if .Landing.Lane}}
+  <table>
+    <tr><th>순번</th><th>세션</th><th>대기 경과</th><th>마지막 신호</th><th>획득 경과</th></tr>
+    {{range .Landing.Lane}}
+    <tr{{if .Holder}} class="lane-holder"{{end}}>
+      <td class="mono">{{if .Missing}}<span class="dim">없음</span>{{else}}{{.RowID}}{{end}}</td>
+      <td class="mono">{{.Session}}</td>
+      <td>{{if .Waiting}}{{.Waiting}}{{else}}<span class="dim">—</span>{{end}}</td>
+      {{/* 빈칸은 "관측 실패이거나 신호가 없다"다. 둘을 갈라 적으려면 없는 정보를 지어내야 한다. */}}
+      <td>{{if .Signal}}{{.Signal}}{{else}}<span class="dim">—</span>{{end}}</td>
+      <td>{{if .Holder}}<b>{{.Held}}</b>{{else}}<span class="dim">—</span>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+
+  {{/* 쓰기 ③ — 레인 회수. 사유 필수. 회수 행위가 판단(decision)으로 원장에 남는다.
+       CLI 의 fd lane release 와 **같은 함수**를 부른다. */}}
+  <form class="write" method="post" action="actions/lane-release?key={{.WriteKey "lane-release"}}">
+    <input type="hidden" name="project" value="{{.Project.ID}}">
+    <label>회수할 줄 행
+      <select name="item" required {{if not .Landing.Lane}}disabled{{end}}>
+        {{range .Landing.Lane}}{{if not .Missing}}<option value="{{.RowID}}">{{.RowID}} ← {{.Session}} ({{if .Holder}}점유 중, {{.Held}}{{else}}대기 {{.Waiting}}{{end}})</option>{{end}}{{end}}
+        {{if not .Landing.Lane}}<option>회수할 줄 행이 없다</option>{{end}}
+      </select>
+    </label>
+    <label>사유(필수)
+      <input name="reason" required minlength="4" maxlength="2000" size="46"
+             placeholder="왜 남의 랜딩을 끊는가 — 획득 경과·신호 나이를 근거로">
+    </label>
+    <button type="submit" {{if not .Landing.Lane}}disabled{{end}}>레인 회수</button>
+    <span class="k">레인 정지/재개는 여전히 Tier B(러너)다 — 여기서 여는 것은 회수 하나뿐이다.</span>
+  </form>
+
   <h3>스냅숏 — 재계산이 불가능한 수치</h3>
   <p class="k">{{.Landing.Current}}</p>
   {{with .Landing.SnapErr}}<p class="empty">{{.}}</p>{{end}}

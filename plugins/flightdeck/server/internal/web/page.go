@@ -183,6 +183,27 @@ type LandingPanel struct {
 	Empty     string
 	Tier      string
 	Current   string // 현재 입력(기본 브랜치 HEAD) — 스냅숏 대조의 상대
+	// 레인 절. **0건·못 읽음·어긋남을 각각 자기 문자열로 가진다** — 한 자리에 접으면
+	// "질의가 안 돌았다"와 "아무도 안 섰다"가 화면에서 같아진다.
+	Lane      []LaneRow
+	LaneErr   string
+	LaneEmpty string
+	LaneWarn  string
+}
+
+// LaneRow 는 랜딩 줄의 한 자리다.
+//
+// ★ 회수 판정은 **두 숫자**로 한다: 얼마나 오래 쥐고 있나(Held)와 마지막 신호가
+// 얼마나 낡았나(Signal). 자동 만료를 안 만든 근거가 "사람이 이 나이들을 보고 판정한다"
+// 이므로 한 축이 빠지면 판정의 근거가 없다 — 어긋남 행에서도 반드시 둘 다 낸다.
+type LaneRow struct {
+	RowID   int64
+	Session string
+	Waiting string // 대기 경과 — 줄에 선 뒤 지난 시간
+	Signal  string // 마지막 신호 나이. 빈 문자열 = 관측 실패이거나 신호가 없다
+	Holder  bool   // 지금 레인을 쥐고 있나
+	Held    string // 획득 경과. 점유자만 채운다
+	Missing bool   // 점유자인데 줄에 행이 없다(정합 어긋남) — 회수 번호가 없는 행이다
 }
 
 // HoldRow 는 자원 점유 한 줄이다.
@@ -650,7 +671,76 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 	if len(pan.Snapshots) == 0 && pan.SnapErr == "" {
 		pan.SnapErr = "스냅숏 0건 — 전수 판정 수치가 아직 하나도 보관되지 않았다."
 	}
+	h.fillLane(ctx, &pan, proj.ID, now)
 	return pan
+}
+
+// fillLane 은 랜딩 줄을 패널에 채운다.
+//
+// ★ **조회는 service.LandingLane 하나로 한다.** query.go 에 생 SQL 을 두 번째로
+// 만들면 판정이 두 자리에 생기고, 한쪽만 고치는 순간 화면과 보드가 조용히 어긋난다
+// (board.go 가 같은 규율을 적어 뒀다). 그 함수는 점유자·줄의 정합 재확인까지 한다.
+//
+// ★ **생존 창으로 거르지 않는다.** 창 밖 세션이 맨 앞에서 막고 있는 상황이야말로
+// 사람이 봐야 하는 상황이고, 거르면 화면이 "줄이 비었는데 아무도 못 잡는다"가 된다.
+func (h *handler) fillLane(ctx context.Context, pan *LandingPanel, project string, now time.Time) {
+	lane, err := h.svc.LandingLane(ctx, project)
+	if err != nil {
+		// 못 읽은 것을 0건으로 적지 않는다. 빈 표가 아니라 실패다.
+		pan.LaneErr = "랜딩 줄을 못 읽었다: " + Clip(err.Error(), 400)
+		h.log.ErrorContext(ctx, "랜딩 줄 조회 실패", "project", project, "error", err.Error())
+		return
+	}
+
+	holderSeen := false
+	for _, e := range lane.Entries {
+		row := LaneRow{
+			RowID:   e.RowID,
+			Session: e.SessionID,
+			Waiting: Age(now.Sub(e.EnqueuedAt)),
+			Signal:  signalAge(now, e.LastSignalAt),
+		}
+		if lane.Holder != nil && lane.Holder.SessionID == e.SessionID {
+			row.Holder = true
+			row.Held = Age(now.Sub(lane.Holder.AcquiredAt))
+			holderSeen = true
+		}
+		pan.Lane = append(pan.Lane, row)
+	}
+
+	// 점유자가 줄에 없다 — 정합 어긋남이다. **행을 지우지 않고 낸다.**
+	// 이 행이 화면에서 사라지면 "레인은 물렸는데 화면은 비었다"가 되고,
+	// 그때가 정확히 사람이 회수해야 하는 순간이다.
+	if lane.Holder != nil && !holderSeen {
+		pan.Lane = append(pan.Lane, LaneRow{
+			Session: lane.Holder.SessionID,
+			Waiting: "", // 줄 행이 없으므로 대기 경과라는 것이 없다
+			Signal:  signalAge(now, lane.Holder.LastSignalAt),
+			Holder:  true,
+			Held:    Age(now.Sub(lane.Holder.AcquiredAt)),
+			Missing: true,
+		})
+		pan.LaneWarn = "정합 어긋남 — 레인을 쥔 세션의 줄 행이 없다. " +
+			"회수는 줄 행 번호로 하는데 그 번호가 없으므로, 이 자리는 CLI 로도 화면으로도 못 푼다 — " +
+			"점유자가 land 로 빠지거나 서버가 다시 읽어 스스로 아무는 것이 정상 경로다."
+	}
+
+	if len(pan.Lane) == 0 {
+		pan.LaneEmpty = "줄이 비었다 — 질의는 돌았고 아무도 안 섰다."
+	}
+}
+
+// signalAge 는 마지막 신호의 나이다. nil 이면 빈 문자열이다.
+//
+// ★ **"관측 실패"와 "신호가 없다"를 화면에서 가르지 않는다.** service.LandingLane 이
+// 그 자리에서 이미 그렇게 정했다(둘 다 nil 로 오고 실패 사유는 서버 WARN 에 남는다).
+// 화면이 그 둘을 갈라 적으려면 없는 정보를 지어내야 한다. 이 축을 반드시 봐야 하는
+// 곳은 불변으로 남는 판단 본문이고, 그쪽(ReleaseLaneRow)은 두 경우를 다른 문장으로 적는다.
+func signalAge(now time.Time, at *time.Time) string {
+	if at == nil {
+		return ""
+	}
+	return Age(now.Sub(*at))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

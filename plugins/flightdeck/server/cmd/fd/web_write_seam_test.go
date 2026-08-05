@@ -93,9 +93,18 @@ func TestDashboardWriteFormsGoThroughTheAssembledServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 레인에 한 명 세워 회수 폼이 실제 대상을 갖게 한다.
+	if code, out := h.run("", "land"); code != 0 {
+		t.Fatalf("줄 서기 실패(code=%d): %s", code, out)
+	}
+
 	for _, c := range []struct{ name, suffix, item string }{
 		{"선점 회수", "actions/reclaim", item},
 		{"항목 폐기", "actions/drop", item},
+		// ★ 새 버튼이 **태어나자마자 죽지 않는지**를 여기서만 볼 수 있다.
+		// 이 축이 없으면 web/actions_test.go 는 초록인데 브라우저는 400 이다 —
+		// 정확히 위 두 버튼이 그렇게 죽어 있었다.
+		{"랜딩 줄 행 회수", "actions/lane-release", "1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			action, fields := formBlock(t, html, c.suffix)
