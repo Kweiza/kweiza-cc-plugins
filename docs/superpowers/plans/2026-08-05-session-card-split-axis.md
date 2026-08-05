@@ -2228,6 +2228,78 @@ func TestFindSessionReturnsExistingCard(t *testing.T) {
 한 번 찍어 확인한다. 카드 수를 세는 다른 길이 있으면 그것을 써도 된다 — 이 시험이 잠그는
 것은 **개수가 안 변하는 것**이지 특정 엔드포인트가 아니다.
 
+**그리고 3중키 세 축이 각각 구분력을 갖게 한다.**
+
+검토가 뮤테이션으로 잡았다 — `Store.FindSession` 의 `WHERE` 절에서 **`machine_id` 나
+`worktree` 를 지워도 어느 시험도 안 잡는다.** 위 두 시험이 머신·워크트리를 고정하고
+`cc_session_id` 만 바꾸기 때문이다.
+
+이 저장소는 세션 정체가 **3중키**라는 것을 반복해서 못박는다(`OpenSession` 주석:
+"워크트리 경로만 키로 쓰면 안 된다 — 옛 세션 행과 합쳐진다"). 그 불변식의 2/3 이
+조회에서 무너져도 안 보이면 안 된다.
+
+**"이웃을 심고 못 찾는지 본다"** 로 잡는다. 순서에 안 기대는 확정적 방법이다 —
+올바른 구현은 404, `WHERE` 가 깎이면 그 이웃이 걸려 200 이 된다.
+
+```go
+// 3중키의 세 축이 **각각** 조회를 가른다.
+// 축 하나가 SQL 에서 빠지면 이웃이 걸려 200 이 나오므로 확정적으로 잡힌다
+// (행 순서에 안 기댄다 — 올바른 답이 404 라서 한 건이라도 걸리면 실패다).
+func TestFindSessionNeedsAllThreeKeyParts(t *testing.T) {
+	e := newEnv(t, nil)
+
+	// 기준 카드 하나: machine=m1 · worktree=<repo> · cc=cc-x
+	e.openSession(...) // 위 시험들이 쓰는 방식 그대로
+
+	cases := []struct {
+		name              string
+		machine, wt, cc   string
+		why               string
+	}{
+		{
+			name: "머신이 다르면 못 찾는다", machine: "m2", wt: <repo>, cc: "cc-x",
+			why: "WHERE 에서 machine_id 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+		{
+			name: "워크트리가 다르면 못 찾는다", machine: "m1", wt: <repo> + "/elsewhere", cc: "cc-x",
+			why: "WHERE 에서 worktree 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+		{
+			name: "cc 가 다르면 못 찾는다", machine: "m1", wt: <repo>, cc: "cc-y",
+			why: "WHERE 에서 cc_session_id 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := url.Values{"machine": {c.machine}, "worktree": {c.wt}, "cc": {c.cc}}
+			w := e.do(http.MethodGet, "/api/v1/sessions?"+q.Encode(), nil, loopback())
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("상태 %d, 원하는 것 404 — %s\n본문: %s", w.Code, c.why, w.Body.String())
+			}
+		})
+	}
+}
+```
+
+`<repo>` 는 위 시험들이 쓰는 실제 워크트리 값으로 채운다(`newEnv` 가 세우는 것).
+**워크트리 값은 절대경로여야 한다** — `JudgeOpenSession` 이 상대경로를 거절한다.
+
+**공백 위생도 한 줄로 잠근다**(검토가 `strings.TrimSpace` 도 무시험이라고 잡았다).
+
+```go
+// 질의값에 공백이 붙어도 같은 카드를 찾는다.
+func TestFindSessionTrimsQueryValues(t *testing.T) {
+	e := newEnv(t, nil)
+	want := e.openSession(...) // 위와 같은 방식
+	q := url.Values{"machine": {" m1 "}, "worktree": {" " + <repo> + " "}, "cc": {" cc-x "}}
+	w := e.do(http.MethodGet, "/api/v1/sessions?"+q.Encode(), nil, loopback())
+	if w.Code != http.StatusOK {
+		t.Fatalf("상태 %d, 원하는 것 200 — 공백이 붙으면 못 찾는다면 TrimSpace 가 빠진 것이다", w.Code)
+	}
+	_ = want
+}
+```
+
 - [ ] **Step 2: 실패를 확인한다**
 
 ```bash
@@ -2313,9 +2385,30 @@ cd plugins/flightdeck/server && go test ./internal/api/ -run TestFindSession -v 
 
 - [ ] **Step 5: 되돌려 빨강을 확인한다**
 
-`Service.FindSession` 이 `s.st.OpenSession(...)` 을 부르도록 바꾸고 돌린다.
-기대: `TestFindSessionNeverCreatesACard` 가 "세션이 N장에서 N+1장으로 늘었다" 로 FAIL.
-**이것이 이 과제의 핵심 단정이다** — 확인했으면 되돌린다.
+빨강이 안 나오면 그 시험이 아무것도 안 잡는 것이다. **시험을 고쳐라(구현을 고치지 마라).**
+
+| # | 되돌릴 것 | 빨강이어야 하는 시험 |
+|---|---|---|
+| 1 | **`Service.FindSession` 이 `s.st.OpenSession(...)` 을 부르게** | `TestFindSessionNeverCreatesACard` — **이 과제의 핵심 단정이다** |
+| 2 | `api.go` 의 라우트 한 줄 제거 | `TestFindSessionReturnsExistingCard`(200 갈래) |
+| 3 | `Store.FindSession` 의 `errors.Is(err, sql.ErrNoRows)` 갈래 제거 | `TestFindSessionNeverCreatesACard` |
+| 4 | **`WHERE` 절에서 `machine_id` 제거** | `TestFindSessionNeedsAllThreeKeyParts/머신이_다르면_못_찾는다` |
+| 5 | **`WHERE` 절에서 `worktree` 제거** | 〃`/워크트리가_다르면_못_찾는다` |
+| 6 | **`WHERE` 절에서 `cc_session_id` 제거** | 〃`/cc_가_다르면_못_찾는다` |
+| 7 | **`handleFindSession` 의 `strings.TrimSpace` 제거** | `TestFindSessionTrimsQueryValues` |
+| 8 | 질의 인자 `machine`·`worktree` 를 서로 뒤바꾸기 | `TestFindSessionReturnsExistingCard` |
+| 9 | 200 → 201 | 〃 |
+
+**4·5·6·7 이 이번 수정의 핵심이다.** 검토가 뮤테이션으로 확인했다 — 이전 판에서 **4·5·7 이
+초록으로 살아남았다.** 3중키 정체 불변식의 2/3 이 조회에서 무너져도 안 잡혔다는 뜻이다.
+
+**1번을 확인할 때 주의:** 상태 코드 단정이 `t.Fatalf` 라 먼저 걸려서 카드 수 단정에 도달을
+못 할 수 있다. 검토가 확인한 방법을 그대로 써라 — 상태 코드 단정만 `t.Logf` 로 잠시 낮춘 채
+같은 뮤테이션을 넣어 **카드 수 단정이 단독으로 빨강을 내는지** 보고, 확인한 뒤 되돌려라.
+(검토 결과: 낸다. "세션이 1장에서 2장으로 늘었다".)
+
+**2번을 확인할 때 주의:** 라우트가 아예 없어도 `404` 가 나오므로
+`TestFindSessionNeverCreatesACard` 는 **헛되이 통과한다.** 200 갈래가 잡는 것이 정상이다.
 
 - [ ] **Step 6: 커밋**
 
