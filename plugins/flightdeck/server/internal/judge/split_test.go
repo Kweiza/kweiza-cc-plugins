@@ -267,13 +267,16 @@ func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 // 소유 루트는 **가장 긴** 것이어야 한다. 가장 짧은 것을 고르면 링크 워크트리가
 // 통째로 저장소 루트에 흡수되고, 그 순간 거짓 양성 56%가 돌아온다.
 func TestOwningRootPicksTheLongestMatch(t *testing.T) {
-	got, _ := DetectUnnormalizedSplit([]SplitCard{
+	got, un := DetectUnnormalizedSplit([]SplitCard{
 		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s2", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: "cc"},
 		{SessionID: "s3", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/B", CCSessionID: "cc"},
 	}, testRoots)
 	if len(got) != 0 {
 		t.Fatalf("보고 %d건, 원하는 것 0건 — 셋 다 자기 트리의 루트다: %+v", len(got), got)
+	}
+	if un != 0 {
+		t.Fatalf("버린 카드 %d장, 원하는 것 0장 — 보고 0건이 '판정을 못 해서'면 안 된다", un)
 	}
 }
 

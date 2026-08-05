@@ -1,6 +1,7 @@
 package service
 
 import (
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
@@ -154,5 +155,44 @@ func TestBoardFillsConversations(t *testing.T) {
 		if n != 1 {
 			t.Errorf("카드 %s 가 묶음에 %d번 나온다", id, n)
 		}
+	}
+}
+
+func TestSplitCardsOfCarriesTriple(t *testing.T) {
+	in := []SessionCard{card("s1", "cc-a", "/repo", false)}
+	in[0].View.Session.MachineID = "m1"
+	got := splitCardsOf(in)
+	if len(got) != 1 {
+		t.Fatalf("%d건, 원하는 것 1건", len(got))
+	}
+	if got[0].SessionID != "s1" || got[0].MachineID != "m1" ||
+		got[0].Worktree != "/repo" || got[0].CCSessionID != "cc-a" {
+		t.Fatalf("3중키가 안 실렸다: %+v", got[0])
+	}
+}
+
+// ★ 운영 진입점(Board)을 그대로 탄다. splitCardsOf 만 시험하면 배선 한 줄을 지워도
+//
+//	스위트가 초록이다 — Task 2 가 그 사고를 실제로 냈다.
+func TestBoardFillsSplits(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	// 같은 (머신, cc)로 카드 둘을 연다: 하나는 트리 루트, 하나는 그 하위 디렉토리.
+	// openSession 은 MachineID 를 "m1"으로 고정해 낸다(helper_test.go) — 두 카드가
+	// 같은 머신으로 잡힌다. 정규화가 돌았다면 둘 다 루트로 적혔을 모양이라 갈림
+	// 보고가 하나 나와야 한다.
+	sub := filepath.Join(repo, "sub")
+	openSession(t, s, "p", repo, repo, "cc-1", "트랙2")
+	openSession(t, s, "p", repo, sub, "cc-1", "트랙2")
+
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if len(view.Sessions) < 2 {
+		t.Fatalf("카드 %d장 — 이 시험이 아무것도 안 재고 있다", len(view.Sessions))
+	}
+	if len(view.Splits) == 0 {
+		t.Fatal("Splits 가 비었다 — Board 가 DetectUnnormalizedSplit 을 안 부르거나 루트를 안 넘긴다")
 	}
 }
