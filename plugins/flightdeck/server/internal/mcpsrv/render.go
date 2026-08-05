@@ -133,6 +133,32 @@ func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
 	return strings.Join(parts, " · ")
 }
 
+// activityKinds 는 "이 세션이 일하고 있나"에 답하는 신호다.
+//
+// ★ **mcp 와 push 는 일부러 뺐다.** mcp 는 서비스가 세션을 열 때와 상태를 바꿀 때마다
+// 찍으므로(service/session.go) 포함하면 아무것도 안 한 세션도 점등돼 판별력이 0이 된다 —
+// 실측: 카드 26장 중 16장이 신호가 mcp 하나뿐이고 그 시각이 opened_at 과 같았다.
+// push 는 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
+var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
+
+// activityOf 는 "이 세션이 일하고 있나"와 그 사유를 낸다. 순수 함수다.
+//
+// 화면 ①이 선점을 필터로 쓰는 이상 이 배지가 **"쥐고만 있고 안 하는 세션"**을 가리키는
+// 유일한 축이다. 불리언만 내면 사람이 무엇을 근거로 회수할지 못 정하므로 사유를 함께 낸다.
+// 이 판정은 죽음을 말하지 않는다 — 나이를 숫자로 낼 뿐이고 회수는 사람이 한다(설계 §4).
+func activityOf(sig map[model.SignalKind]time.Time, now time.Time) (bool, string) {
+	var newest time.Time
+	for _, k := range activityKinds {
+		if at, ok := sig[k]; ok && at.After(newest) {
+			newest = at
+		}
+	}
+	if newest.IsZero() {
+		return false, "○ 활동 없음"
+	}
+	return true, "● 활동 " + FormatAge(now.Sub(newest)) + " 전"
+}
+
 // formatPaths 는 경로를 몇 개까지만 보여준다.
 func formatPaths(paths []string, limit int) string {
 	if len(paths) == 0 {
@@ -207,22 +233,55 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if strings.TrimSpace(opt.Notice) != "" {
 		head = append(head, opt.Notice)
 	}
+	// ★★ 선점 필터. 이 화면이 답하는 질문은 "누가 살아 있나"가 아니라
+	// **"어느 작업이 잡혀 있나"** 다. 선점 없는 카드는 안 낸다 — 자기 카드도 예외가 없다.
+	//
+	// ★ 필터가 **여기**여야 하는 이유. toolBoard 는 `v.Sessions` 로 겹침(judge.OverlapsWithLive)과
+	// cc 표류(DriftedTwins)를 **직접 계산한다.** 그 슬라이스를 줄이면 선점 없이 편집하는
+	// 세션이 남의 겹침 판정에서도 사라지고, 카드가 여러 장으로 갈린 사실을 말해 주는
+	// 유일한 배너도 죽는다 — 조용한 오탐이 아니라 조용한 미탐이다. 그래서 렌더 안에서만 거른다.
+	claimed := make([]service.SessionCard, 0, len(v.Sessions))
+	for _, c := range v.Sessions {
+		if len(c.View.Claims) > 0 {
+			claimed = append(claimed, c)
+		}
+	}
+	folded := len(v.Sessions) - len(claimed)
+
 	head = append(head,
 		fmt.Sprintf("보드 · %s · %s · %s",
 			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
-		fmt.Sprintf("살아 있는 세션 %d건 (최근 %s 안에 신호가 있었다 — 생존 판정이 아니다)",
-			len(v.Sessions), FormatAge(v.Window)),
+		fmt.Sprintf("잡혀 있는 작업 %d건 (선점 기준이다 — 세션의 생사가 아니다)",
+			len(claimed)+len(v.OutsideClaims)),
 	)
 
-	ranked := rankCards(v, opt.Self, now)
+	ranked := rankCards(v, claimed, opt.Self, now)
 	blocks := make([]string, 0, len(ranked))
 	for _, c := range ranked {
 		blocks = append(blocks, boardCard(c, now, pathLimit, opt.Detail, v.Asks, v.Blocked))
 	}
 
 	var foot []string
-	if len(v.Sessions) == 0 {
-		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
+	if len(claimed)+len(v.OutsideClaims) == 0 {
+		// ★ 0건의 뜻이 바뀌었다. 예전에는 "이 창에 다른 세션이 없다"였고 지금은
+		//   **"아무도 항목을 안 쥐고 있다"** 다. 후자는 정상 상태라, 그 사실을 말해야
+		//   사람이 없는 서버 장애를 찾아 헤매지 않는다.
+		foot = append(foot, "잡혀 있는 작업이 없다 — 아무 세션도 큐 항목을 쥐고 있지 않다. 서버 장애가 아니다.")
+	}
+	// ★ 창 밖인데 항목을 쥔 세션. **창을 이 화면에 걸지 않는다** — 걸면 회수가 가장
+	// 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
+	// 카드가 아니라 한 줄인 이유: git 파생을 안 읽었다(창 밖까지 파생하면 카드당
+	// git 호출 1~4회가 세션 수만큼 터진다). 그 사실을 줄머리가 말한다.
+	for _, ov := range v.OutsideClaims {
+		_, act := activityOf(ov.Signals, now)
+		foot = append(foot, fmt.Sprintf("창 밖 선점 · %s %s · %s · 파생 안 읽음",
+			ShortID(ov.Session.ID), strings.Join(ov.Claims, ", "), act))
+	}
+	// ★ 접은 것을 침묵하지 않는다. 그리고 **조율에서 빠진 게 아니라는 사실**을 함께 말한다 —
+	// 안 그러면 읽는 쪽이 "저 세션은 아무도 안 본다"로 잘못 읽는다.
+	if folded > 0 {
+		foot = append(foot, fmt.Sprintf(
+			"선점 없는 세션 %d건은 안 낸다 — 겹침 처방은 그 세션들도 그대로 본다.", folded))
 	}
 	// 창 밖으로 잘린 것을 침묵시키지 않는다. 창은 표시 구간이지 생존 판정이 아니다(설계 §4) —
 	// 이 줄이 없으면 "그런 세션이 없다"와 "안 보여 준다"가 구분되지 않는다.
@@ -332,7 +391,10 @@ func joinAll(head, blocks, foot []string, tail string) string {
 //
 // ★ 앞선 판은 목록 위치 순으로 잘랐다. 그래서 열린 ask 가 붙은 카드가 조용한 카드보다
 // 먼저 접힐 수 있었고, 사건을 카드에 붙여도 예산이 그것을 먼저 버렸다.
-func rankCards(v service.BoardView, self string, now time.Time) []service.SessionCard {
+// ★ cards 를 따로 받는다 — v.Sessions 가 아니다. 화면은 선점을 든 카드만 내지만
+// selfPaths 는 **거르지 않은 v.Sessions** 에서 찾아야 한다: 내가 선점 없이 일하는 중이면
+// 내 카드는 화면에 없어도 내 경로는 있고, 그 경로가 남과 겹치는지가 정렬의 근거이기 때문이다.
+func rankCards(v service.BoardView, cards []service.SessionCard, self string, now time.Time) []service.SessionCard {
 	hasNote := map[string]bool{}
 	for _, j := range v.Asks {
 		hasNote[j.SessionID] = true
@@ -370,8 +432,8 @@ func rankCards(v service.BoardView, self string, now time.Time) []service.Sessio
 		card service.SessionCard
 		rank int
 	}
-	tmp := make([]withRank, len(v.Sessions))
-	for i, c := range v.Sessions {
+	tmp := make([]withRank, len(cards))
+	for i, c := range cards {
 		tmp[i] = withRank{card: c, rank: rank(c)}
 	}
 	sort.SliceStable(tmp, func(i, j int) bool {
@@ -433,15 +495,19 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 		state += "(" + clip(v.Session.BlockedWhy, 80) + ")"
 	}
 
-	claims := "선점 없음"
-	if len(v.Claims) > 0 {
-		claims = "선점 " + strings.Join(v.Claims, ", ")
-	}
+	// ★ 선점이 이 카드의 **존재 이유**다(화면 ①은 선점을 든 카드만 낸다). 그래서
+	// 메타 줄이 아니라 머리줄에 온다. 항목 id 는 전부 낸다 — 이 화면의 필터가 곧
+	// 이 값이라, 말없이 자르면 화면이 자기 근거를 숨긴다.
+	claims := strings.Join(v.Claims, ", ")
+	_, act := activityOf(v.Signals, now)
 
+	// ★ 줄 수는 **둘로 유지한다.** 카드당 한 줄이 늘면 예산(1200토큰) 안에 드는 카드 수가
+	// 줄고, boardCardFloor 가 예산을 이기는 갈래로 밀려 기본 출력이 상한을 넘는다
+	// (실측: 3줄로 늘렸더니 24세션 기본 보드가 1208토큰이 됐다).
 	lines := []string{
-		fmt.Sprintf("%s%s %s · %s · %s · %s",
-			mark, ShortID(v.Session.ID), label, branch, state, formatPaths(v.Paths, pathLimit)),
-		fmt.Sprintf("   %s | %s", FormatSignals(v.Signals, now), claims),
+		fmt.Sprintf("%s%s %s · %s", mark, ShortID(v.Session.ID), claims, act),
+		fmt.Sprintf("   %s · %s · %s · %s · %s",
+			label, branch, state, formatPaths(v.Paths, pathLimit), FormatSignals(v.Signals, now)),
 	}
 	if !v.HasFootprint {
 		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
