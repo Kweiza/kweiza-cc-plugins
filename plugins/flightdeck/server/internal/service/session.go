@@ -493,6 +493,15 @@ func (s *Service) Rekey(ctx context.Context, sessionID, ccSessionID string) (mod
 	return out, nil
 }
 
+// FindSession 은 세션을 **찾기만** 한다. 없으면 만들지 않는다.
+//
+// OpenSession 과 달리 파생(branch·head·ahead)을 안 붙인다 — 이 조회를 부르는 자리는
+// 복구 갈래이고 거기서 필요한 것은 "그 카드가 있느냐"와 그 id 뿐이다. 파생을 붙이면
+// 가장 잦은 훅 경로에 git 호출이 는다.
+func (s *Service) FindSession(ctx context.Context, machineID, worktree, ccSessionID string) (model.Session, error) {
+	return s.st.FindSession(ctx, machineID, worktree, ccSessionID)
+}
+
 // 시간 비교의 기준점. Board 가 자르는 지점을 만든다.
 func (s *Service) cut(now time.Time, window time.Duration) time.Time {
 	if window <= 0 {

@@ -58,6 +58,23 @@ func (s *server) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, status, res)
 }
 
+// handleFindSession 은 3중키로 세션을 찾는다. **만들지 않는다.**
+//
+// 이 자리가 없어서 복구 갈래가 upsert 를 조회로 쓰고 있었고, 그것이 빈 카드를 낳았다.
+func (s *server) handleFindSession(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	sess, err := s.svc.FindSession(r.Context(),
+		strings.TrimSpace(q.Get("machine")),
+		strings.TrimSpace(q.Get("worktree")),
+		strings.TrimSpace(q.Get("cc")))
+	if err != nil {
+		s.fail(w, r, err) // 없으면 notFound 가 404 로 나간다
+		return
+	}
+	infoFrom(r.Context()).setSession(sess.ID)
+	s.writeJSON(w, r, http.StatusOK, map[string]any{"session": sess})
+}
+
 type patchSessionRequest struct {
 	State string `json:"state"`
 	Why   string `json:"why"`
