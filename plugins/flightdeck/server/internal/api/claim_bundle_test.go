@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,19 @@ func TestClaimBundleLeadMismatchRefuses(t *testing.T) {
 	ce := errorOf(t, claim)
 	if ce["code"] != "refused" {
 		t.Fatalf("오류 코드가 %v 다(refused 를 기대)", ce["code"])
+	}
+	// 코드만 보면 안 된다 — `RefusedError{What:"claim"}` 처럼 Reason·Guidance 를
+	// 빼먹어도 code 는 여전히 "refused"다. 사유가 **두 id 를 다 담는지**(어느 쪽이
+	// 경로고 어느 쪽이 item_ids 선두인지 짐작하지 않게)와, 처방이 **비어 있지
+	// 않은지**를 따로 본다. 처방이 없으면 에이전트는 같은 어긋난 호출을 영원히
+	// 반복한다 — 그것이 RefusedError.Guidance 가 존재하는 이유다.
+	msg, _ := ce["message"].(string)
+	if !strings.Contains(msg, "path-item") || !strings.Contains(msg, "other-lead") {
+		t.Fatalf("거절 사유에 두 id(경로 path-item·선두 other-lead)가 다 없다: %q", msg)
+	}
+	guidance, _ := ce["guidance"].(string)
+	if strings.TrimSpace(guidance) == "" {
+		t.Fatalf("거절에 처방(guidance)이 없다 — 사유만 주면 무엇을 고쳐야 하는지 모른 채 같은 호출을 반복한다: %v", ce)
 	}
 
 	for _, id := range []string{"path-item", "other-lead", "mismatch-m1"} {
