@@ -204,103 +204,32 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusCreated, map[string]any{"workspace": ws})
 }
 
-type footprintRequest struct {
-	SessionID string   `json:"session_id"`
-	Paths     []string `json:"paths"`
-	Origin    string   `json:"origin"`
-}
-
-// ValidateOrigin 은 발자국의 출처를 판정한다. 순수 함수다.
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/footprints 는 **지웠다**(2026-08-05) — 그 자리의 기록
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// 빈 값은 observed 로 본다(훅이 보내는 기본 경로다). 모르는 값은 **거절한다** —
-// 셋을 뭉개면 "선언했으나 안 건드림"과 "선언 없이 건드림"이 구분되지 않고,
-// 그 구분이 없으면 겹침 축이 무엇을 근거로 삼았는지 아무도 모른다.
-func ValidateOrigin(o string) (model.FootprintOrigin, error) {
-	switch model.FootprintOrigin(strings.TrimSpace(o)) {
-	case "":
-		return model.OriginObserved, nil
-	case model.OriginObserved:
-		return model.OriginObserved, nil
-	case model.OriginDeclared:
-		return model.OriginDeclared, nil
-	case model.OriginClaimed:
-		return model.OriginClaimed, nil
-	default:
-		return "", fmt.Errorf("발자국 출처 %q 가 열거에 없다 — observed|declared|claimed 중 하나여야 한다",
-			clip(o, 32))
-	}
-}
-
-// NormalizeFootprints 는 훅이 준 절대경로를 저장소 좌표계로 옮기고, 좌표계가 다른 것을 가른다.
-// 순수 함수다.
+// 여기 있던 것: footprintRequest · ValidateOrigin · NormalizeFootprints ·
+// handleFootprints. 신호 없이 발자국만 남기는 표면이었고 origin=declared|claimed 를
+// 받을 수 있어 Beat(observed 고정)와 표현력이 달랐다.
 //
-// ★ 좌표계를 안 맞추면 겹침 축이 **조용히** 죽는다. 훅은 절대경로를 주고
-// git 은 저장소 상대를 주므로, 둘을 그대로 두면 같은 파일이 서로 다른 문자열이 되어
-// 아무와도 안 겹친다 — 그리고 그 결과는 "겹침 없음"이라는 정상 응답과 구분되지 않는다.
+// 지운 근거는 그 표현력 차이가 **쓰이는 자리가 없다**는 실측 셋이다:
 //
-// ★ 버린 것을 **함께 돌려준다.** 이 표면은 거절하지 않는다(훅을 400 으로 죽이면 세션
-// 생존 신호가 끊긴다). 그러면 버린 사실을 호출부가 말할 수 있어야 하고, 못 말하면
-// 경로가 조용히 사라진 것과 같아진다 — 이 함수가 없애려는 바로 그 침묵이다.
-func NormalizeFootprints(worktree string, paths []string) ([]string, []service.RejectedPath) {
-	kept, rejected := service.FilterFootprintPaths(paths)
-	rels := make([]string, 0, len(kept))
-	for _, p := range kept {
-		rels = append(rels, service.RelPath(worktree, p))
-	}
-	return service.UnionPaths(rels), rejected
-}
-
-// handleFootprints 는 발자국을 기록한다.
+//	코드 전수    이 표면을 치는 클라이언트 0건(cmd/fd·hooks·mcpsrv·웹 자산 전부)
+//	DB origin    observed 592 · claimed 140 · declared **0** (2026-08-05 실측)
+//	Touch 호출부 이 핸들러 · service.Pick(claimed) · service.Beat(observed)
 //
-// 신호 없이 발자국만 남기는 경로다(선언·항목 경로). 생존 신호와 함께 오는 것은
-// POST /sessions/{id}/signals 쪽이다 — 둘을 한 표면으로 합치면
-// "선언했다"가 "살아 있다"로 둔갑한다.
-func (s *server) handleFootprints(w http.ResponseWriter, r *http.Request) {
-	var req footprintRequest
-	if !s.decode(w, r, &req) {
-		return
-	}
-	infoFrom(r.Context()).setSession(req.SessionID)
-	if strings.TrimSpace(req.SessionID) == "" {
-		s.writeError(w, r, badRequest("missing_session_id", "session_id 가 비었다",
-			"발자국은 세션에 귀속된다 — 주인 없는 경로는 겹침 판정에 쓸 수 없다."))
-		return
-	}
-	origin, err := ValidateOrigin(req.Origin)
-	if err != nil {
-		s.writeError(w, r, badRequest("bad_origin", err.Error(),
-			"훅이 관측한 것은 observed, 세션이 선언한 것은 declared, 항목이 선언한 것은 claimed 다."))
-		return
-	}
-	sess, err := s.st.GetSession(r.Context(), req.SessionID)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	rels, rejected := NormalizeFootprints(sess.Worktree, req.Paths)
-	now := s.now()
-	for _, p := range rels {
-		if err := s.st.Touch(r.Context(), req.SessionID, p, origin, now); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-	}
-	// ★ rejected 도 함께 낸다 — session.beat 이 이미 event 원장에 rejected 를 내므로,
-	// 이 SSE 표면만 안 내면 같은 발자국 축을 보는 두 표면(원장 vs 대시보드)이 다르게
-	// 보고한다. 대시보드는 이 publish 를 먹는다.
-	s.publish(r, "session.footprint", sess.Project, req.SessionID, map[string]any{
-		"origin": string(origin), "count": len(rels), "rejected": len(rejected),
-	})
-	res := map[string]any{
-		"session_id": req.SessionID, "origin": string(origin),
-		"count": len(rels), "paths": rels,
-	}
-	// 버린 것이 있을 때만 싣는다 — 빈 배열을 늘 실으면 정상 응답에 잡음이 낀다.
-	if len(rejected) > 0 {
-		res["rejected"] = rejected
-	}
-	s.writeJSON(w, r, http.StatusOK, res)
-}
+// claimed 는 Pick 이 선점 트랜잭션에서 직접 넣는다. declared 는 **생산자가 이 표면뿐**
+// 이었고 그 표면을 아무도 안 쳤다 — 그래서 그 값의 행이 한 건도 없다. 즉 차이는
+// 실재했으나 그 차이가 만든 데이터가 없었다.
+//
+// ★ 같은 "호출자 0건"인데 바로 위 handleWorkspace 는 **남겼다.** 기준은 대체재다 —
+// 발자국은 이 표면이 없어도 두 문(Beat·Pick)으로 들어오지만, 부 워크스페이스를 넣을
+// 문은 그것 하나뿐이다. 자세한 것은 store/session.go 의 AddWorkspace 주석에 있다.
+//
+// ★ 되살리려면 관문부터 붙여라. 이 핸들러의 NormalizeFootprints 는 좌표계 축만 태우고
+// **포함 축을 안 봤다**(항목 fd-containment-gate-only-on-one-of-three-doors). 지금
+// 살아 있는 두 문은 둘 다 RelPathWithin 을 태우며, 그 개수를 service 의
+// TestFootprintDoorsAreExactlyTwo 가 전수로 잠근다.
 
 // handlePrescriptions 는 이 세션이 지금 받아야 할 처방을 내고 발화를 기록한다.
 //

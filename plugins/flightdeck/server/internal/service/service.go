@@ -432,3 +432,28 @@ type RejectedPath = judge.RejectedPath
 func FilterFootprintPaths(paths []string) (kept []string, rejected []RejectedPath) {
 	return judge.FilterPathCoordinate(paths)
 }
+
+// droppedPathsLimit 는 원장 payload 에 실을 "버린 경로" 개수 상한이다.
+//
+// 원본 경로를 전부 실으면 payload 가 무한히 커진다. 잘렸다는 사실은 같은 payload 의
+// 총 건수(rejected·outside)가 드러낸다 — 그래서 경로 목록만 자르고 건수는 안 자른다.
+const droppedPathsLimit = 5
+
+// clipDroppedPaths 는 버린 경로 목록들을 상한까지 이어 붙여 자른다. 순수 함수다.
+//
+// 목록을 여러 개 받는 이유는 축이 여럿이기 때문이다 — session.beat 은 좌표계(rejected)와
+// 포함 축(outside)을 함께 싣고, item.claim 은 포함 축만 싣는다. 어느 축에서 왔는지는
+// 이 목록이 아니라 **건수 칸**이 말한다(둘을 한 칸에 뭉개면 무엇이 왜 사라졌는지가
+// 다시 뭉개지고, 그 뭉갬이 4530e3c 가 없앤 바로 그것이다).
+func clipDroppedPaths(lists ...[]string) []string {
+	out := make([]string, 0, droppedPathsLimit)
+	for _, l := range lists {
+		for _, p := range l {
+			if len(out) >= droppedPathsLimit {
+				return out
+			}
+			out = append(out, clip(p, 200))
+		}
+	}
+	return out
+}

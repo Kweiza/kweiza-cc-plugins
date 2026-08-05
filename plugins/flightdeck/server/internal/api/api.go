@@ -186,7 +186,6 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/rekey", s.handleRekey)
 	// 처방은 턴마다 돈다. **세션 카드 파생을 안 도는 표면이다** — /notices 와 같은 이유(설계 §6).
 	mux.HandleFunc("POST /api/v1/sessions/{id}/prescriptions", s.handlePrescriptions)
-	mux.HandleFunc("POST /api/v1/footprints", s.handleFootprints)
 
 	// 큐 — Q 계층.
 	mux.HandleFunc("GET /api/v1/items/next", s.handleNextItem)
