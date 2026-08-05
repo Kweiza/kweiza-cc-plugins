@@ -686,8 +686,30 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
 		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
 		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
-		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다",
-			ShortID(l.Holder.SessionID))
+		//
+		// ★ 회수 판정용 **두 나이**(설계 §9 ①)를 이 문장에 싣는다. 아래 정상 경로는 획득 경과를
+		// 머리에, 신호 나이를 항목마다 나눠 싣는데 여기는 항목이 0건이라 실을 자리가 이 한 줄뿐이다.
+		// 그런데 회수 판정이 **가장 절실한** 화면이 바로 여기다 — 줄 행이 사라진 점유는 사람이
+		// 거둬야 하고 그 판단의 근거가 이 두 숫자인데, 둘 다 없으면 화면이 "누가"만 답하고
+		// "얼마나 오래됐나"를 되묻게 만든다.
+		//
+		// ★ 그중 Holder.LastSignalAt 은 LandingLane 이 홀더용으로 질의를 한 번 더 돌려 채워 두고도
+		// renderLane 이 전 함수 통틀어 한 번도 안 읽던 필드였다 —
+		// TestLandingQueueHasAProductionReader 가 잡으려는 "계산만 되고 읽는 쪽이 0건"의 필드 판.
+		//
+		// 낱말은 아래 정상 경로(`점유 획득 %s전` · 항목별 `신호 %s전`/`신호 없음`)를 그대로 베낀다.
+		// 같은 숫자가 한 화면에서 두 어휘로 읽히면 회수 판정이 대조부터 해야 한다.
+		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		//
+		// ★ ShortID 바로 뒤에 여는 괄호를 두지 않고 문장 꼬리에 ` · ` 로 잇는다. 머리에
+		// `<세션>(…)` 모양이 생기면 항목 조각을 잘라 보는 시험(laneEntrySegment)이 그 `)` 를
+		// 먼저 집는다 — 이 분기는 항목이 0건이라 지금은 안 밟히지만, 같은 함정을 새로 파지 않는다.
+		sig := "신호 없음"
+		if l.Holder.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*l.Holder.LastSignalAt)) + "전"
+		}
+		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다 · 점유 획득 %s전 · %s",
+			ShortID(l.Holder.SessionID), FormatAge(now.Sub(l.Holder.AcquiredAt)), sig)
 	}
 	parts := make([]string, 0, len(l.Entries))
 	for i, e := range l.Entries {
