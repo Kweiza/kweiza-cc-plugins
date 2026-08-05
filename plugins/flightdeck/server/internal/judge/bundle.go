@@ -225,8 +225,13 @@ func bundleAround(lead Candidate, fit []Candidate, sib SiblingIndex) Bundle {
 		}
 	}
 	// fit 이 이미 lessCandidate 로 정렬돼 있어 Members·Links 도 그 순서를 물려받는다.
+	//
+	// ★ 시각은 마이크로초까지 찍는다. 분 단위로 자르면 실측의 형제들처럼
+	// 생성 시각이 초 단위로만 다른 두 묶음이 ③으로 갈렸는데도 Reason 문자열은
+	// 똑같이 나온다 — Reason 은 "왜 이것이고 저것이 아닌가"에 답하는 원장인데,
+	// 정작 갈림의 근거였던 값이 텍스트에서 안 보이면 그 답을 못 한다.
 	b.Reason = fmt.Sprintf("의존자 합 %d · 묶음 %d건 · 최고령 %s · 선두 %s",
-		b.Dependents, len(b.Members)+1, b.Oldest.UTC().Format("2006-01-02 15:04"), lead.Item.ID)
+		b.Dependents, len(b.Members)+1, b.Oldest.UTC().Format("2006-01-02 15:04:05.000000"), lead.Item.ID)
 	return b
 }
 
