@@ -582,7 +582,7 @@ func TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(세션 열기가 Beat 한다)
+	// 신호 조회만 실패시킨다. 이 세션은 신호를 **실제로 남겼으므로**(twoSessions 가 Beat 한다)
 	// "없음"이 나오면 그것은 거짓이다.
 	if n := countRows(t, st, `SELECT count(*) FROM signal WHERE session_id = ?`, a); n == 0 {
 		t.Fatalf("사전 조건이 깨졌다 — 이 세션에 신호가 하나도 없다")
