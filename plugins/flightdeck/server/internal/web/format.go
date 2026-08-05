@@ -128,6 +128,39 @@ func SignalAges(now time.Time, sig map[model.SignalKind]time.Time) []SignalAge {
 	return out
 }
 
+// activityKinds 는 "이 세션이 일하고 있나"에 답하는 신호다.
+//
+// ★ **mcp 와 push 는 일부러 뺐다.**
+//
+//	mcp  — 서비스가 세션을 열 때와 상태를 바꿀 때마다 찍는다(service/session.go 의
+//	       t.Beat(..., SignalMCP, now)). 포함하면 아무것도 안 한 세션도 점등돼
+//	       배지의 판별력이 0이 된다. 실측: 카드 26장 중 16장이 신호가 mcp 하나뿐이고
+//	       그 시각이 opened_at 과 같았다.
+//	push — 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
+//
+// 이 목록을 늘리기 전에 그 신호가 **사람이나 에이전트의 작업**을 뜻하는지 먼저 물어라.
+var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
+
+// ActivityOf 는 "이 세션이 일하고 있나"와 **그 사유**를 낸다. 순수 함수다.
+//
+// 불리언만 내지 않는 이유는 이 패키지의 계약 그대로다 — 화면이 배지 하나로 접으면
+// 사람이 무엇을 근거로 회수할지 못 정한다. 사유는 **항상 채운다**: 비면 "활동 없음"과
+// "이 축을 안 읽었다"가 구분되지 않는다.
+//
+// 이 판정은 **죽음을 말하지 않는다.** 나이를 숫자로 낼 뿐이고, 회수는 사람이 한다(설계 §4).
+func ActivityOf(now time.Time, sig map[model.SignalKind]time.Time) (bool, string) {
+	var newest time.Time
+	for _, k := range activityKinds {
+		if at, ok := sig[k]; ok && at.After(newest) {
+			newest = at
+		}
+	}
+	if newest.IsZero() {
+		return false, "활동 없음"
+	}
+	return true, "활동 " + Age(now.Sub(newest))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 파생 표기 — 모든 패널에 붙는다
 // ─────────────────────────────────────────────────────────────────────────────

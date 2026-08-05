@@ -190,6 +190,17 @@ func containerVerdict(hasDockerEnv, hasDataDir bool) (bool, string) {
 	return false, ""
 }
 
+// detectContainer 는 파일시스템 신호를 읽어 containerVerdict 에 넘긴다.
+//
+// ★ 판정의 주인은 하나다. 이 축을 두 번째로 필요로 한 자리(인증 표면이 "루프백 면제가
+// 왜 안 닿는가"를 말할 때)가 생겼을 때 os.Stat 두 줄을 복사하면, 신호가 하나 늘어날 때
+// 한쪽만 고쳐지고 두 화면이 서로 다른 말을 하게 된다.
+func detectContainer() (bool, string) {
+	_, dockerErr := os.Stat("/.dockerenv")
+	_, dataErr := os.Stat("/data")
+	return containerVerdict(dockerErr == nil, dataErr == nil)
+}
+
 // newSelfWatcher 는 감시기를 만든다. **기준값을 여기서 정한다.**
 func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
 	w := &selfWatcher{
@@ -200,9 +211,7 @@ func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
 		w.reason = "이 플랫폼은 자기 재기동을 지원하지 않는다(syscall.Exec 부재)"
 		return w
 	}
-	_, dockerErr := os.Stat("/.dockerenv")
-	_, dataErr := os.Stat("/data")
-	if isContainer, why := containerVerdict(dockerErr == nil, dataErr == nil); isContainer {
+	if isContainer, why := detectContainer(); isContainer {
 		w.reason = why
 		return w
 	}

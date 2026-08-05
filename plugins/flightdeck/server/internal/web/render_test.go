@@ -187,9 +187,13 @@ func TestPageHasSixSectionsAndSurvivesZeroLiveSessions(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, 기대 200\n%s", code, html)
 	}
-	// ① 0건이 빈칸이 아니라 문장이다. 창을 함께 말해야 "아무도 없다"와 "창이 좁다"가 갈린다.
-	mustContain(t, html, "살아 있는 세션 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
-	mustContain(t, html, "2시간", "자른 창을 안 밝히면 0건의 뜻이 정해지지 않는다")
+	// ① 0건이 빈칸이 아니라 문장이다.
+	// ★ 섹션 ①이 선점을 필터로 쓰면서 0건의 **뜻이 바뀌었다**: 예전에는 "창 안에 신호가
+	//    없다"였고 지금은 "아무도 항목을 안 쥐고 있다"다. 후자는 **정상 상태**라, 문장이
+	//    그 사실을 말해야 사람이 서버 장애를 찾아 헤매지 않는다.
+	mustContain(t, html, "잡혀 있는 작업 0건", "0건을 빈칸으로 두면 화면이 아무 말도 안 한다")
+	mustContain(t, html, "서버 장애가 아니다", "0건이 정상 상태라는 것을 화면이 말해야 한다")
+	mustContain(t, html, "2시간", "자른 창을 안 밝히면 다른 절의 0건 뜻이 정해지지 않는다")
 
 	// ② 섹션 여섯이 전부 있다(그 이상도 만들지 않는다).
 	for _, h := range []string{
@@ -245,6 +249,10 @@ func TestDashboardSaysWhatTheWindowCutOff(t *testing.T) {
 func TestLiveSessionShowsFourSignalAgesAndNoFootprintExplicitly(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	sess := f.openSession("cc-1", "트랙2")
+	// ★ 선점을 붙인다. 섹션 ①은 선점을 든 카드만 내므로 선점이 없으면 이 시험이 재려는
+	//    축(신호 다섯 병렬 표기·발자국 명시)이 화면에 아예 안 나온다. 이 시험의 의도는
+	//    필터가 아니라 **카드 안의 표기**다.
+	f.claimOne(sess.ID, "it-signals")
 	if err := f.svc.Beat(context.Background(), sess.ID, model.SignalPrompt, nil); err != nil {
 		t.Fatalf("신호 기록 실패: %v", err)
 	}
@@ -269,6 +277,7 @@ func TestLiveSessionShowsFourSignalAgesAndNoFootprintExplicitly(t *testing.T) {
 func TestSessionWithFootprintDoesNotSayNoFootprint(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	sess := f.openSession("cc-1", "트랙2")
+	f.claimOne(sess.ID, "it-footprint") // 섹션 ①은 선점을 든 카드만 낸다
 	// 훅이 주는 절대경로 발자국.
 	if err := f.svc.Beat(context.Background(), sess.ID, model.SignalTool,
 		[]string{filepath.Join(f.wt, "internal/web/web.go")}); err != nil {
@@ -547,4 +556,19 @@ func TestDarkAndLightBothStyled(t *testing.T) {
 	_, html := f.get("")
 	mustContain(t, html, "prefers-color-scheme: dark", "다크 모드 스타일이 없다")
 	mustContain(t, html, "color-scheme: light dark", "라이트·다크 둘 다 선언돼야 한다")
+}
+
+// claimOne 은 항목 하나를 등록하고 그 세션에 선점시킨다.
+//
+// ★ 섹션 ①이 **선점을 든 카드만** 내기 때문에 필요하다. 카드 안의 표기를 재는 시험은
+// 그 카드가 화면에 나오게 만들어 놓고 재야 한다 — 선점을 안 붙이면 단정이 재려는 축이
+// 아니라 필터를 재게 되고, 그것은 다른 시험의 일이다.
+func (f *fixture) claimOne(sessionID, itemID string) {
+	f.t.Helper()
+	f.addItem(itemID, itemID+" 제목", nil, nil)
+	if _, err := f.svc.Pick(context.Background(), service.PickInput{
+		Project: testProject, SessionID: sessionID, ItemID: itemID,
+	}); err != nil {
+		f.t.Fatalf("선점 실패(%s): %v", itemID, err)
+	}
 }

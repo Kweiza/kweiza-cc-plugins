@@ -435,6 +435,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	title := fs.String("title", "", "판단 제목")
 	body := fs.String("body", "", "핸드오프 "+bodyFlagHelp)
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
+	closeSession := fs.Bool("close", false, "항목을 끝낸 뒤 이 세션도 닫는다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
 	if err := fs.Parse(rest); err != nil {
@@ -473,6 +474,60 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(out, mcpsrv.RenderFinish(fr))
+
+	// ★ 호출 둘이다(항목 finish → 세션 close). 한 트랜잭션이 아니므로 **끝났는데 못 닫은
+	// 상태를 그대로 낸다** — 둘 다 성공한 척하면 다음 사람이 보드에서 이 카드를 보고
+	// "아직 일하는 중"으로 읽는다.
+	if *closeSession {
+		if _, cerr := a.CloseSession(ctx, sess, "finish --close"); cerr != nil {
+			fmt.Fprintf(out, "\n항목은 끝났으나 세션을 못 닫았다: %v\n", cerr)
+			fmt.Fprintln(out, "선점은 반납됐으니 보드 ①에서는 이미 안 보인다 — 다만 겹침 판정에는 아직 잡힌다. 다시 닫으려면: fd close")
+			return 1
+		}
+		fmt.Fprintln(out, "\n그리고 이 세션을 닫았다. 다음 신호가 오면 다시 살아난다.")
+	}
+	return 0
+}
+
+// runClose 는 이 세션을 닫는다.
+//
+// ★ 선점이 남아 있으면 거절한다. 닫힌 카드는 ListLive 에서 빠지고, 그러면 그 선점이
+// **아무에게도 안 보인다** — 항목을 아무도 못 집는데 누가 잡았는지도 안 보이는 상태가 된다.
+// 우회 플래그는 두지 않는다: 우회할 필드가 있으면 우회된다.
+func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("close")
+	why := fs.String("why", "", "닫는 사유(표시 전용)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	cc := a.ccSessionID(*session)
+	if cc == "" {
+		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).")
+		return 1
+	}
+	// 선점 목록은 이 응답에 실려 온다. 따로 묻지 않는다 — 두 번 물으면 그 사이가 창이다.
+	res, _, err := a.OpenSession(ctx, cc, "")
+	if err != nil {
+		fmt.Fprintf(out, "세션 좌표를 못 얻어 닫지 못했다: %v\n", err)
+		return 1
+	}
+	if len(res.Claims) > 0 {
+		fmt.Fprintf(out, "안 닫았다 — 선점 %d건이 남아 있다: %s\n",
+			len(res.Claims), strings.Join(res.Claims, ", "))
+		fmt.Fprintln(out, "닫으면 이 선점이 보드에서 사라진다 — 보드 ①은 선점을 든 카드만 낸다.")
+		fmt.Fprintln(out, "먼저 끝내라: fd finish <item-id> --body …")
+		return 1
+	}
+
+	sess, err := a.CloseSession(ctx, res.Session.ID, *why)
+	if err != nil {
+		fmt.Fprintf(out, "닫지 못했다: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "close · 세션 %s 를 닫았다 [%s]\n", sess.ID, sess.State)
+	fmt.Fprintln(out, "다음 프롬프트·도구·MCP 호출이 오면 이 카드는 다시 살아난다 — 닫기는 판정이 아니라 관측이다.")
 	return 0
 }
 

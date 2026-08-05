@@ -704,9 +704,11 @@ func TestRenderBoardKeepsUnknownApartFromZero(t *testing.T) {
 func TestBoardCardCarriesItsOwnAsk(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	v := service.BoardView{
+		// 선점을 붙인다 — 화면 ①은 선점을 든 카드만 낸다. 이 시험의 의도는 필터가
+		// 아니라 **사건이 자기 카드에 붙는가**이므로 카드가 나오게 해 놓고 잰다.
 		Sessions: []service.SessionCard{
-			{View: model.SessionView{Session: model.Session{ID: "01AAA"}}},
-			{View: model.SessionView{Session: model.Session{ID: "01BBB"}}},
+			{View: model.SessionView{Session: model.Session{ID: "01AAA"}, Claims: []string{"it-aaa"}}},
+			{View: model.SessionView{Session: model.Session{ID: "01BBB"}, Claims: []string{"it-bbb"}}},
 		},
 		Asks: []model.Judgment{
 			{ID: "j1", SessionID: "01AAA", At: now.Add(-12 * time.Minute),
@@ -750,6 +752,9 @@ func TestFoldKeepsEventCardsOverSilentOnes(t *testing.T) {
 			View: model.SessionView{
 				Session: model.Session{ID: fmt.Sprintf("01S%02d", i)},
 				Paths:   []string{"some/long/path/that/costs/tokens.go"},
+				// 선점을 붙인다 — ①이 선점을 든 카드만 내므로, 안 붙이면 이 시험이
+				// 재려는 축(예산이 사건 붙은 카드를 먼저 남기나)이 아니라 필터를 재게 된다.
+				Claims: []string{fmt.Sprintf("it-%02d", i)},
 			},
 		})
 	}
@@ -775,7 +780,10 @@ func TestFoldAlwaysKeepsSelfFirst(t *testing.T) {
 	var sessions []service.SessionCard
 	for i := 0; i < 20; i++ {
 		sessions = append(sessions, service.SessionCard{
-			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}},
+			// ★ 자기 카드에도 선점을 준다. 규칙에 예외가 없어서(선점 없으면 자기 카드도
+			// 안 낸다), 선점 없이 이 시험을 두면 "나는 언제나 첫 카드다"가 아니라
+			// "나도 접힌다"를 재게 된다 — 그 축은 web 의 TestNowSectionGivesSelfNoException 이 잰다.
+			View:   model.SessionView{Session: model.Session{ID: fmt.Sprintf("01S%02d", i)}, Claims: []string{fmt.Sprintf("it-%02d", i)}},
 			IsSelf: i == 19,
 		})
 	}
