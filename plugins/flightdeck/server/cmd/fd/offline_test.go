@@ -35,6 +35,12 @@ func TestJudgeOfflineTable(t *testing.T) {
 		{"add", OfflineRefuse, "전역 유일"},
 		{"finish", OfflineRefuse, "한 트랜잭션"},
 		{"alloc", OfflineRefuse, "같은 번호"},
+		// 랜딩 레인 넷. 전부 거절이지만 **사유가 셋으로 갈린다** — 뭉개면 다음 사람이
+		// 그중 하나(대개 반납)만 아웃박스로 연다.
+		{CmdLandAcquire, OfflineRefuse, "배타의 정본이 서버의 DB 제약"},
+		{CmdLandReport, OfflineRefuse, "남의 점유를 반납한다"},
+		{CmdLandLeave, OfflineRefuse, "남의 점유를 반납한다"},
+		{CmdLaneRelease, OfflineRefuse, "사람의 판단이라 재생 대상이 아니다"},
 	}
 	for _, c := range cases {
 		t.Run(c.cmd, func(t *testing.T) {
@@ -80,7 +86,8 @@ func TestJudgeOfflineUnknownCommandRefusesAndSaysWhy(t *testing.T) {
 // 모든 판정은 사유를 채운다. 공허한 단정(결과만 찍고 왜인지 안 남기는 것)을 막는 축이다.
 func TestJudgeOfflineAlwaysGivesReason(t *testing.T) {
 	for _, cmd := range []string{"note", "status", "beat", "pick", "open", "add",
-		"finish", "alloc", "board", "next", "doctor", "무엇이든"} {
+		"finish", "alloc", "board", "next", "doctor", "무엇이든",
+		CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease} {
 		if strings.TrimSpace(JudgeOffline(cmd).Reason) == "" {
 			t.Fatalf("%q 의 사유가 비었다", cmd)
 		}

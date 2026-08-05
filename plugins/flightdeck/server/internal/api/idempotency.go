@@ -98,6 +98,21 @@ func JudgePersistIdempotency(method, path string) PersistVerdict {
 	case post && len(seg) == 5 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "counters" && seg[4] == "next":
 		return PersistVerdict{Persist: true,
 			Reason: "발번은 되돌릴 수 없다 — 재생을 놓치면 같은 요청이 번호를 하나 더 태운다"}
+
+	// ── 랜딩 레인 둘은 **일부러 안 남긴다.** 기본 가지로 떨어뜨려도 결과는 같지만,
+	//    둘 다 "왜 안 남기나"가 기본 문구와 다른 사유라 여기에 적는다. 특히 회수는
+	//    판단을 하나 만드는 쓰기라, 사유가 없으면 다음 사람이 "추가 전용인데 왜 안 남기지"에
+	//    답을 못 찾고 표를 넓히러 간다.
+	case post && len(seg) == 3 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "landing":
+		return PersistVerdict{
+			Reason: "응답이 '지금 내 차례인가'라 재생하면 앞사람이 반납한 뒤에도 옛 자리가 나간다 — " +
+				"선점과 같은 처지다. 메모리 표로 충분하다"}
+
+	case post && len(seg) == 6 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "landing" &&
+		seg[3] == "rows" && seg[5] == "release":
+		return PersistVerdict{
+			Reason: "회수는 판단을 남기지만 중복이 원리적으로 안 생긴다 — 두 번째 호출은 그 줄 행이 " +
+				"이미 죽어서 거절된다. 메모리 표로 충분하다"}
 	}
 	return PersistVerdict{
 		Reason: "중복이 영구히 남지 않는 쓰기다(upsert 이거나 응답이 지금 상태다) — " +

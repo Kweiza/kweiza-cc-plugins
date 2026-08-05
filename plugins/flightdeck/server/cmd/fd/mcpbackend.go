@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -338,6 +339,58 @@ func (b *mcpBackend) Finish(ctx context.Context, in service.FinishInput) (servic
 		return r, fmt.Errorf("마무리 응답 해석 실패: %w", uerr)
 	}
 	return r, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 랜딩 레인 — 셋이 한 경로다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// land 는 랜딩 표면 한 번을 보내고 응답을 옮긴다.
+//
+// 셋(Land·LandReport·LandLeave)이 이 하나를 쓰는 이유: 경로도 응답 타입도 하나이고,
+// 다른 것은 mode 와 열화 명령 이름뿐이다. 세 벌로 적으면 경로 리터럴이 세 개가 되고
+// (그중 하나만 오타 나는 것이 정확히 이 태스크가 막으려는 결함이다), 응답 해석 문구도
+// 세 벌이 된다.
+//
+// ★ 회수(ReleaseLaneRow)는 여기 없다. mcpsrv.Backend 에 그 메서드가 없고, 없는 것이
+// 판정이다 — land 도구는 release 를 **거절 사유로만** 안다(mcpsrv.toolLand).
+func (b *mcpBackend) land(ctx context.Context, cmd string, req landReq) (service.LandResult, error) {
+	var r service.LandResult
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
+	b.app.cli.Session = req.SessionID
+	raw, err := b.write(ctx, cmd, landingPath, req)
+	if err != nil {
+		return r, err
+	}
+	if uerr := json.Unmarshal(raw, &r); uerr != nil {
+		return r, fmt.Errorf("랜딩 응답 해석 실패: %w", uerr)
+	}
+	// state 는 응답의 뼈대다(RenderLand 가 그것으로 갈린다). 비어 오면 필드 이름이
+	// 어긋난 것이고, 그대로 두면 "모르는 상태"가 아니라 **빈 화면**이 나간다.
+	if strings.TrimSpace(r.State) == "" {
+		return r, fmt.Errorf("랜딩 응답에 state 가 없다 — 응답 형식이 바뀌었다: %s", clip(string(raw), 300))
+	}
+	return r, nil
+}
+
+func (b *mcpBackend) Land(ctx context.Context, in service.LandInput) (service.LandResult, error) {
+	return b.land(ctx, CmdLandAcquire, landReq{
+		Project: in.Project, SessionID: in.SessionID, Mode: api.LandModeAcquire,
+	})
+}
+
+func (b *mcpBackend) LandReport(ctx context.Context, in service.LandReportInput) (service.LandResult, error) {
+	return b.land(ctx, CmdLandReport, landReq{
+		Project: in.Project, SessionID: in.SessionID, Mode: api.LandModeReport,
+		Kind: string(in.Kind), Detail: in.Detail,
+	})
+}
+
+func (b *mcpBackend) LandLeave(ctx context.Context, in service.LandLeaveInput) (service.LandResult, error) {
+	return b.land(ctx, CmdLandLeave, landReq{
+		Project: in.Project, SessionID: in.SessionID, Mode: api.LandModeLeave,
+		Detail: in.Detail,
+	})
 }
 
 func (b *mcpBackend) Alloc(ctx context.Context, project, counter string) (int64, error) {
