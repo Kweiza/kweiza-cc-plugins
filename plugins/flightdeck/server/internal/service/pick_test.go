@@ -599,3 +599,165 @@ func TestAddItemAcceptsSlashCoordinatePaths(t *testing.T) {
 		t.Fatalf("경로 %d개, want 3개", len(it.Paths))
 	}
 }
+
+// makeSiblings 는 항목들을 형제로 만든다.
+// finish 가 만드는 모양 그대로다 — 끝낸 항목과 후속 전부가 한 handoff 판단에 매달린다
+// (finish.go:148-152). 이 관계의 생산자는 실질적으로 finish 하나뿐이다.
+func makeSiblings(t *testing.T, st *store.Store, project string, items ...string) {
+	t.Helper()
+	links := make([]model.JudgmentLink, 0, len(items))
+	for _, id := range items {
+		links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: id})
+	}
+	if _, err := st.AddJudgment(ctx(), model.Judgment{
+		Project: project, Kind: model.JudgmentHandoff,
+		Title: "쪼갰다", Body: "이건 따로 빼자", Links: links,
+	}); err != nil {
+		t.Fatalf("형제 준비 실패(%v): %v", items, err)
+	}
+}
+
+// 형제 둘이 열려 있으면 추천이 묶음으로 온다.
+func TestPickRecommendsBundleOfSiblings(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "묶음시험")
+
+	addItem(t, s, "p", "b1-sib", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "b2-sib", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "b1-sib", "b2-sib")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil {
+		t.Fatal("묶음 축이 nil 이다 — 서버가 그 축을 읽었으면 non-nil 이어야 한다")
+	}
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("형제 하나가 구성원이어야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.Link.Detail == "" {
+		t.Fatal("왜 묶였는지가 비었다")
+	}
+	if len(m.Link.Axes) == 0 || m.Link.Axes[0] != judge.AxisSibling {
+		t.Fatalf("형제 축이 안 붙었다: %v", m.Link.Axes)
+	}
+	// 브랜치는 선두 하나다.
+	if res.Branch != res.Item.ID {
+		t.Fatalf("브랜치가 %q 인데 선두는 %q 다", res.Branch, res.Item.ID)
+	}
+}
+
+// ★ 이 시험이 부재 규율을 지킨다.
+// 묶을 게 없어도 Bundle 은 non-nil 이고 구성원이 0건이다.
+// nil 은 "이 응답은 그 축을 안 읽었다" 하나만 뜻해야 한다.
+func TestPickSoloStillCarriesBundleAxis(t *testing.T) {
+	s, _ := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "단독시험")
+	addItem(t, s, "p", "alone", []string{"services/x.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil {
+		t.Fatal("단독인데 묶음 축이 nil 이다 — '묶을 게 없다'와 '안 읽었다'가 접혔다")
+	}
+	if len(res.Bundle.Members) != 0 {
+		t.Fatalf("단독인데 구성원이 있다: %+v", res.Bundle.Members)
+	}
+}
+
+// 추천은 아직 안 집은 것이므로 구성원의 판단 전문을 안 싣는다(컨텍스트 예산 — 설계 §6).
+func TestPickRecommendDoesNotLoadMemberNotes(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "판단시험")
+	addItem(t, s, "p", "n1", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "n2", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "n1", "n2")
+
+	// 구성원 쪽에만 걸리는 판단을 하나 더 둔다.
+	if _, err := s.Note(ctx(), NoteInput{
+		Project: "p", SessionID: me.Session.ID, Kind: model.JudgmentNotDone,
+		Title: "일부러 안 한 것", Body: "여기는 손대지 않았다", ItemID: "n2",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	for _, m := range res.Bundle.Members {
+		if len(m.Notes) != 0 {
+			t.Fatalf("추천인데 구성원 %q 의 판단 전문을 실었다(%d건)", m.Item.ID, len(m.Notes))
+		}
+	}
+}
+
+// 원장에 선두와 나머지가 갈려 남는다. pick_eval 의 소비자는 SQL 질의다.
+func TestPickRecordsBundleInPickEval(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "원장시험")
+	addItem(t, s, "p", "e1", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "e2", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "e1", "e2")
+
+	// 대조가 성립하는지 결과를 읽기 전에 단정한다.
+	if n := countRows(t, st, `SELECT count(*) FROM pick_eval`); n != 0 {
+		t.Fatalf("원장이 비어 있어야 한다: %d행", n)
+	}
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	lead := res.Item.ID
+	if n := countRows(t, st,
+		`SELECT count(*) FROM pick_eval WHERE picked = ?`, lead); n != 1 {
+		t.Fatalf("picked 에 선두 %q 가 안 남았다", lead)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM pick_eval WHERE picked_with IS NOT NULL AND picked_with <> '[]'`); n != 1 {
+		t.Fatalf("picked_with 에 나머지가 안 남았다")
+	}
+}
+
+// siblingIndex 는 오류를 안 돌려준다 — 조회가 실패하면 빈 색인을 낸다.
+//
+// s.siblingIndex 를 직접 부른다(Pick 전체를 거치지 않는다). judgment_link 표를
+// 지우면 뒤이어 pickRecommend 가 부르는 linkedJudgments(선두의 판단 전문)도
+// **같은 표**를 써서 같이 죽으므로, Pick 전체로 시험하면 이 축과 무관한 이유로
+// 실패해 "형제 색인만" 격리해 보지 못한다(landing_test.go 의 표 이름 바꾸기
+// 관용구를 이 함수 하나에만 겨눈다).
+func TestSiblingIndexReturnsEmptyOnQueryFailure(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p", repo, repo, "cc-1", "형제색인실패시험")
+	f1 := addItem(t, s, "p", "f1-sib", []string{"services/a.go"}, nil)
+	f2 := addItem(t, s, "p", "f2-sib", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "f1-sib", "f2-sib")
+
+	// 사전 조건: 표가 멀쩡할 때는 색인이 실제로 채워진다.
+	sib := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	if len(sib) == 0 {
+		t.Fatalf("사전 조건이 깨졌다 — 표가 멀쩡한데 색인이 비었다: %v", sib)
+	}
+
+	if _, err := st.DB().ExecContext(ctx(),
+		`ALTER TABLE judgment_link RENAME TO judgment_link_hidden`); err != nil {
+		t.Fatalf("형제 색인 조회를 실패시키지 못했다: %v", err)
+	}
+
+	got := s.siblingIndex(ctx(), "p", []judge.Candidate{{Item: f1}, {Item: f2}})
+	if got == nil {
+		t.Fatal("조회가 실패했는데 nil 색인을 냈다 — 빈 맵이어야 나머지 두 축이 판정에서 계속 돈다")
+	}
+	if len(got) != 0 {
+		t.Fatalf("조회가 실패했는데 색인에 값이 남았다: %v", got)
+	}
+}
