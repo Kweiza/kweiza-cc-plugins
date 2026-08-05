@@ -170,3 +170,183 @@ func TestLinkOfPicksSharedJudgmentDeterministically(t *testing.T) {
 		t.Fatalf("공유 판단 중 사전순 첫째(J1)를 안 골랐다: %q", first)
 	}
 }
+
+func memberIDs(b *Bundle) []string {
+	if b == nil {
+		return nil
+	}
+	out := make([]string, 0, len(b.Members))
+	for _, m := range b.Members {
+		out = append(out, m.Item.ID)
+	}
+	return out
+}
+
+// 이웃이 없으면 원소 1개짜리 묶음이다 — 단독은 특수 경우가 아니라 상위집합의 밑변이다.
+func TestEligibleBundleSoloWhenNoNeighbor(t *testing.T) {
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		cand("solo", 0, []string{"a.go"}),
+	}}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if b == nil {
+		t.Fatalf("적격이 있는데 묶음이 nil 이다 (탈락 %v)", rej)
+	}
+	if b.Lead.Item.ID != "solo" || len(b.Members) != 0 {
+		t.Fatalf("단독이어야 하는데 선두 %q 구성원 %v", b.Lead.Item.ID, memberIDs(b))
+	}
+}
+
+// 전이하지 않는다. A–B, B–C 인데 A–C 가 무관하면 A 선두 묶음에 C 가 없어야 한다.
+// 전이를 허용하면 넓은 토큰 하나가 큐의 3분의 2를 한 묶음으로 만든다(설계 §0.1).
+//
+// ★ EligibleBundle 전체가 아니라 bundleAround 를 선두별로 직접 부른다.
+// 이 셋을 EligibleBundle 에 통째로 넣으면 B(두 판단 J1·J2 에 걸친 진짜 허브 —
+// A 와도 직접 이어지고 C 와도 직접 이어진다)가 묶음 2건으로 A·C 의 묶음 1건보다
+// 커서 키②로 이긴다. 의존자·나이를 아무리 바꿔도 못 뒤집는다 — B 의 묶음은
+// A 의 묶음(A+B)의 상위집합에 C 까지 얹은 것이라 의존자 합·크기가 항상
+// A 이상이다. 그러면 승자를 기준으로 "구성원 1건"을 단정하는 순간 이 시험은
+// "전이 안 함"이 아니라 "허브가 커서 이겼다"(키②가 의도한 그대로 —
+// TestEligibleBundlePrefersBiggerBundleOverOlderSolo 가 이미 지킨다)를 재검사하게 되어
+// 정작 지키려던 것을 못 지킨다. 그래서 각 선두의 방사형 결과를 직접 본다.
+func TestEligibleBundleDoesNotTransit(t *testing.T) {
+	sib := SiblingIndex{"A": {"J1"}, "B": {"J1", "J2"}, "C": {"J2"}}
+	fit := []Candidate{cand("A", 0, nil), cand("B", 1, nil), cand("C", 2, nil)}
+
+	a := bundleAround(fit[0], fit, sib)
+	if got := memberIDs(&a); len(got) != 1 || got[0] != "B" {
+		t.Fatalf("A 선두 묶음이 B 를 거쳐 C 로 전이했다 — 구성원 %v", got)
+	}
+	c := bundleAround(fit[2], fit, sib)
+	if got := memberIDs(&c); len(got) != 1 || got[0] != "B" {
+		t.Fatalf("C 선두 묶음이 B 를 거쳐 A 로 전이했다 — 구성원 %v", got)
+	}
+}
+
+// 정렬 키 ②. 이게 없으면 최고령 단독이 항상 이겨 묶음이 영원히 발화하지 않는다.
+func TestEligibleBundlePrefersBiggerBundleOverOlderSolo(t *testing.T) {
+	sib := SiblingIndex{"y1": {"J1"}, "y2": {"J1"}}
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		cand("x-oldest-solo", 0, nil), // 가장 오래됨. 이웃 없음
+		cand("y1", 10, nil),
+		cand("y2", 11, nil),
+	}}
+	b, _ := EligibleBundle(in, sib)
+	if len(b.Members) != 1 {
+		t.Fatalf("묶음(2건)이 최고령 단독을 못 이겼다 — 선두 %q 구성원 %v",
+			b.Lead.Item.ID, memberIDs(b))
+	}
+}
+
+// 정렬 키 ①은 여전히 ②보다 앞이다.
+func TestEligibleBundleDependentsBeatSize(t *testing.T) {
+	sib := SiblingIndex{"y1": {"J1"}, "y2": {"J1"}}
+	heavy := cand("heavy-solo", 0, nil)
+	heavy.Dependents = 5
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		heavy, cand("y1", 10, nil), cand("y2", 11, nil),
+	}}
+	b, _ := EligibleBundle(in, sib)
+	if b.Lead.Item.ID != "heavy-solo" {
+		t.Fatalf("의존자 합이 크기보다 앞이어야 한다 — 선두가 %q 다", b.Lead.Item.ID)
+	}
+}
+
+// 키 ①②③이 전부 동점이면 ④(선두 id 사전순)가 브랜치 이름을 정한다.
+// 실측의 형제 3건이 정확히 이 경우다 — 생성 시각이 마이크로초까지 같다.
+func TestEligibleBundleTieBreaksByLeadID(t *testing.T) {
+	sib := SiblingIndex{"m-mid": {"J1"}, "a-first": {"J1"}, "z-last": {"J1"}}
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		cand("m-mid", 0, nil), cand("z-last", 0, nil), cand("a-first", 0, nil),
+	}}
+	b, _ := EligibleBundle(in, sib)
+	if b.Lead.Item.ID != "a-first" {
+		t.Fatalf("동점에서 선두 id 사전순이어야 한다 — 선두가 %q 다", b.Lead.Item.ID)
+	}
+	if len(b.Members) != 2 {
+		t.Fatalf("형제 셋이 한 묶음이어야 한다 — 구성원 %v", memberIDs(b))
+	}
+}
+
+// 불변식: 모든 후보는 picked 이거나 rejected 에 최소 한 줄.
+// 조용히 사라지는 것이 하나도 없어야 큐가 블랙박스가 안 된다.
+func TestEligibleBundleLedgersEveryCandidate(t *testing.T) {
+	sib := SiblingIndex{"y1": {"J1"}, "y2": {"J1"}}
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		cand("y1", 0, nil), cand("y2", 1, nil),
+		cand("lonely", 5, nil),
+		{Item: openItem("taken", 2), ClaimedBy: "S2"},
+	}}
+	b, rej := EligibleBundle(in, sib)
+	inBundle := map[string]bool{b.Lead.Item.ID: true}
+	for _, id := range memberIDs(b) {
+		inBundle[id] = true
+	}
+	ledger := itemIDs(rej)
+	for _, id := range []string{"y1", "y2", "lonely", "taken"} {
+		if !inBundle[id] && !ledger[id] {
+			t.Fatalf("후보 %q 가 묶음에도 원장에도 없다", id)
+		}
+		if inBundle[id] && ledger[id] {
+			t.Fatalf("후보 %q 가 묶음에도 원장에도 있다 — 두 번 셌다", id)
+		}
+	}
+	if !contains(codesFor(rej, "lonely"), RejectNotTop) {
+		t.Fatalf("적격이지만 안 뽑힌 항목의 사유가 %v 다", codesFor(rej, "lonely"))
+	}
+	if !contains(codesFor(rej, "taken"), RejectClaimed) {
+		t.Fatalf("남이 선점한 항목의 사유가 %v 다", codesFor(rej, "taken"))
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// 적격 0건이면 nil 을 내되 사유는 전부 낸다.
+func TestEligibleBundleNoneKeepsEveryReason(t *testing.T) {
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{
+		{Item: openItem("taken", 0), ClaimedBy: "S2"},
+		{Item: model.Item{ID: "done", State: model.ItemDone, CreatedAt: t0}},
+	}}
+	b, rej := EligibleBundle(in, SiblingIndex{})
+	if b != nil {
+		t.Fatalf("적격이 없는데 묶음이 나왔다: %q", b.Lead.Item.ID)
+	}
+	if len(itemIDs(rej)) != 2 {
+		t.Fatalf("탈락 원장에 2건이 있어야 한다: %v", rej)
+	}
+}
+
+// 겹침은 묶음 **전체 경로**로 본다 — 남과 부딪히는지는 묶음 단위 질문이다.
+func TestEligibleBundleOverlapsUseWholeBundlePaths(t *testing.T) {
+	sib := SiblingIndex{"lead": {"J1"}, "mem": {"J1"}}
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("lead", 0, []string{"lead-only.go"}),
+			cand("mem", 1, []string{"member-only.go"}),
+		},
+		Live: []LiveSession{{ID: "S2", Paths: []string{"member-only.go"}}},
+	}
+	b, _ := EligibleBundle(in, sib)
+	if len(b.Lead.Overlaps) == 0 {
+		t.Fatal("구성원의 경로로 난 겹침이 안 잡혔다 — 겹침을 선두 경로로만 봤다")
+	}
+}
+
+// 사유가 없으면 "왜 저것이 아니라 이것인가"에 답할 수 없다.
+func TestEligibleBundleCarriesReason(t *testing.T) {
+	sib := SiblingIndex{"y1": {"J1"}, "y2": {"J1"}}
+	in := EligibleInput{Self: "S1", Candidates: []Candidate{cand("y1", 0, nil), cand("y2", 1, nil)}}
+	b, _ := EligibleBundle(in, sib)
+	for _, want := range []string{"의존자", "묶음", "최고령"} {
+		if !strings.Contains(b.Reason, want) {
+			t.Fatalf("사유에 %q 가 없다: %q", want, b.Reason)
+		}
+	}
+}
