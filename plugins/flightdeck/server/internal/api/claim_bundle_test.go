@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
@@ -340,5 +341,202 @@ func TestClaimBundleLeadMismatchSurvivesTrim(t *testing.T) {
 		if _, err := e.st.GetClaim(t.Context(), testProject, id); err == nil {
 			t.Fatalf("거절됐는데 항목 %s 에 선점 행이 생겼다", id)
 		}
+	}
+}
+
+// addItems 는 항목 여럿을 등록한다. 등록 자체가 이 파일의 단정이 아니라 전제라서
+// 실패하면 그 자리에서 세운다 — 전제가 깨진 채로 본 단정을 읽으면 거짓 초록이 난다.
+func (e *env) addItems(sess string, ids ...string) {
+	e.t.Helper()
+	for _, id := range ids {
+		add := e.write(http.MethodPost, "/api/v1/items", map[string]any{
+			"project": testProject, "session_id": sess, "id": id,
+			"title": id + " 제목", "body": id + " 본문",
+		})
+		if add.Code != http.StatusCreated {
+			e.t.Fatalf("항목 등록 실패(%s): %d %s", id, add.Code, add.Body.String())
+		}
+	}
+}
+
+// assertLeadMismatch 는 선두 어긋남 거절 하나를 **값이 제 이름표 옆에 붙었는지**까지 본다.
+//
+// ★ 순서를 보는 이유: 사유는 두 값을 나르는데, 어느 쪽이 경로고 어느 쪽이 item_ids 의
+// 선두인지가 그 문장의 **전부**다. 두 값을 뒤바꿔 찍어도 "둘 다 들어 있다"는 단정은
+// 초록으로 지나가고(단정 ③·⑤가 그렇다), 그러면 세션은 처방("경로와 item_ids[0] 을
+// 같게 맞춰라")을 받아 들고 **멀쩡한 쪽을 고치러 간다** — 사유가 없는 것보다 나쁘다.
+//
+// 문구 자체는 안 고정한다. 보는 것은 "경로 … <경로 id> … 선두 … <선두 id>" 라는
+// 이름표-값 결합뿐이라, 문장을 다듬는 정상 변경은 여기서 붉어지지 않는다.
+func assertLeadMismatch(t *testing.T, w *httptest.ResponseRecorder, wantPath, wantLead string) {
+	t.Helper()
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("선두 어긋남이 거절되지 않았다: %d %s", w.Code, w.Body.String())
+	}
+	ce := errorOf(t, w)
+	if ce["code"] != "refused" {
+		t.Fatalf("오류 코드가 %v 다(refused 를 기대)", ce["code"])
+	}
+	msg, _ := ce["message"].(string)
+	order := []string{"경로", wantPath, "선두", wantLead}
+	at := -1
+	for _, want := range order {
+		i := strings.Index(msg, want)
+		if i < 0 {
+			t.Fatalf("거절 사유에 %q 가 없다: %q", want, msg)
+		}
+		if i < at {
+			t.Fatalf("거절 사유가 값을 제 이름표에 안 붙였다 — %q 가 제자리에 없다(기대 순서 %v): %q",
+				want, order, msg)
+		}
+		at = i
+	}
+	if guidance, _ := ce["guidance"].(string); strings.TrimSpace(guidance) == "" {
+		t.Fatalf("거절에 처방(guidance)이 없다: %v", ce)
+	}
+}
+
+// assertNoClaims 는 나열한 항목 어디에도 선점 행이 안 생겼음을 본다.
+func (e *env) assertNoClaims(ids ...string) {
+	e.t.Helper()
+	for _, id := range ids {
+		if _, err := e.st.GetClaim(e.t.Context(), testProject, id); err == nil {
+			e.t.Fatalf("거절됐는데 항목 %s 에 선점 행이 생겼다", id)
+		}
+	}
+}
+
+// TestClaimBundlePathIDTrimsToo 는 단정 ⑥이고, 단정 ④의 **거울**이다: 공백이
+// 경로 쪽에 붙어도 같은 것으로 본다.
+//
+// ★ 이 시험이 없으면 무엇이 깨지나: 트림을 **한쪽에만** 거는 변경(선두만 트림하고
+// 경로는 원문 바이트)이 전 스위트를 초록으로 지나간다 — 단정 ④는 경로가 깨끗한
+// 요청만 보기 때문이다. 그런데 그 반쪽 트림은 이 브랜치가 메운 계층 비대칭을
+// 방향만 뒤집어 그대로 되살린다: service 는 item_ids 를 트림해서 다루므로 이
+// 요청을 받아 선두 trim6-lead 를 집는데, REST 만 문 앞에서 400 으로 걷어낸다.
+// 게다가 그 거절 사유는 화면에서 두 값이 **똑같아 보이는데** 다르다고 말한다.
+//
+// 경로에 공백이 실제로 실릴 수 있음을 이 시험 자체가 보인다 — %20 은 라우터가
+// 풀어 PathValue 로 그대로 넘긴다(문자열 리터럴로 " trim6-lead" 를 넣는 게 아니라
+// 진짜 URL 로 보낸다).
+func TestClaimBundlePathIDTrimsToo(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-bundle-6")
+	e.addItems(sess, "trim6-lead", "trim6-m1")
+
+	// 경로에만 공백을 붙인다 — item_ids 는 깨끗하다(단정 ④의 정반대).
+	claim := e.write(http.MethodPost, "/api/v1/items/%20trim6-lead%20/claim", map[string]any{
+		"project": testProject, "session_id": sess,
+		"item_ids": []string{"trim6-lead", "trim6-m1"},
+	})
+	if claim.Code != http.StatusOK {
+		t.Fatalf("공백만 다른 경로 id 가 거절됐다 — 트림이 선두 쪽에만 걸렸다: %d %s",
+			claim.Code, claim.Body.String())
+	}
+	cb := decodeBody(t, claim)
+
+	// 브랜치·항목은 트림된 값이다. 원문이 새면 워크트리 디렉토리 이름에 공백이 들어간다.
+	if cb["branch"] != "trim6-lead" {
+		t.Fatalf("branch 가 %q 다 — 트림된 선두여야 한다: %s", cb["branch"], claim.Body.String())
+	}
+	if item, _ := cb["item"].(map[string]any); item == nil || item["ID"] != "trim6-lead" {
+		t.Fatalf("응답의 항목이 trim6-lead 가 아니다: %s", claim.Body.String())
+	}
+	bundle, has := cb["bundle"].(map[string]any)
+	if !has {
+		t.Fatalf("bundle 절이 없다 — item_ids 가 묶음 경로에 안 닿았다: %s", claim.Body.String())
+	}
+	members, _ := bundle["members"].([]any)
+	if len(members) != 1 {
+		t.Fatalf("구성원이 1건이 아니다(%d): %s", len(members), claim.Body.String())
+	}
+	m0, _ := members[0].(map[string]any)
+	if mi, _ := m0["item"].(map[string]any); mi == nil || mi["ID"] != "trim6-m1" {
+		t.Fatalf("구성원의 항목이 trim6-m1 이 아니다: %v", m0["item"])
+	}
+
+	// 좌표계는 원장이다: 트림된 두 id 만, 공백 붙은 유령 행은 없다.
+	held, err := e.st.ClaimedItems(t.Context(), sess)
+	if err != nil {
+		t.Fatalf("세션이 쥔 항목을 못 읽었다: %v", err)
+	}
+	got := append([]string(nil), held...)
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "trim6-lead" || got[1] != "trim6-m1" {
+		t.Fatalf("이 세션이 쥔 항목이 %v 다(trim6-lead·trim6-m1 둘만이어야 한다)", held)
+	}
+	e.assertNoClaims(" trim6-lead ")
+}
+
+// TestClaimBundleLeadIsCaseSensitive 는 단정 ⑦이다: 대소문자만 다른 선두는
+// **다른 항목**이므로 거절된다.
+//
+// ★ 이 시험이 없으면 무엇이 깨지나: 비교를 strings.EqualFold 로 넓히는 변경이
+// 전 스위트를 초록으로 지나간다. 그런데 항목 id 는 대소문자를 구분하는 값이고
+// (여기서 case-item 과 CASE-ITEM 이 **둘 다 등록된다** — 원장이 그렇게 본다는 뜻이다),
+// 그 id 가 곧 브랜치 이름·워크트리 디렉토리 이름이다. 느슨해지면 URL 은 case-item
+// 을 가리키는데 서버는 CASE-ITEM 을 집어 그 이름으로 브랜치를 파라고 답한다 —
+// "무엇을 집었는가"가 어긋나는 바로 그 실패이고, 이 문지기가 존재하는 이유다.
+//
+// 그래서 상태코드만 보지 않고 **실재하는 CASE-ITEM 에 선점 행이 안 생겼는지**까지 본다.
+// 넓힌 비교의 피해는 400 이 200 이 되는 것이 아니라 남의 항목을 집는 것이다.
+func TestClaimBundleLeadIsCaseSensitive(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-bundle-7")
+	e.addItems(sess, "case-item", "CASE-ITEM", "case-m1")
+
+	claim := e.write(http.MethodPost, "/api/v1/items/case-item/claim", map[string]any{
+		"project": testProject, "session_id": sess,
+		"item_ids": []string{"CASE-ITEM", "case-m1"},
+	})
+	assertLeadMismatch(t, claim, "case-item", "CASE-ITEM")
+	e.assertNoClaims("case-item", "CASE-ITEM", "case-m1")
+}
+
+// TestClaimBundleGuardsSingleElementItemIDs 는 단정 ⑧이다: item_ids 의 원소가
+// **하나뿐이어도** 선두 문지기가 산다.
+//
+// ★ 이 시험이 없으면 무엇이 깨지나: 문지기 조건을 len(...) > 1 로 좁히는 변경이
+// 전 스위트를 초록으로 지나간다 — 단정 ③·⑤·⑦이 전부 원소 2건짜리 요청이기 때문이다.
+// 좁혀지면 원소 하나짜리 어긋난 묶음이 통째로 문을 지나 **URL 이 가리키지 않은
+// 항목을 집는다**: 브랜치는 solo8-other 가 되는데 요청 URL·이벤트 라벨·멱등 키는
+// 여전히 solo8-path 를 말한다. 원소 하나짜리 item_ids 는 fd 가 실제로 보내는
+// 모양이다(묶을 이웃이 없는 지정 선점).
+//
+// 짝을 함께 둔다: **맞는** 선두 하나짜리는 그대로 통과해야 한다. 어긋난 쪽만
+// 보면 "원소 하나면 전부 거절"이라는 반대편 고장이 이 시험을 통과한다.
+func TestClaimBundleGuardsSingleElementItemIDs(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-bundle-8")
+	e.addItems(sess, "solo8-path", "solo8-other")
+
+	// ── 어긋난 하나: 걷어낸다 ──
+	bad := e.write(http.MethodPost, "/api/v1/items/solo8-path/claim", map[string]any{
+		"project": testProject, "session_id": sess,
+		"item_ids": []string{"solo8-other"},
+	})
+	assertLeadMismatch(t, bad, "solo8-path", "solo8-other")
+	e.assertNoClaims("solo8-path", "solo8-other")
+
+	// ── 맞는 하나: 통과하고, 자기 하나만 집는다 ──
+	ok := e.write(http.MethodPost, "/api/v1/items/solo8-path/claim", map[string]any{
+		"project": testProject, "session_id": sess,
+		"item_ids": []string{"solo8-path"},
+	})
+	if ok.Code != http.StatusOK {
+		t.Fatalf("맞는 선두 하나짜리 묶음이 거절됐다: %d %s", ok.Code, ok.Body.String())
+	}
+	cb := decodeBody(t, ok)
+	if cb["branch"] != "solo8-path" {
+		t.Fatalf("branch 가 %v 다: %s", cb["branch"], ok.Body.String())
+	}
+	if bundle, has := cb["bundle"].(map[string]any); !has {
+		t.Fatalf("bundle 절이 없다: %s", ok.Body.String())
+	} else if members, _ := bundle["members"].([]any); len(members) != 0 {
+		t.Fatalf("혼자 지정했는데 구성원 %d건을 묶어 왔다: %s", len(members), ok.Body.String())
+	}
+	held, err := e.st.ClaimedItems(t.Context(), sess)
+	if err != nil || len(held) != 1 || held[0] != "solo8-path" {
+		t.Fatalf("이 세션이 쥔 항목이 %v 다(solo8-path 하나여야 한다): %v", held, err)
 	}
 }
