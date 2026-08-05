@@ -42,7 +42,7 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		return PrescribeResult{}, err
 	}
 
-	in := judge.PrescribeInput{Now: s.now(), SessionID: sessionID}
+	in := judge.PrescribeInput{Now: s.now(), SessionID: sessionID, SelfCC: sess.CCSessionID}
 
 	// 억제 상태 — 이 세션이 이미 낸 키와 그 시각.
 	emitted, since, err := s.emittedKeys(ctx, sessionID, sess.OpenedAt)
@@ -117,6 +117,9 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		}
 		in.Others = append(in.Others, judge.LiveSession{
 			ID: v.Session.ID, Label: v.Session.Label, Paths: v.Paths,
+			// ★ 대화 id 를 함께 넘긴다. 카드 id 만으로는 형제 카드(같은 대화, 다른 카드)를
+			// 남으로 보고 **자기 자신과 조율하라**는 처방을 낸다.
+			CCSessionID: v.Session.CCSessionID,
 		})
 	}
 
