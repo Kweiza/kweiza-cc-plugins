@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,4 +193,94 @@ func TestPathCheckSurvivesTheRestRoundTrip(t *testing.T) {
 		t.Fatalf("pick 실패(%d): %s", code, out)
 	}
 	mustContain(t, "fd pick 출력", out, "경로 실재:")
+}
+
+// `fd move <id> --project <그것>` 이 **파일시스템에서 유도된** misregistered 판정에서
+// 끝까지 나오는지 본다.
+//
+// ★ 왜 이것이 따로 필요한가. 이 축의 시험이 두 갈래로 나뉘어 있었다 —
+// internal/mcpsrv/render_test.go 는 `ItemPathVerdict` 를 **손으로 구성**해 렌더만 보고,
+// 위 TestPathCheckSurvivesTheRestRoundTrip 은 실물 왕복을 치지만 등록 프로젝트가 하나뿐이라
+// `nowhere` 만 닿는다. 그래서 **관측이 만든 Suggest 가 그대로 화면의 --project 값이 되는가**를
+// 어느 시험도 통째로 안 봤다. 그 이음매에서 값이 뒤바뀌어도(프로젝트 id 대신 경로가 들어가도)
+// 아무것도 안 죽는다.
+//
+// `fd move` 줄은 이 기능이 내는 **유일한 행동 지시**다. 그 값이 틀리면 사용자가 항목을
+// 엉뚱한 프로젝트로 옮긴다 — 이 기능이 고치려던 사고를 그대로 재현한다.
+func TestMoveSuggestionSurvivesFromFilesystemToScreen(t *testing.T) {
+	h := newHarness(t)
+
+	// 프로젝트 둘을 **서로 다른 경로**로 등록한다. 하네스는 FD_PROJECT 하나로 도는데,
+	// FD_WORKTREE 로 좌표를 갈아 끼우면 같은 서버에 두 번째 프로젝트를 열 수 있다.
+	here := t.TempDir()  // 등록된 프로젝트. 선언 경로가 **없다**
+	there := t.TempDir() // 다른 프로젝트. 선언 경로가 **있다**
+
+	const declared = "svc/api/handler.go"
+	if err := os.MkdirAll(filepath.Join(there, "svc", "api"), 0o755); err != nil {
+		t.Fatalf("두 번째 프로젝트의 경로 생성 실패: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(there, declared), []byte("package api\n"), 0o644); err != nil {
+		t.Fatalf("두 번째 프로젝트의 파일 생성 실패: %v", err)
+	}
+
+	// 좌표를 갈아 끼운 환경. 하네스의 env 를 베끼고 두 축만 바꾼다 —
+	// FD_URL·FD_STATE_DIR 를 그대로 물려받아야 두 호출이 **같은 서버**를 친다.
+	envAt := func(worktree, project string) map[string]string {
+		e := map[string]string{}
+		for k, v := range h.env {
+			e[k] = v
+		}
+		e["FD_WORKTREE"] = worktree
+		e["FD_PROJECT"] = project
+		return e
+	}
+	envHere := envAt(here, h.project)
+	envThere := envAt(there, "otherproj")
+
+	for _, e := range []map[string]string{envHere, envThere} {
+		if code, out := h.runEnv(e, "", "open"); code != 0 {
+			t.Fatalf("open 실패(%d): %s", code, out)
+		}
+	}
+
+	// ── 대조 전제: 두 프로젝트가 **정말 둘로** 등록됐는가.
+	// 하나로 접히면 지목이 생길 수 없고, 이 시험은 아무것도 안 보면서 초록이 된다.
+	projs, err := h.st.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("프로젝트 목록 조회 실패: %v", err)
+	}
+	if len(projs) != 2 {
+		ids := make([]string, 0, len(projs))
+		for _, p := range projs {
+			ids = append(ids, p.ID+"@"+p.Path)
+		}
+		t.Fatalf("대조 전제가 깨졌다 — 프로젝트가 %d개다(2개여야 한다): %s",
+			len(projs), strings.Join(ids, " · "))
+	}
+
+	code, out := h.runEnv(envHere, "", "add",
+		"--id", "t-move-suggest",
+		"--title", "오등록 지목 왕복",
+		"--body", "본문이다",
+		"--path", declared)
+	if code != 0 {
+		t.Fatalf("add 실패(%d): %s", code, out)
+	}
+
+	code, out = h.runEnv(envHere, "", "pick", "t-move-suggest")
+	if code != 0 {
+		t.Fatalf("pick 실패(%d): %s", code, out)
+	}
+
+	// ── 본 단정: 지목이 **otherproj 라는 id 그대로** 행동 지시에 실려야 한다.
+	mustContain(t, "fd pick 출력", out,
+		"경로 실재:",
+		"오등록일 수 있다",
+		"`fd move t-move-suggest --project otherproj`")
+
+	// ★ 경로가 id 자리에 새는 것을 따로 막는다. 위 단정은 부분 문자열이라
+	// "--project otherproj" 를 포함하는 더 긴 잘못된 문자열도 통과시킬 수 있다.
+	if strings.Contains(out, "--project "+there) {
+		t.Errorf("지목에 프로젝트 id 가 아니라 경로가 실렸다:\n%s", out)
+	}
 }
