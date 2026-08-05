@@ -49,3 +49,60 @@ func TestFindSessionReturnsExistingCard(t *testing.T) {
 		t.Fatalf("세션 %q, 원하는 것 %q", got, want)
 	}
 }
+
+// TestFindSessionNeedsAllThreeKeyParts 는 3중키의 세 축이 **각각** 조회를 가르는지 본다.
+//
+// "이웃을 심고 못 찾는지 본다" — 기준 카드 하나(machine=m1 · worktree=e.repo · cc=cc-x)를
+// 세운 뒤, 축 하나씩만 다른 좌표로 조회한다. 세 경우 전부 **404 여야 한다.** 축 하나가
+// WHERE 절에서 빠지면 그 이웃(기준 카드)이 걸려 200 이 되므로 확정적으로 잡힌다 —
+// 행 순서에 안 기댄다(올바른 답이 404 라서 한 건이라도 200 이면 실패다).
+//
+// e.openSession 이 고정하는 machine="m1"·worktree=e.repo 를 그대로 기준으로 쓴다 —
+// TestFindSessionNeverCreatesACard·TestFindSessionReturnsExistingCard 는 이 둘을 고정하고
+// cc 만 바꾸므로 machine_id·worktree 가 WHERE 절에서 빠져도 안 잡힌다(검토가 뮤테이션으로
+// 확인). 이 시험이 그 사각지대를 메운다.
+func TestFindSessionNeedsAllThreeKeyParts(t *testing.T) {
+	e := newEnv(t, nil)
+	e.openSession("cc-x") // 기준 카드: machine=m1 · worktree=e.repo · cc=cc-x
+
+	cases := []struct {
+		name            string
+		machine, wt, cc string
+		why             string
+	}{
+		{
+			name: "머신이 다르면 못 찾는다", machine: "m2", wt: e.repo, cc: "cc-x",
+			why: "WHERE 에서 machine_id 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+		{
+			name: "워크트리가 다르면 못 찾는다", machine: "m1", wt: e.repo + "/elsewhere", cc: "cc-x",
+			why: "WHERE 에서 worktree 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+		{
+			name: "cc 가 다르면 못 찾는다", machine: "m1", wt: e.repo, cc: "cc-y",
+			why: "WHERE 에서 cc_session_id 가 빠지면 기준 카드가 걸려 200 이 된다",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := url.Values{"machine": {c.machine}, "worktree": {c.wt}, "cc": {c.cc}}
+			w := e.do(http.MethodGet, "/api/v1/sessions?"+q.Encode(), nil, loopback())
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("상태 %d, 원하는 것 404 — %s\n본문: %s", w.Code, c.why, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestFindSessionTrimsQueryValues 는 질의값에 공백이 붙어도 같은 카드를 찾는지 본다.
+func TestFindSessionTrimsQueryValues(t *testing.T) {
+	e := newEnv(t, nil)
+	e.openSession("cc-x") // machine=m1 · worktree=e.repo · cc=cc-x
+
+	q := url.Values{"machine": {" m1 "}, "worktree": {" " + e.repo + " "}, "cc": {" cc-x "}}
+	w := e.do(http.MethodGet, "/api/v1/sessions?"+q.Encode(), nil, loopback())
+	if w.Code != http.StatusOK {
+		t.Fatalf("상태 %d, 원하는 것 200 — 공백이 붙으면 못 찾는다면 TrimSpace 가 빠진 것이다\n본문: %s",
+			w.Code, w.Body.String())
+	}
+}
