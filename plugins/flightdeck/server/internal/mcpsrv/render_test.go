@@ -732,8 +732,31 @@ func TestRenderBoardLaneEmptySaysTheQueryRan(t *testing.T) {
 	}
 }
 
+// laneEntrySegment 는 렌더된 레인 절에서 세션 하나에 해당하는 항목 조각만 잘라낸다
+// (`N.<세션>(행R·대기AGE전MARK)` 모양이라, marker 부터 그 항목을 닫는 `)` 까지가 경계다).
+//
+// 시험이 문자열 전체에 "점유" 가 있는지만 보면 그 표시가 **엉뚱한 항목에 붙어도** 통과한다 —
+// 그 조각만 떼어 봐야 표시가 뒤바뀐 버그를 잡는다.
+func laneEntrySegment(t *testing.T, s, marker string) string {
+	t.Helper()
+	i := strings.Index(s, marker)
+	if i < 0 {
+		t.Fatalf("표시 %q 를 렌더 결과에서 못 찾았다:\n%s", marker, s)
+	}
+	rest := s[i:]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		t.Fatalf("표시 %q 의 항목이 ')' 로 안 닫힌다:\n%s", marker, s)
+	}
+	return rest[:end+1]
+}
+
 // TestRenderBoardLaneListsEntriesAndMarksTheHolder 는 줄 항목이 실제로 나오는지,
 // 그리고 지금 점유자가 어느 항목인지 표시가 갈리는지를 본다.
+//
+// ★ 단정을 **그 항목의 조각에** 붙인다(laneEntrySegment). 문자열 전체에 "점유" 가 있는지만
+// 보면 그 표시가 대기자 쪽에 잘못 붙어도(뒤바뀐 버그) 통과한다 — 실제로 앞선 판이 그 모양의
+// 시험이었다.
 func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
 	enq := t0.Add(-90 * time.Second)
 	got := RenderBoard(service.BoardView{
@@ -753,14 +776,43 @@ func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
 	if !strings.Contains(got, ShortID("01HOLDERSESSION")) || !strings.Contains(got, ShortID("01WAITERSESSION")) {
 		t.Fatalf("줄에 선 세션 둘이 다 안 보인다:\n%s", got)
 	}
-	// 점유자 쪽에만 표시가 붙어야 한다 — 대기자와 점유자가 화면에서 구분돼야 한다.
-	holderLine := got
-	idx := strings.Index(holderLine, ShortID("01HOLDERSESSION"))
-	waitIdx := strings.Index(holderLine, ShortID("01WAITERSESSION"))
-	if idx < 0 || waitIdx < 0 {
-		t.Fatalf("세션 표시를 못 찾았다:\n%s", got)
+
+	holderSeg := laneEntrySegment(t, got, ShortID("01HOLDERSESSION"))
+	waiterSeg := laneEntrySegment(t, got, ShortID("01WAITERSESSION"))
+
+	// 점유자 쪽 조각에만 표시가 붙어야 한다 — 대기자 조각에 있으면 표시가 뒤바뀐 것이다.
+	if !strings.Contains(holderSeg, "점유") {
+		t.Fatalf("지금 점유자 조각에 '점유' 표시가 없다: %q\n전체:\n%s", holderSeg, got)
 	}
-	if !strings.Contains(got, "점유") {
-		t.Fatalf("지금 점유자가 화면에 안 보인다:\n%s", got)
+	if strings.Contains(waiterSeg, "점유") {
+		t.Fatalf("대기자 조각에 '점유' 표시가 붙었다 — 점유자·대기자 표시가 뒤바뀌었다: %q\n전체:\n%s", waiterSeg, got)
+	}
+}
+
+// TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent — Entries 가 완전히 비었는데 Holder 가
+// 있는 상태는 이 레포에서 가장 위험한 불변식 위반이다: landing.go 의 "살아 있는 랜딩 점유에는
+// 반드시 대응하는 살아 있는 줄 행이 있다"가 깨졌다는 뜻이고, 그 축은
+// TestLiveLandingHoldAlwaysHasALiveQueueRow(internal/service/landing_test.go)가 동작으로 잠근다.
+//
+// 0건 분기가 Holder 유무를 안 가르면 이 상태가 "비어 있음(질의는 돌았다)"으로 조용히 접힌다 —
+// 정확히 이 상태에서 경고가 필요한데 그 경고 분기(l.Holder != nil && !laneHolderIsQueued(l))에
+// 영원히 안 닿는다(len(l.Entries)==0 조기 반환이 앞을 막는다). 이 시험은 그 도달성을 잠근다.
+func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
+	got := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Entries: []service.LaneEntry{},
+		},
+	}, BoardRenderOptions{Now: t0})
+
+	if strings.Contains(got, "비어 있음") {
+		t.Fatalf("점유자가 있는데 '비어 있음'으로 찍혔다 — 가장 위험한 불변식 위반이 조용히 접혔다:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠") {
+		t.Fatalf("정합 어긋남 경고가 안 찍혔다(불변식 위반인데 화면이 침묵한다):\n%s", got)
+	}
+	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
+		t.Fatalf("어느 세션이 점유했는지가 안 보인다 — 경고는 있는데 누구 것인지 답을 못한다:\n%s", got)
 	}
 }

@@ -570,7 +570,17 @@ func boardDetailFoot(v service.BoardView) []string {
 // 화면에서 같아진다(service.LaneView 주석과 같은 판정).
 func renderLane(l *service.LaneView, now time.Time) string {
 	if len(l.Entries) == 0 {
-		return "랜딩 레인: 비어 있음(질의는 돌았다 — 지금 아무도 안 섰다)"
+		if l.Holder == nil {
+			return "랜딩 레인: 비어 있음(질의는 돌았다 — 지금 아무도 안 섰다)"
+		}
+		// ★ 점유는 있는데 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는 랜딩 점유에는
+		// 반드시 대응하는 살아 있는 줄 행이 있다")이 깨진 가장 위험한 모양이다
+		// (TestLiveLandingHoldAlwaysHasALiveQueueRow 가 잡으려는 상태 그 자체다. Land 도 이
+		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
+		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
+		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
+		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다",
+			ShortID(l.Holder.SessionID))
 	}
 	parts := make([]string, 0, len(l.Entries))
 	for i, e := range l.Entries {
