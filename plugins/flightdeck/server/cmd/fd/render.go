@@ -34,6 +34,14 @@ type SessionStartInput struct {
 	Blocked    []model.Judgment
 	Pending    int    // 아웃박스에 남아 있는 판단 수 — 고정 자리 + 옛 채널 자리 합계(hookSessionStart 참고)
 	Notice     string // 도구가 스스로 못 한 것(예: machine-id 를 못 적었다)
+
+	// Unreadable 은 **세다 걸린** 큐다. 각 원소는 "<자리>: <사유>".
+	//
+	// ★ Pending 과 갈라 둔 이유는 하나다 — **0 과 '못 쟀다'를 가른다.** 셀 수 없는 큐는
+	// Pending 에 0 으로 들어가는데(Leftover.Pending 이 0값으로 남는다), 그러면 배너에서
+	// "아무것도 안 쌓였다"와 구별이 안 되고 0 은 '깨끗하다'로 읽힌다. RenderHealth 가
+	// disk_known 에 대해 이미 같은 규율을 쓴다.
+	Unreadable []string
 }
 
 // RenderSessionStart 는 SessionStart 훅이 stdout 으로 내는 additionalContext 본문이다. 순수 함수다.
@@ -65,6 +73,12 @@ func RenderSessionStart(in SessionStartInput) string {
 	}
 	if in.Pending > 0 {
 		fmt.Fprintf(&b, "아직 못 보낸 판단 %d건이 이 머신에 쌓여 있다 — 서버가 살아나면 자동 재생된다\n", in.Pending)
+	}
+	// ★ 셀 수 없었던 큐는 **위 건수와 따로** 낸다. 합치면 0 에 묻히고, 묻히면 침묵이다.
+	// 그 큐는 지금 재생도 새 적재도 막혀 있다(List 오류가 Replay·Append 둘 다의 첫 줄이다).
+	for _, u := range in.Unreadable {
+		fmt.Fprintf(&b, "아웃박스를 못 셌다 — %s\n"+
+			"  그 큐는 지금 재생도, 새 판단 적재도 막혀 있다. `fd doctor` 가 전량을 찍는다\n", clip(u, 300))
 	}
 	if in.Notice != "" {
 		fmt.Fprintf(&b, "! %s\n", clip(in.Notice, 400))
