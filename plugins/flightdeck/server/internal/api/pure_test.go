@@ -410,7 +410,7 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 		DBPath:    "/home/user/.flightdeck/fd.db",
 		DBError:   "unable to open database file /home/user/.flightdeck/fd.db",
 		DiskError: "statfs /home/user/.flightdeck: no such file",
-	}, true, true, buildinfo.Coord{})
+	}, true, true, buildinfo.Coord{}, SelfUpdateStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -423,6 +423,39 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 	}
 	if body.DBError == "" {
 		t.Fatal("DB 가 죽었는데 그 사실이 응답에 없다 — 침묵하면 배너가 정상으로 읽힌다")
+	}
+}
+
+func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
+	at := time.Date(2026, 8, 5, 0, 31, 2, 0, time.UTC)
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: true, LastAt: &at,
+			From: "07e5df4", To: "1d044b2",
+			Outcome: "refused", Detail: "selfcheck exit 1 — 증분 계획이 거절된다",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{"self_update", "refused", "1d044b2"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("%q 가 응답에 없다: %s", want, raw)
+		}
+	}
+}
+
+// ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
+func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, true, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching: false, Reason: "이 플랫폼은 자기 재기동을 지원하지 않는다",
+		})
+	if body.SelfUpdate.Watching {
+		t.Fatal("watching 이 참이다")
+	}
+	if strings.TrimSpace(body.SelfUpdate.Reason) == "" {
+		t.Fatal("왜 안 보는지가 비었다")
 	}
 }
 
