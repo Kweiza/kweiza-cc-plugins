@@ -625,6 +625,12 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 	// finish 는 t.AddItem 을 직접 불러 이 함수의 검증을 거치지 않으므로, 거기서 따로
 	// 부르지 않으면 같은 사람이 같은 세션에서 add 는 거절당하고 finish 는 조용히
 	// 통과하는 반쪽 관문이 된다 — 반쪽 발화는 균일한 부재보다 나쁘다.
+	//
+	// ★ item.paths 로 가는 문은 **셋**이다. 이 주석은 오래 둘만 세고 있었다.
+	// 세 번째는 레거시 이관(legacy/apply.go 의 tx.AddItem)이고, 그 관문은 여기가
+	// 아니라 계획 쪽(legacy/plan.go, code="bad_path_coordinate")에 있다.
+	// 규율도 다르다 — add·finish 는 **거절**하고 이관은 **그 경로만 버리고 남긴다.**
+	// 갈린 이유는 고칠 사람이 그 자리에 있느냐다(legacy/plan.go 의 그 주석을 보라).
 	if err := judgeItemPathsCoordinate(in.Paths); err != nil {
 		return model.Item{}, &RefusedError{What: "add",
 			Reason: err.Error(),

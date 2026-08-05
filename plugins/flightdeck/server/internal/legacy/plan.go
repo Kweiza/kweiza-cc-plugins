@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
@@ -204,9 +205,30 @@ func PlanImport(sc Scan, opt PlanOptions) ImportPlan {
 		if (state == model.ItemDone || state == model.ItemDropped) && closed.IsZero() {
 			closed = it.Created
 		}
+		// ★ item.paths 좌표계 관문 — 이관은 이 컬럼으로 가는 **세 번째 문**이다.
+		//
+		// 앞의 둘은 add(service.AddItem)와 finish(followup.paths)이고 둘 다
+		// judgeItemPathsCoordinate 로 **거절**한다(스펙 §4.2 "사람이 넣으면 거절").
+		// 여기는 거절하지 않고 **그 경로만 버리고 남긴다.** 다른 규율을 쓰는 이유는
+		// 고칠 수 있는 사람이 있느냐다 — add·finish 는 지금 그 자리에 있는 사람이
+		// 사유를 읽고 즉시 고칠 수 있지만, 이관은 과거의 원본을 옮기는 것이라 그
+		// 사람이 없다. 고칠 수 없는 것을 거절하면 카드 하나가 이관 전체를 멈춘다.
+		// 발자국 쪽 규율(service.Beat — 버리되 원장에 남긴다)과 같은 자리다.
+		//
+		// Fatal 이 아닌 이유: 좌표계가 틀린 경로는 그 항목의 **겹침 축만** 죽인다.
+		// 제목·본문·상태·선행은 멀쩡하므로 항목을 통째로 버릴 근거가 못 된다
+		// (규율 ①의 Fatal 은 "파일을 읽다 실패한 것"에 대한 것이다).
+		//
+		// 판정을 Apply 가 아니라 여기서 하는 것은 ImportPlan 주석의 계약이다 —
+		// 판정이 실행 본문에 흩어지면 시험이 그 사본을 단정하게 되고 변이가 조용히 샌다.
+		keptPaths, badPaths := judge.FilterPathCoordinate(it.Paths)
+		for _, bp := range badPaths {
+			reject("queue", path, "paths", "bad_path_coordinate", bp.Reason, false)
+		}
+
 		m := model.Item{
 			Project: opt.Project, ID: it.ID, Title: it.Title, Body: it.Body,
-			Paths: it.Paths, Labels: it.Labels(), State: state,
+			Paths: keptPaths, Labels: it.Labels(), State: state,
 			CloseReason: closeReason, CreatedAt: it.Created,
 		}
 		if state == model.ItemDone || state == model.ItemDropped {
