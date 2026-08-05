@@ -284,3 +284,85 @@ func TestMoveSuggestionSurvivesFromFilesystemToScreen(t *testing.T) {
 		t.Errorf("지목에 프로젝트 id 가 아니라 경로가 실렸다:\n%s", out)
 	}
 }
+
+// 묶음이 서버에서 만들어져 JSON 을 건너 렌더까지 그대로 오는지 본다.
+// 손으로 구성한 PickResult 로는 이 이음매를 못 본다.
+//
+// ★ 형제 관계는 하네스의 **실물 store** 로 만든다. fd CLI 의 finish 에는
+// 후속 인자가 없어서(cmds.go 에 --followup 이 0건이다) 그 경로로는 형제를 못 만든다.
+// 이 시험이 지키려는 것은 **읽기 경로**(서버 → JSON → 클라이언트 → 렌더)이므로
+// 쓰기를 store 로 놓는 것이 범위를 정확히 맞춘다.
+func TestPickBundleSurvivesTheWire(t *testing.T) {
+	h := newHarness(t)
+
+	if code, out := h.run("", "open", "--label", "묶음왕복"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d):\n%s", code, out)
+	}
+	for _, id := range []string{"w1-sib", "w2-sib"} {
+		if code, out := h.run("", "add", "--id", id, "--title", id+" 제목",
+			"--body", id+" 본문", "--path", "services/"+id+".go"); code != 0 {
+			t.Fatalf("항목 등록 실패(%s, %d):\n%s", id, code, out)
+		}
+	}
+	// 형제로 만든다 — finish 가 만드는 모양 그대로(한 handoff 판단이 둘을 가리킨다).
+	if _, err := h.st.AddJudgment(context.Background(), model.Judgment{
+		Project: h.project, Kind: model.JudgmentHandoff,
+		Title: "쪼갰다", Body: "이건 따로 빼자",
+		Links: []model.JudgmentLink{
+			{TargetKind: "item", TargetID: "w1-sib"},
+			{TargetKind: "item", TargetID: "w2-sib"},
+		},
+	}); err != nil {
+		t.Fatalf("형제 준비 실패: %v", err)
+	}
+
+	// ① 추천이 묶음으로 온다.
+	code, out := h.run("", "next")
+	if code != 0 {
+		t.Fatalf("next 실패(%d):\n%s", code, out)
+	}
+	mustContain(t, "묶음 추천", out, "묶음 구성원", "묶은 근거", "sibling", "w1-sib", "w2-sib")
+
+	// ② 묶음을 집는다. 브랜치는 선두 하나다.
+	code, claimed := h.run("", "pick", "w1-sib", "w2-sib")
+	if code != 0 {
+		t.Fatalf("묶음 선점 실패(%d):\n%s", code, claimed)
+	}
+	if !strings.Contains(claimed, "브랜치: w1-sib") {
+		t.Fatalf("선두 브랜치가 안 나온다:\n%s", claimed)
+	}
+	if n := strings.Count(claimed, "브랜치: "); n != 1 {
+		t.Fatalf("브랜치 줄이 %d개다 — 묶음의 브랜치는 선두 하나뿐이다:\n%s", n, claimed)
+	}
+	if !strings.Contains(claimed, "w2-sib") {
+		t.Fatalf("구성원이 응답에 없다:\n%s", claimed)
+	}
+
+	// ③ store 레벨에서 **둘 다 실제로 선점됐는지** 확인한다. 렌더 문자열만 보면
+	// "브랜치: w1-sib 만 찍히고 w2-sib 는 선점 안 됐는데도 문구만 맞다"를 못 잡는다 —
+	// 이 하자가 바로 이 태스크가 닫는 것이다.
+	//
+	// ★ 존재만 보지 않는다 — **누가 쥐었는지**(SessionID)까지 이 세션의 것과 맞춰 본다.
+	// 존재만 보면 "w2-sib 를 남이 먼저 쥐고 있어서 이 세션은 못 받았는데 응답 문구에는
+	// (탈락 사유로) 이름이 남는" 경우를 놓친다 — 그 경우도 "존재하고 안 풀렸다"는 참이다.
+	sessions, err := h.st.ListSessions(context.Background(), h.project)
+	if err != nil {
+		t.Fatalf("세션 조회 실패: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("대조 전제가 깨졌다 — 세션이 %d개다(1개여야 이 세션이 누구인지 모호하지 않다)", len(sessions))
+	}
+	me := sessions[0].ID
+	for _, id := range []string{"w1-sib", "w2-sib"} {
+		cl, err := h.st.GetClaim(context.Background(), h.project, id)
+		if err != nil {
+			t.Fatalf("%s 가 store 에서 선점되지 않았다: %v", id, err)
+		}
+		if cl.ReleasedAt != nil {
+			t.Fatalf("%s 의 선점이 이미 풀려 있다: %+v", id, cl)
+		}
+		if cl.SessionID != me {
+			t.Fatalf("%s 가 이 세션(%s) 의 선점이 아니다: %+v", id, me, cl)
+		}
+	}
+}

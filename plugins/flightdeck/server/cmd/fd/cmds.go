@@ -78,6 +78,19 @@ func TakeFirstPositional(args []string) (pos string, rest []string) {
 	return "", args
 }
 
+// TakeLeadingPositionals 는 맨 앞에서부터 이어지는 위치 인자를 **전부** 떼어낸다.
+// TakeFirstPositional 과 같은 순서 문제(위/뒤 어느 쪽에 플래그가 와도 같은 뜻)를
+// 여러 개의 위치 인자로 확장한 판이다 — `fd pick <id> <id>… [--flags]` 를 받으려면
+// 첫 번째 하나만 떼는 것으로는 부족하다: 둘째 id 가 그대로 "모르는 플래그"로 보여
+// flag.Parse 가 죽거나, 최악의 경우 조용히 버려진다(바로 이 태스크가 닫는 결함이다).
+func TakeLeadingPositionals(args []string) (pos []string, rest []string) {
+	i := 0
+	for i < len(args) && !strings.HasPrefix(args[i], "-") {
+		i++
+	}
+	return args[:i], args[i:]
+}
+
 // runStatus 는 `fd status` 다. 서버 상태 배너 + 보드.
 func (a *App) runStatus(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("status")
@@ -248,19 +261,32 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 	return 0
 }
 
-// runPick 은 `fd pick <id>` 다. **오프라인에서는 거절된다.**
+// runPick 은 `fd pick <id> [<id>…]` 다. **오프라인에서는 거절된다.**
+//
+// ★ 인자가 여럿이면 **묶음 선점**이다 — 첫째가 선두(브랜치가 되는 id)이고 나머지는
+// item_ids 로 그대로 실어 보낸다(claimReq.ItemIDs). 예전에는 TakeFirstPositional +
+// fs.Arg(0) 로 딱 하나만 읽어, `fd pick c1 c2` 를 주면 c2 가 **말도 없이 버려지고**
+// 종료코드는 0 이었다 — 추천 응답이 item_ids 로 묶음을 프리스크라이브하는 지금,
+// 그 침묵은 "선점됐다고 믿고 시작했는데 실은 c2 를 아무도 안 쥔" 사고로 직행한다.
+//
+// ★ 인자 하나는 **item_ids 를 아예 안 싣는다**(claimReq.ItemIDs 가 비어 nil).
+// 오늘까지의 단독 선점·재개 경로와 문자 그대로 같은 요청을 보내야 하기 때문이다 —
+// service.PickInput.ItemIDs 가 1개짜리로 차 있어도 pickBundle 이 pickExplicit 과
+// 같은 결과를 내긴 하지만(태스크 8), 요청 자체를 다르게 만들 이유가 없다.
 func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("pick")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
-	itemID, rest := TakeFirstPositional(args)
+	itemIDs, rest := TakeLeadingPositionals(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	if itemID == "" {
-		itemID = fs.Arg(0)
-	}
-	if strings.TrimSpace(itemID) == "" {
-		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id>")
+	// ★ **뒤에 남은 위치 인자도 합친다** — 비었을 때만 대신 쓰지 않는다. flag.Parse 는
+	// 첫 비플래그 인자에서 멈추므로, `fd pick w1 --cc-session x w2` 처럼 id 사이에
+	// 플래그가 끼면 앞에서 이미 w1 을 건졌어도 w2 는 fs.Args() 에 따로 남는다.
+	// 여기서 안 합치면 이 갈래에서도 조용히 버려진다 — 이 태스크가 고치려는 사고 그대로다.
+	itemIDs = append(itemIDs, fs.Args()...)
+	if len(itemIDs) == 0 {
+		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id> [<item-id>…] — 여럿이면 첫째가 선두(브랜치)다")
 		return 2
 	}
 	a.cli.Flush(ctx)
@@ -270,8 +296,11 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	a.cli.Session = sess
-	res, err := a.cli.Write(ctx, "pick", "/api/v1/items/"+urlPath(itemID)+"/claim",
-		claimReq{Project: a.proj.ID, SessionID: sess})
+	req := claimReq{Project: a.proj.ID, SessionID: sess}
+	if len(itemIDs) > 1 {
+		req.ItemIDs = itemIDs // 선두 포함 전체 순서 — 경로는 선두(itemIDs[0])로 보낸다
+	}
+	res, err := a.cli.Write(ctx, "pick", "/api/v1/items/"+urlPath(itemIDs[0])+"/claim", req)
 	if err != nil {
 		fmt.Fprintf(out, "선점하지 못했다: %v\n", err)
 		return 1
