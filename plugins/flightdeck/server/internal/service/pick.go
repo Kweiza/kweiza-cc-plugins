@@ -71,7 +71,35 @@ type PickResult struct {
 	// 적격 0건(PickNone)에도 nil 이다 — 항목이 없으면 관측할 대상이 없다.
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
 
+	// Bundle 은 이 응답이 낸 묶음이다.
+	//
+	// ★ **포인터다.** QueueOpen·PathCheck 과 같은 이유이고, 그 상태가 실제로 난다:
+	// 서버는 독립 컨테이너인데 플러그인은 자동 갱신되고(구서버 + 신 클라이언트),
+	// 오프라인 `fd next` 는 이 필드가 생기기 전에 굳은 디스크 캐시를 그대로 재생한다.
+	// 슬라이스만 두면 그 상태가 **"묶을 게 하나도 없다"를 단정한다** — 관측한 적 없는 사실을.
+	// SkewBanner 는 api_version 문자열만 보므로 필드 추가로는 안 뜬다.
+	//
+	// nil = 이 응답은 묶음 축을 안 읽었다 · 구성원 0건 = 묶을 게 없어 단독이다.
+	Bundle *BundleInfo `json:"bundle,omitempty"`
+
 	Derived
+}
+
+// BundleInfo 는 pick 한 번이 낸 묶음이다. **저장되지 않는다.**
+type BundleInfo struct {
+	Members []BundleMember `json:"members"` // 선두 제외
+	Reason  string         `json:"reason"`  // 정렬 네 키의 실제 값
+	Scope   string         `json:"scope"`   // 무엇을 이웃 후보로 봤나
+}
+
+// BundleMember 는 묶음 구성원 하나다.
+type BundleMember struct {
+	Item      model.Item             `json:"item"`
+	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
+	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
+	Notes     []model.Judgment       `json:"notes,omitempty"` // 집었을 때만 전문
+	Claimed   bool                   `json:"claimed"`
+	Rejection *model.Rejection       `json:"rejection,omitempty"` // 못 집었으면 사유
 }
 
 // ValidateItemID 는 항목 id 가 브랜치 이름·디렉토리 이름으로 쓰여도 안전한지 본다. 순수 함수다.
@@ -306,6 +334,25 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	return res, nil
 }
 
+// siblingIndex 는 후보들에 걸린 판단 링크를 모아 judge 가 쓸 색인으로 만든다.
+//
+// 실패해도 pick 을 실패시키지 않는다 — 형제 축 하나 때문에 추천을 잃는 것이 더 나쁘고,
+// 빈 색인이면 나머지 두 축이 그대로 돈다. 못 읽은 사실은 derive 가 아니라
+// 로그에 남긴다(derive 에 넣으면 FreshnessOf 가 git 축을 낡음으로 접는다).
+func (s *Service) siblingIndex(ctx context.Context, project string, cands []judge.Candidate) judge.SiblingIndex {
+	ids := make([]string, 0, len(cands))
+	for _, c := range cands {
+		ids = append(ids, c.Item.ID)
+	}
+	links, err := s.st.JudgmentLinksForItems(ctx, project, ids)
+	if err != nil {
+		s.log.WarnContext(ctx, "형제 색인 조회 실패 — 형제 축 없이 판정한다",
+			"project", clip(project, 64), "count", len(ids), "error", err.Error())
+		return judge.SiblingIndex{}
+	}
+	return judge.SiblingIndex(links)
+}
+
 // pickRecommend 는 적격 항목 하나를 고르고 탈락 사유 전부를 남긴다.
 func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in PickInput,
 	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
@@ -320,25 +367,36 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 		return PickResult{}, err
 	}
 
-	picked, rejected := judge.Eligible(judge.EligibleInput{
+	sib := s.siblingIndex(ctx, proj.ID, cands)
+	best, rejected := judge.EligibleBundle(judge.EligibleInput{
 		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
-	})
+	}, sib)
 
 	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
 	eval := model.PickEval{Project: proj.ID, SessionID: in.SessionID, Rejected: rejected}
-	if picked != nil {
-		eval.Picked = picked.Item.ID
+	if best != nil {
+		eval.Picked = best.Lead.Item.ID
+		for _, m := range best.Members {
+			eval.PickedWith = append(eval.PickedWith, m.Item.ID)
+		}
 	}
 	// ★ 적격 0건도 기록이다. 사유가 없으면 큐는 블랙박스가 되고,
 	//   블랙박스는 두 번째 세션부터 무시된다.
 	if err := s.st.RecordPickEval(ctx, eval); err != nil {
 		return PickResult{}, err
 	}
+	// picked_count 는 선두를 포함한 묶음 크기다. best 가 nil 이면 0 이다 —
+	// 여기서 1을 더하면 "추천 없음"인데도 1건 집은 것처럼 로그가 거짓말한다.
+	pickedCount := 0
+	if best != nil {
+		pickedCount = len(eval.PickedWith) + 1
+	}
 	s.st.LogEvent(ctx, "item.pick", proj.ID, in.SessionID, map[string]any{
-		"picked": eval.Picked, "count": len(cands), "skipped": len(rejected),
+		"picked": eval.Picked, "picked_count": pickedCount,
+		"count": len(cands), "skipped": len(rejected),
 	})
 
-	if picked == nil {
+	if best == nil {
 		res.Mode = PickNone
 		res.Reason = fmt.Sprintf("적격 항목이 0건이다(후보 %d건, 탈락 사유 %d줄). %s",
 			len(cands), len(rejected), scope)
@@ -348,18 +406,35 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 		return res, nil
 	}
 
-	item := picked.Item
+	item := best.Lead.Item
 	res.Mode, res.Item, res.Branch = PickRecommended, &item, item.ID
-	res.Overlaps = picked.Overlaps
+	res.Overlaps = best.Lead.Overlaps
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
 	}
-	res.Reason = fmt.Sprintf("의존자 %d건 · %s 생성 · 후보 %d건 중 1순위다. "+
-		"아직 선점하지 않았다 — 집으려면 item_id 를 주고 다시 불러라",
-		picked.Dependents, item.CreatedAt.Format("2006-01-02"), len(cands))
+	// ★ 묶음은 여기서 조립한다. 구성원의 판단 전문(Notes)은 **안 싣는다** — 추천은
+	// 아직 선점이 아니라서, 후보마다 전문을 실으면 컨텍스트만 태운다(설계 §6).
+	// PathCheck 는 구성원별로 따로 본다 — 합치면 `fd move <id>` 처방이 엉뚱한
+	// id 를 가리키게 된다(경로 겹침·부재는 항목 단위 사실이다).
+	res.Bundle = &BundleInfo{
+		Reason: best.Reason,
+		Scope: fmt.Sprintf("이웃 후보는 적격 항목 %d건이다. 선두와 **직접** 이어진 것만 붙였다(전이 없음)",
+			len(cands)),
+	}
+	for i, m := range best.Members {
+		res.Bundle.Members = append(res.Bundle.Members, BundleMember{
+			Item: m.Item, Link: best.Links[i],
+			PathCheck: s.checkItemPaths(ctx, proj, m.Item.Paths),
+			// Notes 는 안 싣는다 — 추천은 아직 안 집은 것이라
+			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
+		})
+	}
+	res.Reason = fmt.Sprintf("%s · 후보 %d건 중 1순위다. "+
+		"아직 선점하지 않았다 — 집으려면 item_ids 에 선두부터 순서대로 주고 다시 불러라",
+		best.Reason, len(cands))
 	if notes, err := s.linkedJudgments(ctx, proj.ID, item.ID); err != nil {
 		return PickResult{}, err
 	} else {
@@ -368,7 +443,8 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	res.Derived = d.result(now)
 	s.log.InfoContext(ctx, "추천",
 		"project", proj.ID, "session_id", in.SessionID, "item", item.ID,
-		"count", len(cands), "skipped", len(rejected), "overlaps", len(res.Overlaps))
+		"count", len(cands), "skipped", len(rejected), "overlaps", len(res.Overlaps),
+		"bundle", len(best.Members))
 	return res, nil
 }
 
