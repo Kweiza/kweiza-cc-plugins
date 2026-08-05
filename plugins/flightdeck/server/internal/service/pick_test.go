@@ -1176,6 +1176,53 @@ func TestPickBundleOverlapsCoverWholeBundle(t *testing.T) {
 	}
 }
 
+// 묶음 경로도 **형제 카드**를 건너뛴다.
+//
+// ★ TestPickDoesNotReportSiblingCardAsOverlap 은 단독 경로(ItemID)만 본다.
+// 묶음 경로는 구성원을 다 집은 뒤 합집합으로 겹침을 **다시** 내므로(pickBundle ③),
+// 그 재계산이 selfCC 를 안 넘기면 단독 시험은 초록인 채로 묶음 화면만 거짓말을 한다.
+// 실측으로 확인했다: 그 인자를 "" 로 바꿔도 전 스위트가 초록이었다.
+func TestPickBundleDoesNotReportSiblingCardAsOverlap(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "내 카드")
+	sibling := openSession(t, s, "p", repo, repo, "cc-1", "같은 대화의 다른 카드")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "진짜 남")
+
+	// 형제는 선두·구성원 경로를 **둘 다** 만진다 — 합집합 재계산에서 반드시 걸린다.
+	if err := s.Beat(ctx(), sibling.Session.ID, model.SignalTool, []string{
+		filepath.Join(repo, "services", "lead.go"),
+		filepath.Join(repo, "services", "mem.go"),
+	}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	// 남은 구성원 경로만 만진다 — 선두만 봤다면 안 잡히는 자리다.
+	if err := s.Beat(ctx(), other.Session.ID, model.SignalTool,
+		[]string{filepath.Join(repo, "services", "mem.go")}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	addItem(t, s, "p", "mem", []string{"services/mem.go"}, nil)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 집혔어야 한다: %+v", res.Bundle.Members)
+	}
+	for _, ov := range res.Overlaps {
+		if ov.SessionID == sibling.Session.ID {
+			t.Fatalf("형제 카드가 묶음 겹침으로 나왔다 — 자기 자신과 조율하라는 화면이다: %+v", res.Overlaps)
+		}
+	}
+	// 형제를 빼면서 축을 통째로 끄는 변경을 막는다.
+	if len(res.Overlaps) != 1 || res.Overlaps[0].SessionID != other.Session.ID {
+		t.Fatalf("진짜 남과의 겹침이 사라졌다: %+v", res.Overlaps)
+	}
+}
+
 // 못 집은 구성원도 실물 Item 을 실어야 한다 — 리뷰 라운드 1 finding 1.
 // pickExplicit 이 실패하면 자기가 이미 읽은 항목도 버리고 빈 PickResult 를 낸다.
 // 그걸 그대로 두면 구성원의 Item 이 {Project:"" ID:"" State:""} 로 찍히고, 추천
