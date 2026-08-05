@@ -217,7 +217,7 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
 
 	best := bundles[0]
-	best.Lead.Overlaps = OverlapsWithLive(bundlePaths(best), in.Live, in.Self)
+	best.Lead.Overlaps = OverlapsWithLive(bundlePaths(best), in.Live, in.Self, in.SelfCC)
 
 	// 적격이었으나 이 묶음에 못 든 것도 원장에 남긴다. 안 남기면
 	// pick_eval 어디에도 없어 "왜 저것이 아니라 이것인가"에 답할 수 없다.
