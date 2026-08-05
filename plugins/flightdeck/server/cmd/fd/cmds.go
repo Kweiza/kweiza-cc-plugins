@@ -392,7 +392,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	if *closeSession {
 		if _, cerr := a.CloseSession(ctx, sess, "finish --close"); cerr != nil {
 			fmt.Fprintf(out, "\n항목은 끝났으나 세션을 못 닫았다: %v\n", cerr)
-			fmt.Fprintln(out, "이 카드는 아직 살아 있는 세션으로 보인다. 다시 닫으려면: fd close")
+			fmt.Fprintln(out, "선점은 반납됐으니 보드 ①에서는 이미 안 보인다 — 다만 겹침 판정에는 아직 잡힌다. 다시 닫으려면: fd close")
 			return 1
 		}
 		fmt.Fprintln(out, "\n그리고 이 세션을 닫았다. 다음 신호가 오면 다시 살아난다.")
@@ -427,7 +427,7 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 	if len(res.Claims) > 0 {
 		fmt.Fprintf(out, "안 닫았다 — 선점 %d건이 남아 있다: %s\n",
 			len(res.Claims), strings.Join(res.Claims, ", "))
-		fmt.Fprintln(out, "닫으면 이 선점이 보드에서 사라진다(닫힌 카드는 살아 있는 세션에서 빠진다).")
+		fmt.Fprintln(out, "닫으면 이 선점이 보드에서 사라진다 — 보드 ①은 선점을 든 카드만 낸다.")
 		fmt.Fprintln(out, "먼저 끝내라: fd finish <item-id> --body …")
 		return 1
 	}

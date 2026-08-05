@@ -156,7 +156,11 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	h.log.InfoContext(r.Context(), "request served",
 		"route", "GET /", "status", status,
 		"duration", h.now().Sub(start).Seconds(),
-		"result_count", len(page.Live.Sessions))
+		// ★ 이름을 바꿨다. 이 값은 이제 "살아 있는 세션 수"가 아니라 **선점을 든 카드 수**다
+		// (섹션 ①이 선점을 필터로 쓴다). 옛 이름으로 두면 로그·경보가 카드 급감을
+		// 서버 장애로 읽는다 — 이 자리는 이 변경에서 시험이 없는 유일한 관측 축이라
+		// 회귀로도 안 잡힌다.
+		"claimed_cards", len(page.Live.Sessions))
 }
 
 // render 는 버퍼에 다 찍은 뒤에만 내보낸다.

@@ -40,6 +40,9 @@ nav a.on { font-weight:700; text-decoration:underline; }
 .k { color:var(--dim); font-size:12px; }
 .sig { display:flex; flex-wrap:wrap; gap:10px; font-size:12px; font-variant-numeric:tabular-nums; }
 .sig .off { color:var(--dim); }
+.claims { font-weight:600; font-size:13px; margin-bottom:4px; }
+.badge { font-size:12px; margin-left:6px; }
+.badge.quiet { color:var(--warn); }
 .paths { font-size:12px; margin:6px 0 0; padding-left:16px; }
 .none { color:var(--warn); font-size:12px; }
 table { border-collapse:collapse; width:100%; font-size:13px; }
@@ -93,19 +96,24 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 {{/* ─────────────────────────── ① 지금 ─────────────────────────── */}}
 <section id="now">
   <div class="shead">
-    <h2>① 지금 — 살아 있는 세션</h2>
+    <h2>① 지금 — 잡혀 있는 작업</h2>
     <span class="derived">{{.Live.Window}} · {{.Live.Derived}}</span>
   </div>
   {{template "pfail" .Live.Panel}}
   {{with .Live.Empty}}<p class="empty">{{.}}</p>{{end}}
+  {{with .Live.Folded}}<p class="dim">{{.}}</p>{{end}}
   {{with .Live.OutOfWindow}}<p class="dim">{{.}}</p>{{end}}
   <div class="cards">
     {{range .Live.Sessions}}
     <div class="card{{if .IsSelf}} self{{end}}">
+      {{/* 선점이 이 카드의 존재 이유다 — 머리줄에 둔다. 항목 id 를 전부 낸다(안 접는다) */}}
+      <div class="claims mono">{{join ", " .Claims}}</div>
       <div><b>{{if .Label}}{{.Label}}{{else}}(라벨 없음){{end}}</b>
         <span class="k mono">{{.Short}}</span>
         <span class="k">· {{.State}}{{if .BlockedWhy}} ({{.BlockedWhy}}){{end}}</span>
         {{if .OpenedAge}}<span class="k">· 열림 {{.OpenedAge}}</span>{{end}}
+        <span class="badge{{if not .HasActivity}} quiet{{end}}">{{if .HasActivity}}●{{else}}○{{end}} {{.Activity}}</span>
+        {{if not .Derived}}<span class="k none">· 파생 안 읽음(창 밖)</span>{{end}}
       </div>
       <div class="k mono">{{.Worktree}}</div>
       <div class="k">
@@ -124,7 +132,6 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
         {{if .MorePaths}}<li class="dim">외 {{.MorePaths}}건</li>{{end}}
       </ul>
       {{end}}
-      <div class="k">선점: {{if .Claims}}<span class="mono">{{join ", " .Claims}}</span>{{else}}없음{{end}}</div>
       {{with .LastNote}}
       <div class="note"><span class="k">최근 판단 [{{.Kind}}] {{.At}} ({{.Age}})</span>
         <div class="body">{{if .Title}}{{.Title}} — {{end}}{{.Body}}</div></div>
