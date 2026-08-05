@@ -12,6 +12,7 @@ import (
 
 	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/buildinfo"
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -357,6 +358,19 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(out, mcpsrv.RenderPick(pr, a.now()))
+	// ★ **보낸 것과 돌아온 것을 대조한다.** 여기까지 오면 HTTP 는 200 이었지만
+	// 그것은 "요청한 id 를 전부 다뤘다"를 뜻하지 않는다 — item_ids 를 모르는 구서버는
+	// 그 필드를 조용히 버리고 경로의 선두 하나만 집는다(양쪽 api_version 이 "1" 이라
+	// SkewBanner 도 안 뜬다). 그 응답을 그대로 렌더하고 0 을 내면 `fd pick a b c` 가
+	// a 만 찍고 성공으로 끝난다 — b·c 는 아무도 안 쥔 채 이름조차 안 불린다.
+	//
+	// 종료코드를 1 로 낸다. 이 명령의 소비자는 사람만이 아니라 **스크립트와
+	// 에이전트의 Bash 도구**이고, 그들이 읽는 유일한 기계 신호가 종료코드다.
+	// 본문은 위에서 이미 냈다 — 선두는 실제로 집혔을 수 있으므로 지우지 않는다.
+	if missing := judge.UnaccountedIDs(itemIDs, pr.AccountedIDs()); len(missing) > 0 {
+		fmt.Fprint(out, mcpsrv.RenderBundleUnaccounted(missing))
+		return 1
+	}
 	return 0
 }
 

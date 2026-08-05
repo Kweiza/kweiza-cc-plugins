@@ -769,6 +769,20 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 		return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
 	}
 	tail := s.tail(ctx, tailOpts{overlaps: res.Overlaps, observed: true})
+	// ★ **보낸 것과 돌아온 것을 대조한다.** 이 자리가 요청(a.ItemIDs)과 응답(res)을
+	// 둘 다 보는 유일한 지점이다 — 백엔드가 in-process 서비스든 원격 서버를 치는
+	// cmd/fd 프록시든 똑같이 지난다.
+	//
+	// 안 하면: item_ids 를 모르는 구서버가 선두만 집고 200 을 내는데(양쪽 api_version
+	// 이 "1" 이라 SkewBanner 는 안 뜬다) 이 도구는 그걸 성공으로 렌더한다. 세션은
+	// 안 쥔 항목을 쥐었다고 믿고 남의 작업 위에서 일한다 — 선점이 막으려는 사고 그 자체다.
+	//
+	// isError=true 로 낸다. 본문은 그대로 실어 보낸다 — 선두는 실제로 집혔을 수 있고
+	// 그 브랜치·워크트리 명령을 지우면 성공한 절반까지 함께 버리는 셈이 된다.
+	if missing := judge.UnaccountedIDs(a.ItemIDs, res.AccountedIDs()); len(missing) > 0 {
+		return textResult(notice+RenderPick(res, s.now())+"\n\n"+
+			RenderBundleUnaccounted(missing)+"\n"+tail, true)
+	}
 	return textResult(notice+RenderPick(res, s.now())+"\n\n"+tail, false)
 }
 
