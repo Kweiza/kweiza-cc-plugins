@@ -838,8 +838,10 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 // 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
 // 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
 func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
+	sessions := []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}}
 	got := RenderBoard(service.BoardView{
-		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Sessions:      sessions,
+		Conversations: service.FoldConversations(sessions),
 		Lane: &service.LaneView{
 			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{
@@ -855,8 +857,11 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 		t.Fatalf("경고가 어느 세션의 점유인지 말하지 않는다 — 누구를 회수해야 하는지 답이 없다:\n%s", got)
 	}
 	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
+	// ★ Conversations 를 채운다 — 안 채우면 이번 수정으로 새로 생긴 "Sessions·Conversations
+	//   불일치" 경고도 "⚠" 라 이 대조(레인 정합 경고 부재)와 뒤섞여 오검출된다.
 	ok := RenderBoard(service.BoardView{
-		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Sessions:      sessions,
+		Conversations: service.FoldConversations(sessions),
 		Lane: &service.LaneView{
 			Holder: &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{

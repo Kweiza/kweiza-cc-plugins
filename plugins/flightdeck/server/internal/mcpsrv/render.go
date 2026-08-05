@@ -227,6 +227,15 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	}
 
 	var foot []string
+	// ★ Sessions 는 찼는데 Conversations 가 비면 소리 내어 말한다. 폴백하지 않는다 —
+	//   즉석 접기로 덮으면 배선이 빠진 사실이 숨겨지고, 그 침묵이 이 브랜치가 막으려는
+	//   사고 그 자체다. 서로 모순인 문서를 조용히 내보내는 것보다 모순을 말하는 것이 낫다.
+	if len(v.Conversations) == 0 && len(v.Sessions) > 0 {
+		foot = append(foot, fmt.Sprintf(
+			"⚠ 카드 %d장이 있는데 대화 묶음이 비었다 — 접기 파생이 안 돌았다"+
+				"(BoardView.Conversations 미배선). 카드 절은 비어 있지만 세션은 있다.",
+			len(v.Sessions)))
+	}
 	if len(v.Sessions) == 0 {
 		foot = append(foot, "지금 살아 있는 세션이 없다 — 이 창에서 보이는 다른 세션이 하나도 없다는 뜻이다.")
 	}
