@@ -566,10 +566,14 @@ func TestEligibleBundleDoesNotAbsorbWhenASatisfiedPrerequisiteIsAlsoPresent(t *t
 // 무력화하면(대입 조건을 늘 참으로 바꾸면) 처음 셋만 붉어진다. 나머지 셋(sha·job 축)은
 // 애초에 item 이 아닌 선행이라 blockedOnlyBy 의 구조적 가드(비-item 선행은 무조건
 // 거른다)가 코드 필터와 **무관하게** 이중으로 막는다 — 코드 필터만 무력화해선 안
-// 붉어진다(TestEligibleBundleDoesNotAbsorbSHABlocked 의 주석과 같은 사정). 그래도
-// 이 셋을 남긴 이유는, 코드가 실제로 after-bad-ref·after-unmet-sha·after-failed-job
-// 인지(예를 들어 항상 after-unknown 으로 새지 않는지)를 원장에서 직접 확인하는
-// 값어치가 있어서다 — 방어가 겹친다고 사유 코드 자체가 맞는지 안 볼 이유는 없다.
+// 붉어진다. 그 가드 자체도 이중이다: blockedOnlyBy 의 `a.Item == ""` 줄과
+// `a.Item != leadID` 줄은 leadID 가 항상 비어 있지 않다는 store 불변식 때문에
+// 비-item 선행에 대해 서로를 완전히 대체한다 — 둘 다 무력화해야만 sha·job 세
+// 줄이 붉어진다("아직 조상이 아닌 sha 선행" 행으로 실측 확인, task-4-report.md
+// Fix round 2/5). 그래도 이 셋을 남긴 이유는, 코드가 실제로
+// after-bad-ref·after-unmet-sha·after-failed-job 인지(예를 들어 항상
+// after-unknown 으로 새지 않는지)를 원장에서 직접 확인하는 값어치가 있어서다 —
+// 방어가 겹친다고 사유 코드 자체가 맞는지 안 볼 이유는 없다.
 func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -620,30 +624,6 @@ func TestEligibleBundleAbsorbsOnlyUnmetItem(t *testing.T) {
 				t.Fatalf("사유 코드 %q 가 원장에 없다: %v", tc.code, codesFor(rej, "A-blocked"))
 			}
 		})
-	}
-}
-
-// sha 선행은 흡수 대상이 아니다 — 이 세션이 만들 수 없는 사실을 기다린다.
-//
-// SHAAncestry 에 deadbee: AncestryNo 를 명시해 실제로 after-unmet-sha 코드가 나는지까지
-// 확인한다. 예전에는 SHAAncestry 를 빈 맵으로 뒀는데, 그러면 키 부재로 after-unknown 이
-// 나가 TestEligibleBundleAbsorbsOnlyUnmetItem 의 "조회 못 한 선행" 사례와 코드가
-// 똑같아진다 — sha 축을 하나도 안 거치면서 이름만 sha 시험이었다.
-func TestEligibleBundleDoesNotAbsorbSHABlocked(t *testing.T) {
-	in := EligibleInput{
-		Self: "S1",
-		Candidates: []Candidate{
-			cand("B-lead", 0, nil),
-			cand("A-blocked", 1, nil, afterSHA("deadbee")),
-		},
-		Facts: AfterFacts{SHAAncestry: map[string]AncestryResult{"deadbee": AncestryNo}},
-	}
-	b, rej := EligibleBundle(in, SiblingIndex{})
-	if contains(memberIDs(b), "A-blocked") {
-		t.Fatalf("sha 선행을 흡수했다 — 구성원 %v", memberIDs(b))
-	}
-	if !contains(codesFor(rej, "A-blocked"), AfterUnmetSHA) {
-		t.Fatalf("sha 미충족 사유(after-unmet-sha)가 원장에 없다: %v", codesFor(rej, "A-blocked"))
 	}
 }
 
