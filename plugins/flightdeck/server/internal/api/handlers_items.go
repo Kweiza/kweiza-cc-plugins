@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
@@ -128,13 +129,28 @@ func (s *server) handleClaimItem(w http.ResponseWriter, r *http.Request) {
 	// "무엇을 집었는가"가 모호해지고, 선두 id 가 곧 브랜치 이름이 된다 — pick 응답이
 	// 나르는 것 중 가장 중요한 사실이라 짐작으로 메우지 않는다. 아직 s.svc.Pick 을
 	// 안 불렀으니 쓰기는 하나도 안 열렸다.
+	//
+	// ★ 비교는 **트림한 값끼리** 한다 — service 가 이미 그렇게 보기 때문이다.
+	//
+	// 아래 s.svc.Pick 이 받는 item_ids 는 service 의 dedupeIDs 를 지나며 TrimSpace
+	// 된다(service/pick.go). 그래서 여기서 바이트로 비교하면 선두에 공백 하나 붙은
+	// 같은 요청이 **문에 따라 답이 갈린다**: REST 는 400 으로 걷어내고, service 를
+	// 직접 부르는 쪽(mcpsrv 하네스 등)은 통과시켜 트림된 값을 브랜치로 삼는다.
+	// 두 파일 중 어느 쪽만 봐도 그 자리는 옳아 보여, 이 빈 칸은 어느 diff 에도
+	// 안 나타난다. 정규화 지점을 한 군데로 맞추는 것이 유일한 봉합이다.
+	//
+	// 사유에도 **트림한 값**을 찍는다. 원문 바이트를 그대로 내면 화면에서 두 값이
+	// 똑같아 보이는데 거절된 꼴이 되고, 그러면 고칠 곳을 못 찾는다.
 	pathID := r.PathValue("id")
-	if len(req.ItemIDs) > 0 && req.ItemIDs[0] != pathID {
-		s.fail(w, r, &service.RefusedError{What: "claim",
-			Reason: fmt.Sprintf("경로의 항목(%s)과 item_ids 의 선두(%s)가 다르다",
-				clip(pathID, 64), clip(req.ItemIDs[0], 64)),
-			Guidance: "선두가 브랜치 이름이 된다 — 경로와 item_ids[0] 을 같게 맞춰라."})
-		return
+	if len(req.ItemIDs) > 0 {
+		lead, want := strings.TrimSpace(req.ItemIDs[0]), strings.TrimSpace(pathID)
+		if lead != want {
+			s.fail(w, r, &service.RefusedError{What: "claim",
+				Reason: fmt.Sprintf("경로의 항목(%s)과 item_ids 의 선두(%s)가 다르다",
+					clip(want, 64), clip(lead, 64)),
+				Guidance: "선두가 브랜치 이름이 된다 — 경로와 item_ids[0] 을 같게 맞춰라."})
+			return
+		}
 	}
 
 	in := service.PickInput{Project: req.Project, SessionID: req.SessionID, ItemID: pathID}
