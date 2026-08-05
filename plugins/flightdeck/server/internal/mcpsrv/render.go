@@ -135,10 +135,13 @@ func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
 
 // activityKinds 는 "이 세션이 일하고 있나"에 답하는 신호다.
 //
-// ★ **mcp 와 push 는 일부러 뺐다.** mcp 는 서비스가 세션을 열 때와 상태를 바꿀 때마다
-// 찍으므로(service/session.go) 포함하면 아무것도 안 한 세션도 점등돼 판별력이 0이 된다 —
-// 실측: 카드 26장 중 16장이 신호가 mcp 하나뿐이고 그 시각이 opened_at 과 같았다.
+// ★ **mcp 와 push 는 일부러 뺐다.** mcp 는 도구 호출이면 무엇이든 찍는다 —
+// 이 파일과 짝인 callTool 이 이름을 안 가리고 dispatch 전에 찍으므로 읽기 전용
+// board 하나로도 점등되고, service.Note 의 문은 REST 로 열려 있어 PreCompact 훅의
+// 자동 초안까지 들어온다. 포함하면 아무 일도 안 한 세션이 점등돼 판별력이 0이 된다.
 // push 는 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
+// (옛 근거였던 "세션 열기·상태 전이가 찍는다"는 그 두 자리를 지워 사라졌다 —
+//  web/format.go 의 같은 주석과 함께 읽어라.)
 var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
 
 // activityOf 는 "이 세션이 일하고 있나"와 그 사유를 낸다. 순수 함수다.
@@ -686,8 +689,37 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
 		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
 		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
-		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다",
-			ShortID(l.Holder.SessionID))
+		//
+		// ★ 회수 판정용 **두 나이**(설계 §9 ①)를 이 문장에 싣는다. 아래 정상 경로는 획득 경과를
+		// 머리에, 신호 나이를 항목마다 나눠 싣는데 여기는 항목이 0건이라 실을 자리가 이 한 줄뿐이다.
+		// 그런데 회수 판정이 **가장 절실한** 화면이 바로 여기다 — 줄 행이 사라진 점유는 사람이
+		// 거둬야 하고 그 판단의 근거가 이 두 숫자인데, 둘 다 없으면 화면이 "누가"만 답하고
+		// "얼마나 오래됐나"를 되묻게 만든다.
+		//
+		// ★ 그중 Holder.LastSignalAt 은 LandingLane 이 홀더용으로 질의를 한 번 더 돌려 채워 두고도
+		// renderLane 이 전 함수 통틀어 한 번도 안 읽던 필드였다 —
+		// TestLandingQueueHasAProductionReader 가 잡으려는 "계산만 되고 읽는 쪽이 0건"의 필드 판.
+		//
+		// 낱말은 아래 정상 경로(`점유 획득 %s전` · 항목별 `신호 %s전`/`신호 없음`)를 그대로 베낀다.
+		// 같은 숫자가 한 화면에서 두 어휘로 읽히면 회수 판정이 대조부터 해야 한다.
+		//
+		// ★ nil 은 빈칸으로 두지 않고 "신호 없음"이라고 **적는다** — 여기서 하는 일은 그것뿐이다.
+		// **못 읽음과 없음을 가르는 자리가 아니다.** 이 nil 은 두 경우가 이미 뭉개진 값이다:
+		// 그 둘을 실제로 가르는 것은 service/landing.go 의 lastSignal 의 **둘째 반환값**인데,
+		// 이 필드를 채우는 세 자리(Land 의 점유자 채움 · LandingLane 의 루프 · LandingLane 의
+		// 점유자-줄에-없음 갈래)가 전부 그 값을 `_` 로 버린다. 읽기 실패는 그쪽 WARN 에만 남는다.
+		// 그 규율이 지켜지는 곳은 불변으로 남는 판단 본문(ReleaseLaneRow)이고, 거기만
+		// "읽지 못했다"와 "없음"을 다른 문장으로 적는다 — 화면은 애초에 그 축을 못 받는다.
+		//
+		// ★ ShortID 바로 뒤에 여는 괄호를 두지 않고 문장 꼬리에 ` · ` 로 잇는다. 머리에
+		// `<세션>(…)` 모양이 생기면 항목 조각을 잘라 보는 시험(laneEntrySegment)이 그 `)` 를
+		// 먼저 집는다 — 이 분기는 항목이 0건이라 지금은 안 밟히지만, 같은 함정을 새로 파지 않는다.
+		sig := "신호 없음"
+		if l.Holder.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*l.Holder.LastSignalAt)) + "전"
+		}
+		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다 · 점유 획득 %s전 · %s",
+			ShortID(l.Holder.SessionID), FormatAge(now.Sub(l.Holder.AcquiredAt)), sig)
 	}
 	parts := make([]string, 0, len(l.Entries))
 	for i, e := range l.Entries {
@@ -699,7 +731,9 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 판정한다"인데, 그 판정을 내리는 사람은 대기자가 아니라 보드를 보는 사람이다.
 		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
 		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
-		// nil 은 침묵이 아니라 "없음"으로 낸다(못 읽음과 없음을 가르는 이 레포의 규율).
+		// nil 은 빈칸이 아니라 "신호 없음"으로 적는다 — 다만 그 nil 은 못 읽음과 없음이 이미
+		// 뭉개진 값이다(위 어긋남 갈래 주석의 세 자리와 같은 이유. LaneEntry 쪽을 채우는 것이
+		// 그중 LandingLane 의 루프다).
 		sig := "신호 없음"
 		if e.LastSignalAt != nil {
 			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
@@ -1414,9 +1448,18 @@ func RenderRefusal(what, reason, guidance string) string {
 // 마지막 신호 나이) · **이 레인은 네 것이 아니다**(reclaimed — 사유가 무엇이 일어났는지 말한다).
 // report·leave 의 확인(released·left)은 그보다 단순해서 한 줄이다.
 //
-// ★ **lane-turn 처방을 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다
-// (설계 단계 ③ 이 그것을 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는
-// 부류다. waiting 응답이 낼 수 있는 유일한 처방은 "다시 물어라"(폴링)뿐이다.
+// ★ **개정 — 통로가 서서 옛 금지가 만료됐다.** 원래 이 자리는 "**lane-turn 처방을
+// 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다(설계 단계 ③ 이 그것을
+// 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는 부류다. waiting 응답이
+// 낼 수 있는 유일한 처방은 '다시 물어라'(폴링)뿐이다." 였다. judge.PrescribeLaneTurn 이
+// 들어오면서 그 금지의 근거가 사라졌고, 그러자 waiting 꼬리에 있던
+// "차례는 서버가 밀어주지 않는다"가 **거짓이 됐다** — 그래서 추가가 아니라 교체다.
+//
+// ★ **허용은 waiting 하나뿐이다.** 나머지 넷에서는 여전히 금지다 — 근거가 "통로가 없다"에서
+// "그 자리에서 할 말이 아니다"로 바뀌었을 뿐이다. turn 은 이미 쥐었고, released·left 는 줄을
+// 떠났고, reclaimed 의 일은 잘못된 믿음을 고치는 것이라 사유가 처방을 겸한다(아래 ★ 참고 —
+// 거기에 통지 이야기를 얹으면 머리글과 사유가 다투는 그 결함이 되돌아온다).
+// 이 갈림을 잠근 것은 TestRenderLandWaitingPointsAtLaneTurn 이다.
 func RenderLand(r service.LandResult, now time.Time) string {
 	var b strings.Builder
 	switch r.State {
@@ -1437,7 +1480,18 @@ func RenderLand(r service.LandResult, now time.Time) string {
 				b.WriteString(" · 마지막 신호 없음\n")
 			}
 		}
-		b.WriteString("차례는 서버가 밀어주지 않는다 — 다시 물으려면 land 를 다시 불러라.\n")
+		// ★ **교체다, 추가가 아니다.** 여기 있던 문장은 "차례는 서버가 밀어주지 않는다 —
+		// 다시 물으려면 land 를 다시 불러라." 였다. 통로가 서면서 그 첫 절이 거짓이 됐다.
+		//
+		// ★ 그래도 "이제 가만히 있어도 된다"로는 쓰지 않는다. 처방은 (세션 × 키) 1회고 키에
+		// 줄 행 번호가 실려 있어(judge.PrescribeInput.LaneTurnRow 주석), 접히거나 훅이 못 돌면
+		// 이 줄 행의 차례 통지는 **영구히 사라진다** — 그 실패는 화면에 안 뜬다. 폴링을 닫는
+		// 문장을 쓰면 그 세션은 자기 차례를 영영 모른 채 서 있고 뒤 줄 전원이 그만큼 선다.
+		// 그래서 두 문장이다: 하나는 밀어 온다는 사실, 하나는 그것이 한 번뿐이라 두 번째 길이
+		// 그대로 남아 있다는 사실. 키 이름을 본문에 박는 이유는 세션이 실제로 받는 처방과
+		// 이 문장을 이어 읽어야 하기 때문이다.
+		b.WriteString("차례가 오면 처방이 턴 끝에 온다(Stop 훅이 끌어간다) — 키는 lane-turn 이고 그 줄 행 앞으로 한 번뿐이다.\n")
+		b.WriteString("한 번 지나가면 같은 줄 행에는 다시 안 온다 — land 를 다시 불러 묻는 길은 그대로 열려 있다.\n")
 
 	case "released":
 		fmt.Fprintf(&b, "land · 보고하고 레인을 반납했다 (줄 행 %d)\n", r.RowID)

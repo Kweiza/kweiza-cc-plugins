@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -190,6 +191,26 @@ type Outbox struct {
 	source string // 왜 이 자리인가. fd doctor 가 찍는다 — machineSrc 가 선례다
 	// now 는 격리 시각을 찍는 시계다. 시험이 갈아 끼울 자리이기도 하다.
 	now func() time.Time
+	// log 는 **잠금을 못 잡아 무잠금으로 떨어졌다**를 말할 자리다. 없어도 된다(nil 안전).
+	//
+	// ★ 이 필드가 없으면 fail-open 이 침묵이 된다. 무잠금 갈래는 오늘과 같은 동작이라
+	// 나빠지지는 않지만, 그것이 **얼마나 자주 일어나는지**를 아무도 못 보는 상태로 두면
+	// "잠금을 넣었다"가 거짓 안심이 된다(설계 §9 — 조용히 버리는 것이 하나도 없어야 한다).
+	log *slog.Logger
+}
+
+// withLogger 는 잠금 경고를 받을 로거를 꽂는다. Client 가 큐를 만든 직후에 부른다.
+func (o *Outbox) withLogger(l *slog.Logger) *Outbox {
+	o.log = l
+	return o
+}
+
+// warn 은 로거가 없어도 안전하다.
+func (o *Outbox) warn(msg string, args ...any) {
+	if o.log == nil {
+		return
+	}
+	o.log.Warn(msg, args...)
 }
 
 func newOutbox(get func(string) (string, bool), home string) *Outbox {
@@ -228,11 +249,28 @@ func (o *Outbox) stamp() time.Time {
 // Append 는 쓰기 하나를 쌓는다. **같은 키가 이미 있으면 쌓지 않는다** —
 // 훅은 실패하면 재시도되므로, 그대로 두면 한 판단이 여러 줄이 된다.
 //
-// ★ 그 중복 검사는 **호출이 겹치지 않는다는 전제 위에 있다**(Client 타입 주석의 셋 중 둘째).
-// List→검사→O_APPEND 사이에 잠금이 없어서, 둘이 동시에 들어오면 서로를 못 보고 둘 다 통과한다 —
-// 없애려던 "한 판단이 여러 줄"이 바로 그 자리에서 돌아온다.
-// 전제를 깨는 커밋은 internal/mcpsrv 의 TestServeNeverOverlapsBackend 에서 빨강을 본다.
+// ★ 그 중복 검사는 List→검사→O_APPEND 라 **그 사이에 남이 끼면 서로를 못 본다.**
+// 그래서 프로세스 간 잠금 아래에서 돈다(outbox_lock.go).
+//
+// ★ **피해는 중복이 아니라 삭제였다.** 이 주석은 오래 "한 판단이 여러 줄이 된다"만
+// 적어 뒀는데, 재현해 보니 더 무거운 것이 있었다: 재생이 도는 동안 Append 한 줄은
+// 재생의 스냅숏에 없어서 keep() 의 전량 재기록에 통째로 지워진다. 격리에도 안 남고,
+// Append 를 부른 쪽은 err=nil 을 받아 "쌓았다"를 찍는다. 멱등 키는 그것을 못 막는다 —
+// 막을 줄 자체가 파일에서 사라지기 때문이다.
+//
+// 잠금을 못 잡으면 **무잠금으로 진행한다**(fail-open). 훅 예산을 넘기며 기다리는 것보다
+// 오늘과 같은 상태로 떨어지는 쪽이 낫다 — 다만 조용히 떨어지지는 않는다.
 func (o *Outbox) Append(e OutboxEntry) error {
+	locked, err := withQueueLock(o.dir, queueLockBudget, func() error { return o.appendLocked(e) })
+	if locked {
+		return err
+	}
+	o.warn("큐 잠금 없이 쌓는다 — 재생과 겹치면 이 판단이 사라질 수 있다",
+		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
+	return o.appendLocked(e)
+}
+
+func (o *Outbox) appendLocked(e OutboxEntry) error {
 	cur, err := o.List()
 	if err != nil {
 		return err
@@ -300,6 +338,83 @@ func readEntries(path string) ([]OutboxEntry, error) {
 }
 
 // keep 은 남길 항목만 다시 쓴다(원자 교체).
+// settle 은 재생 한 번의 결과를 파일에 반영한다. 남은 건수를 낸다.
+//
+// ★ **스냅숏을 되쓰지 않는다. 이것이 이 축의 수정 전부다.**
+// 옛 구현은 재생을 시작할 때 뜬 스냅숏에서 처리한 것을 뺀 `left` 를 통째로 되썼다.
+// 그 사이 남이 Append 한 줄은 스냅숏에 없으므로 그 되쓰기에 **삭제된다**(실측 33/300).
+// 그리고 남이 이미 지운 줄은 스냅숏에 남아 있으므로 **되살아난다**(실측 300/300).
+// 여기서는 잠금 안에서 파일을 다시 읽고 **내가 처리한 키만 빼서** 되쓴다. 그러면
+// 새로 들어온 줄은 내 관심 밖이라 그대로 살고, 남이 지운 줄은 애초에 안 읽힌다.
+//
+// ★ Tries 는 **지금 파일값에 +1** 이다. 스냅숏값+1 로 쓰면 겹친 재생 둘이 같은 값에서
+// 출발해 같은 값을 써서 시도 하나가 사라진다(실측 299/300). 시도는 가산이라야 맞다.
+func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int) (int, error) {
+	remaining := snapshotLeft
+	merge := func() error {
+		cur, err := o.List()
+		if err != nil {
+			return err
+		}
+		out := make([]OutboxEntry, 0, len(cur))
+		for _, e := range cur {
+			// ★ **키가 빈 줄은 절대 안 지운다.** 병합은 키 문자열로 매칭하므로 빈 키끼리
+			// 서로 별칭이 된다 — 하나가 배달되면 나머지가 격리에도 안 남고 사라진다.
+			// 옛 구현은 위치로 지워서 이 별칭이 없었으니, 안 막으면 이 커밋이 만든 회귀다.
+			// 지금 작성기는 빈 키를 안 만들지만(FreshKey·IdempotencyKey 가 nosession 을
+			// 채운다) 손편집·부분 기록으로 들어온 줄까지 잃을 이유는 없다. 남기고 말한다.
+			if e.Key == "" {
+				o.warn("키 없는 줄이 큐에 있다 — 재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)",
+					"dir", o.dir, "path", e.Path)
+				out = append(out, e)
+				continue
+			}
+			if done[e.Key] {
+				continue // 보냈거나 격리했다
+			}
+			if bumpedKey != "" && e.Key == bumpedKey {
+				e.Tries++
+			}
+			out = append(out, e)
+		}
+		remaining = len(out)
+		return o.keep(out)
+	}
+	locked, err := withQueueLock(o.dir, queueLockBudget, merge)
+	if locked {
+		return remaining, err
+	}
+	// 잠금을 못 잡아도 **병합으로** 처리한다. 스냅숏 되쓰기로 되돌아가지 않는다 —
+	// 잠금 없이도 다시 읽고 빼는 쪽이 창을 훨씬 좁힌다(오늘보다 나쁘지 않다).
+	o.warn("큐 잠금 없이 재생 결과를 반영한다 — 겹친 재생이 있으면 판단이 사라질 수 있다",
+		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
+	// ★ 한 줄로 쓰지 마라(`return remaining, merge()`). Go 는 반환값들의 평가 순서를
+	// 규정하지 않아서, merge 가 갱신하는 remaining 을 그 전에 읽을지 후에 읽을지가 미정이다.
+	merr := merge()
+	return remaining, merr
+}
+
+// errText 는 nil 오류를 빈 문자열로 낸다. 로그 인자에서 <nil> 을 안 보이게 한다.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// tmpNonce 는 임시 파일 이름에 붙일 조각이다. **pid 만으로는 부족하다** —
+// 한 프로세스 안 두 고루틴도 같은 tmp 를 다툴 수 있고, 프레임 루프를 병렬화하는 날
+// pid-only 판은 그 자리에서 조용히 무력해진다.
+//
+// 난수를 못 얻으면 나노초로 대신한다(FreshKey 가 같은 자리에서 같은 선택을 한다).
+func tmpNonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d-%x", os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(b[:]))
+}
+
 func (o *Outbox) keep(entries []OutboxEntry) error {
 	if len(entries) == 0 {
 		if err := os.Remove(o.pendingPath()); err != nil && !os.IsNotExist(err) {
@@ -316,11 +431,20 @@ func (o *Outbox) keep(entries []OutboxEntry) error {
 		b.Write(buf)
 		b.WriteByte('\n')
 	}
-	tmp := o.pendingPath() + ".tmp"
+	// ★ tmp 이름은 **프로세스마다 다르다.** 고정 이름(`pending.jsonl.tmp`)이면 잠금을
+	// 못 잡아 떨어진 갈래 둘이 같은 tmp 에 O_TRUNC 로 쓰고, 그러면 서로의 바이트가
+	// 섞인 채 rename 된다. 잠금이 있으면 거의 안 닿는 자리지만, fail-open 갈래가
+	// 남아 있는 한 그 자리는 열려 있다.
+	tmp := fmt.Sprintf("%s.%s.tmp", o.pendingPath(), tmpNonce())
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		// ★ 여기도 치운다. os.WriteFile 은 O_CREATE|O_TRUNC 로 **먼저 만들고** 쓰므로
+		// ENOSPC·EDQUOT·EIO 로 실패해도 파일은 남는다. 이름이 유일해진 뒤로는 다음
+		// 호출이 같은 이름을 재사용해 덮어 주지 않으니, 실패할 때마다 잔해가 하나씩 쌓인다.
+		os.Remove(tmp)
 		return fmt.Errorf("아웃박스 기록 실패: %w", err)
 	}
 	if err := os.Rename(tmp, o.pendingPath()); err != nil {
+		os.Remove(tmp) // 이름이 유일해졌으니 실패한 tmp 는 아무도 안 치운다
 		return fmt.Errorf("아웃박스 교체 실패: %w", err)
 	}
 	return nil
@@ -350,10 +474,15 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 	sent, rejected := 0, 0
 	stopReason, rejectReason := "", ""
 	left := []OutboxEntry(nil)
+	// done 은 **내가 실제로 처리한** 키다(보냈거나 격리했다). 아래 병합이 이것만 뺀다.
+	// bumpedKey 는 시도 횟수를 올려야 하는 키다 — 멈추는 자리는 하나뿐이라 한 개다.
+	done := map[string]bool{}
+	bumpedKey := ""
 	for i, e := range entries {
 		err := send(ctx, e)
 		if err == nil {
 			sent++
+			done[e.Key] = true
 			continue
 		}
 		v := JudgeReplayFailure(err, e.Tries)
@@ -370,6 +499,7 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 				break
 			}
 			rejected++
+			done[e.Key] = true
 			if rejectReason == "" {
 				rejectReason = v.Reason
 			}
@@ -382,6 +512,7 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 		// (JudgeReplayFailure 의 같은 주석). 세면 오프라인이 길다는 이유만으로 격리된다.
 		if !Unreachable(err, 0) {
 			e.Tries++
+			bumpedKey = e.Key
 		}
 		left = append(left, e)
 		left = append(left, entries[i+1:]...)
@@ -389,10 +520,11 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 			i+1, clip(e.Key, 40), e.Tries, err)
 		break
 	}
-	if err := o.keep(left); err != nil {
+	remaining, err := o.settle(done, bumpedKey, len(left))
+	if err != nil {
 		return ReplayResult{Sent: sent, Remaining: len(left), Rejected: rejected}, err
 	}
-	res := ReplayResult{Sent: sent, Remaining: len(left), Rejected: rejected}
+	res := ReplayResult{Sent: sent, Remaining: remaining, Rejected: rejected}
 	switch {
 	case res.Remaining == 0 && res.Rejected == 0:
 		res.Detail = fmt.Sprintf("판단 %d건을 재생했다", sent)
@@ -400,8 +532,17 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 		res.Detail = fmt.Sprintf("판단 %d건 재생 · %d건은 영구 거절이라 격리했다(%s) — %s",
 			sent, res.Rejected, o.rejectedPath(), rejectReason)
 	default:
+		// ★ 사유가 빌 수 있다. Remaining 은 이제 **병합 뒤 파일 기준**이라, 내가 멈춰서가
+		// 아니라 **재생 도중 남이 쌓아서** 남는 갈래가 생겼다(옛 구현에는 없던 갈래다:
+		// 거기서는 Remaining>0 이 곧 break 였다). 그때 stopReason 은 비어 있고, 그대로
+		// 두면 "…남았다 — " 로 대시만 남는다. ReplayResult 는 건수와 **왜 남았는지**를
+		// 함께 내겠다고 스스로 적어 둔 타입이므로 그 계약을 빈 문자열로 깨면 안 된다.
+		why := stopReason
+		if why == "" {
+			why = "재생 중에 새로 쌓였다 — 다음 재생이 보낸다"
+		}
 		res.Detail = fmt.Sprintf("판단 %d건 재생 · %d건 격리 · %d건 남았다 — %s",
-			sent, res.Rejected, res.Remaining, stopReason)
+			sent, res.Rejected, res.Remaining, why)
 	}
 	return res, nil
 }

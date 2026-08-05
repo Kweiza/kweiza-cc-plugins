@@ -324,6 +324,45 @@ CLI 한 줄기만 앞당기면 탈출구가 성립한다(REST 라우트 하나 +
 | MCP 도구 수 | 6 | **7** | `mcpsrv/protocol_test.go:62`(이름·순서 하드코딩, 설명 90자 상한), `mcpsrv/add_coordinate_test.go:65` |
 | 웹 버튼 수 | 4 | **5** | `web/render_test.go:365` POST==2, `:369` reason required==2, `:373` Tier B 비활성 문자열 |
 | DESIGN 테이블 수 | 12(실제 **23**) | **24** | 없음 — 그래서 표류했다 |
+| README 표면 표(도구·스킬) *(개정 2026-08-05 추가)* | 도구 6 · 스킬 3 | **도구 7 · 스킬 4** | **없음.** 그리고 만들지 않는다 — 아래 개정 참고 |
+
+> ★ 개정(2026-08-05) — **위 표의 "잠근 것" 칸 셋이 전부 낡았다.** 랜딩 뒤 브랜치
+> `fd-lane-residuals` 에서 각 칸을 코드로 다시 셌다. 원문은 지우지 않는다 — 스펙을 쓴 시점의
+> 기대와 랜딩판이 어디서 갈렸는지가 이 문서의 값이다.
+>
+> - **MCP 도구 수** — `mcpsrv/add_coordinate_test.go:65` 는 **더는 개수를 안 센다.** 그 자리는
+>   지금 `:73 TestFixingMisregistrationDidNotGrowTheToolTable` 이고 `move` 부재만 본다. 실제로
+>   7을 세는 시험은 **셋**이다: `mcpsrv/protocol_test.go:63 TestToolTableIsSeven`(이름·순서
+>   하드코딩 + 설명 90자 상한) · `mcpsrv/tools_test.go:39 TestPickGainsItemIDsWithoutGrowingToolCount`
+>   (`len(Tools()) != 7`) · `mcpsrv/server_test.go:244`(`len(list.Tools) != 7`, 함수는 `:176
+>   TestInitializeAndToolsListRoundTrip`). "개수의 정본은 하나여야 한다"는
+>   `add_coordinate_test.go:68-69` 의 판정은 여전히 옳지만 **아직 사실이 아니다** — 그 파일
+>   스스로 `:70-72` 에서 같은 셋을 세어 그렇게 고백한다.
+> - **웹 버튼 수** — 줄번호 셋(`:365`·`:369`·`:373`)과 값 둘이 전부 낡았다. 지금 잠그는 것은
+>   `web/render_test.go:380 TestWriteFormsAreAtMostFourAndAllRequireReason` **하나**이고 단정은
+>   넷이다: `<form` **≤ 4**(쓰기 셋 + 프로젝트 고르기 GET 하나) · `method="post"` **== 3** ·
+>   `name="reason" required` **== 3** · Tier B 비활성 버튼 둘의 문구. 실측 `web/dashboard.gohtml`:
+>   POST 폼 셋(`:145` reclaim · `:227` drop · `:289` lane-release) + 영구 비활성 버튼 둘
+>   (`:181` 잡 우회 기록 · `:331` 레인 정지/재개) = **쓰기 버튼 다섯, 살아 있는 것은 셋.**
+>   `DESIGN.md` §6 heading 은 이 개정과 같은 커밋에서 "버튼 4개" → "쓰기 버튼 5개(살아 있는
+>   것은 셋)"로 고쳤다 — 같은 절 본문이 이미 "다섯뿐이고 살아 있는 것은 셋"이라 자기모순이었다.
+> - **DESIGN 테이블 수** — "없음"이 **더는 참이 아니다.**
+>   `store/schema_table_count_test.go:60 TestDeclaredTablesMatchDesign` 이 이름 **24개를 통째로**
+>   못박고(`landing_queue` 포함), 실패 문구가 DESIGN §3 을 같이 고치라고 요구한다.
+> - **README 행(이 개정이 더한 행)** — 결손은 **문구가 아니라 락이다.** `README.md:69` 는 이미
+>   "MCP 도구 7개 … `land`", `:70` 은 "스킬 4개"로 **옳다**(스킬 4는 이 항목이 아니라 커밋
+>   `cdce59d` 가 만든 값이다). 그런데 `grep -rn 'README\.md' --include=*.go` 가 `server/` 에서
+>   잡는 다섯 자리는 전부 **픽스처 저장소에 파일을 심는 코드**이고, README 를 **문서로 읽는
+>   시험은 0건**이다. 락 칸에 없는 시험을 적지 않는 이유는 그것이 이 레포의 판정이기 때문이다 —
+>   "표를 **더하는 사람**의 빨간불이 여기서 나야 그 사람이 DESIGN 을 같이 고친다. 문서를 읽는
+>   시험은 표를 안 더한 사람까지 세우고, 문서 편집이 도는 동안 계속 빨갛다"
+>   (`store/schema_table_count_test.go:52-56`). 코드 쪽에서 도구 수는 위 셋이 대신 세운다.
+>   **스킬 수에는 대응 시험이 없다** — `cmd/fd/plugin_test.go:244` 의 목록이
+>   `{"fd-pickup","fd-handoff","fd-setup"}` 하드코딩이라 `fd-update` 를 아예 안 본다. 그리고
+>   넣으면 **확정적으로 빨간불**이다(실측 줄 수 fd-setup 52 · fd-pickup 55 · fd-handoff 58 ·
+>   **fd-update 72**, 상한은 60줄 미만). 그래서 그 자리는 문구 수정이 아니라 판정이고 **별도
+>   항목**이다 — 같은 이유로 `DESIGN.md:58` 의 "스킬은 3개"도 이 커밋에서 안 고쳤다(고치면 바로
+>   아래 "넷째는 이 논거로 정당화되지 않는다" 문단이 통째로 거짓이 된다).
 
 ★ **테이블 수는 세는 축을 함께 적지 않으면 반드시 다시 표류한다.** 실측(판단 `01KZ7DKQ3QHKH75X4XY0YDPFMC`):
 

@@ -53,8 +53,8 @@ func TestRenderBoardKeepsClaimHoldersOutsideTheWindow(t *testing.T) {
 		OutsideClaims: []model.SessionView{{
 			Session: model.Session{ID: "01STUCK"},
 			Claims:  []string{"it-stuck"},
-			// mcp 뿐이다 — 열림·상태 전이가 찍는 신호라 **활동이 아니다.**
-			// 이것이 "쥐고만 있고 아무것도 안 한 세션"의 실제 모양이다(실측 16/26).
+			// mcp 뿐이다 — 조회 도구(board)를 부르기만 해도 찍히는 신호라 **활동이 아니다.**
+			// 이것이 "쥐고만 있고 아무것도 안 한 세션"의 실제 모양이다.
 			Signals: map[model.SignalKind]time.Time{model.SignalMCP: now.Add(-12 * time.Hour)},
 		}},
 	}

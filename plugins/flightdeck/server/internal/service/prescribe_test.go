@@ -1,10 +1,12 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -256,5 +258,201 @@ func TestUnclaimedStillFiresForNewWorkAfterFinish(t *testing.T) {
 	if !found {
 		t.Fatalf("끝낸 항목의 선언 경로 밖에서 새 일을 시작했는데 미선점 처방이 안 떴다: %+v\n"+
 			"이 그물이 죽으면 진짜 미선점 작업을 잡을 자리가 없다", res.All)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// lane-turn — judge 의 판정을 실제 줄(landing_queue · resource_hold)과 잇는 배선
+//
+// 이 두 시험은 **실물 DB** 로 돈다. 차례 판정의 두 인자가 서로 다른 표에 있고,
+// 그 둘이 어긋난 상태가 이 축의 유일한 오발화 경로라 가짜 저장층으로는 원리적으로 못 본다
+// (landing_test.go 머리의 같은 판정).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// laneTurnKeys 는 처방에서 lane-turn 키만 고른다.
+//
+// 접두 문자열을 여기 다시 쓰지 않고 judge 의 상수를 쓴다 — 사본을 두면 judge 가 키를 바꾼 날
+// 이 시험은 0건을 세면서 초록불이 난다("안 떴다"를 단정하는 쪽이 조용히 무의미해진다).
+func laneTurnKeys(res PrescribeResult) []string {
+	var out []string
+	for _, p := range res.All {
+		if strings.HasPrefix(p.Key, judge.PrescribeLaneTurn+":") {
+			out = append(out, p.Key)
+		}
+	}
+	return out
+}
+
+// landOrFail 은 줄에 서고, 기대한 갈래가 아니면 시험을 세운다.
+func landOrFail(t *testing.T, s *Service, sessionID, want string) LandResult {
+	t.Helper()
+	res, err := s.Land(ctx(), LandInput{Project: "p", SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("land 실패(%s): %v", sessionID, err)
+	}
+	if res.State != want {
+		t.Fatalf("land 갈래가 %q 다(기대 %q): %+v", res.State, want, res)
+	}
+	return res
+}
+
+// releaseLaneOrFail 은 레인을 쥔 세션이 ok 로 보고해 놓는다. ok 는 사유가 면제된다.
+func releaseLaneOrFail(t *testing.T, s *Service, sessionID string) {
+	t.Helper()
+	if _, err := s.LandReport(ctx(), LandReportInput{
+		Project: "p", SessionID: sessionID, Kind: model.LandingLeftOK,
+	}); err != nil {
+		t.Fatalf("레인 반납 실패(%s): %v", sessionID, err)
+	}
+}
+
+// prescribeOrFail 은 처방 한 번이다.
+func prescribeOrFail(t *testing.T, s *Service, sessionID string) PrescribeResult {
+	t.Helper()
+	res, err := s.Prescriptions(ctx(), sessionID)
+	if err != nil {
+		t.Fatalf("처방 실패(%s): %v", sessionID, err)
+	}
+	return res
+}
+
+// TestLaneTurnFiresOnceWhenTheLaneBecomesMine 은 judge 의 lane-turn 판정이 **실제 줄**과
+// 이어져 있는지를 배선 전체(store → service → judge)로 단정한다.
+//
+// ★ 왜 순수 함수 시험만으론 부족한가. judge 는 in.LaneTurnRow 를 보고 내지만 그 축을
+// 아무도 안 채우면 판정 시험은 초록불인 채 차례는 영영 아무에게도 안 간다 —
+// TestFinishedItemDoesNotLookLikeUnclaimedWork 가 세운 것과 같은 자리다.
+//
+// 국면 넷을 한 시험에 넣는다. 차례의 정의가 **곱**이라 두 인자를 각각 눌러 봐야 하기 때문이다.
+// 점유 인자는 갈래가 둘(남이 쥠 · 내가 쥠)이라 둘 다 눌러야 곱이 다 눌린다:
+//
+//	⓪ 맨 앞도 나고 내가 쥐었다   → 안 뜬다. land 응답이 방금 turn 으로 답했으니 같은 말을
+//	                             두 번 하는 것이고, 문구가 "land() 로 레인을 쥐고 랜딩을
+//	                             시작해라"라 이미 쥔 세션에게는 거짓이다
+//	① 앞에 사람이 있다          → 안 뜬다
+//	② 맨 앞은 나인데 남이 쥐었다 → 안 뜬다. 두 표가 어긋난 상태이고, 여기서 뜨면 세션을
+//	                             AcquireResource 가 반드시 실패할 자리로 보낸다
+//	③ 맨 앞이 나고 레인이 비었다 → 뜬다. 그리고 두 번째 호출에는 안 뜬다
+func TestLaneTurnFiresOnceWhenTheLaneBecomesMine(t *testing.T) {
+	svc, st := newSvc(t)
+	a, b := twoSessions(t, svc)
+
+	held := landOrFail(t, svc, a, "turn")
+	mine := landOrFail(t, svc, b, "waiting")
+
+	// ⓪ 맨 앞도 a 고 레인을 쥔 것도 a 다 — laneTurnRow 주석이 "쥔 사람이 있으면 안 낸다,
+	//    **남이든 나든**"이라 명시한 그 "나든" 쪽이다.
+	//
+	//    ★ **이 단정을 넣기 전에는 "나든" 쪽을 밟는 시험이 하나도 없었다.** prescribe.go 의
+	//      점유 갈래를 `held.SessionID != sessionID` 로 좁히는 변이(= 남의 점유만 막는다)를
+	//      넣어도 이 모듈의 12개 패키지가 전부 초록이었다. 그 변이 아래에서 실제로 나가는 것은
+	//      **이미 레인을 쥔 세션에게 "land() 로 레인을 쥐고 랜딩을 시작해라"** 라는 거짓 문구고,
+	//      lane-turn 은 judge.Prescribe 의 맨 앞이라 그 턴의 표시 상한 셋 중 첫 칸도 먹는다.
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, a)); len(keys) != 0 {
+		t.Fatalf("레인을 이미 쥔 세션에게 차례 처방이 떴다: %v\n"+
+			"land 가 turn 으로 답한 직후다 — 같은 말을 두 번 하고, "+
+			"그 문구는 이미 쥔 세션에게 거짓이다(land() 로 쥐라고 시킨다)", keys)
+	}
+
+	// ① 앞사람이 줄에 있다.
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, b)); len(keys) != 0 {
+		t.Fatalf("앞에 사람이 선 채인데 차례 처방이 떴다: %v", keys)
+	}
+
+	// ② 두 표를 일부러 어긋낸다 — 점유는 a 가 그대로 쥔 채 a 의 줄 행만 닫는다.
+	//    맨 앞은 이제 b 지만 레인은 여전히 a 의 것이다.
+	if err := st.CloseLandingRow(ctx(), "p", held.RowID, model.LandingLeftForce,
+		"두 표를 일부러 어긋낸다(점유는 두고 줄 행만 닫는다)"); err != nil {
+		t.Fatalf("어긋난 상태를 못 만들었다: %v", err)
+	}
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, b)); len(keys) != 0 {
+		t.Fatalf("맨 앞이지만 레인은 남이 쥔 상태에서 차례 처방이 떴다: %v\n"+
+			"이 처방을 믿은 세션은 취득이 반드시 실패하는 자리로 간다 — 그 상태를 푸는 것은 사람의 회수다", keys)
+	}
+
+	// ③ a 가 놓는다. 이제 맨 앞도 나고 레인도 비었다.
+	releaseLaneOrFail(t, svc, a)
+
+	// ★ 줄에서 나간 a 에게는 아무 일도 안 일어난다. **지금이 정확히 그 오발화 상태다** —
+	//   줄은 비지 않았고(b 가 맨 앞) 레인도 비었으니, "맨 앞이 나인가" 비교를 빼먹으면
+	//   줄에 안 선 세션 전원이 남의 차례를 자기 것으로 받는다.
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, a)); len(keys) != 0 {
+		t.Fatalf("줄에서 나간 세션에게 차례 처방이 떴다: %v", keys)
+	}
+
+	want := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, mine.RowID)
+	got := laneTurnKeys(prescribeOrFail(t, svc, b))
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("차례가 왔는데 처방이 %v 다(기대 [%s])", got, want)
+	}
+
+	// 같은 줄 행에는 다시 안 뜬다.
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, b)); len(keys) != 0 {
+		t.Fatalf("같은 줄 행에 차례 처방이 다시 떴다: %v", keys)
+	}
+
+	// 억제의 정본은 event 표다 — 거기 안 남으면 세션이 재시작한 순간 다시 뜬다.
+	evs, err := st.ListSessionEvents(ctx(), b, "prescribe", time.Time{})
+	if err != nil {
+		t.Fatalf("이벤트 조회 실패: %v", err)
+	}
+	var recorded bool
+	for _, e := range evs {
+		if strings.Contains(e.Payload, want) {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatalf("발화 기록에 %s 가 없다: %+v", want, evs)
+	}
+}
+
+// TestLaneTurnReturnsForANewQueueRow 는 반대 방향이다 — 같은 세션이 **새 줄 행**을 받으면
+// 차례 처방이 다시 떠야 한다.
+//
+// 이 대조가 없으면 억제 키에 줄 행 번호를 실었다는 결정이 배선 계층에서는 안 잠긴다
+// (TestUnclaimedStillFiresForNewWorkAfterFinish 가 세운 선례). 그 결정이 풀리면 억제는 세션
+// 카드 수명 전체에 걸쳐 1회로 굳고, 차례를 받고 랜딩에 실패해 맨 뒤에 다시 선 세션에게
+// 두 번째 차례는 영영 안 온다.
+//
+// ★ **앞 시험이 그 결정을 대신 잠그지 못한다** — 이것이 이 대조가 필요한 정확한 이유다.
+// 처음에 이 자리에 "이 대조가 없으면 위 시험은 lane-turn 을 통째로 껐다로도 초록불이 난다"고
+// 적었는데 **거짓이었다.** 변이로 확인했다: 축을 통째로 끄면 위 시험은 초록이 아니라 **빨갛다**
+// (그 시험은 국면 ③ 에서 처방이 뜨는 것을 단정한다). 참인 변이는 더 좁다 — 행 번호는 키에
+// 그대로 두고 **suppressed 만 lane-turn 접두를 통째로 누르게** 하면 위 시험은 초록인 채
+// 이 시험만 빨개진다. 억제 키의 접미를 잠그는 것은 이 대조 하나뿐이라는 뜻이다.
+func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
+	svc, _ := newSvc(t)
+	a, b := twoSessions(t, svc)
+
+	// 1차 — a 가 쥐고 b 가 서고, a 가 놓는다.
+	landOrFail(t, svc, a, "turn")
+	first := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+
+	wantFirst := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, first.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != wantFirst {
+		t.Fatalf("1차 차례 처방이 %v 다(기대 [%s])", got, wantFirst)
+	}
+
+	// b 가 차례를 안 쓰고 줄에서 빠진다 — 그 줄 행이 닫힌다.
+	if _, err := svc.LandLeave(ctx(), LandLeaveInput{
+		Project: "p", SessionID: b, Detail: "랜딩할 것이 없어졌다"}); err != nil {
+		t.Fatalf("줄에서 빠지기 실패: %v", err)
+	}
+
+	// 2차 — 같은 세션이 다시 선다. 살아 있던 행이 닫혔으므로 새 행이 발급된다.
+	landOrFail(t, svc, a, "turn")
+	second := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+
+	if second.RowID == first.RowID {
+		t.Fatalf("다시 줄을 섰는데 같은 행 번호(%d)를 받았다 — 이 시험의 전제가 깨졌다", second.RowID)
+	}
+	wantSecond := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, second.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != wantSecond {
+		t.Fatalf("새 줄 행(%d)에 차례가 왔는데 처방이 %v 다(기대 [%s])\n"+
+			"억제 키에 줄 행 번호가 안 실리면 재시도 세션에게 두 번째 차례는 영영 안 온다",
+			second.RowID, got, wantSecond)
 	}
 }

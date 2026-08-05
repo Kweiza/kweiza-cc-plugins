@@ -329,10 +329,15 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 // 만들 수 있다. 어긋나 보일 때만 줄을 한 번 더 읽어 재확인한다 — 아래 본문 주석에
 // 왜 트랜잭션이 아니라 재확인인지가 있다.
 //
-// ★ 줄 길이만큼 LastSignal 을 부른다(N+1). 줄 길이는 그 프로젝트의 동시 세션 수라
-// 실무상 한 자릿수이므로 지금은 이대로 둔다 — 여기가 느려지면 신호 MAX 를 세션 목록으로
-// 한 번에 읽는 질의를 store 에 더하면 된다. 나중에 "왜 느리지"를 묻는 사람이
-// 이 문장을 보고 바로 답에 닿아야 해서 적어 둔다.
+// ★ 줄 길이만큼 LastSignal 을 부른다. 점유자 몫은 **따로 안 부른다** — 점유자가 줄에
+// 있으면(정상 경로) 루프에서 읽은 값을 재사용하고, 줄에 없을 때(정합 어긋남)만 한 번 더
+// 부른다. 줄 길이는 그 프로젝트의 동시 세션 수라 실무상 한 자릿수이므로 지금은 이대로
+// 둔다 — 여기가 느려지면 신호 MAX 를 세션 목록으로 한 번에 읽는 질의를 store 에 더하면
+// 된다. 나중에 "왜 느리지"를 묻는 사람이 이 문장을 보고 바로 답에 닿아야 해서 적어 둔다.
+//
+// ★ 이 문단은 **계약이 아니라 지금 코드의 사실이다.** 질의 수를 세는 이음매가 없어서
+// 잠그는 시험도 없다 — 여기를 고치는 사람은 아래 두 자리(루프의 캡처, 점유자 채움)를
+// 눈으로 같이 봐야 하고, 그러기 싫으면 세는 이음매를 먼저 만들어야 한다.
 func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, error) {
 	if strings.TrimSpace(project) == "" {
 		return LaneView{}, &RefusedError{What: "lane", Reason: "project 가 비었다"}
@@ -365,10 +370,47 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 	//   "읽기 전용이라 트랜잭션을 안 거친다"는 판정과 정합하는 쪽이 재확인이다.
 	//
 	//   줄을 **점유자 조회 뒤에** 다시 읽으므로 두 번째 스냅숏은 점유자 조회보다 새것이고,
-	//   끼어든 land 의 줄 행이 반드시 보인다. 정상 경로 비용은 0이다(어긋나 보일 때만 돈다).
-	//   남는 창은 반대 방향 하나다 — 점유자가 그 사이에 반납한 경우. 그때는 다음 조회에서
-	//   점유도 함께 사라져 "비어 있음"으로 스스로 아문다. 진짜 어긋남은 조회를 다시 해도
-	//   그대로 남는다는 점이 둘을 가른다.
+	//   끼어든 land 의 줄 행이 보인다 — **그 세션이 재확인 전에 다시 빠지지 않았다면.**
+	//   정상 경로 비용은 0이다(어긋나 보일 때만 돈다).
+	//
+	//   ★ **개정 — 남는 창은 하나가 아니라 둘이고, 한쪽은 스스로 아물기 전에 이미 거짓을
+	//   낸다.** 원래 이 자리는 "남는 창은 반대 방향 하나다 — 점유자가 그 사이에 반납한 경우.
+	//   그때는 다음 조회에서 점유도 함께 사라져 '비어 있음'으로 스스로 아문다"였다. 반납이
+	//   **어느 두 질의 사이**에 들어가느냐로 결과가 갈린다:
+	//
+	//   (가) 첫 줄 조회 ↔ 점유자 조회 사이의 반납 — 줄에는 그 세션의 행이 남아 보이는데
+	//        점유는 이미 없다. 점유자가 nil 이라 재확인 술어가 거짓이고 재확인은 안 돈다.
+	//        화면에 유령 엔트리 하나가 뜰 뿐 **경고는 안 난다**(경고는 점유자가 있어야 난다).
+	//        옛 문장의 "스스로 아문다"가 맞는 쪽이 이것이다.
+	//   (나) 점유자 조회 ↔ 재확인 사이의 반납 — holder 는 위에서 값으로 복사해 뒀고 rows 만
+	//        새것으로 갈리므로 응답이 {점유자 있음, 줄 0건}이 된다. **거짓 ⚠ 가 이번 응답에
+	//        실제로 나간다** — mcpsrv/render.go 의 어긋남 문장과 web/page.go 의 Missing 행이
+	//        그 모양을 그대로 낸다. 아무는 것은 **다음** 조회이지 이번 응답이 아니다.
+	//        다만 이 모양을 만들려면 커밋이 **둘** 필요하다: 취득이 첫 줄 조회 뒤에(아니면 그
+	//        행이 rows 에 있어 재확인 자체가 안 돈다), 반납이 점유자 조회 뒤에 들어와야 한다.
+	//        그리고 프로덕션 반납 경로 **넷**은 전부 점유 반납과 줄 행 닫기를 한 트랜잭션에
+	//        묶는다 — LandReport·LandLeave(둘 다 ReleaseResource + CloseLandingRowBySession),
+	//        ReleaseLaneRow(ForceReleaseResource + CloseLandingRow), 그리고 **Service.Finish**
+	//        (finish.go 의 ④ 반납 루프 + 그 뒤 CloseLandingRowBySession). 그래서 거짓을 만든
+	//        그 커밋은 점유도 함께 없앤 것이고, 응답이 낸 {점유자 있음, 줄 0건} 조합은
+	//        **DB 의 어떤 커밋 시점에도 없던 것**이다 — 이 어긋남은 다음 조회에 안 남는다.
+	//        (넷째만 이 파일 밖이라 열거에서 빠지기 쉽다. LandReport 의 거절 문구가 이미
+	//        "finish 는 마무리가 함께 닫는다"고 가리키고 있다.)
+	//
+	//        ★ **그러나 "다음 조회는 예외 없이 비어 있음"은 아니다.** 그 반납 뒤에 다른 세션이
+	//        land 하면 다음 조회는 비어 있음이 아니라 정상 화면(점유자 있음 · 줄 1건 이상)이고,
+	//        그 land 와 뒤이은 반납이 다시 위 두 커밋 자리에 들어오면 같은 거짓 ⚠ 가
+	//        **재발한다**. 아무는 것은 **이번 응답이 낸 어긋남**이지 "⚠ 가 다시는 안 뜬다"가
+	//        아니다 — 이 창은 좁힐 수는 있어도(아래 기각 문단) 닫히지 않는다.
+	//
+	//   진짜 어긋남은 조회를 다시 해도 그대로 남는다는 점이 둘 어느 쪽과도 갈린다.
+	//
+	//   ★ **재확인 뒤에 점유자를 한 번 더 읽는 것은 기각했다.** ErrNotFound 면 holder 를 nil 로
+	//   접어 (나)를 좁힐 수 있지만 **닫지는 못한다** — 그 사이에 다른 세션이 새로 취득하면
+	//   같은 거짓 ⚠ 가 그대로 나간다(취득·반납·취득 세 커밋). 어긋나 보일 때 비용이 +2 질의가
+	//   되고 얻는 것은 확률뿐이다. 게다가 그 갈래를 herr != nil 전체로 넓히면 조회 실패까지
+	//   "레인 비었음"으로 접혀 진짜 어긋남을 삼킨다 — 그 축을 잠근 것이
+	//   TestLandingLaneStillReportsRealDivergenceAfterTheRecheck 다.
 	if holder != nil && !rowsHaveSession(rows, holder.SessionID) {
 		fresh, ferr := s.st.ListLandingQueue(ctx, project)
 		if ferr != nil {
@@ -377,19 +419,43 @@ func (s *Service) LandingLane(ctx context.Context, project string) (LaneView, er
 		rows = fresh
 	}
 
+	// ★ 점유자가 줄에 있으면 아래 점유자 채움이 **같은 세션을 또 묻게 된다** — 정상 경로에서
+	//   늘 그렇다. 그래서 루프를 돌면서 그 한 값을 붙잡아 둔다. 두 키(줄 행의 session_id 와
+	//   점유의 session_id)는 같은 Land 호출의 한 값에서 갈라진 것이고 어느 쪽에도 정규화가
+	//   없으므로 문자열이 같다 — 이 전제는 새로 만드는 것이 아니라 바로 아래 rowsHaveSession
+	//   과 표시 계층 둘이 이미 == 로 의존하고 있는 것이다.
+	//   맵을 만들지 않는다: 재사용할 대상이 최대 하나(점유는 배타다)라 값 두 개면 족하다.
+	var holderSignal *time.Time
+	holderSeen := false
+
 	out := LaneView{Entries: make([]LaneEntry, 0, len(rows)), Holder: holder}
 	for _, r := range rows {
 		// 관측 실패와 "신호 없음"은 화면에서 둘 다 빈칸이다 — 사람이 다시 물으면 되고,
 		// 실패 사유는 WARN 에 남는다. 이 축을 반드시 봐야 하는 곳은 불변으로 남는
 		// 판단 본문이고, 그쪽(ReleaseLaneRow)은 두 경우를 다른 문장으로 적는다.
 		at, _ := s.lastSignal(ctx, r.SessionID)
+		if holder != nil && r.SessionID == holder.SessionID {
+			holderSignal, holderSeen = at, true
+		}
 		out.Entries = append(out.Entries, LaneEntry{
 			RowID: r.ID, SessionID: r.SessionID, EnqueuedAt: r.EnqueuedAt,
 			LastSignalAt: at,
 		})
 	}
 	if out.Holder != nil {
-		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
+		if holderSeen {
+			out.Holder.LastSignalAt = holderSignal
+			// 위 재사용은 정합에 영향이 0이다: 키가 같으면 같은 질의라 결과가 같고,
+			// 시점이 몇 ms 이른 것은 이 값이 표시용이라는 판정(lastSignal 주석)과 정합한다.
+		} else {
+			// ★ **여기 질의는 지운 것이 아니라 남긴 것이다.** 점유자가 줄에 없는 정합 어긋남
+			//   갈래에서는 루프가 그 세션을 한 번도 안 읽었다. 그리고 이 값에는 실제 독자가
+			//   있다 — 줄이 0건일 때 mcpsrv/render.go 의 어긋남 문장과 web/page.go 의 Missing
+			//   행이 회수 판정용 "신호 나이"로 이 필드를 읽는 유일한 자리다. 안 채우면 그 두
+			//   화면이 조용히 "신호 없음"이 되어, 사람이 회수를 판정할 두 숫자 중 하나가
+			//   사라진다. 즉 이 갈래의 +1 질의는 낭비가 아니라 화면 계약이다.
+			out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
+		}
 	}
 	return out, nil
 }

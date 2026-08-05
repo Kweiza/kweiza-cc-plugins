@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -127,6 +128,27 @@ type server struct {
 	// 라우트 라벨을 스스로 풀기 위해 보관한다 — 아래 resolveRoute 참조.
 	mux *http.ServeMux
 
+	// draining 은 **서버가 종료 중이다**는 사실이다. Drain() 이 닫고, 수명이 정해지지
+	// 않은 응답(지금은 SSE 하나)이 이것으로 빠져나온다.
+	//
+	// ★ 이 사실을 **요청 컨텍스트로 나르지 않는다.** 그것이 이 자리의 결함이었다 —
+	// BaseContext 가 serveCtx 였을 때 "서버가 종료 중이다"와 "이 요청은 그만둬도 된다"가
+	// 한 값으로 접혔고, 그래서 드레인이 마무리 대신 절단이었다. 두 사실은 채널이 다르다.
+	//
+	// ★ **수명이 정해지지 않은 응답을 새로 만들면 이 채널을 봐야 한다.** 안 보면 그
+	// 핸들러 하나가 셧다운 유예를 통째로 쓴다 — srv.Shutdown 은 요청 컨텍스트를 안 끊으므로
+	// 스트림이 스스로 나가는 다른 길이 없다. 컴파일러가 이것을 못 잡는다(Go 에는 "이 채널을
+	// select 해야 한다"를 강제할 수단이 없다). 대신 유예를 넘기면 ERROR 가 뜨고, 넘기지
+	// 않아도 "서버 종료" 의 drain_ms 가 그 값이 자라는 것을 말한다.
+	//
+	// ★ 통지는 **select 에 앉아 있는 핸들러에게만** 닿는다. w.Write 안에서 막힌 스트림
+	// (수신 윈도가 찬 죽은 피어)은 이 채널로도, 요청 컨텍스트 취소로도 못 깨운다 —
+	// 오늘도 그렇고 고친 뒤에도 그렇다. 그것을 푸는 것은 유예 만료 뒤의 srv.Close() 하나다.
+	// 그래서 유예 초과 ERROR 는 "계약 위반"과 "죽은 피어" 둘 다를 뜻할 수 있다
+	// (후속: fd-sse-write-deadline-unbounded).
+	draining  chan struct{}
+	drainOnce sync.Once
+
 	// loopbackSeen 은 **루프백으로 도달한 요청이 실제로 있었는가**다.
 	//
 	// ★ 설정만으로는 면제가 닿는지 알 수 없다. 컨테이너 배포에서는 호스트의
@@ -172,15 +194,46 @@ func (s *server) resolveRoute(r *http.Request) string {
 	return RoutePattern("", r.Method)
 }
 
+// Drain 은 수명이 정해지지 않은 응답에 종료를 알린다. 여러 번 불러도 안전하다.
+//
+// ★ goroutine 도 채널도 **새로 만들지 않는다** — 닫기 한 번이다. 그래서 join 할 것이
+// 없고 이 호출은 못 매달린다. 통지를 받은 핸들러가 실제로 나갔는지의 판정자는
+// srv.Shutdown 하나다("커넥션이 유휴가 됐는가"). 여기서 세지 않는다 — 판정자가 둘이면
+// 반드시 어긋나고, 그때 어느 쪽이 정본인지 말해 주는 것이 없다.
+func (s *server) Drain() { s.drainOnce.Do(func() { close(s.draining) }) }
+
+// Handler 는 조립된 표면이다 — http.Handler 이면서 **종료를 통지받는다.**
+//
+// Serve 가 http.Handler 를 안 받는 이유: SSE 는 요청 컨텍스트로 안 끝난다(이 축의 전부다).
+// 통지 경로를 타입 단언(`if d, ok := h.(interface{ Drain() })`)으로 두면 누가 핸들러를
+// 한 겹 감싸는 순간 **조용히** 사라지고, 그 결과는 "모든 종료가 유예를 통째로 쓴다"는
+// 침묵한 회귀다. 원칙 ① 그대로 — 검사가 아니라 **넘길 수 없다는 부재**로 막는다.
+type Handler interface {
+	http.Handler
+	Drain()
+}
+
+// surface 는 게이트 사슬과 종료 통지를 한 값으로 묶는다.
+//
+// ★ *server 에 ServeHTTP 를 달지 않는다. 달면 **사슬을 안 탄 핸들러**가 Handler 로
+// 새는 길이 생긴다 — newServer 만 부르는 시험의 결과가 그대로 Handler 를 만족하게 되고,
+// 컴파일은 통과하는데 인증·멱등·한도가 전부 빠진 표면이 조립된다.
+type surface struct {
+	http.Handler // 게이트 사슬
+	srv          *server
+}
+
+func (f surface) Drain() { f.srv.Drain() }
+
 // NewServer 는 라우팅과 게이트를 얹은 핸들러를 만든다.
 //
 // 라우팅은 표준 http.ServeMux 의 메서드·패턴 문법이다(Go 1.22+). 프레임워크가 없다 —
 // 라우트 패턴 문자열이 그대로 액세스 로그와 /metrics 의 라벨이 되므로,
 // 라우터가 그 문자열을 돌려주는 것 자체가 이 계층이 필요로 하는 기능의 전부다.
-func NewServer(svc *service.Service, opt Options) http.Handler {
+func NewServer(svc *service.Service, opt Options) Handler {
 	s := newServer(svc, opt)
 	s.mux = s.routes()
-	return s.chain(s.mux)
+	return surface{Handler: s.chain(s.mux), srv: s}
 }
 
 // newServer 는 상태만 만든다. 라우팅과 분리한 이유는 시험이 **같은 게이트 사슬**에
@@ -193,9 +246,11 @@ func newServer(svc *service.Service, opt Options) *server {
 	//   여러 번 들어가고, 중복 키의 처리는 파서마다 다르다 — 수집기 판올림 한 번에
 	//   "어느 프로세스가 무엇을 했나"라는 축이 조용히 사라진다.
 	s := &server{
-		svc:  svc,
-		log:  opt.Log,
-		opt:  opt,
+		svc:      svc,
+		log:      opt.Log,
+		opt:      opt,
+		draining: make(chan struct{}),
+
 		hub:  NewHub(opt.SSEBuffer),
 		met:  newMetrics(),
 		idem: newIdemStore(opt.IdempotencyTTL, opt.IdempotencyMax, opt.Clock),
@@ -289,11 +344,37 @@ func (s *server) chain(h http.Handler) http.Handler {
 	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(h)))))))
 }
 
+// ShutdownGrace 는 드레인이 인플라이트에 주는 시간이다.
+//
+// ★ 공개인 이유는 이 값이 **자기 갱신 반응 시간의 항**이기 때문이다
+// (cmd/fd/selfwatch.go 의 selfUpdateReactionBudget 이 이 값을 더한다). 여기서만 알면
+// 그쪽이 같은 숫자를 다시 적게 되고, 두 벌은 반드시 표류한다.
+//
+// **10초의 근거(2026-08-05 실측).** 정본 서버 액세스 로그 6시간(요청 2902건)에서
+// 라우트별 소요를 갈랐다. 수명이 정해진 요청의 **관측 최댓값이 0.864초**이고
+// (`GET /{$}` — 보드 파생 git 호출을 포함한 가장 무거운 자리), 가장 무거운 REST 는
+// `GET /api/v1/items/next` p95 0.249초다. 유예는 그 최댓값의 **12배**다.
+// 꼬리(p95 59.9초 · max 971초)는 **전부 `GET /events`** 였다 — 그것이 수명이 정해지지
+// 않은 유일한 응답이고, 그래서 유예가 아니라 Drain() 통지로 나간다.
+//
+// ★ **액세스 로그가 못 보는 항이 하나 있다.** 요청 줄을 아직 한 줄도 안 보낸 커넥션
+// (`StateNew`)은 로그에 원리적으로 안 남는데, `srv.Shutdown` 은 그런 커넥션을 **5초가
+// 지나기 전에는 유휴로 안 친다**(net/http 의 규칙이다). 즉 말 없는 소켓 하나가 붙어 있으면
+// 인플라이트가 0건이어도 드레인이 5초를 쓴다(실측 5.31초). 그래서 위 "12배 여유"는
+// 요청 축의 값이고, 실제 여유는 그 항이 실재할 때 절반 이하다 — 유예는 아직 안 깨지지만
+// **항을 다 셌다고 말하면 거짓이다.** 그리고 그 5초는 아래 drain_ms 에 인플라이트 대기와
+// 구분 없이 합산된다(후속: fd-drain-ms-conflates-statenew-floor).
+// ★ 컨테이너의 stop_grace_period 는 이 값보다 **커야 한다**(compose.yaml —
+// TestComposeStopGraceExceedsShutdownGrace 가 그 부등식을 붙든다).
+const ShutdownGrace = 10 * time.Second
+
 // Serve 는 핸들러를 주소에 붙이고 ctx 가 끝날 때까지 돌린다.
 //
 // 포트 선점은 **사유를 남기고 종료한다**(설계 §7) — 조용히 실패하면
 // 전 세션이 "서버 미도달"만 보고 원인을 모른다.
-func Serve(ctx context.Context, addr string, h http.Handler, log *slog.Logger) error {
+//
+// ★ h 가 http.Handler 가 아니라 Handler 인 이유는 Handler 의 독 코멘트에 있다.
+func Serve(ctx context.Context, addr string, h Handler, log *slog.Logger) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -306,13 +387,30 @@ func Serve(ctx context.Context, addr string, h http.Handler, log *slog.Logger) e
 		return fmt.Errorf("%s 를 열 수 없다: %w", addr, err)
 	}
 
+	// ★ 인플라이트 요청 컨텍스트를 ctx 에서 **뗀다.** 취소만 뗀다 —
+	// middleware.go 의 멱등 기록 저장이 쓰는 것과 같은 관용구다.
+	// (값은 안 옮겨진다: 이 ctx 에는 실린 값이 없다. 상관키는 requestID 미들웨어가
+	// r.Context() 에 걸고 그것은 여기보다 하류다. 그 사실이 바뀌면 이 줄도 바뀐다.)
+	//
+	// 떼기 전에는 드레인 신호가 곧 절단이었다: BaseContext 가 serveCtx 라 취소 한 번에
+	// 모든 r.Context() 가 죽었고, srv.Shutdown 은 **이미 다 죽은 뒤에** 도착해 기다릴
+	// 대상이 없었다. 즉 Shutdown 을 부르면서 그것이 할 일을 먼저 없앤 배선이었다.
+	//
+	// ★ 인플라이트를 **유예를 주고** 끊는 자리는 아래 2단 하나이고 그때는 ERROR 로 말한다.
+	// 다만 `defer cutInflight()` 는 모든 반환 경로에 걸려 있어서, 리스너가 스스로 죽는 갈래
+	// (`case err := <-done`)에서는 유예 없이 끊긴다 — 그 갈래는 이 함수가 곧 반환하고
+	// 살릴 리스너가 없다. 조용하지는 않다("서버가 멈췄다"가 원인을 낸다). 그 갈래를 유예로
+	// 감싸지 않는 이유는 기다릴 이유가 없어서이지, 절단이 안 일어나서가 아니다.
+	baseCtx, cutInflight := context.WithCancel(context.WithoutCancel(ctx))
+	defer cutInflight()
+
 	srv := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		// WriteTimeout 을 걸지 않는다 — SSE 는 수명이 정해지지 않은 응답이라
 		// 상한을 걸면 정상 구독이 주기적으로 끊긴다.
 		IdleTimeout:    120 * time.Second,
-		BaseContext:    func(net.Listener) context.Context { return ctx },
+		BaseContext:    func(net.Listener) context.Context { return baseCtx },
 		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		ReadTimeout:    0,
 		MaxHeaderBytes: 1 << 20,
@@ -330,21 +428,57 @@ func Serve(ctx context.Context, addr string, h http.Handler, log *slog.Logger) e
 
 	select {
 	case err := <-done:
+		// 리스너가 스스로 죽었다(포트 회수·fd 고갈). 매달린 스트림을 남길 이유가 없다 —
+		// 여기서 기다리지는 않는다(기다릴 리스너가 이미 없다). 이 통지가 없으면 호출자가
+		// 곧바로 store 를 닫는데 SSE 핸들러는 아직 살아서 닫힌 DB 를 만난다.
+		h.Drain()
 		if err != nil {
 			log.ErrorContext(ctx, "서버가 멈췄다", "error", err.Error())
 		}
 		return err
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		t0 := time.Now()
+
+		// 1단 — 수명이 정해지지 않은 응답에 종료를 알린다.
+		//
+		// ★ **Shutdown 보다 먼저다.** srv.Shutdown 은 요청 컨텍스트를 안 끊고, 커넥션이
+		// 유휴가 되는 길은 핸들러 반환 하나뿐이다. 이 통지가 없으면 SSE 구독 하나가
+		// 아래 유예를 통째로 쓰고, 모든 종료·모든 자기 갱신이 그만큼 늦어진다.
+		// ★ RegisterOnShutdown 을 안 쓴다: 그쪽은 `go f()` 라 순서 보장이 없고 Shutdown 이
+		// 기다리지도 않는다 — join 할 자 없는 goroutine 을 하나 늘릴 뿐이다.
+		h.Drain()
+
+		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ShutdownGrace)
 		defer cancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
-			log.ErrorContext(ctx, "정상 종료 실패 — 강제로 닫는다", "error", err.Error())
+			// 2단 — 유예를 넘겼다. **여기서 처음으로** 인플라이트를 끊는다.
+			//
+			// cutInflight 를 Close 보다 먼저 부르는 이유: 요청이 띄운 자식(git 서브프로세스)까지
+			// 걷히게 하려면 컨텍스트가 끊겨야 한다. Close 만 하면 커넥션은 닫히는데 핸들러와
+			// 그 자식은 계속 돈다.
+			//
+			// ★ 그래도 이 함수는 핸들러 goroutine 을 **join 하지 않는다** — net/http 가 그 수단을
+			// 안 준다. 그래서 반환 뒤 호출자가 store 를 닫으면 아직 도는 쿼리가
+			// "database is closed" 로 죽을 수 있다. 절단 사유가 두 벌이 되는 것뿐이고 파손은
+			// 아니지만, 이 갈래가 ERROR 로 표시되는 이유 중 하나다.
+			log.ErrorContext(ctx, "유예 안에 마무리를 못 했다 — 인플라이트를 끊고 강제로 닫는다",
+				"grace", ShutdownGrace.String(), "error", err.Error())
+			cutInflight()
 			if cerr := srv.Close(); cerr != nil {
 				log.ErrorContext(ctx, "강제 종료도 실패했다", "error", cerr.Error())
 			}
 		}
 		<-done
-		log.InfoContext(ctx, "서버 종료")
+		// ★ drain_ms 를 남긴다. 성공한 자기 갱신은 exec 로 상태가 통째로 사라지므로
+		// (selfwatch.go 의 "성공은 여기 안 남는다"), 이 한 줄이 **이 축을 사후에 잴 수 있는
+		// 유일한 자리**다. 드레인이 2ms 에서 8초로 자라도 이것 없이는 아무 데도 안 남는다 —
+		// ERROR 는 유예를 넘겼는지만 말하는 이진 판별이다.
+		//
+		// ★ **이 값은 두 사실을 접는다**(이 레포가 대체로 금지하는 것이다): "인플라이트가 그만큼
+		// 걸렸다"와 "말 없는 StateNew 소켓이 net/http 의 5초 바닥을 밟았다"가 안 갈린다.
+		// 지금 가르지 않는 이유는 net/http 가 그 구분을 밖으로 안 내주기 때문이고, 그 사실을
+		// 여기 적어 두는 것이 지금 할 수 있는 전부다. 5초 근처의 drain_ms 는 그 바닥을 먼저 의심해라.
+		log.InfoContext(ctx, "서버 종료", "drain_ms", time.Since(t0).Milliseconds())
 		return nil
 	}
 }
