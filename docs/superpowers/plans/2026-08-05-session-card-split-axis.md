@@ -47,7 +47,6 @@
 | `plugins/flightdeck/DESIGN.md` | §10 확인율 분모 정정 | 수정 |
 
 ---
-
 ### Task 1: `judge/split.go` — 정규화 미실행 흔적 탐지
 
 **Files:**
@@ -56,7 +55,22 @@
 
 **Interfaces:**
 - Consumes: 없음(이 과제가 시작점이다).
-- Produces: `judge.SplitCard{SessionID, MachineID, Worktree, CCSessionID string}` · `judge.SplitReport{CCSessionID, MachineID, Ancestor string; Descendants, SessionIDs []string}` · `func judge.DetectUnnormalizedSplit(cards []SplitCard) []SplitReport` · `func judge.SameConversation(a, b string) bool`
+- Produces: `judge.SplitCard{SessionID, MachineID, Worktree, CCSessionID string}` · `judge.SplitReport{CCSessionID, MachineID, Root string; Recorded, SessionIDs []string}` · `func judge.DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport` · `func judge.SameConversation(a, b string) bool`
+
+**이 과제가 판정하는 것 — 조상 관계가 아니라 "같은 트리에 값이 여럿"이다**
+
+정규화가 도는 클라이언트는 `worktree` 를 언제나 **그 트리의 git 루트**로 적는다
+(`cmd/fd/env.go` `resolveProject` 의 `--show-toplevel`). 따라서 한 대화가 **같은 트리**에
+대해 서로 다른 값을 둘 이상 기록했다면, 그 카드 중 최소 하나는 정규화 없이 열린 것이다.
+
+앞선 판은 "조상-자손 경로 쌍"으로 판정했다가 **실측에서 거짓 양성 56%** 를 냈다(2026-08-05,
+조상-자손 쌍 100건 중 56건). 원인은 이 저장소의 배치다 — flightdeck 링크 워크트리는
+`<repo>/.flightdeck/worktrees/X` 즉 **저장소 루트의 자손 경로**에 살고, 그것은 정규화가
+완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는 못 가른다.
+
+그래서 **git 이 아는 워크트리 루트 목록**을 받아 각 경로의 소유 트리를 정한다.
+
+---
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -65,64 +79,131 @@
 ```go
 package judge
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+// 이 저장소의 실제 배치를 그대로 쓴다 — 링크 워크트리가 저장소 루트 **아래** 산다.
+var testRoots = []string{
+	"/repo",
+	"/repo/.flightdeck/worktrees/A",
+	"/repo/.flightdeck/worktrees/B",
+}
 
 func TestDetectUnnormalizedSplit(t *testing.T) {
 	const (
 		m  = "machine-1"
 		cc = "cc-aaa"
-		wt = "/repo"
 	)
 	cases := []struct {
 		name  string
 		cards []SplitCard
-		want  int // 보고 건수
+		roots []string
+		want  int
 		why   string
 	}{
 		{
-			name: "조상·자손이면 보고한다",
+			name: "같은 트리에 값이 둘이면 보고한다",
 			cards: []SplitCard{
-				{SessionID: "s1", MachineID: m, Worktree: wt, CCSessionID: cc},
-				{SessionID: "s2", MachineID: m, Worktree: wt + "/plugins/flightdeck/server", CCSessionID: cc},
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins/flightdeck/server", CCSessionID: cc},
 			},
-			want: 1,
-			why:  "정규화가 돌았다면 둘 다 /repo 로 접혔을 것이다",
+			roots: testRoots,
+			want:  1,
+			why:   "정규화가 돌았다면 둘 다 /repo 로 적혔을 것이다",
 		},
 		{
-			name: "형제 트리는 보고하지 않는다",
+			name: "저장소 루트와 링크 워크트리 루트는 보고하지 않는다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: cc},
+			},
+			roots: testRoots,
+			want:  0,
+			why:   "둘 다 자기 트리의 루트다 — 정규화가 도는 클라이언트가 만드는 정당한 모양이고, 실측 거짓 양성 56%의 원인이었다",
+		},
+		{
+			name: "링크 워크트리 안의 하위 디렉토리는 보고한다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A/plugins/flightdeck/server", CCSessionID: cc},
+			},
+			roots: testRoots,
+			want:  1,
+			why:   "소유 트리가 A 로 같은데 값이 둘이다 — 소유 루트를 가장 긴 것으로 골라야 여기가 /repo 로 흡수되지 않는다",
+		},
+		{
+			name: "형제 워크트리 둘은 보고하지 않는다",
 			cards: []SplitCard{
 				{SessionID: "s1", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/B", CCSessionID: cc},
 			},
-			want: 0,
-			why:  "서로 다른 git 워크트리다 — 정당하게 갈린 것이고 병합 때 실제로 충돌한다",
+			roots: testRoots,
+			want:  0,
+			why:   "서로 다른 git 워크트리다 — 같은 repo-상대 경로를 만지면 병합 때 실제로 충돌한다",
+		},
+		{
+			name: "한 대화가 트리 둘에서 각각 안 접혔으면 보고 둘",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins", CCSessionID: cc},
+				{SessionID: "s3", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: cc},
+				{SessionID: "s4", MachineID: m, Worktree: "/repo/.flightdeck/worktrees/A/plugins", CCSessionID: cc},
+			},
+			roots: testRoots,
+			want:  2,
+			why:   "트리마다 따로 보고한다 — 대표 하나만 내면 나머지가 조용히 사라진다",
 		},
 		{
 			name: "cc 가 다르면 보고하지 않는다",
 			cards: []SplitCard{
-				{SessionID: "s1", MachineID: m, Worktree: wt, CCSessionID: "cc-aaa"},
-				{SessionID: "s2", MachineID: m, Worktree: wt + "/sub", CCSessionID: "cc-bbb"},
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: "cc-aaa"},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins", CCSessionID: "cc-bbb"},
 			},
-			want: 0,
-			why:  "다른 대화가 한 트리 안에서 일하는 것은 이 제품의 정상 흐름이다",
+			roots: testRoots,
+			want:  0,
+			why:   "다른 대화가 한 트리 안에서 일하는 것은 이 제품의 정상 흐름이다",
 		},
 		{
 			name: "빈 cc 끼리는 보고하지 않는다",
 			cards: []SplitCard{
-				{SessionID: "s1", MachineID: m, Worktree: wt, CCSessionID: ""},
-				{SessionID: "s2", MachineID: m, Worktree: wt + "/sub", CCSessionID: ""},
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: ""},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins", CCSessionID: ""},
 			},
-			want: 0,
-			why:  "못 읽음을 값으로 접으면 관측이 깨진 순간 이 축이 거짓 초록을 낸다",
+			roots: testRoots,
+			want:  0,
+			why:   "못 읽음을 값으로 접으면 관측이 깨진 순간 이 축이 거짓 초록을 낸다",
 		},
 		{
 			name: "머신이 다르면 보고하지 않는다",
 			cards: []SplitCard{
-				{SessionID: "s1", MachineID: "machine-1", Worktree: wt, CCSessionID: cc},
-				{SessionID: "s2", MachineID: "machine-2", Worktree: wt + "/sub", CCSessionID: cc},
+				{SessionID: "s1", MachineID: "machine-1", Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: "machine-2", Worktree: "/repo/plugins", CCSessionID: cc},
 			},
-			want: 0,
-			why:  "다른 머신의 같은 경로는 같은 트리가 아니다",
+			roots: testRoots,
+			want:  0,
+			why:   "다른 머신의 같은 경로는 같은 트리가 아니다",
+		},
+		{
+			name: "루트를 모르면 아무것도 보고하지 않는다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/repo/plugins", CCSessionID: cc},
+			},
+			roots: nil,
+			want:  0,
+			why:   "git 을 못 읽었을 때 추측으로 보고하면 실측 기준 거짓 양성이 56%다",
+		},
+		{
+			name: "소유 트리를 못 찾은 경로는 건너뛴다",
+			cards: []SplitCard{
+				{SessionID: "s1", MachineID: m, Worktree: "/elsewhere", CCSessionID: cc},
+				{SessionID: "s2", MachineID: m, Worktree: "/elsewhere/sub", CCSessionID: cc},
+			},
+			roots: testRoots,
+			want:  0,
+			why:   "git 이 모르는 트리에 대고 '접혔어야 한다'를 판정할 근거가 없다",
 		},
 		{
 			name: "경로 성분 경계를 지킨다",
@@ -130,24 +211,14 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 				{SessionID: "s1", MachineID: m, Worktree: "/repo", CCSessionID: cc},
 				{SessionID: "s2", MachineID: m, Worktree: "/repo-backup", CCSessionID: cc},
 			},
-			want: 0,
-			why:  "/repo 는 /repo-backup 의 조상이 아니다 — 문자열 접두로 보면 오답이 난다",
-		},
-		{
-			name: "한 대화 안의 무관한 갈림 쌍을 둘 다 보고한다",
-			cards: []SplitCard{
-				{SessionID: "s1", MachineID: m, Worktree: "/a", CCSessionID: cc},
-				{SessionID: "s2", MachineID: m, Worktree: "/a/b", CCSessionID: cc},
-				{SessionID: "s3", MachineID: m, Worktree: "/x", CCSessionID: cc},
-				{SessionID: "s4", MachineID: m, Worktree: "/x/y", CCSessionID: cc},
-			},
-			want: 2,
-			why:  "대표 하나만 내면 /x↔/x/y 가 조용히 사라진다 — 실측에서 한 대화가 워크트리 16개에 걸쳤다",
+			roots: []string{"/repo", "/repo-backup"},
+			want:  0,
+			why:   "/repo 는 /repo-backup 의 조상이 아니다 — 문자열 접두로 보면 오답이 난다",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := DetectUnnormalizedSplit(c.cards)
+			got := DetectUnnormalizedSplit(c.cards, c.roots)
 			if len(got) != c.want {
 				t.Fatalf("보고 %d건, 원하는 것 %d건 — %s\n입력: %+v\n결과: %+v",
 					len(got), c.want, c.why, c.cards, got)
@@ -156,44 +227,42 @@ func TestDetectUnnormalizedSplit(t *testing.T) {
 	}
 }
 
-// 대조 단정 — 함수가 항상 빈 결과를 내도 위 시험 다섯이 초록이다.
-// 이 시험이 그 거짓 초록을 막는다.
+// 대조 단정 — 함수가 항상 빈 결과를 내도 위 표가 통과하는 케이스가 많다.
+// 이 시험이 보고의 **내용**까지 잠근다.
 func TestDetectUnnormalizedSplitReportsDetail(t *testing.T) {
 	got := DetectUnnormalizedSplit([]SplitCard{
 		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s2", MachineID: "m", Worktree: "/repo/a", CCSessionID: "cc"},
 		{SessionID: "s3", MachineID: "m", Worktree: "/repo/a/b", CCSessionID: "cc"},
-	})
+	}, testRoots)
 	if len(got) != 1 {
 		t.Fatalf("보고 %d건, 원하는 것 1건: %+v", len(got), got)
 	}
 	r := got[0]
-	if r.Ancestor != "/repo" {
-		t.Errorf("조상 %q, 원하는 것 %q", r.Ancestor, "/repo")
+	if r.Root != "/repo" {
+		t.Errorf("트리 %q, 원하는 것 %q", r.Root, "/repo")
 	}
-	if len(r.Descendants) != 2 {
-		t.Errorf("자손 %d개, 원하는 것 2개: %v", len(r.Descendants), r.Descendants)
+	if want := []string{"/repo", "/repo/a", "/repo/a/b"}; !reflect.DeepEqual(r.Recorded, want) {
+		t.Errorf("기록된 값 %v, 원하는 것 %v", r.Recorded, want)
 	}
-	if len(r.SessionIDs) != 3 {
-		t.Errorf("카드 %d장, 원하는 것 3장: %v", len(r.SessionIDs), r.SessionIDs)
+	if want := []string{"s1", "s2", "s3"}; !reflect.DeepEqual(r.SessionIDs, want) {
+		t.Errorf("카드 %v, 원하는 것 %v", r.SessionIDs, want)
 	}
 	if r.CCSessionID != "cc" {
 		t.Errorf("cc %q, 원하는 것 %q", r.CCSessionID, "cc")
 	}
 }
 
-// 사슬은 최상위 하나가 덮는다 — 중첩 보고를 내면 같은 카드가 두 번 세어진다.
-func TestDetectUnnormalizedSplitReportsOnlyTopmostInAChain(t *testing.T) {
+// 소유 루트는 **가장 긴** 것이어야 한다. 가장 짧은 것을 고르면 링크 워크트리가
+// 통째로 저장소 루트에 흡수되고, 그 순간 거짓 양성 56%가 돌아온다.
+func TestOwningRootPicksTheLongestMatch(t *testing.T) {
 	got := DetectUnnormalizedSplit([]SplitCard{
-		{SessionID: "s1", MachineID: "m", Worktree: "/a", CCSessionID: "cc"},
-		{SessionID: "s2", MachineID: "m", Worktree: "/a/b", CCSessionID: "cc"},
-		{SessionID: "s3", MachineID: "m", Worktree: "/a/b/c", CCSessionID: "cc"},
-	})
-	if len(got) != 1 {
-		t.Fatalf("보고 %d건, 원하는 것 1건 — 사슬은 최상위 하나가 덮는다: %+v", len(got), got)
-	}
-	if got[0].Ancestor != "/a" || len(got[0].Descendants) != 2 {
-		t.Fatalf("조상 %q · 자손 %v — 원하는 것 /a 와 자손 2개", got[0].Ancestor, got[0].Descendants)
+		{SessionID: "s1", MachineID: "m", Worktree: "/repo", CCSessionID: "cc"},
+		{SessionID: "s2", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/A", CCSessionID: "cc"},
+		{SessionID: "s3", MachineID: "m", Worktree: "/repo/.flightdeck/worktrees/B", CCSessionID: "cc"},
+	}, testRoots)
+	if len(got) != 0 {
+		t.Fatalf("보고 %d건, 원하는 것 0건 — 셋 다 자기 트리의 루트다: %+v", len(got), got)
 	}
 }
 
@@ -206,16 +275,14 @@ func TestDetectUnnormalizedSplitIsDeterministic(t *testing.T) {
 		{SessionID: "s3", MachineID: "machine-2", Worktree: "/repo", CCSessionID: "cc"},
 		{SessionID: "s4", MachineID: "machine-2", Worktree: "/repo/sub", CCSessionID: "cc"},
 	}
-	want := DetectUnnormalizedSplit(in)
+	want := DetectUnnormalizedSplit(in, testRoots)
 	if len(want) != 2 {
 		t.Fatalf("보고 %d건, 원하는 것 2건: %+v", len(want), want)
 	}
 	for i := 0; i < 200; i++ {
-		got := DetectUnnormalizedSplit(in)
-		for j := range got {
-			if got[j].MachineID != want[j].MachineID || got[j].Ancestor != want[j].Ancestor {
-				t.Fatalf("%d회차에서 순서가 흔들렸다: %+v vs %+v", i, got, want)
-			}
+		got := DetectUnnormalizedSplit(in, testRoots)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%d회차에서 결과가 흔들렸다:\n%+v\nvs\n%+v", i, got, want)
 		}
 	}
 }
@@ -236,7 +303,7 @@ func TestSameConversation(t *testing.T) {
 - [ ] **Step 2: 실패를 확인한다**
 
 ```bash
-cd plugins/flightdeck/server && go test ./internal/judge/ -run 'TestDetectUnnormalizedSplit|TestSameConversation' -v
+cd plugins/flightdeck/server && go test ./internal/judge/ -run 'TestDetectUnnormalizedSplit|TestOwningRoot|TestSameConversation' -v
 ```
 
 기대: 컴파일 실패 — `undefined: SplitCard` · `undefined: DetectUnnormalizedSplit` · `undefined: SameConversation`.
@@ -272,111 +339,88 @@ type SplitCard struct {
 	CCSessionID string
 }
 
-// SplitReport 는 한 대화의 카드가 상하위 경로로 갈렸다는 **보고**다.
+// SplitReport 는 한 대화가 **같은 트리**에 대해 서로 다른 worktree 값을 기록했다는 보고다.
 type SplitReport struct {
 	CCSessionID string
 	MachineID   string
-	Ancestor    string   // 조상 쪽 워크트리(가장 짧은 것)
-	Descendants []string // 그 아래로 잡힌 워크트리들. 정렬된다
+	Root        string   // git 이 아는 워크트리 루트
+	Recorded    []string // 그 트리에 대해 기록된 서로 다른 값들. 정렬된다. 언제나 2개 이상
 	SessionIDs  []string // 이 보고에 걸린 카드 전부. 정렬된다
 }
 
 // DetectUnnormalizedSplit 은 워크트리 정규화가 안 돈 흔적을 찾는다. 순수 함수다.
 //
-// ★★ 이 함수는 이 저장소에서 **경로 접두 관계를 쓰는 유일한 자리**다. DESIGN §3 이
-// 일부러 없앤 축이므로 울타리를 여기 못박는다:
+// 판정은 하나다 — **같은 (머신, cc, 소유 트리)인데 기록된 worktree 값이 둘 이상.**
+// 정규화가 도는 클라이언트는 언제나 그 트리의 git 루트를 적으므로(cmd/fd/env.go
+// resolveProject 의 --show-toplevel) 값이 여럿이면 최소 하나는 정규화 없이 열린 것이다.
 //
+// ★★ 왜 조상-자손 경로 쌍으로 판정하지 않는가. 앞선 판이 그렇게 했다가 실측에서
+// **거짓 양성 56%** 를 냈다(2026-08-05, 조상-자손 쌍 100건 중 56건). 이 저장소의 링크
+// 워크트리는 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 **자손 경로**에 살고,
+// 그것은 정규화가 완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는
+// 못 가르고, git 이 아는 루트 목록이 있어야 갈린다.
+//
+// ★ 울타리:
 //   - 이것은 정체 판정도 겹침 판정도 **아니다. 보고다.** 어느 소비자도 이 결과로 두
 //     카드를 같은 세션이라고 보지 않는다. 카드는 여전히 3중키로만 같다.
 //   - **CCSessionID 가 같을 때만 본다.** 앞선 세션이 상하위 17건을 가짜 겹침으로 셌다가
 //     "전부 다른 대화였다"로 정정한 사고가 있다. 그 17건은 cc 가 달라 여기 안 걸린다.
-//   - **형제 트리는 안 건드린다.** `.flightdeck/worktrees/A` 와 `/B` 는 서로 다른 git
-//     워크트리이고 같은 repo-상대 경로를 만지면 병합 때 실제로 충돌한다 — 진짜 겹침이다.
-//   - **빈 cc 끼리는 같다고 보지 않는다.** 못 읽음을 값으로 접으면 관측이 깨진 순간
-//     이 축이 통째로 거짓 초록을 낸다.
-//
-// 정규화(`cmd/fd/env.go` resolveProject, 커밋 4de4b21)가 도는 클라이언트는 이 모양을
-// **만들 수 없다** — 그래서 보고 하나가 곧 "그 카드를 연 클라이언트가 낡았다"의 증거다.
-func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
-	// (머신, cc) 로 묶는다. 빈 cc 는 아예 안 담는다.
-	type key struct{ machine, cc string }
-	groups := map[key][]SplitCard{}
+//   - **형제 트리는 안 건드린다.** 소유 루트가 다르면 아예 다른 묶음이 된다.
+//   - **빈 cc 끼리는 같다고 보지 않는다.**
+//   - **worktreeRoots 가 비면 아무것도 보고하지 않는다.** 못 읽었다는 사실은 호출부가
+//     파생 실패로 남긴다 — 여기서 추측으로 보고하면 위의 56%가 그대로 돌아온다.
+func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport {
+	roots := make([]string, 0, len(worktreeRoots))
+	for _, r := range worktreeRoots {
+		if r = strings.TrimSpace(r); r != "" {
+			roots = append(roots, filepath.Clean(r))
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+
+	type key struct{ machine, cc, root string }
+	groups := map[key]map[string][]string{} // (머신,cc,트리) → worktree 값 → 세션 id 들
 	for _, c := range cards {
 		cc := strings.TrimSpace(c.CCSessionID)
 		m := strings.TrimSpace(c.MachineID)
-		if cc == "" || m == "" {
+		wt := strings.TrimSpace(c.Worktree)
+		if cc == "" || m == "" || wt == "" {
 			continue
 		}
-		groups[key{m, cc}] = append(groups[key{m, cc}], c)
+		wt = filepath.Clean(wt)
+		if wt == "." {
+			continue
+		}
+		root := owningRoot(wt, roots)
+		if root == "" {
+			continue // git 이 모르는 트리다 — "접혔어야 한다"를 판정할 근거가 없다
+		}
+		k := key{m, cc, root}
+		if groups[k] == nil {
+			groups[k] = map[string][]string{}
+		}
+		groups[k][wt] = append(groups[k][wt], c.SessionID)
 	}
 
 	var out []SplitReport
-	for k, g := range groups {
-		// 워크트리를 정규화해 중복을 없앤다. 한 워크트리에 카드가 여럿이면 그것은
-		// 이 축이 아니다(같은 트리의 다른 창 — 영영 안 합쳐지는 것이 옳다).
-		byWT := map[string][]string{}
-		for _, c := range g {
-			wt := filepath.Clean(strings.TrimSpace(c.Worktree))
-			if wt == "" || wt == "." {
-				continue
-			}
-			byWT[wt] = append(byWT[wt], c.SessionID)
-		}
+	for k, byWT := range groups {
 		if len(byWT) < 2 {
-			continue
+			continue // 한 트리에 값 하나 — 정규화가 돈 모양이다
 		}
-		wts := make([]string, 0, len(byWT))
-		for wt := range byWT {
-			wts = append(wts, wt)
+		rec := make([]string, 0, len(byWT))
+		var ids []string
+		for wt, sids := range byWT {
+			rec = append(rec, wt)
+			ids = append(ids, sids...)
 		}
-		sort.Strings(wts)
-
-		// 가장 짧은 것부터 보며, 자기 아래로 들어간 것을 모은다.
-		//
-		// ★ wts 는 사전순 정렬돼 있고, 경로 접두는 언제나 사전순으로 더 작다 —
-		//   그래서 조상은 항상 자기 자손보다 먼저 온다. 이 성질에 기대어 "이미 낸
-		//   조상의 아래면 건너뛴다"로 **최상위 조상 하나만** 낸다.
-		//   사슬(/a → /a/b → /a/b/c)은 /a 하나가 셋 다 덮으므로 보고도 하나여야 한다.
-		var chosen []string
-		for _, anc := range wts {
-			nested := false
-			for _, c := range chosen {
-				if isDescendant(c, anc) {
-					nested = true
-					break
-				}
-			}
-			if nested {
-				continue
-			}
-			var desc []string
-			for _, d := range wts {
-				if d != anc && isDescendant(anc, d) {
-					desc = append(desc, d)
-				}
-			}
-			if len(desc) == 0 {
-				continue
-			}
-			chosen = append(chosen, anc)
-			ids := append([]string{}, byWT[anc]...)
-			for _, d := range desc {
-				ids = append(ids, byWT[d]...)
-			}
-			sort.Strings(desc)
-			sort.Strings(ids)
-			out = append(out, SplitReport{
-				CCSessionID: k.cc, MachineID: k.machine,
-				Ancestor: anc, Descendants: desc, SessionIDs: ids,
-			})
-			// ★ 여기서 break 하지 않는다. 한 대화가 **서로 무관한** 갈림 쌍을 둘 이상
-			//   가질 수 있고(/a→/a/b 와 /x→/x/y), 대표 하나만 내면 나머지가 조용히
-			//   사라진다. 실측에서 한 대화가 워크트리 16개에 걸쳐 있었다 — 실제로 나는 모양이다.
-			//
-			//   대신 **배너는 len(reports) 가 아니라 서로 다른 cc 수를 센다**(splitBanner).
-			//   보고는 갈림 그룹 단위이고 배너가 세는 것은 대화 단위라, 둘을 같은 수로
-			//   접으면 대화 하나가 여러 개로 부풀어 보인다.
-		}
+		sort.Strings(rec)
+		sort.Strings(ids)
+		out = append(out, SplitReport{
+			CCSessionID: k.cc, MachineID: k.machine,
+			Root: k.root, Recorded: rec, SessionIDs: ids,
+		})
 	}
 	// ★ 정렬 키가 셋이어야 결정적이다. cc 하나만 쓰면 같은 cc 가 서로 다른 머신
 	//   둘에서 보고를 만들 때 두 보고의 상대 순서가 맵 순회에 따라 흔들린다 —
@@ -388,9 +432,25 @@ func DetectUnnormalizedSplit(cards []SplitCard) []SplitReport {
 		if out[i].MachineID != out[j].MachineID {
 			return out[i].MachineID < out[j].MachineID
 		}
-		return out[i].Ancestor < out[j].Ancestor
+		return out[i].Root < out[j].Root
 	})
 	return out
+}
+
+// owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
+//
+// ★ 가장 긴 것을 골라야 한다. 가장 짧은 것을 고르면 `<repo>/.flightdeck/worktrees/X` 가
+// 통째로 저장소 루트에 흡수되고, 그 순간 거짓 양성 56%가 돌아온다.
+func owningRoot(p string, roots []string) string {
+	best := ""
+	for _, r := range roots {
+		if p == r || isDescendant(r, p) {
+			if len(r) > len(best) {
+				best = r
+			}
+		}
+	}
+	return best
 }
 
 // isDescendant 는 child 가 parent **아래**인지다. 순수 함수다.
@@ -412,29 +472,32 @@ func isDescendant(parent, child string) bool {
 - [ ] **Step 4: 초록을 확인한다**
 
 ```bash
-cd plugins/flightdeck/server && go test ./internal/judge/ -run 'TestDetectUnnormalizedSplit|TestSameConversation' -v
+cd plugins/flightdeck/server && go test ./internal/judge/ -v
 ```
 
-기대: PASS 전부.
+기대: 새 시험 전부 PASS, **기존 judge 시험도 전부 PASS**.
 
-- [ ] **Step 5: 수정을 되돌려 빨강을 확인한다**
+- [ ] **Step 5: 수정을 되돌려 빨강을 확인한다 — 셋**
 
-`DetectUnnormalizedSplit` 본문을 `return nil` 하나로 바꾸고 위 명령을 다시 돌린다.
-기대: `TestDetectUnnormalizedSplit/조상·자손이면_보고한다` 와 `TestDetectUnnormalizedSplitReportsDetail` 이 FAIL.
-확인했으면 되돌린다.
+이 과제의 품질은 이 단계가 정한다. 셋 다 **실제 실패 메시지를 눈으로 보고** 보고서에 적어라.
 
-이어서 `isDescendant` 를 `strings.HasPrefix(child, parent)` 로 바꾸고 다시 돌린다.
-기대: `경로_성분_경계를_지킨다` 가 FAIL. 확인했으면 되돌린다.
+1. `owningRoot` 가 가장 **짧은** 루트를 고르게 바꾼다(`len(r) > len(best)` → `best == ""`).
+   기대: `저장소_루트와_링크_워크트리_루트는_보고하지_않는다` 와 `TestOwningRootPicksTheLongestMatch` 가 FAIL.
+   **이것이 거짓 양성 56%를 막는 단정이다.**
+2. `if len(roots) == 0 { return nil }` 을 지운다.
+   기대: `루트를_모르면_아무것도_보고하지_않는다` 가 FAIL.
+3. 정렬 키를 `CCSessionID` 하나로 되돌린다.
+   기대: `TestDetectUnnormalizedSplitIsDeterministic` 이 FAIL(200회 중 어딘가에서).
+
+셋 다 확인했으면 되돌린다.
 
 - [ ] **Step 6: 커밋**
 
 ```bash
 cd plugins/flightdeck/server && gofmt -l . && go vet ./internal/judge/
 git add internal/judge/split.go internal/judge/split_test.go
-git commit -m "feat(flightdeck): 정규화가 안 돈 흔적을 원장만으로 탐지한다 — 접두 일치는 보고 전용이다"
+git commit -m "feat(flightdeck): 정규화가 안 돈 흔적을 원장만으로 탐지한다 — 판정은 '같은 트리에 값이 여럿'이다"
 ```
-
----
 
 ### Task 2: `service` — 카드를 대화 단위로 접는다
 
@@ -661,8 +724,18 @@ git commit -m "feat(flightdeck): 보드가 카드를 대화 단위로 접는다 
 - Test: `plugins/flightdeck/server/internal/service/board_conversation_test.go` (Task 2 의 파일에 더한다)
 
 **Interfaces:**
-- Consumes: `judge.DetectUnnormalizedSplit([]judge.SplitCard) []judge.SplitReport` (Task 1) · `service.SessionCard` (기존)
-- Produces: `service.BoardView.Splits []judge.SplitReport` · `func service.splitCardsOf(cards []SessionCard) []judge.SplitCard`
+- Consumes: `judge.DetectUnnormalizedSplit(cards []judge.SplitCard, worktreeRoots []string) []judge.SplitReport` (Task 1) · `service.SessionCard` (기존) · `Service.worktreeIndex` (기존, `sessionCards` 안에서 이미 돈다)
+- Produces: `service.BoardView.Splits []judge.SplitReport` · `func service.splitCardsOf(cards []SessionCard) []judge.SplitCard` · `sessionCards` 가 워크트리 루트 목록을 함께 돌려준다
+
+**이 과제의 핵심은 루트 목록을 어디서 얻느냐다**
+
+`DetectUnnormalizedSplit` 은 git 이 아는 워크트리 루트 목록이 있어야 돈다(없으면 `nil` 을 낸다).
+그 목록은 `sessionCards` 안에서 이미 계산된다 — `wts, heads = s.worktreeIndex(ctx, g, d)` 의
+`wts` 가 `워크트리 경로 → 브랜치` 맵이고, 그 **키가 곧 루트 목록**이다.
+
+**`worktreeIndex` 를 다시 부르지 마라.** 그것은 `git worktree list` 한 번이고 이 서버에서
+가장 비싼 일의 일부다(`sessionCards` 머리말이 그 비용을 세는 이유를 적어 뒀다). 대신
+`sessionCards` 의 반환에 루트 목록을 더한다.
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -719,14 +792,60 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 ```go
 	// Splits 는 워크트리 정규화가 안 돈 흔적이다. **비어 있는 것이 정상**이고,
 	// 하나라도 있으면 그 카드를 연 클라이언트가 4de4b21 이전 판이라는 뜻이다.
+	//
+	// ★ git 을 못 읽으면 이 축은 **판정 자체를 안 한다**(빈 슬라이스). 그 사실은
+	//   Failures 에 남는다 — 침묵과 "갈림 없음"을 구분해야 한다.
 	Splits []judge.SplitReport `json:"splits,omitempty"`
 ```
 
-`Board` 의 `view.Conversations = …` 바로 다음 줄에 더한다.
+`sessionCards` 의 시그니처에 루트 목록을 더한다. 지금은
 
 ```go
-	view.Splits = judge.DetectUnnormalizedSplit(splitCardsOf(cards))
+func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
 ```
+
+이고, 이것을 다음으로 바꾼다.
+
+```go
+// 반환의 둘째 값은 **git 이 아는 워크트리 루트 목록**이다.
+// 갈림 탐지가 그것 없이는 못 돌고(judge.DetectUnnormalizedSplit), 여기서 이미
+// `git worktree list` 를 한 번 돌렸으므로 호출부가 다시 부르면 그 비용이 두 배가 된다.
+// git 을 못 읽었으면 nil 이다 — 빈 것과 못 읽은 것을 호출부가 가를 수 있어야 한다.
+func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
+```
+
+함수 안에서 `wts` 가 채워진 직후(앵커: `wts, heads = s.worktreeIndex(ctx, g, d)`) 루트를 모은다.
+
+```go
+		wts, heads = s.worktreeIndex(ctx, g, d)
+		roots = make([]string, 0, len(wts))
+		for wt := range wts {
+			roots = append(roots, wt)
+		}
+		sort.Strings(roots) // 파생 결과가 맵 순회 순서에 안 새게
+```
+
+`roots` 는 함수 머리에서 `var roots []string` 으로 선언한다. 모든 `return` 을 세 값으로
+고친다(오류 갈래는 `return nil, nil, err`).
+
+`Board` 의 호출부를 고친다. 앵커: `cards, err := s.sessionCards(...)`.
+
+```go
+	cards, roots, err := s.sessionCards(ctx, proj, s.cut(now, window), opt.Self, d)
+```
+
+그리고 `view.Conversations = …` 바로 다음 줄에 더한다.
+
+```go
+	// ★ roots 가 비면 DetectUnnormalizedSplit 이 nil 을 낸다 — 추측으로 보고하면
+	//   실측 기준 거짓 양성이 56%다(2026-08-05). 그 침묵을 파생 실패로 남긴다.
+	if len(roots) == 0 {
+		d.note("split-detect", "워크트리 루트를 못 읽어 갈림 탐지를 건너뛰었다")
+	}
+	view.Splits = judge.DetectUnnormalizedSplit(splitCardsOf(cards), roots)
+```
+
+`d.note` 의 정확한 시그니처는 같은 파일의 기존 호출부(`d.note("project-path", …)`)를 따른다.
 
 - [ ] **Step 4: 초록을 확인한다**
 
@@ -811,8 +930,8 @@ func TestRenderBoardShowsSplitBanner(t *testing.T) {
 	v := service.BoardView{
 		Project: model.Project{ID: "p"}, At: now, Window: 2 * time.Hour,
 		Splits: []judge.SplitReport{{
-			CCSessionID: "cc-a", MachineID: "m", Ancestor: "/repo",
-			Descendants: []string{"/repo/sub"}, SessionIDs: []string{"s1", "s2"},
+			CCSessionID: "cc-a", MachineID: "m", Root: "/repo",
+			Recorded: []string{"/repo", "/repo/sub"}, SessionIDs: []string{"s1", "s2"},
 		}},
 	}
 	out := RenderBoard(v, BoardRenderOptions{Now: now})
