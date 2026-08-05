@@ -166,23 +166,45 @@ type Bundle struct {
 // 두 규칙이 조용히 표류한다.
 func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Rejection) {
 	var fit []Candidate
-	var rejected []model.Rejection
+	byID := make(map[string]Candidate, len(in.Candidates))
+	rejByItem := make(map[string][]model.Rejection, len(in.Candidates))
+	order := make([]string, 0, len(in.Candidates))
+
 	for _, c := range in.Candidates {
+		byID[c.Item.ID] = c
+		order = append(order, c.Item.ID)
 		rs := rejectionsFor(c, in)
 		if len(rs) == 0 {
 			fit = append(fit, c)
 			continue
 		}
-		rejected = append(rejected, rs...)
+		rejByItem[c.Item.ID] = rs
 	}
 	if len(fit) == 0 {
-		return nil, rejected
+		return nil, flatten(order, rejByItem)
 	}
 	sort.SliceStable(fit, func(i, j int) bool { return lessCandidate(fit[i], fit[j]) })
 
+	// 흡수 후보: 탈락 사유가 **전부** after-unmet-item 인 항목만.
+	// 하나라도 다른 코드(폐기·미조회·오타·sha·job 등)가 섞이면 흡수하지 않는다 —
+	// "기다리면 풀린다" 가 아닌 것을 충족으로 접는 순간 이 판정의 존재 이유가 무너진다.
+	absorbable := map[string]Candidate{}
+	for id, rs := range rejByItem {
+		all := true
+		for _, r := range rs {
+			if r.Reason != AfterUnmetItem {
+				all = false
+				break
+			}
+		}
+		if all && len(rs) > 0 {
+			absorbable[id] = byID[id]
+		}
+	}
+
 	bundles := make([]Bundle, 0, len(fit))
 	for _, lead := range fit {
-		bundles = append(bundles, bundleAround(lead, fit, sib))
+		bundles = append(bundles, bundleAround(lead, fit, absorbable, sib))
 	}
 	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
 
@@ -194,37 +216,62 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 	picked := map[string]bool{best.Lead.Item.ID: true}
 	for _, m := range best.Members {
 		picked[m.Item.ID] = true
+		delete(rejByItem, m.Item.ID) // 흡수됐으면 원장에서 뺀다 — picked 이므로. 두 번 세면 불변식이 깨진다.
 	}
 	for _, c := range fit {
 		if picked[c.Item.ID] {
 			continue
 		}
-		rejected = append(rejected, model.Rejection{Item: c.Item.ID, Reason: RejectNotTop,
+		rejByItem[c.Item.ID] = append(rejByItem[c.Item.ID], model.Rejection{
+			Item: c.Item.ID, Reason: RejectNotTop,
 			Detail: fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
 				best.Lead.Item.ID, len(best.Members)+1)})
 	}
-	return &best, rejected
+	return &best, flatten(order, rejByItem)
+}
+
+// flatten 은 항목별 사유를 **입력 순서대로** 편다.
+// 맵을 그대로 순회하면 같은 입력에 사유 순서가 흔들리고,
+// 그러면 pick_eval 로 쌓인 분포를 시점 간에 비교할 수 없다.
+func flatten(order []string, byItem map[string][]model.Rejection) []model.Rejection {
+	var out []model.Rejection
+	for _, id := range order {
+		out = append(out, byItem[id]...)
+	}
+	return out
 }
 
 // bundleAround 는 선두 하나를 중심으로 직접 이웃만 모은다.
-func bundleAround(lead Candidate, fit []Candidate, sib SiblingIndex) Bundle {
+// absorbable 은 EligibleBundle 이 미리 걸러 둔 "흡수 대상"이다 —
+// 사유가 전부 after-unmet-item 인 탈락 항목만 여기 들어온다.
+func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candidate, sib SiblingIndex) Bundle {
 	b := Bundle{Lead: lead, Dependents: lead.Dependents, Oldest: lead.Item.CreatedAt}
-	for _, c := range fit {
-		if c.Item.ID == lead.Item.ID {
-			continue
-		}
-		l := LinkOf(lead, c, sib)
-		if l == nil {
-			continue
-		}
+	add := func(c Candidate, l Link) {
 		b.Members = append(b.Members, c)
-		b.Links = append(b.Links, *l)
+		b.Links = append(b.Links, l)
 		b.Dependents += c.Dependents
 		if c.Item.CreatedAt.Before(b.Oldest) {
 			b.Oldest = c.Item.CreatedAt
 		}
 	}
+	for _, c := range fit {
+		if c.Item.ID == lead.Item.ID {
+			continue
+		}
+		if l := LinkOf(lead, c, sib); l != nil {
+			add(c, *l)
+		}
+	}
+	// 흡수 — 선두가 그 항목의 **미충족 선행 전부**여야 한다.
+	// 하나라도 밖에 있으면 밖의 것을 기다려야 하는 사실이 안 바뀐다.
+	for _, c := range sortedCands(absorbable) {
+		if blockedOnlyBy(c, lead.Item.ID) {
+			add(c, Link{Item: c.Item.ID, Axes: []BundleAxis{AxisAfter},
+				Detail: fmt.Sprintf("선행 %s 를 같은 묶음이 함께 한다 — 랜딩을 안 기다린다", lead.Item.ID)})
+		}
+	}
 	// fit 이 이미 lessCandidate 로 정렬돼 있어 Members·Links 도 그 순서를 물려받는다.
+	// 흡수된 구성원은 sortedCands(=id 사전순)로 뒤에 덧붙는다.
 	//
 	// ★ 시각은 마이크로초까지 찍는다. 분 단위로 자르면 실측의 형제들처럼
 	// 생성 시각이 초 단위로만 다른 두 묶음이 ③으로 갈렸는데도 Reason 문자열은
@@ -233,6 +280,37 @@ func bundleAround(lead Candidate, fit []Candidate, sib SiblingIndex) Bundle {
 	b.Reason = fmt.Sprintf("의존자 합 %d · 묶음 %d건 · 최고령 %s · 선두 %s",
 		b.Dependents, len(b.Members)+1, b.Oldest.UTC().Format("2006-01-02 15:04:05.000000"), lead.Item.ID)
 	return b
+}
+
+// blockedOnlyBy 는 이 항목의 선행이 **정확히 그 항목 하나**뿐인지 본다.
+// 항목 선행이 여럿이면 전부 묶음 안이어야 하는데, 방사형 묶음의 구성원은
+// 선두와만 직접 이어지므로 "전부"가 성립하는 경우가 곧 "하나뿐"이다.
+func blockedOnlyBy(c Candidate, leadID string) bool {
+	n := 0
+	for _, a := range c.Item.After {
+		if a.Item == "" {
+			return false // sha·job 선행이 섞여 있으면 흡수하지 않는다
+		}
+		if a.Item != leadID {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// sortedCands 는 맵을 id 사전순으로 편다. 맵 순회는 순서가 흔들린다.
+func sortedCands(m map[string]Candidate) []Candidate {
+	ids := make([]string, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Candidate, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, m[id])
+	}
+	return out
 }
 
 // lessBundle 은 추천 순서다. 조정할 상수가 하나도 없다.
