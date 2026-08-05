@@ -861,11 +861,17 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 			"아직 선점하지 않았다 — 집으려면 item_id 에 %s 를 주고 다시 불러라",
 			best.Reason, len(cands), item.ID)
 	}
-	if notes, err := s.linkedJudgments(ctx, proj.ID, item.ID); err != nil {
-		return PickResult{}, err
-	} else {
-		res.Notes = notes
-	}
+	// ★ 여기서 오류를 올리면 **이미 만들어 원장에 적기까지 한 결과를 통째로 버린다.**
+	// 이 줄에 오기까지 후보 수집·판정·묶음 조립이 끝났고 RecordPickEval 이 이미
+	// "이 세션에 X 를 추천했다"를 썼다. 거기서 500 을 내면 원장과 응답이 갈라진다 —
+	// 다음 사람이 pick_eval 을 읽고 "추천이 나갔는데 왜 아무도 안 집었나"를 묻는데
+	// 그 질문에 답할 근거가 어디에도 없다.
+	//
+	// 그리고 같은 함수가 **같은 테이블을 읽는 다른 조회**(siblingIndex)에 대해서는 이미
+	// 부드럽게 실패하며 그 사실을 Bundle.Scope 에 적는다. 한 함수 안에 정반대의 실패
+	// 정책 둘이 있었다. notesOrNote 는 그 비대칭을 없애는 자리이고, 못 읽은 사실은
+	// 아래 d.result 가 파생 실패 축으로 그대로 나른다(침묵으로 접지 않는다).
+	s.notesOrNote(ctx, proj.ID, item.ID, &res, d)
 	res.Derived = d.result(now)
 	s.log.InfoContext(ctx, "추천",
 		"project", proj.ID, "session_id", in.SessionID, "item", item.ID,
@@ -1020,8 +1026,12 @@ func (s *Service) heldResources(ctx context.Context, project string) (map[string
 
 // notesOrNote 는 연결된 판단을 싣거나, **못 실은 사실을 이름으로 남긴다.**
 //
-// ★ 왜 오류를 안 올리나. 이 함수를 부르는 두 자리(재개 · 선점 커밋 직후)는 둘 다
-// 원장이 이미 "이 세션이 이 항목을 쥐고 있다"고 말한 뒤다. 거기서 판단 조회 실패로
+// ★ 왜 오류를 안 올리나. 이 함수를 부르는 세 자리는 전부 **원장이 이미 무언가를 말한
+// 뒤**다 — 선점 두 자리(재개 · 선점 커밋 직후)는 "이 세션이 이 항목을 쥐고 있다"를,
+// 추천 한 자리(pickRecommend 끝)는 RecordPickEval 이 쓴 "이 세션에 X 를 추천했다"를.
+// 어느 쪽이든 여기서 오류를 올리면 **원장과 응답이 갈라진다.**
+//
+// 선점 쪽은 값이 더 크다. 거기서 판단 조회 실패로
 // 오류를 올리면 묶음 구성원 루프가 그것을 rejectionOf 로 받아 **커밋된 선점을
 // Claimed=false·claim-failed 로 보고**하고, 단독 경로는 요청이 통째로 500 이 된다.
 // 어느 쪽이든 세션은 자기가 쥔 항목을 안 쥔 줄 알게 되는데, 이 판에는 선점 만료도
