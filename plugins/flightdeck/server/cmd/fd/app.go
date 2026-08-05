@@ -185,6 +185,29 @@ func (a *App) Rekey(ctx context.Context, sessionID, cc string) (model.Session, e
 	return out, nil
 }
 
+// CloseSession 은 카드를 done 으로 내린다. **관측이지 판정이 아니다** —
+// 사람이(또는 /clear 가) "이 세션은 끝났다"고 말해 준 것을 적는 것뿐이다.
+// 무응답·나이·pid 에서 죽음을 추론하는 자리는 이 도구 어디에도 없다.
+//
+// ★ a.cli.do 를 쓴다 — Rekey 와 같은 이유(offline.go 의 정책표가 모르는 명령을 거절한다)에
+// 하나가 더 있다. **닫기는 지금의 사실이지 나중에 재생할 사실이 아니다.** 오프라인 큐에
+// 쌓아 두면 그 사이 되살아나 일하고 있는 세션을 나중에 다시 죽인다.
+// 서버가 안 닿으면 그 사실을 그대로 올린다 — 조용히 성공한 척하지 않는다.
+func (a *App) CloseSession(ctx context.Context, sessionID, why string) (model.Session, error) {
+	raw, _, err := a.cli.do(ctx, "PATCH", "/api/v1/sessions/"+urlPath(sessionID),
+		patchStateReq{State: string(model.SessionDone), Why: why}, FreshKey(a.cli.Session))
+	if err != nil {
+		return model.Session{}, err
+	}
+	var out struct {
+		Session model.Session `json:"session"`
+	}
+	if uerr := json.Unmarshal(raw, &out); uerr != nil {
+		return model.Session{}, fmt.Errorf("세션 닫기 응답 해석 실패: %w", uerr)
+	}
+	return out.Session, nil
+}
+
 // clientAPIVersion 은 이 바이너리가 아는 계약 버전이다.
 // 서버와 같은 상수를 쓴다 — 두 벌로 두면 스큐 배너가 자기 자신을 못 본다.
 const clientAPIVersion = service.APIVersion

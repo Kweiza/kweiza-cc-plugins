@@ -50,6 +50,22 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 			}
 			existing.Label = label
 		}
+		// ★ 닫힌 카드를 다시 열면 **살아난다.** 이 자리가 없으면 닫기를 넣는 순간
+		// 살아서 일하는 세션이 보드에서 사라진다 — /clear 는 카드를 닫고 곧바로
+		// 같은 카드를 rekey 로 이어받는데, 그때 state 가 done 이면 ListLive 가 그것을
+		// 통째로 뺀다. 이 도구가 이미 두 번 겪은 오판이다(board.go 머리말).
+		//
+		// ★ **되살리기만 한다. 죽이지 않는다.** 그래서 done 일 때만 손댄다:
+		// blocked 는 사람이 사유와 함께 남긴 판단이라 여는 것이 조용히 지우면 안 되고,
+		// active 는 이미 맞다.
+		if existing.State == model.SessionDone {
+			if _, err := t.tx.ExecContext(t.ctx,
+				`UPDATE session SET state = ? WHERE id = ?`,
+				string(model.SessionActive), existing.ID); err != nil {
+				return model.Session{}, false, fmt.Errorf("세션 되살리기 실패(id=%q): %w", existing.ID, err)
+			}
+			existing.State = model.SessionActive
+		}
 		return existing, false, nil
 	case errors.Is(err, ErrNotFound):
 		// 아래로

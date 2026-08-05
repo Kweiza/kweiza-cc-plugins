@@ -63,14 +63,37 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 		// ★ Stop 은 async 면 안 된다 — 이 훅의 출력이 곧 처방 배달이고, async 는
 		//   그 출력의 운명을 안 정해 준다(설계 §6).
 		"Stop": {"", false},
+		// ★ SessionEnd 는 **clear 만** 받는다. 아래 단정이 그 폭을 붙들고 있다.
+		"SessionEnd": {"clear", true},
 	}
 	if len(hf.Hooks) != len(want) {
 		t.Fatalf("훅 이벤트가 %d개다 — %d개여야 한다: %v", len(hf.Hooks), len(want), keysOf(hf.Hooks))
 	}
-	// ★ SessionEnd 는 **없어야 한다.** reason 열거에 크래시·컨텍스트 소진이 없어서
-	//   그 위에 아무것도 세울 수 없다(설계 §6).
-	if _, bad := hf.Hooks["SessionEnd"]; bad {
-		t.Fatal("SessionEnd 훅이 있다 — 세션 종료를 신뢰성 있게 감지할 수단이 없다는 것이 이 설계의 전제다")
+
+	// ★★ SessionEnd 의 폭을 여기서 못박는다. **이 단정이 이 파일에서 가장 중요하다.**
+	//
+	// 앞선 판은 SessionEnd 를 통째로 금지했고 그 사유는 "세션 종료를 신뢰성 있게 감지할
+	// 수단이 없다"였다. **그 전제는 지금도 참이다** — 설치본 2.1.221·2.1.222 를 뜯어 보면
+	// executeSessionEndHooks 를 부르는 자리가 `o3t("clear", …)` 와 `o3t("resume", …)` 둘뿐이고,
+	// logout·prompt_input_exit·other·bypass_permissions_disabled 는 zod 열거값에만 있고
+	// 아무도 안 쏜다. 훅 이벤트 31종에도 프로세스 종료를 알리는 것이 없다.
+	//
+	// 바뀐 것은 **쓰임**이다. 이 훅은 죽음을 감지하지 않는다. /clear 로 떠나는 대화의 카드를
+	// 닫을 뿐이고, 그 판정은 되돌릴 수 있다(Tx.OpenSession 이 닫힌 카드를 되살린다).
+	//
+	// 그래서 matcher 를 넓히면 안 된다:
+	//   · logout·prompt_input_exit·other — 아무도 안 쏜다. 넣으면 "잡고 있다"는 착각만 생긴다
+	//     (prompt_input_exit 옆에는 "Session keeps running. Use /stop to end it." 이 박혀 있다)
+	//   · resume — **/fork 도 같은 사유로 온다.** fork 에서 원본 카드를 닫는 것이 옳은지는
+	//     별도 판단이고 지금 그 근거가 없다
+	se := hf.Hooks["SessionEnd"]
+	if len(se) != 1 {
+		t.Fatalf("SessionEnd 그룹이 %d개다 — 하나여야 한다", len(se))
+	}
+	if se[0].Matcher != "clear" {
+		t.Fatalf("SessionEnd 의 matcher 가 %q 다 — clear 하나여야 한다. "+
+			"이 훅은 프로세스 종료를 못 잡는다(사유 넷은 아무도 안 쏘고, resume 은 /fork 와 공유한다)",
+			se[0].Matcher)
 	}
 
 	for ev, w := range want {
@@ -105,7 +128,7 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 	// 조용히 아무것도 안 하고 0 을 낸다 — 그것이 이 단정을 두는 이유다.
 	known := map[string]bool{
 		"session-start": true, "user-prompt": true, "post-tool": true, "pre-compact": true,
-		"stop": true,
+		"stop": true, "session-end": true,
 	}
 	for ev, groups := range hf.Hooks {
 		cmd := groups[0].Hooks[0].Command
