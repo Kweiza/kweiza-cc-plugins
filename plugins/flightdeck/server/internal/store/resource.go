@@ -234,7 +234,9 @@ func (s *Store) ForceReleaseResource(ctx context.Context, project, resource, rea
 	return s.Tx(ctx, func(t *Tx) error { return t.ForceReleaseResource(project, resource, reason) })
 }
 
-// listHeld 는 지금 쥐어져 있는 자원 전부를 낸다. 획득이 오래된 순이다.
+// listHeld 는 지금 쥐어져 있는 자원 전부를 낸다.
+// 획득이 오래된 순이고, 같은 시각이면 자원 이름순이다 — ORDER BY 가 여기 있으므로
+// 그 사실의 출처는 이 자리다(공개 짝 둘은 이 문장을 소비자에게 보이게 옮겨 적은 것이다).
 //
 // Tx 안팎에서 같은 질의가 필요해서(finish 의 holds 읽기를 트랜잭션 안으로 옮기는 자리,
 // ReleaseLaneRow 의 "점유가 있을 때만 회수" 판정) 자유 함수로 뺐다 — heldBy 와 같은 자리다.
@@ -269,12 +271,26 @@ func listHeld(ctx context.Context, q dbtx, project string) ([]model.ResourceHold
 	return out, nil
 }
 
-// ListHeld 는 트랜잭션 밖에서 읽는다.
+// ListHeld 는 지금 쥐어져 있는 자원 전부를 트랜잭션 밖에서 낸다.
+// 획득이 오래된 순이고, 같은 시각이면 자원 이름순이다.
+//
+// ★ 이 순서에 **분기하는** 호출자는 지금 없다 — pick 은 자원→점유자 맵으로 접고
+// (heldResources), finish 는 자기 세션 것만 걸러 반납한다. 정렬을 뒤집어도 그 둘은
+// 안 깨진다. 그런데도 공개 짝이 순서를 말해야 하는 이유는 이 슬라이스가 **재정렬 없이
+// 그대로 사람에게 나가기 때문이다**: 보드의 막힘 절(web/page.go)과 MCP 꼬리의 자원 점유
+// 줄(mcpsrv/render.go)이 둘 다 받은 순서대로 이어 붙인다. 즉 순서가 바뀔 때 상하는 것은
+// 호출자의 판정이 아니라 **사람이 보는 화면**이다.
+//
+// 그래서 이 두 줄은 "계약"이 아니라 **지금 사실**이고, 사실인 채로 두기 위해
+// store_test.go 의 TestListHeldOrdersByAcquisitionThenResource 가 이것을 잠근다 —
+// 그 시험이 서기 전까지는 ORDER BY 를 DESC 로 뒤집어도 다섯 패키지가 전부 초록이었다.
 func (s *Store) ListHeld(ctx context.Context, project string) ([]model.ResourceHold, error) {
 	return listHeld(ctx, s.db, project)
 }
 
 // ListHeld 는 트랜잭션 안에서 읽는다.
+// 정렬은 Store.ListHeld 와 같다(획득이 오래된 순, 같은 시각이면 자원 이름순) — 질의를
+// 자유 함수 하나로 공유하므로 둘이 갈릴 자리가 없다.
 //
 // finish 처럼 "점유 목록을 보고 그것을 근거로 같은 트랜잭션에서 반납까지 하는" 호출자를 위한
 // 것이다 — 밖에서 읽고 트랜잭션 안에서 반납하면 그 사이에 남이 잡을 수 있고, 그러면

@@ -285,11 +285,24 @@ func listLandingQueue(ctx context.Context, q dbtx, project string) ([]model.Land
 }
 
 // ListLandingQueue 는 트랜잭션 밖에서 줄을 읽는다(보드·화면).
+// 순번(오래된 순)으로 낸다 — 줄에 선 차례 그대로다.
+//
+// ★ 여기서는 정렬이 표시 취향이 아니라 **의미다.** ListHeld 와 갈리는 점이 그것이다:
+// service.LandingLane 이 이 슬라이스를 그대로 LaneView.Entries 에 담고, 화면은 담긴
+// 차례를 사람이 읽는 대기 순서로 낸다. 뒤집으면 맨 앞 세션이 꼴찌로 보인다.
+// (TestListLandingQueueKeepsOrderAndDoesNotFilterByWindow 가 이 짝으로 그 순서를 잠근다.)
 func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.LandingRow, error) {
 	return listLandingQueue(ctx, s.db, project)
 }
 
 // ListLandingQueue 는 트랜잭션 안에서 줄을 읽는다.
+// 정렬은 Store 짝과 같다(순번 = 오래된 순) — 질의를 자유 함수 하나로 공유한다.
+//
+// ★ 이 순서에 **분기하는** 호출자가 실제로 있다: service 의 lanePosition 이 이 슬라이스를
+// 훑으며 `pos = i + 1` 로 자기 자리를 센다. 순서가 곧 대답이라 뒤집으면 순번이 거짓이 된다.
+// 다만 **이 짝을 직접 통과하는 순서 시험은 없다**(형제
+// TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction 은 가시성만 본다).
+// 질의가 한 벌이라 Store 짝의 순서 시험이 같은 ORDER BY 를 덮을 뿐이다.
 //
 // ★ 순번을 이 트랜잭션에서 세려면 반드시 이쪽이어야 한다. 밖에서 읽으면 **방금 넣은
 // 내 행이 아직 커밋 전이라 안 보이고**, 그러면 자기 자신이 빠진 줄에서 순번을 세게 된다.
