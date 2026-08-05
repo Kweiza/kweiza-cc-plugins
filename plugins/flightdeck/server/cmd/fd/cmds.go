@@ -83,12 +83,38 @@ func TakeFirstPositional(args []string) (pos string, rest []string) {
 // 여러 개의 위치 인자로 확장한 판이다 — `fd pick <id> <id>… [--flags]` 를 받으려면
 // 첫 번째 하나만 떼는 것으로는 부족하다: 둘째 id 가 그대로 "모르는 플래그"로 보여
 // flag.Parse 가 죽거나, 최악의 경우 조용히 버려진다(바로 이 태스크가 닫는 결함이다).
+//
+// ★ **`args[:i:i]` 로 자른다** — 3-인덱스 슬라이스라 cap 이 len 과 같아진다.
+// `args[:i]` 로 두면(리뷰 라운드 1 finding 3) cap 이 호출자의 원본 배열 끝까지
+// 남고, 호출부가 이 반환값에 `append` 하면 그 배열의 뒤쪽(=rest 가 가리키는 바로 그
+// 메모리)을 덮어쓴다. 지금은 `run()` 이 args 를 다시 안 읽어 우연히 안 터졌을 뿐이다 —
+// 호출부가 하나라도 늘면 그 순간 조용히 값이 바뀐다. cap 을 끊으면 append 가 항상
+// 새 배열을 할당해 이 위험이 원천적으로 없다.
 func TakeLeadingPositionals(args []string) (pos []string, rest []string) {
 	i := 0
 	for i < len(args) && !strings.HasPrefix(args[i], "-") {
 		i++
 	}
-	return args[:i], args[i:]
+	return args[:i:i], args[i:]
+}
+
+// nonBlankPositionals 는 다듬으면 빈 문자열이 되는 항목을 골라낸다. 순수 함수다.
+//
+// ★ 왜 필요한가(리뷰 라운드 1 finding 1 — CRITICAL). `len(itemIDs) == 0` 만으로는
+// `fd pick "   "` 를 못 거른다: 슬라이스 길이는 1이라 통과하고, 그 공백이 그대로
+// URL 경로에 실려 `/api/v1/items/   /claim` 이 되어 서버가 **추천 경로**로 떨어진다.
+// 그러면 아무것도 안 집었는데 종료코드 0·"브랜치: wa"·워크트리 명령이 나온다 —
+// 이 태스크가 닫으려던 바로 그 모양("성공했다고 말하지만 아무것도 안 집었다")이
+// 공백 인자 한 자리로 되살아난다. 옛 코드는 `strings.TrimSpace(itemID) == ""` 로
+// 이 축을 봤는데, 다중 인자로 옮기며 그 트림을 빠뜨렸다.
+func nonBlankPositionals(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // runStatus 는 `fd status` 다. 서버 상태 배너 + 보드.
@@ -284,7 +310,27 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	// 첫 비플래그 인자에서 멈추므로, `fd pick w1 --cc-session x w2` 처럼 id 사이에
 	// 플래그가 끼면 앞에서 이미 w1 을 건졌어도 w2 는 fs.Args() 에 따로 남는다.
 	// 여기서 안 합치면 이 갈래에서도 조용히 버려진다 — 이 태스크가 고치려는 사고 그대로다.
-	itemIDs = append(itemIDs, fs.Args()...)
+	//
+	// ★ 합치는 것도 **같은 "-" 판정을 통과한 것만**이다(리뷰 라운드 1 finding 2).
+	// flag.Parse 는 첫 비플래그 인자에서 멈추므로 그 뒤에 "-" 로 시작하는 오타가 있어도
+	// (`fd pick ta --cc-session x tb --bogus`) fs.Args() 에 그대로 남는다. 이걸
+	// 검증 없이 합치면 "--bogus" 가 항목 id 로 둔갑해 서버에 그대로 실려 가고,
+	// 서버가 그것을 "못 찾음"으로 거절해도 **묶음의 나머지는 성공해 종료코드가 0** 이
+	// 된다 — 같은 오타가 자리만 옮기면 통과하는 비대칭이라 여기서 막는다.
+	tailIDs, leftover := TakeLeadingPositionals(fs.Args())
+	itemIDs = append(itemIDs, tailIDs...)
+	if len(leftover) > 0 {
+		fmt.Fprintf(out, "플래그처럼 보이는 인자를 항목 id 자리로 못 읽었다: %s\n"+
+			"플래그는 id 들 앞이나(맨 뒤 한 무더기로) 모아 써라 — id 사이에 있으면 그 뒤는 이 명령이 못 본다.\n",
+			clip(leftover[0], 80))
+		return 2
+	}
+	// ★ 길이만 보면 안 된다(리뷰 라운드 1 finding 1 — CRITICAL). `fd pick "   "` 는
+	// len(itemIDs)==1 이라 통과했었고, 그 공백이 그대로 URL 에 실려 서버가
+	// **추천 경로**로 떨어졌다 — 아무것도 안 집었는데 종료코드 0·"브랜치: …"·
+	// 워크트리 명령이 나오는, 이 태스크가 닫으려던 바로 그 모양이다. 길이를 재기
+	// 전에 반드시 다듬어 걸러낸다.
+	itemIDs = nonBlankPositionals(itemIDs)
 	if len(itemIDs) == 0 {
 		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id> [<item-id>…] — 여럿이면 첫째가 선두(브랜치)다")
 		return 2
