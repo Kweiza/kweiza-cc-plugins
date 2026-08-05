@@ -246,6 +246,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	} else {
 		foot = append(foot, boardBriefFoot(v)...)
 	}
+	// ★ 레인 절 자리다. service.BoardView 에 Lane *LaneView 가 아직 없다(Task 8 이 붙인다) — 생기면 여기서 낸다.
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
 	} else if len(v.Derived.Failures) > 0 {
@@ -933,4 +934,56 @@ func RenderRefusal(what, reason, guidance string) string {
 		s += "\n" + guidance
 	}
 	return s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// land
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RenderLand 는 land 한 번의 결과다. 순수 함수다.
+//
+// 세 갈래가 뼈대다: **네 차례다**(turn) · **너는 N번째다**(waiting — 앞사람 세션·획득 경과·
+// 마지막 신호 나이) · **네 레인은 회수됐다**(reclaimed — 사유). report·leave 의 확인(released·left)은
+// 그보다 단순해서 한 줄이다.
+//
+// ★ **lane-turn 처방을 언급하지 않는다.** 레인이 넘어갈 때 알림을 미는 통로는 아직 없다
+// (설계 단계 ③ 이 그것을 만든다) — 없는 통로를 가리키는 문구는 이 레포가 결함으로 분류하는
+// 부류다. waiting 응답이 낼 수 있는 유일한 처방은 "다시 물어라"(폴링)뿐이다.
+func RenderLand(r service.LandResult, now time.Time) string {
+	var b strings.Builder
+	switch r.State {
+	case "turn":
+		fmt.Fprintf(&b, "land · 네 차례다 — 레인을 쥐었다 (줄 행 %d)\n", r.RowID)
+		b.WriteString("다 쓰면 result 로 보고하고 반납해라. 줄 서 놓고 그만두려면 leave 를 써라.\n")
+
+	case "waiting":
+		fmt.Fprintf(&b, "land · 너는 %d번째다 (줄 행 %d)\n", r.Position, r.RowID)
+		if r.Holder == nil {
+			b.WriteString("지금 레인을 쥔 사람이 없다 — 앞사람이 아직 land 를 안 불렀다.\n")
+		} else {
+			fmt.Fprintf(&b, "지금 레인: %s · 획득 %s 전",
+				ShortID(r.Holder.SessionID), FormatAge(now.Sub(r.Holder.AcquiredAt)))
+			if r.Holder.LastSignalAt != nil {
+				fmt.Fprintf(&b, " · 마지막 신호 %s 전\n", FormatAge(now.Sub(*r.Holder.LastSignalAt)))
+			} else {
+				b.WriteString(" · 마지막 신호 없음\n")
+			}
+		}
+		b.WriteString("차례는 서버가 밀어주지 않는다 — 다시 물으려면 land 를 다시 불러라.\n")
+
+	case "released":
+		fmt.Fprintf(&b, "land · 보고하고 레인을 반납했다 (줄 행 %d)\n", r.RowID)
+
+	case "left":
+		fmt.Fprintf(&b, "land · 줄에서 빠졌다 (줄 행 %d)\n", r.RowID)
+
+	case "reclaimed":
+		fmt.Fprintf(&b, "land · 네 레인은 회수됐다 — %s\n", r.Reason)
+
+	default:
+		// KnownTool 이 표와 디스패치를 지키듯, 여기는 service.LandResult.State 다섯 낱말과
+		// 이 switch 가 어긋나지 않는다는 전제 위에 있다. 어긋나면 침묵하지 않고 값을 그대로 보인다.
+		fmt.Fprintf(&b, "land · 이 서버가 모르는 상태 %q 다 — 서버 결함이다 (줄 행 %d)\n", r.State, r.RowID)
+	}
+	return b.String()
 }
