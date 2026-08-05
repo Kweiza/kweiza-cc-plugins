@@ -63,6 +63,16 @@ type LiveSession struct {
 	ID    string
 	Label string
 	Paths []string
+	// CCSessionID 는 이 카드가 속한 **대화**의 id 다.
+	//
+	// ★ 카드 id 로는 "이게 나인가"를 못 가른다. 정체가 3중키(머신·워크트리·cc)라
+	// 한 대화가 카드 여러 장이 될 수 있고(cc 표류·워크트리 갈림), 그때 카드 id 는 다르지만
+	// 대화는 같다. 그 상태에서 카드 id 만 비교하면 **세션이 자기 자신과 조율하라는 처방**이 뜬다.
+	// 실측(2026-08-05): overlap 발화 32건 중 5건이 그것이었다.
+	//
+	// 비어 있을 수 있다(관측이 실패한 카드). 빈 값끼리는 **같다고 보지 않는다** —
+	// 못 읽은 둘을 같은 대화로 접으면 진짜 겹침이 조용히 사라진다.
+	CCSessionID string
 }
 
 type EligibleInput struct {
