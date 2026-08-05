@@ -881,10 +881,12 @@ func TestPickBundleMemberPathCheckIsPerItemNotLead(t *testing.T) {
 }
 
 // 추천 응답의 Reason 은 지금 실제로 통하는 인자만 처방한다 — 리뷰 라운드 1
-// finding 1(CRITICAL). item_ids 는 태스크 9에서 온다. mcpsrv 의 pick 도구는 지금
-// item_id 하나만 받고(additionalProperties:false, DisallowUnknownFields) 모르는
-// 필드를 거절하므로, item_ids 를 처방하면 이 응답의 유일한 실행 가능한 줄이
-// "json: unknown field \"item_ids\"" 로 죽는다.
+// finding 1(CRITICAL) 이 남긴 규율은 그대로다. 태스크 9가 item_ids 를 스키마에
+// 실제로 더했지만, 이 시험의 시나리오처럼 **구성원이 없는(묶음 크기 1) 추천은
+// 여전히 item_id 를 처방한다** — 원소 하나짜리 배열을 만들라고 시키는 것은
+// 이미 있는 더 짧고 검증된 단독 경로를 두고 에두르는 것이라 정직하지 않다.
+// 구성원이 있는 묶음의 item_ids 처방은
+// TestPickRecommendReasonPrescribesItemIDsForBundle 이 잠근다.
 func TestPickRecommendReasonPrescribesItemIDNotItemIDs(t *testing.T) {
 	s, _ := newSvc(t)
 	repo := newRepo(t)
@@ -896,7 +898,7 @@ func TestPickRecommendReasonPrescribesItemIDNotItemIDs(t *testing.T) {
 		t.Fatalf("pick 실패: %v", err)
 	}
 	if strings.Contains(res.Reason, "item_ids") {
-		t.Fatalf("아직 없는 인자 item_ids 를 처방했다: %q", res.Reason)
+		t.Fatalf("구성원 없는 추천인데 item_ids 를 처방했다: %q", res.Reason)
 	}
 	if !strings.Contains(res.Reason, "item_id") {
 		t.Fatalf("실제로 통하는 item_id 인자를 아예 언급하지 않는다: %q", res.Reason)
@@ -907,6 +909,37 @@ func TestPickRecommendReasonPrescribesItemIDNotItemIDs(t *testing.T) {
 	// **처방 문구 자체**가 있는지를 본다.
 	if !strings.Contains(res.Reason, "item_id 에 "+res.Item.ID) {
 		t.Fatalf("처방 문구에 item_id 와 선두 id 가 나란히 없다: %q", res.Reason)
+	}
+}
+
+// 구성원이 있는 묶음은 item_ids 에 [선두, 구성원...] 을 선두부터 순서대로
+// 처방한다 — 단독 item_id 만 처방하면 세션이 그대로 재호출해도 선두만 집히고
+// 구성원은 아무도 다시 안 부른다.
+func TestPickRecommendReasonPrescribesItemIDsForBundle(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "묶음처방시험")
+
+	addItem(t, s, "p", "path-a", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "path-b", []string{"services/b.go"}, nil)
+	makeSiblings(t, st, "p", "path-a", "path-b")
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	// 사전 조건: id 사전순 동점 처리로 path-a 가 선두여야 한다(설계대로).
+	if res.Item == nil || res.Item.ID != "path-a" {
+		t.Fatalf("사전 조건이 깨졌다 — 선두가 path-a 가 아니다: %+v", res.Item)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 정확히 1건이어야 한다: %+v", res.Bundle)
+	}
+	if strings.Contains(res.Reason, "item_id 에 ") {
+		t.Fatalf("구성원이 있는데 단독 item_id 처방 문구가 남아 있다: %q", res.Reason)
+	}
+	if !strings.Contains(res.Reason, "item_ids 에 [path-a, path-b]") {
+		t.Fatalf("처방 문구에 item_ids·선두·구성원이 순서대로 없다: %q", res.Reason)
 	}
 }
 

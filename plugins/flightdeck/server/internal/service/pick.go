@@ -656,13 +656,31 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
 		})
 	}
-	// ★ item_ids 는 아직 없다(태스크 9에서 온다) — mcpsrv 의 pick 도구는 지금
-	// item_id 하나만 받고 additionalProperties:false·DisallowUnknownFields 로
-	// 모르는 필드를 거절한다. item_ids 를 처방하면 이 응답의 유일한 실행 가능 줄이
-	// "json: unknown field \"item_ids\"" 로 죽는다 — 지금 통하는 선두의 item_id 를 써라.
-	res.Reason = fmt.Sprintf("%s · 후보 %d건 중 1순위다. "+
-		"아직 선점하지 않았다 — 집으려면 item_id 에 %s 를 주고 다시 불러라",
-		best.Reason, len(cands), item.ID)
+	// ★ 실제로 통하는 인자만 처방한다(태스크 7 리뷰 라운드 1 finding 1 이 남긴 규율).
+	// mcpsrv 의 pick 도구는 additionalProperties:false·DisallowUnknownFields 로
+	// 모르는 필드를 거절하므로, 스키마에 없는 인자를 처방하면 이 응답의 유일한
+	// 실행 가능 줄이 "json: unknown field" 로 죽는다.
+	//
+	// 태스크 9 가 item_ids 를 실제로 스키마에 더했다 — 그래서 구성원이 있는 묶음은
+	// 이제 item_ids 에 [선두, 구성원...] 순서대로를 처방한다. 구성원이 없는
+	// (묶음 크기 1인) 추천은 **여전히 item_id 를 처방한다** — 그 모양은 항상
+	// item_id 로 통하는 단독 선점·재개 경로 그대로이고, 배열에 원소 하나만
+	// 담아 item_ids 를 쓰라고 시키면 더 짧고 이미 검증된 경로를 두고 에둘러
+	// 가라고 하는 것이라 정직하지 않다.
+	if len(best.Members) > 0 {
+		ids := make([]string, 0, len(best.Members)+1)
+		ids = append(ids, item.ID)
+		for _, m := range best.Members {
+			ids = append(ids, m.Item.ID)
+		}
+		res.Reason = fmt.Sprintf("%s · 후보 %d건 중 1순위다. "+
+			"아직 선점하지 않았다 — 집으려면 item_ids 에 [%s] 를 선두부터 순서대로 주고 다시 불러라",
+			best.Reason, len(cands), strings.Join(ids, ", "))
+	} else {
+		res.Reason = fmt.Sprintf("%s · 후보 %d건 중 1순위다. "+
+			"아직 선점하지 않았다 — 집으려면 item_id 에 %s 를 주고 다시 불러라",
+			best.Reason, len(cands), item.ID)
+	}
 	if notes, err := s.linkedJudgments(ctx, proj.ID, item.ID); err != nil {
 		return PickResult{}, err
 	} else {

@@ -419,6 +419,98 @@ func TestPickRefusesSteal(t *testing.T) {
 	}
 }
 
+// TestPickRefusesBothItemIDAndItemIDs 는 둘을 동시에 주면 거절함을 단정한다.
+// 합치거나 한쪽을 우선하면 무엇을 집었는지가 흐려지고, 그것이 이 도구가
+// 지키려는 것 자체다.
+func TestPickRefusesBothItemIDAndItemIDs(t *testing.T) {
+	repo := newRepo(t)
+	svc, st := newSvc(t)
+	srv := newServer(t, svc, repo, fullEnv(repo))
+
+	frames := serve(t, srv,
+		call("add", map[string]any{"id": "a", "title": "제목 a", "body": "본문 a"}),
+		call("add", map[string]any{"id": "b", "title": "제목 b", "body": "본문 b"}),
+		call("pick", map[string]any{"item_id": "a", "item_ids": []string{"b"}}),
+	)
+	if len(frames) != 3 {
+		t.Fatalf("응답이 %d개다", len(frames))
+	}
+	text, isErr := toolText(t, frames[2])
+	if !isErr {
+		t.Fatalf("item_id·item_ids 동시 지정이 조용히 통과했다:\n%s", text)
+	}
+	for _, want := range []string{"item_id", "item_ids", "둘 중 하나만"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("거절 문구에 %q 가 없다:\n%s", want, text)
+		}
+	}
+	// 거절인데 선점이 일어나면 안 된다 — 응답이 "선점했다"로 시작하면 실패다.
+	if strings.Contains(text, "선점했다") {
+		t.Fatalf("거절해야 하는데 선점했다:\n%s", text)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM claim`); n != 0 {
+		t.Fatalf("거절했는데 선점 %d행이 생겼다", n)
+	}
+}
+
+// TestPickClaimsBundleViaItemIDs 는 item_ids 가 스키마에만 있는 게 아니라
+// 실제로 도구 호출 경로 전체(디코드 → 서비스 → 렌더)를 타고 묶음을 집는지를
+// **실제로 도구를 불러서** 확인한다. 스키마만 읽어서는 이 사실을 못 본다 —
+// 태스크 7 의 결함(item_ids 를 처방했지만 실제로는 unknown field 였다)이
+// 스키마 목록이 아니라 실제 호출로만 드러났던 것과 같은 이유다.
+func TestPickClaimsBundleViaItemIDs(t *testing.T) {
+	repo := newRepo(t)
+	svc, st := newSvc(t)
+	srv := newServer(t, svc, repo, fullEnv(repo))
+
+	frames := serve(t, srv,
+		// dep 를 먼저 끝내 둔다 — bundle-a·bundle-b 가 같은 선행(item:dep)을
+		// 공유해야 AxisAfter 로 묶인다(judge.LinkOf).
+		call("add", map[string]any{"id": "dep", "title": "선행", "body": "먼저 끝낸다"}),
+		call("pick", map[string]any{"item_id": "dep"}),
+		call("finish", map[string]any{"item_id": "dep", "outcome": "done", "body": "끝냈다"}),
+		call("add", map[string]any{
+			"id": "bundle-a", "title": "묶음 a", "body": "본문 a",
+			"after": []map[string]any{{"item": "dep"}},
+		}),
+		call("add", map[string]any{
+			"id": "bundle-b", "title": "묶음 b", "body": "본문 b",
+			"after": []map[string]any{{"item": "dep"}},
+		}),
+		call("pick", map[string]any{}), // 추천 — item_ids 처방을 실제로 낸다
+		call("pick", map[string]any{"item_ids": []string{"bundle-a", "bundle-b"}}),
+	)
+	if len(frames) != 7 {
+		t.Fatalf("응답이 %d개다", len(frames))
+	}
+
+	rec, isErr := toolText(t, frames[5])
+	if isErr {
+		t.Fatalf("추천이 실패했다:\n%s", rec)
+	}
+	// 사전 조건: 사전순 동점 처리로 bundle-a 가 선두여야 한다.
+	if !strings.Contains(rec, "▸ bundle-a") {
+		t.Fatalf("사전 조건이 깨졌다 — 선두가 bundle-a 가 아니다:\n%s", rec)
+	}
+	if !strings.Contains(rec, "item_ids 에 [bundle-a, bundle-b]") {
+		t.Fatalf("추천이 실제로 통하는 item_ids 를 처방하지 않는다:\n%s", rec)
+	}
+
+	claimed, isErr := toolText(t, frames[6])
+	if isErr {
+		t.Fatalf("묶음 선점이 실패했다:\n%s", claimed)
+	}
+	if !strings.Contains(claimed, "pick · 선점했다") {
+		t.Fatalf("선점했다는 사실이 응답에 없다:\n%s", claimed)
+	}
+	if !strings.Contains(claimed, "묶음 2건 중 2건을 집었다") {
+		t.Fatalf("묶음 전원이 집혔다는 사실이 응답에 없다:\n%s", claimed)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM claim WHERE item_id IN ('bundle-a','bundle-b')`); n != 2 {
+		t.Fatalf("묶음 두 항목이 실제로 선점되지 않았다(claim 행 %d개)", n)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ④ board 기본 출력이 예산 안인가
 // ─────────────────────────────────────────────────────────────────────────────
