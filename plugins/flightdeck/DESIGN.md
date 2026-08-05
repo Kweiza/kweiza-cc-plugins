@@ -345,9 +345,8 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 ```
 POST   /sessions                    PATCH  /sessions/{id}
-POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces
+POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라이언트 0건(아래)
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
-POST   /footprints
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /judgments                   GET    /judgments?q=
@@ -356,6 +355,23 @@ GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
 ```
+
+**`POST /footprints` 는 이 표에서 지웠다(2026-08-05, 실제로 코드에서 제거).**
+신호 없이 발자국만 남기는 표면이었고 `origin=declared|claimed` 를 받을 수 있어
+`Beat`(observed 고정)와 표현력이 달랐다. 지운 근거는 그 차이가 **쓰이는 자리가
+없다**는 실측 셋이다 — 비시험 클라이언트 0건, `origin=declared` 행 **0건**(observed
+592 · claimed 140), 그리고 `claimed` 는 `service.Pick` 이 선점 트랜잭션에서 직접
+넣는다. 즉 차이는 실재했으나 그 차이가 만든 데이터가 한 행도 없었다.
+발자국이 들어오는 문은 이제 **둘**이고(`service.Beat`·`service.Pick`) 그 개수는
+`service.TestFootprintDoorsAreExactlyTwo` 가 전수로 잠근다.
+
+**`POST /sessions/{id}/workspaces` 는 클라이언트가 0건이지만 남긴다.**
+같은 "호출자 없음"인데 결론이 갈리는 기준은 **대체재**다 — 발자국은 위 두 문으로
+들어오지만, 부(副) 워크스페이스를 넣을 문은 이것 하나뿐이다. 다만 지금 이 표에는
+세션 행이 이미 갖고 있지 않은 값이 **한 건도** 없다(2026-08-05 재측정: 126행 ·
+non_primary 0 · `session.worktree` 와 다른 값 0). **이 표를 근거로 세션 키에서
+worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 근거 전문은
+`store/session.go` 의 `AddWorkspace` 주석에 있다.
 
 **`/notices` 는 응답 꼬리(미확인 알림) 전용이고 세션 카드 파생을 돌지 않는다.**
 꼬리는 MCP 응답 **전부**에 붙으므로, 그 값을 `/dashboard.json` 에서 가져오면
@@ -394,8 +410,19 @@ GET    /metrics
 5. **막힘** — 닫히지 않은 `note(kind=blocked)` + 자원 임계
 6. **판단 검색** — SQLite FTS5 전문 검색
 
-버튼은 넷뿐이다: 선점 회수(사유 필수) · 항목 폐기(사유 필수) · 레인 정지/재개(Tier B) · 잡 우회 기록(Tier B).
+버튼은 다섯뿐이고 **살아 있는 것은 셋**이다: 선점 회수(사유 필수) · 항목 폐기(사유 필수) ·
+**랜딩 줄 행 회수(사유 필수)** · 레인 정지/재개(Tier B) · 잡 우회 기록(Tier B).
 **그 외 쓰기는 없다** — 파생물에 손을 대는 순간 대시보드가 다시 손 기재 저장소가 되고 그 락이 부활한다.
+
+**줄 행 회수만 Tier B 에서 Tier A 로 넘어왔다.** 이 서버가 실제로 랜딩 줄을 갖고 있고, 그 줄에
+**자동 만료가 없기 때문**이다 — 물린 줄을 푸는 길이 사람뿐이라 화면과 CLI(`fd lane release`)가
+그 길의 전부다. 회수 대상은 레인이 아니라 **줄 행**이라 대기 중 좀비도 같은 문법으로 빠진다.
+레인 정지/재개는 러너의 일이라 **여전히 Tier B** 이고, 화면은 그 둘을 비활성 버튼으로 남긴다.
+
+**화면 쓰기는 게이트 사슬 안에 있다.** 폼은 `Idempotency-Key` 헤더를 실을 수 없으므로 폼 action 의
+쿼리에 렌더 시각 키를 싣고 `withScreenWrite` 가 헤더로 올린다. 그 미들웨어는 같은 자리에서 화면
+액션 경로 한정 `Origin`/`Sec-Fetch-Site` 대조를 한다 — 헤더 요구가 **우연히** 하던 CSRF 방어를
+쿼리로 우회하는 순간 잃기 때문이고, **없애는 것은 대체물 없이 없애지 않는다**.
 
 **모든 패널에 `(파생: git@14:31, 12초 전)` 이 붙는다.** 서버가 죽었을 때 마지막 상태가 현재 사실인 척하는 것을
 구조로 막는다 — 기존 대시보드의 빈 락 배열이 저지르던 실패다.

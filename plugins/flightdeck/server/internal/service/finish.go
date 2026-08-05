@@ -58,6 +58,12 @@ type FinishResult struct {
 	Judgment  model.Judgment `json:"judgment"`
 	Followups []model.Item   `json:"followups,omitempty"`
 	Released  []string       `json:"released,omitempty"` // 함께 반납한 자원
+	// SkippedFollowups 는 **id 가 이미 있어 안 넣은** 후속이다.
+	//
+	// 이 칸이 없으면 흡수가 거짓말이 된다 — 세션은 후속이 들어간 줄 알고 떠나고,
+	// 그 id 의 항목은 남이 만든 다른 것이다. Released 와 같은 성격의 칸이다:
+	// "요청한 것과 실제로 된 것이 다르다"를 그 자리에서 말한다.
+	SkippedFollowups []string `json:"skipped_followups,omitempty"`
 	Derived
 }
 
@@ -176,6 +182,20 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 
 		// ② 후속 등록. 여기서 실패하면 ①③④ 가 전부 롤백된다 —
 		//    그것이 이 함수를 한 트랜잭션에 둔 이유다.
+		//
+		// ★ 단 **중복 id 하나만 예외다.** 그 갈래는 흡수하고 계속 간다.
+		//
+		//   원자성이 지키려는 실패 모드는 "핸드오프는 했는데 후속이 유입되지 않은" 상태인데,
+		//   중복 id 에서는 그 모드가 성립하지 않는다 — **같은 id 의 항목이 이미 존재한다.**
+		//   반면 롤백하면 ① 의 판단이 함께 사라지고, 그것은 원리적으로 파생 불가하다.
+		//   나머지 셋(종료·반납·후속)은 전부 다시 만들 수 있지만 본문은 그 세션에만 있다.
+		//
+		//   ④ 가 이미 같은 판단을 내렸다(ErrNotFound·ResourceHeldError 를 흡수). 이 자리만
+		//   그 규율 밖에 있었다. 두 세션이 같은 축을 동시에 마무리하며 자연스럽게 같은
+		//   후속 이름을 고르는 것이 이 결함의 실제 진입로다.
+		//
+		//   중복 **이외의** 실패(FK 위반·CHECK·직렬화)는 그대로 롤백한다. 그 분류는
+		//   store.JudgeConstraintCode 가 이미 하고 있어 여기서 문구를 파싱하지 않는다.
 		for _, f := range in.Followups {
 			it := model.Item{
 				Project: in.Project, ID: f.ID, Title: f.Title, Body: f.Body,
@@ -183,6 +203,18 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				CreatedAt: now,
 			}
 			if err := t.AddItem(it); err != nil {
+				var conflict *store.ConflictError
+				if errors.As(err, &conflict) && conflict.Kind == store.ConflictDuplicate {
+					// 흡수했으면 **반드시 말한다.** 조용히 넘기면 세션은 후속이 들어간 줄 알고
+					// 떠나고, 그 id 의 항목은 남이 만든 다른 것이다 — 판단을 지키려다
+					// 더 나쁜 거짓을 만들게 된다. 응답(SkippedFollowups)과 원장 양쪽에 남긴다.
+					out.SkippedFollowups = append(out.SkippedFollowups, f.ID)
+					t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
+						"item": f.ID,
+						"why":  "같은 id 의 항목이 이미 있다 — 판단을 지키려고 이 후속만 건너뛴다",
+					})
+					continue
+				}
 				return fmt.Errorf("후속 항목 %s 등록 실패: %w", clip(f.ID, 64), err)
 			}
 			out.Followups = append(out.Followups, it)

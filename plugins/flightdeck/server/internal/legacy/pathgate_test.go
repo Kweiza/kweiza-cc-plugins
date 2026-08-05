@@ -126,3 +126,75 @@ func TestPlanImportKeepsItemWhenEveryPathIsBad(t *testing.T) {
 	}
 	t.Fatalf("경로가 전부 틀렸다고 항목 %q 가 빠졌다 — 겹침 축만 죽을 뿐 항목은 유효하다", id)
 }
+
+// 이관은 포함 축을 **판정할 수 없다** — 그래서 판정하는 대신 말한다.
+//
+// 좌표계 축과 갈리는 자리다. 좌표계는 문자열 형태만 보므로 이관에서도 판정된다(위 두
+// 시험). 포함 축("이 경로가 어느 트리 안인가")은 기준 트리를 알아야 하는데
+// **PlanOptions 에 그것이 없다** — 레거시 카드의 경로는 다른 머신·다른 디렉토리에서 온
+// 것일 수 있고 이 순수 함수는 그것을 알 방법이 없다.
+//
+// 그래서 버리지 않는다. 버리면 이관이 경로를 통째로 잃고, 고칠 수 있는 사람은 이미 그
+// 자리에 없다(add·finish 와 규율이 갈리는 기준 그대로). 대신 Notes 로 말한다 —
+// 관문이 어느 표면에 없는지가 코드 어디에도 안 적혀 있으면 다음 사람이 네 표면을 다시
+// 전수해야 그 표를 만든다.
+func TestPlanImportSaysItCannotJudgeContainmentInsteadOfDroppingPaths(t *testing.T) {
+	id := firstPlannedItemID(t)
+
+	sc := scanFixture(t)
+	for i := range sc.Items {
+		if sc.Items[i].ID == id {
+			sc.Items[i].Paths = []string{
+				"internal/api/x.go", // 상대경로 — 이 축과 무관하다
+				// 흠 없는 POSIX 절대경로. 좌표계 관문을 **통과한다** — 그래서 포함 축이
+				// 따로 필요했고, 여기서는 그 축을 판정할 기준이 없다.
+				"/home/other/repo/internal/z.go",
+			}
+			break
+		}
+	}
+
+	p := PlanImport(sc, PlanOptions{Project: "cp"})
+
+	var got *PlannedItem
+	for i := range p.Items {
+		if p.Items[i].Item.ID == id {
+			got = &p.Items[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("항목 %q 가 통째로 빠졌다", id)
+	}
+
+	// ── ① 절대경로도 **살아남는다.** 판정할 수 없는 것을 버리면 못 읽음이 값이 된다.
+	if len(got.Item.Paths) != 2 {
+		t.Fatalf("남은 경로가 %v 다 — 둘 다 남아야 한다.\n"+
+			"포함 축을 판정할 기준이 없는데 버리면 이관이 경로를 통째로 잃는다 — "+
+			"그 경로가 정말 밖인지 안인지 이 함수는 모른다", got.Item.Paths)
+	}
+
+	// ── ② 그러나 침묵하지 않는다. 못 본 축이 있다는 사실이 Notes 에 남는다.
+	var note string
+	for _, n := range p.Notes {
+		if strings.Contains(n, "포함") {
+			note = n
+			break
+		}
+	}
+	if note == "" {
+		t.Fatalf("포함 축을 못 봤다는 말이 Notes 에 없다: %v.\n"+
+			"침묵하면 다음 사람은 '관문이 있다'만 배우고 이 표면에 없다는 것을 못 본다 — "+
+			"그것이 '반쪽 발화는 균일한 부재보다 나쁘다'의 모양이다", p.Notes)
+	}
+	// ── ③ 어느 카드인지 말해야 사람이 고친다.
+	if !strings.Contains(note, id) {
+		t.Errorf("Note 에 항목 id 가 없다: %q", note)
+	}
+	// ── ④ 출력에 나와야 한다. 계획에만 있고 화면에 안 나오면 아무도 안 본다.
+	var buf bytes.Buffer
+	RenderPlan(&buf, p, false)
+	if !strings.Contains(buf.String(), "포함") {
+		t.Error("포함 축 Note 가 dry-run 출력에 없다")
+	}
+}

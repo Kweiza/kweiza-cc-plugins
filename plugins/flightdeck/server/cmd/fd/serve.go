@@ -112,6 +112,9 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 		log.Error("DB 를 열지 못해 기동을 중단한다", "db_path", clip(path, 200), "error", err.Error())
 		return 1
 	}
+	// ★ 자동 갱신 경로에서는 이 defer 가 **안 돈다.** syscall.Exec 는 스택째 버린다.
+	// 그래도 되는 근거: exec 뒤에도 같은 프로세스라 POSIX 락이 자기 자신과 안 부딪히고,
+	// 커밋된 것은 WAL 파일에 남아 새 이미지가 그대로 이어 읽는다. 잃는 것은 이 로그 한 줄이다.
 	defer func() {
 		if cerr := st.Close(); cerr != nil {
 			log.Error("DB 닫기 실패", "error", cerr.Error())
@@ -121,10 +124,28 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	svc := service.New(st, log)
 	token := envOr(env, "FD_TOKEN", "")
 	webH := web.New(svc, web.WithLogger(log))
+	// ★ watcher 를 buildHandler 보다 먼저 만든다 — api.Options.SelfUpdate 콜백이
+	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
+	watcher := newSelfWatcher(log, path)
 	handler := buildHandler(svc, webH, api.Options{
 		Token:         token,
 		RatePerMinute: *rate,
 		Log:           log,
+		SelfUpdate: func() api.SelfUpdateStatus {
+			st := watcher.Status()
+			out := api.SelfUpdateStatus{
+				Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
+				From: st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
+			}
+			// ★ LastAt 변환: cmd/fd 는 time.Time(제로값 = 시도 없음), api 는 *time.Time
+			// (nil = 시도 없음). IsZero() 로 가른다 — 값 그대로 &st.LastAt 을 넘기면
+			// "시도 없음"도 유효한 시각처럼 실린다.
+			if !st.LastAt.IsZero() {
+				at := st.LastAt
+				out.LastAt = &at
+			}
+			return out
+		},
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -133,13 +154,73 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	log.Info("기동", "route", clip(*addr, 120), "db_path", clip(path, 200),
 		"api_version", service.APIVersion, "auth_required", token != "")
 
-	if err := api.Serve(ctx, *addr, handler, log); err != nil {
+	return serveWithWatcher(ctx, *addr, handler, log, watcher)
+}
+
+// serveWithWatcher 는 REST 서버를 감시기와 함께 돌린다. `runServe` 가 이것을 부르는
+// 얇은 껍데기다 — 실제 api.Serve·실제 goroutine 스케줄로 드레인 악수를 시험하려면
+// 이 조합을 따로 부를 수 있어야 한다(serve_test.go 를 본다).
+//
+// ★ 감시기에게는 **자기만의 취소 손잡이**(watchCtx)를 준다. 서버 ctx 를 그대로 주면
+// 드레인(= 그 ctx 취소)이 감시기 자신도 죽여서 exec 까지 못 간다.
+//
+// ★ 감시기 goroutine 을 **join** 한다(watchDone). drain(=close(served))이 끝났다고
+// 곧바로 이 함수가 반환하면, 감시기의 exec 시도가 끝나기 전에 이 프로세스가 os.Exit
+// 에 닿을 수 있다 — (a) 성공 exec 인데 그 사실이 기록되기 전에 프로세스가 죽어
+// 재기동이 사람이 끈 것과 구별 안 되거나, (b) exec 실패(exit 1) 안전망이 그 실패를
+// 아직 못 본 채로 통과해 버린다. <-watchDone 이 그 창을 닫는다.
+//
+// 유계인 근거: stopWatch() 뒤 verify 중이던 감시기는 exec.CommandContext 가 자식을
+// 죽여 selfVerifyTimeout 안에 verify 가 돌아온다. drain 중이던 감시기는 served 가
+// 이미 닫혀 있어 <-served 에 안 막힌다. 그 외에는 Run 이 ctx.Done() 으로 바로
+// 돌아온다. 그래서 <-watchDone 은 못 매달린다.
+//
+// ★ 그 대가로 감시기는 **종료 의사를 스스로 알 수 없게 된다.** watchCtx 는 SIGTERM 으로
+// 안 끊기고(stopWatch() 는 api.Serve 가 돌아온 **뒤에** 불린다), serveCtx 는 감시기 자신의
+// 드레인으로도 끊긴다. 그래서 신호 컨텍스트인 ctx 를 그대로 읽는 술어를 따로 건네준다 —
+// exec 직전 두 자리가 그것으로 묻는다.
+func serveWithWatcher(ctx context.Context, addr string, h http.Handler, log *slog.Logger, w *selfWatcher) int {
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	serveCtx, drainServe := context.WithCancel(ctx)
+	defer drainServe()
+
+	w.shutdownRequested = func() bool { return ctx.Err() != nil }
+
+	served := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		w.Run(watchCtx, func() {
+			// ★ 이것은 **우아한 마무리가 아니다.** api.Serve 의 BaseContext 가 serveCtx 라
+			// 인플라이트 요청 컨텍스트가 전부 그 자손이고, 여기서 그 ctx 를 취소하는 순간
+			// srv.Shutdown 이 기다리기도 전에 도는 요청들이 함께 끊긴다.
+			// 그래도 되는 근거는 요청이 끝난다는 것이 아니라 **클라이언트의 아웃박스 +
+			// 멱등키**다(설계 §3①): 끊긴 쓰기는 재시도로 돌아오고 중복은 멱등키가 접는다.
+			drainServe()
+			<-served // 리스너가 실제로 닫힐 때까지 기다린다 — 그 전에 exec 하면 포트가 겹친다
+		})
+	}()
+
+	serveErr := api.Serve(serveCtx, addr, h, log)
+	close(served) // 드레인 중인 감시기를 먼저 풀어 준다
+	stopWatch()   // 감시 중이면 세운다. 드레인 중이면 served 가 이미 닫혀 있어 안 막힌다
+	<-watchDone   // ★ exec 시도가 끝나기 전에는 이 프로세스가 돌아오지 않는다
+
+	if serveErr != nil {
 		// api.Serve 가 이미 원인 전문을 남겼다. 여기서 더하는 것은 **처방**이다.
-		log.Error("서버를 띄우지 못했다", "route", clip(*addr, 120),
-			"error", err.Error(), "reason", PortAdvice(*addr, err))
+		log.Error("서버를 띄우지 못했다", "route", clip(addr, 120),
+			"error", serveErr.Error(), "reason", PortAdvice(addr, serveErr))
 		return 1
 	}
-	log.Info("종료", "route", clip(*addr, 120))
+	// 드레인이 자동 갱신 때문이었으면 exec 가 이미 이 프로세스를 갈아치웠다.
+	// 여기에 도달했다는 것은 exec 가 실패했거나 사람이 껐다는 뜻이다.
+	if su := w.Status(); su.Outcome == "failed" {
+		log.Error("자동 갱신이 실패해 서버가 내려간 상태다 — 재기동이 필요하다",
+			"detail", clip(su.Detail, 400))
+		return 1
+	}
+	log.Info("종료", "route", clip(addr, 120))
 	return 0
 }
 

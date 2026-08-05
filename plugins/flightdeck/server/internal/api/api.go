@@ -52,6 +52,12 @@ type Options struct {
 	// Clock 은 시계다. nil 이면 time.Now().UTC.
 	Clock func() time.Time
 
+	// SelfUpdate 는 자동 갱신 축의 현재 상태를 낸다. nil 이면 "배선 안 됨"으로 답한다.
+	//
+	// ★ 콜백인 이유: 이 값은 **계속 변한다.** 조립 시점의 스냅숏을 박으면
+	// /healthz 가 영원히 기동 직후 상태를 낸다.
+	SelfUpdate func() SelfUpdateStatus
+
 	// Fallback 은 REST 라우트에 안 걸린 요청을 받을 핸들러다(보통 대시보드).
 	// nil 이면 JSON 404 를 낸다.
 	//
@@ -186,7 +192,6 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/rekey", s.handleRekey)
 	// 처방은 턴마다 돈다. **세션 카드 파생을 안 도는 표면이다** — /notices 와 같은 이유(설계 §6).
 	mux.HandleFunc("POST /api/v1/sessions/{id}/prescriptions", s.handlePrescriptions)
-	mux.HandleFunc("POST /api/v1/footprints", s.handleFootprints)
 
 	// 큐 — Q 계층.
 	mux.HandleFunc("GET /api/v1/items/next", s.handleNextItem)
@@ -236,13 +241,17 @@ func (s *server) routes() *http.ServeMux {
 //	  rateLimit — 429. 로그 줄 없음(초과 트래픽이 그대로 로그 증폭이 된다)
 //	    auth    — 401. 로그 줄 없음
 //	      accessLog — 여기서부터 "게이트를 통과한 요청"이다. 1건당 1줄
-//	        idempotency — 쓰기 재시도를 같은 결과로 접는다
-//	          recover   — 패닉을 500 으로. 액세스 로그가 그 500 을 본다
+//	        screenWrite — 화면 폼의 출처를 대조하고 쿼리 키를 헤더로 올린다
+//	          idempotency — 쓰기 재시도를 같은 결과로 접는다
+//	            recover   — 패닉을 500 으로. 액세스 로그가 그 500 을 본다
 //
 // recover 가 accessLog **안쪽**인 이유: 바깥에 두면 패닉 요청의 액세스 로그가
 // 상태코드 0 으로 남아 "무엇이 500 을 냈나"를 지표에서 못 찾는다.
+//
+// screenWrite 가 idempotency **바깥**인 이유: 안쪽에 두면 키가 헤더로 올라가기 전에
+// 이미 400 이 나간 뒤다. accessLog 안쪽인 이유: 여기서 내는 403 도 로그에 남아야 한다.
 func (s *server) chain(h http.Handler) http.Handler {
-	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withIdempotency(s.withRecover(h))))))
+	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(h)))))))
 }
 
 // Serve 는 핸들러를 주소에 붙이고 ctx 가 끝날 때까지 돌린다.

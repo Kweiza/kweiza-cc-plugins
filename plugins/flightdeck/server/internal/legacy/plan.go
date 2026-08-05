@@ -226,6 +226,36 @@ func PlanImport(sc Scan, opt PlanOptions) ImportPlan {
 			reject("queue", path, "paths", "bad_path_coordinate", bp.Reason, false)
 		}
 
+		// ★ 포함 축("이 경로가 어느 트리 안인가")은 **여기서 판정할 수 없다.**
+		//
+		// 좌표계 축과 갈리는 자리다. 좌표계는 문자열 형태만 보므로 이관에서도 판정된다
+		// (바로 위). 포함 축은 기준 트리를 알아야 하는데 PlanOptions 에 그것이 없다 —
+		// 그리고 없는 것이 옳다. 레거시 카드의 경로는 다른 머신·다른 디렉토리에서 온
+		// 것일 수 있고, 이 순수 함수에는 그것을 알 방법이 없다.
+		//
+		// 그래서 **버리지 않는다.** 판정할 수 없는 것을 버리면 못 읽음이 값이 되고,
+		// 그 경로가 정말 밖이었는지 아무도 다시 못 안다(service.RelPathWithin 이
+		// root 를 모를 때 within=true 로 두는 것과 같은 규율 — fail-open).
+		//
+		// 대신 말한다. 관문이 어느 표면에 없는지가 코드 어디에도 안 적혀 있으면 다음
+		// 사람이 네 표면을 다시 전수해야 그 표를 만든다 — 항목
+		// fd-containment-gate-only-on-one-of-three-doors 가 그 비용을 적었다.
+		var absPaths []string
+		for _, p := range keptPaths {
+			if strings.HasPrefix(p, "/") {
+				absPaths = append(absPaths, p)
+			}
+		}
+		if len(absPaths) > 0 {
+			p.Notes = append(p.Notes, fmt.Sprintf(
+				"큐 항목 `%s` 의 경로 %d개가 절대경로다 — **포함 축을 판정하지 않고 그대로 넣는다.** "+
+					"어느 트리 안인지는 기준 트리를 알아야 하는데 이관에는 그것이 없다"+
+					"(레거시 카드의 경로는 다른 머신에서 온 것일 수 있다). "+
+					"살아 있는 두 문(service.Beat·service.Pick)은 이 축을 태우므로, "+
+					"이 경로들은 겹침 축에서 아무와도 안 맞을 수 있다: %s",
+				it.ID, len(absPaths), strings.Join(absPaths, " · ")))
+		}
+
 		m := model.Item{
 			Project: opt.Project, ID: it.ID, Title: it.Title, Body: it.Body,
 			Paths: keptPaths, Labels: it.Labels(), State: state,

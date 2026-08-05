@@ -92,9 +92,12 @@ func WithSSEPath(p string) Option {
 
 // Handler 는 읽기 전용 대시보드를 낸다.
 //
-// 라우트는 셋뿐이다: GET / (한 장) · POST actions/reclaim · POST actions/drop.
-// 쓰기가 둘인 이유는 설계 §6 의 버튼 넷 중 뒤 둘(레인 정지/재개 · 잡 우회 기록)이
-// Tier B 이기 때문이다 — 그 둘은 화면에 **비활성 버튼으로 자리만** 낸다.
+// 라우트는 넷뿐이다: GET / (한 장) · POST actions/reclaim · POST actions/drop ·
+// POST actions/lane-release.
+//
+// 쓰기가 셋인 이유는 설계 §6 의 버튼 다섯 중 **뒤 둘**만 여전히 Tier B 이기
+// 때문이다 — 줄 행 회수는 이 서버가 하는 일이라 열렸고(자동 만료가 없으므로 사람이
+// 푸는 유일한 길이다), 정지/재개와 잡 우회 기록은 러너의 일이라 아직 없다.
 func Handler(svc *service.Service) http.Handler { return New(svc) }
 
 // New 는 옵션을 받는 생성자다.
@@ -116,6 +119,7 @@ func New(svc *service.Service, opts ...Option) http.Handler {
 	h.mux.HandleFunc("GET /{$}", h.dashboard)
 	h.mux.HandleFunc("POST /actions/reclaim", h.reclaim)
 	h.mux.HandleFunc("POST /actions/drop", h.drop)
+	h.mux.HandleFunc("POST /actions/lane-release", h.laneRelease)
 	h.mux.HandleFunc("/", h.notFound)
 	return h
 }

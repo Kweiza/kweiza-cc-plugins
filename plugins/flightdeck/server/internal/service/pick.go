@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -342,10 +343,62 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	// 새 선점. 판정은 store.JudgeClaim 이 하고 여기서 흉내 내지 않는다 —
 	// 흉내 내면 조회와 삽입 사이에 남이 잡는 창이 생긴다.
 	var claim model.Claim
+	// 포함 축이 버린 경로. Tx 안에서 세션의 워크트리를 읽어야 나오므로 여기 담아
+	// Tx 뒤의 경고 로그가 읽는다(Beat 와 같은 모양).
+	var outside []string
 	err = s.st.Tx(ctx, func(t *store.Tx) error {
+		// ★ 포함 축 — item.Paths 는 상류(AddItem·AddFollowup)의 좌표계 관문만 지나왔다.
+		// 그 관문이 쓰는 judge.JudgePathCoordinate 는 자기 주석에 "포함 축은 여기 없다"고
+		// 적어 놨고, POSIX 절대경로는 흠이 없어 통과한다. 그래서 `fd add --path
+		// /tmp/남의레포/x.go` 가 선점하는 순간 claimed 발자국이 됐다.
+		//
+		// 4530e3c 는 문이 셋이라고 적었지만(Beat · api.NormalizeFootprints ·
+		// legacy.PlanImport) **넷이다.** 이 자리가 그 네 번째이고, 넷 중 Beat 와 함께
+		// 유일하게 살아 있는 문이다 — 나머지 둘은 호출자가 없거나 일회성 CLI 다.
+		//
+		// 규율은 Beat 와 같다: 거절하지 않고 버리되 원장에 남긴다. 여기서 거절하면
+		// 경로 하나가 선점 전체를 멈추고, 그러면 큐가 항목 하나에 막힌다.
+		sess, err := t.GetSession(in.SessionID)
+		if err != nil {
+			return err
+		}
+		inside := make([]string, 0, len(item.Paths))
+		outside = outside[:0]
+		for _, p := range item.Paths {
+			rel, within := RelPathWithin(sess.Worktree, p)
+			if rel == "" {
+				continue
+			}
+			if !within {
+				outside = append(outside, p)
+				continue
+			}
+			// ★ 절대경로만 rel 로 갈아 끼운다. 상대경로는 **원본 그대로** 둔다.
+			//
+			// 이것이 Beat 와 이 문의 진짜 차이다. RelPathWithin 은 filepath.Clean 을
+			// 거치므로 "pipeline/" 의 후행 슬래시가 사라지는데, item.Paths 에서 그
+			// 슬래시는 **디렉토리 표기**이고 겹침 축이 그것을 읽는다
+			// (judge.PathsOverlap — TestPickReportsOverlapWithoutFilteringIt 이
+			// pair[0]=="pipeline/" 를 못박고 있다). Beat 가 받는 것은 훅이 준 파일
+			// 절대경로라 정규화가 무해하지만, 여기 오는 것은 **사람이 선언한 경로**다.
+			//
+			// 포함 판정은 그대로 쓴다 — 상대경로는 RelPathWithin 계약상 언제나 within
+			// 이므로(상대화할 것이 없으면 "안"이다) 이 분기가 판정을 우회하지 않는다.
+			if !filepath.IsAbs(p) {
+				rel = p
+			}
+			inside = append(inside, rel)
+		}
+
 		// 시도를 먼저 예약한다 — 롤백돼도 남는다(거절당한 선점도 원장의 자산이다).
+		//
+		// ★ "paths" 는 **선언된 전부**다. 이 칸의 의미를 "실제로 Touch 한 수"로 바꾸지
+		// 않는다 — session.beat 의 count 가 두 번 의미를 바꿔 원장 질의가 세 정의를
+		// 걸치게 된 전례가 바로 옆에 있다(session.go 의 그 주석). 대신 outside 를
+		// 더해서 paths - outside 로 Touch 수를 복원하게 둔다.
 		t.LogEvent("item.claim", proj.ID, in.SessionID, map[string]any{
 			"item": item.ID, "paths": len(item.Paths), "overlaps": len(res.Overlaps),
+			"outside": len(outside), "dropped_paths": clipDroppedPaths(outside),
 		})
 		c, err := t.ClaimItem(proj.ID, item.ID, in.SessionID)
 		if err != nil {
@@ -354,13 +407,18 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 		claim = c
 		// 항목이 선언한 경로를 이 세션의 발자국으로 남긴다(origin=claimed).
 		// 착수 직후 구간은 브랜치 diff 가 정의상 비어 있어 이 축이 그 구간을 덮는다.
-		for _, p := range item.Paths {
+		for _, p := range inside {
 			if err := t.Touch(in.SessionID, p, model.OriginClaimed, c.At); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if len(outside) > 0 {
+		s.log.WarnContext(ctx, "항목이 선언한 경로 일부가 카드의 워크트리 밖이다 — 발자국으로 안 남긴다",
+			"project", proj.ID, "session_id", clip(in.SessionID, 64), "item", clip(item.ID, 64),
+			"dropped", len(outside), "first_path", clip(outside[0], 200))
+	}
 	if err != nil {
 		s.logFail(ctx, "item.claim", proj.ID, in.SessionID, err)
 		s.log.ErrorContext(ctx, "선점 실패",

@@ -50,10 +50,21 @@ const (
 type FootprintOrigin string
 
 const (
-	OriginObserved FootprintOrigin = "observed" // PostToolUse 훅이 실제 편집을 봤다
-	OriginDeclared FootprintOrigin = "declared" // 세션이 집을 때 선언했다
-	OriginClaimed  FootprintOrigin = "claimed"  // 항목이 선언한 경로
+	OriginObserved FootprintOrigin = "observed" // PostToolUse 훅이 실제 편집을 봤다 — service.Beat
+	OriginDeclared FootprintOrigin = "declared" // 세션이 집을 때 선언했다 — ★ 지금 생산자가 없다(아래)
+	OriginClaimed  FootprintOrigin = "claimed"  // 항목이 선언한 경로 — service.Pick
 )
+
+// ★ OriginDeclared 를 만드는 자리가 지금 **하나도 없다.**
+//
+// 유일한 생산자였던 POST /api/v1/footprints 를 2026-08-05 에 지웠다 — 그 표면을 치는
+// 클라이언트가 0건이었고, 그래서 `declared` 행도 DB 에 **0건**이었다(observed 592 ·
+// claimed 140 실측). 지운 근거 전문은 api/handlers_session.go 의 그 자리에 있다.
+//
+// 열거에서는 **안 뺐다.** 스키마 CHECK(footprint.origin)와 PK 가 셋을 전제하고 있어
+// 빼면 마이그레이션이 되고, 그것은 이 축의 문제가 아니다. 그리고 이 값의 뜻("세션이
+// 집을 때 선언했다")은 여전히 유효하다 — 되살릴 자리가 생기면 그때 생산자를 만들면 된다.
+// 다만 **지금 이 값을 근거로 무엇을 판정하지 마라.** 항상 0건이다.
 
 // ItemState 는 큐 항목의 상태다.
 type ItemState string
