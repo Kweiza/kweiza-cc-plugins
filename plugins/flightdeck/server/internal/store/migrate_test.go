@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -107,6 +108,9 @@ func makeV1DB(t *testing.T, path string) {
 		`DROP INDEX IF EXISTS landing_queue_waiting`,
 		`DROP INDEX IF EXISTS landing_queue_one_live_per_session`,
 		`DROP TABLE IF EXISTS landing_queue`,
+		// 004 증분이 pick_eval 에 더한 컬럼. v1 은 이 표를 갖고 있었지만(schema.sql)
+		// 그 컬럼은 없었다 — 안 걷으면 재열기에서 같은 컬럼을 또 만들려다 죽는다.
+		`ALTER TABLE pick_eval DROP COLUMN picked_with`,
 		`DELETE FROM schema_version WHERE version > 1`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
@@ -194,6 +198,70 @@ func TestOpenUpgradesVersion1Database(t *testing.T) {
 		t.Fatalf("업그레이드된 DB 재열기 실패: %v", err)
 	}
 	defer s2.Close()
+}
+
+// 옛 DB(컬럼 없음)를 열면 판올림이 컬럼을 만들고, 옛 행은 그대로 읽혀야 한다.
+//
+// ★ 전제를 **결과를 읽기 전에** 단정한다. 옛 상태가 실제로 만들어지지 않았으면
+// 아래 단정은 아무것도 안 지킨다 — makeV1DB 를 쓰는 시험이 같은 규율을 갖고 있다.
+func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	s, err := OpenWithLogger(path, log)
+	if err != nil {
+		t.Fatalf("Open 실패: %v", err)
+	}
+	seed(t, s, "P")
+	prev := SchemaVersion - 1
+	for _, q := range []string{
+		`INSERT INTO pick_eval(project, session_id, at, picked, rejected)
+		   VALUES ('P','S1','2026-08-01T00:00:00.000000Z','old-lead','[]')`,
+		`ALTER TABLE pick_eval DROP COLUMN picked_with`,
+		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev),
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("옛 DB 구성 실패(%s): %v", q, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("닫기 실패: %v", err)
+	}
+
+	// ── 전제 확인 ──
+	raw, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatalf("raw 열기 실패: %v", err)
+	}
+	var v int
+	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
+		t.Fatalf("전제 확인 실패: %v", err)
+	}
+	if v != prev {
+		t.Fatalf("전제가 성립하지 않았다: schema_version=%d — 이 상태로는 아래 단정이 무의미하다", v)
+	}
+	raw.Close()
+
+	// ── 판올림 ──
+	s2, err := OpenWithLogger(path, log)
+	if err != nil {
+		t.Fatalf("판올림 Open 실패: %v", err)
+	}
+	defer s2.Close()
+
+	var picked string
+	var isNull bool
+	if err := s2.db.QueryRow(
+		`SELECT picked, picked_with IS NULL FROM pick_eval WHERE session_id='S1'`,
+	).Scan(&picked, &isNull); err != nil {
+		t.Fatalf("판올림 뒤 옛 행을 못 읽는다: %v", err)
+	}
+	if picked != "old-lead" {
+		t.Fatalf("옛 행의 picked 가 %q 로 바뀌었다", picked)
+	}
+	if !isNull {
+		t.Fatal("옛 행의 picked_with 가 NULL 이 아니다 — 그 행은 묶음을 관측한 적이 없다")
+	}
 }
 
 // ★ 신규 설치와 업그레이드가 **같은 모양의 DB** 를 만들어야 한다.
