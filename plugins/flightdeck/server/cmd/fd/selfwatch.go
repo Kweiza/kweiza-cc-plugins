@@ -134,8 +134,13 @@ const selfVerifyTimeout = 15 * time.Second
 // 근거 없는 상한 하나를 새로 만들어야 한다 — 이 상수가 없애려는 것이 정확히 그것이다.
 // 예산은 "상한이 선언된 항의 합"이지 "일어날 수 있는 모든 일의 합"이 아니다.
 //
-// ★ **되풀이 실패는 안 덮는다.** 검증 중 파일이 또 바뀌면(TOCTOU, ActRefuse) 사슬이
-// 통째로 한 판 더 돈다. 이 예산은 **한 판의 최악**이고, 그 사실을 여기 적어 둔다.
+// ★ **되풀이는 안 덮는다.** `ActRefuse` 를 내는 자리 둘은 되풀이 성질이 **정반대**라
+// 한 이름으로 접으면 안 된다:
+//   - TOCTOU(검증 중 파일이 또 바뀜) — `lastFail` 을 안 건드리므로 사슬이 통째로 한 판 더
+//     돈다. 이 예산은 **한 판의 최악**이라 그 되풀이를 안 덮는다.
+//   - 검증 실패 — `lastFail` 을 걸어 `Decide` 가 그 판에 대해 **한 판도 더 안 돈다.**
+//     그러면 예산은 유계로 말할 것이 없다: 파일이 또 바뀔 때까지 서버가 안 바뀌므로
+//     **예산의 적용 자체가 안 된다.** 그 구간의 스큐 창은 사람이 손댈 때까지 무한이다.
 //
 // ★ 이 식이 있는 이유는 숫자가 아니라 **결합을 보이게 하는 것**이다. api.ShutdownGrace 를
 // 늘리는 사람이 자기가 자기 갱신 반응 시간을 늘린다는 것을 여기서 본다. 그 결합을 말하는
@@ -438,13 +443,15 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 	// 멀쩡하다. 종료 의사는 신호 컨텍스트를 보는 shutdownRequested 가 안다.
 	// ctx.Err() 도 함께 보는 이유는 다르다: 그쪽이 끊겼으면 리스너가 이미 없다.
 	if w.shuttingDown() || ctx.Err() != nil {
-		// ★ 이 갈래도 **화면까지 간다.** 사람이 보는 것은 "갱신을 넣었는데 서버가 안 바뀌었다"이고,
-		// 여기서 침묵하면 /healthz 의 self_update 가 그 사유를 말하지 않는다. Outcome 이 빈 값이면
-		// "아직 시도가 없었다"로 읽히는데 그것은 사실이 아니다 — 검증까지 갔다가 접은 것이다.
-		w.setStatus(func(s *selfUpdateStatus) {
-			s.LastAt, s.From, s.To = time.Now().UTC(), from, buildLine
-			s.Outcome, s.Detail = "refused", "검증 중 종료 요청이 와 재기동을 접었다"
-		})
+		// ★ **이 갈래는 화면에 못 간다. 그래서 setStatus 를 안 부른다.**
+		// 진입 조건이 곧 "서버가 이미 내려가는 중"이다 — shuttingDown() 이 참이면 serveCtx 도
+		// 끊겨 api.Serve 가 srv.Shutdown 안이고, Shutdown 은 **리스너를 먼저 닫는다**.
+		// ctx(watchCtx) 쪽은 더 확실하다: stopWatch() 는 api.Serve 가 반환한 뒤에만 불린다.
+		// selfUpdateStatus 는 메모리 전용이고 유일한 독자가 /healthz 라, 여기 적은 값은
+		// **어떤 커넥션으로도 못 읽힌다**(실측: 드레인 시작 뒤 /healthz 새 연결은 전부 거절,
+		// 미리 맺은 keep-alive 도 Shutdown 이 닫는다). 적어 두면 다음 사람이 화면에서 사유를
+		// 볼 수 있다고 믿는다 — 죽은 쓰기보다 그 믿음이 비싸다.
+		// **사유가 닿는 유일한 좌표는 이 로그 줄이다.**
 		w.log.Info("검증 중 종료 요청이 와 재기동을 접는다", "exe", clip(w.exePath, 200))
 		return ActNothing
 	}
@@ -486,10 +493,9 @@ func (w *selfWatcher) step(ctx context.Context, drain func()) Action {
 	// **직후** 정상적으로 stopWatch() 를 부른다. 그것을 종료 의사로 읽으면 멀쩡한 재기동이
 	// 매번 접힌다 — 기능 자체가 죽는다.
 	if w.shuttingDown() {
-		w.setStatus(func(s *selfUpdateStatus) {
-			s.LastAt, s.From, s.To = time.Now().UTC(), from, buildLine
-			s.Outcome, s.Detail = "refused", "드레인 중 종료 요청이 와 재기동을 접었다 — 서버는 이미 내려갔다"
-		})
+		// ★ 여기도 setStatus 를 안 부른다 — 위 갈래와 같은 이유이고 이쪽이 더 분명하다.
+		// drain() 은 `drainServe(); <-served` 이고 served 는 **api.Serve 가 반환한 뒤**에 닫힌다.
+		// 즉 이 줄이 도는 시점에 리스너는 확실히 없다. 로그가 사유의 전부다.
 		w.log.Info("드레인 중 종료 요청이 와 재기동을 접는다 — 서버는 이미 내려갔다",
 			"exe", clip(w.exePath, 200))
 		return ActNothing
