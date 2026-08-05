@@ -28,7 +28,7 @@ type SplitCard struct {
 type SplitReport struct {
 	CCSessionID string
 	MachineID   string
-	Root        string   // git 이 아는 워크트리 루트
+	Root        string   // 이 보고가 걸린 워크트리 루트
 	Recorded    []string // 그 트리에 대해 기록된 서로 다른 값들. 정렬된다. 언제나 2개 이상
 	SessionIDs  []string // 이 보고에 걸린 카드 전부. 정렬된다
 }
@@ -39,11 +39,21 @@ type SplitReport struct {
 // 정규화가 도는 클라이언트는 언제나 그 트리의 git 루트를 적으므로(cmd/fd/env.go
 // resolveProject 의 --show-toplevel) 값이 여럿이면 최소 하나는 정규화 없이 열린 것이다.
 //
-// ★★ 왜 조상-자손 경로 쌍으로 판정하지 않는가. 앞선 판이 그렇게 했다가 실측에서
-// **거짓 양성 56%** 를 냈다(2026-08-05, 조상-자손 쌍 100건 중 56건). 이 저장소의 링크
-// 워크트리는 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 **자손 경로**에 살고,
-// 그것은 정규화가 완벽히 도는 클라이언트도 만드는 정당한 모양이다. 경로 모양만으로는
-// 못 가르고, git 이 아는 루트 목록이 있어야 갈린다.
+// 둘째 반환값은 **어느 트리에도 못 붙인 카드 수**다. 침묵하면 "갈림 없음"과
+// "그 트리를 못 알아봤다"가 화면에서 같아진다 — 호출부가 이 수를 반드시 낸다.
+//
+// ★★ 판정 규칙이 두 번 무너졌고, 그 실측이 이 설계의 근거다.
+//
+//	① 조상-자손 경로 쌍            → 조상-자손 쌍 100건 중 56건(56%)이 거짓 양성
+//	② 살아 있는 git 워크트리 루트   → 보고 31건 중 26건(84%)이 거짓 양성
+//	③ 살아 있는 루트 ∪ 관례 복원    → 보고 36건 중 거짓 양성 0건
+//
+// ①: 링크 워크트리가 `<repo>/.flightdeck/worktrees/X` 즉 저장소 루트의 자손 경로에
+// 살아서, 정규화가 완벽히 도는 클라이언트도 조상-자손 쌍을 만든다.
+//
+// ②: 원장의 링크-워크트리 경로 93개 중 81개가 **이미 지워진** 워크트리다(랜딩 뒤
+// 정리한다). git 은 살아 있는 것만 아므로 지워진 트리의 카드가 저장소 루트로 흡수돼
+// ①의 거짓 양성이 그대로 재생산된다.
 //
 // ★ 울타리:
 //   - 이것은 정체 판정도 겹침 판정도 **아니다. 보고다.** 어느 소비자도 이 결과로 두
@@ -52,27 +62,40 @@ type SplitReport struct {
 //     "전부 다른 대화였다"로 정정한 사고가 있다. 그 17건은 cc 가 달라 여기 안 걸린다.
 //   - **형제 트리는 안 건드린다.** 소유 루트가 다르면 아예 다른 묶음이 된다.
 //   - **빈 cc 끼리는 같다고 보지 않는다.**
-//   - **worktreeRoots 가 비면 아무것도 보고하지 않는다.** 못 읽었다는 사실은 호출부가
-//     파생 실패로 남긴다 — 여기서 추측으로 보고하면 위의 56%가 그대로 돌아온다.
-func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitReport {
-	roots := make([]string, 0, len(worktreeRoots))
-	for _, r := range worktreeRoots {
-		if r = strings.TrimSpace(r); r != "" {
-			roots = append(roots, filepath.Clean(r))
+//   - **알려진 루트가 하나도 없으면 아무것도 보고하지 않는다**(카드 전부가 둘째
+//     반환값으로 나간다).
+func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) ([]SplitReport, int) {
+	seen := map[string]bool{}
+	var roots []string
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		if !seen[p] {
+			seen[p] = true
+			roots = append(roots, p)
 		}
 	}
-	if len(roots) == 0 {
-		return nil
+	for _, r := range worktreeRoots {
+		add(r)
+	}
+	// 관례로 알려진 루트를 카드 경로에서 되읽는다 — 지워진 워크트리를 덮는다.
+	for _, c := range cards {
+		if r := conventionRoot(c.Worktree); r != "" {
+			add(r)
+		}
 	}
 
 	type key struct{ machine, cc, root string }
 	groups := map[key]map[string][]string{} // (머신,cc,트리) → worktree 값 → 세션 id 들
+	unattributed := 0
 	for _, c := range cards {
 		cc := strings.TrimSpace(c.CCSessionID)
 		m := strings.TrimSpace(c.MachineID)
 		wt := strings.TrimSpace(c.Worktree)
 		if cc == "" || m == "" || wt == "" {
-			continue
+			continue // 3중키가 안 서는 카드다 — 판정 대상이 아니고 '버렸다'고 셀 것도 아니다
 		}
 		wt = filepath.Clean(wt)
 		if wt == "." {
@@ -80,7 +103,8 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitR
 		}
 		root := owningRoot(wt, roots)
 		if root == "" {
-			continue // git 이 모르는 트리다 — "접혔어야 한다"를 판정할 근거가 없다
+			unattributed++ // git 도 관례도 모르는 트리다. **세어서 낸다**
+			continue
 		}
 		k := key{m, cc, root}
 		if groups[k] == nil {
@@ -119,7 +143,37 @@ func DetectUnnormalizedSplit(cards []SplitCard, worktreeRoots []string) []SplitR
 		}
 		return out[i].Root < out[j].Root
 	})
-	return out
+	return out, unattributed
+}
+
+// conventionRoot 는 경로 안에서 **관례로 알려진** 워크트리 루트를 되읽는다. 순수 함수다.
+//
+// ★ 추측이 아니다. flightdeck 자신이 그 자리에 워크트리를 만든다 — `pick` 응답의
+// "워크트리 준비" 절이 `git worktree add '.flightdeck/worktrees/<항목id>'` 를 출력한다.
+// `.claude/worktrees/<이름>` 도 같은 부류(하네스가 만드는 자리)다. 이 제품이 스스로
+// 지키는 불변식이라 경로에서 되읽을 수 있다.
+//
+// ★ 이것이 없으면 **지워진 워크트리**의 카드가 저장소 루트로 흡수된다. 실측에서
+// 원장의 링크-워크트리 경로 93개 중 81개가 이미 지워진 것이었고, 그 상태로는
+// 보고의 84%가 거짓 양성이었다.
+//
+// 못 찾으면 빈 문자열이다.
+func conventionRoot(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	segs := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
+	for i := 0; i+2 < len(segs); i++ {
+		if segs[i] != ".flightdeck" && segs[i] != ".claude" {
+			continue
+		}
+		if segs[i+1] != "worktrees" || segs[i+2] == "" {
+			continue
+		}
+		return filepath.FromSlash(strings.Join(segs[:i+3], "/"))
+	}
+	return ""
 }
 
 // owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
