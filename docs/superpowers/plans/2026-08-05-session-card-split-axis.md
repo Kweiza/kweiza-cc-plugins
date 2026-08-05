@@ -1110,8 +1110,10 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 	// Splits 는 워크트리 정규화가 안 돈 흔적이다. **비어 있는 것이 정상**이고,
 	// 하나라도 있으면 그 카드를 연 클라이언트가 4de4b21 이전 판이라는 뜻이다.
 	//
-	// ★ git 을 못 읽으면 이 축은 **판정 자체를 안 한다**(빈 슬라이스). 그 사실은
-	//   Failures 에 남는다 — 침묵과 "갈림 없음"을 구분해야 한다.
+	// ★ git 을 못 읽어도 이 축이 **완전히 죽지는 않는다** — judge 가 카드 경로에서
+	//   관례 루트(.flightdeck/worktrees/<이름>)를 되읽기 때문이다. 다만 근거가 그것뿐이라
+	//   판정 범위가 좁아지고, 그 사실은 Failures 의 `split-detect` 축에 남는다.
+	//   침묵과 "갈림 없음"을 구분해야 한다.
 	Splits []judge.SplitReport `json:"splits,omitempty"`
 ```
 
@@ -1197,6 +1199,65 @@ func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time
 `d.note` 의 정확한 시그니처와 `fmt` import 유무는 같은 파일의 기존 호출부
 (`d.note("project-path", …)`)를 보고 맞춘다.
 
+**그리고 이 두 갈래를 잠그는 시험을 반드시 둔다.** 검토가 확인했다 — 두 `d.note` 를
+지워도 전 모듈이 초록이다. 이 과제가 "★★"로 반복 강조한 **"침묵하지 않는다"** 가
+회귀 보호 없이 방치되면 다음 리팩터가 조용히 없앤다. Task 2 의 배선 결함과 같은 부류다.
+
+`d.note(axis, detail)` 는 `Derived.Failures` 에 `DerivedFailure{Axis, Detail}` 로 실린다
+(`service.go` 의 `derive.note`). 그러니 `view.Failures` 에서 `Axis == "split-detect"` 를 찾으면 된다.
+
+`board_conversation_test.go` 에 더한다.
+
+```go
+// hasFailure 는 파생 실패 목록에 그 축이 있는지다.
+func hasFailure(v BoardView, axis string) bool {
+	for _, f := range v.Failures {
+		if f.Axis == axis {
+			return true
+		}
+	}
+	return false
+}
+
+// ★ "침묵하지 않는다"가 이 과제의 핵심 설계다. 루트를 못 읽었다는 사실이 화면에
+//   안 남으면 "갈림 없음"과 "판정을 못 했다"가 같아진다 — 이 저장소가 반복해서
+//   겪은 실패 모양이다.
+func TestBoardNotesWhenWorktreeRootsAreUnreadable(t *testing.T) {
+	// git 파생이 통째로 실패하는 서비스를 세운다. degrade_test.go 가 그 방법을
+	// 이미 보여 준다(`broken` 서비스) — 그 방식을 그대로 쓴다.
+	...
+	view, err := broken.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err) // 파생이 실패해도 보드는 응답을 낸다
+	}
+	if !hasFailure(view, "split-detect") {
+		t.Fatalf("루트를 못 읽었는데 split-detect 축이 Failures 에 없다 — "+
+			"화면이 '갈림 없음'과 '판정 못 함'을 구분하지 못한다\nFailures: %+v", view.Failures)
+	}
+}
+
+// ★ 어느 트리에도 못 붙인 카드가 있으면 그 수를 낸다.
+func TestBoardNotesUnattributedCards(t *testing.T) {
+	s, _ := newSvc(t)
+	// 등록된 저장소 **밖** 경로로 세션을 연다 — 어느 워크트리 루트에도 안 붙는다.
+	// (실물 원장에도 /home/aaron·/home/aaron/infra 같은 카드가 실제로 있다)
+	...
+	view, err := s.Board(ctx(), "p", BoardOptions{})
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if !hasFailure(view, "split-detect") {
+		t.Fatalf("트리에 못 붙인 카드가 있는데 split-detect 축이 없다\nFailures: %+v", view.Failures)
+	}
+}
+```
+
+`broken` 서비스를 세우는 정확한 방법은 `degrade_test.go` 를, 저장소 밖 경로로 세션을 여는
+방법은 `board_test.go`·`helper_test.go` 를 보고 맞춘다. **그 파일들은 읽기만 하고 수정하지 마라.**
+
+두 시험이 같은 축(`split-detect`)을 보므로, **각 갈래를 따로 지웠을 때 각각 하나씩만
+빨강이 되는지** 반드시 확인해라. 둘 다 한 시험에만 걸리면 갈래 하나는 여전히 무시험이다.
+
 `d.note` 의 정확한 시그니처는 같은 파일의 기존 호출부(`d.note("project-path", …)`)를 따른다.
 
 - [ ] **Step 4: 초록을 확인한다**
@@ -1216,6 +1277,8 @@ cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestSplitCards
 | 1 | `splitCardsOf` 가 `MachineID` 를 안 싣게 | `TestSplitCardsOfCarriesTriple` |
 | 2 | **`Board` 안의 `view.Splits = ...` 한 줄 제거** | `TestBoardFillsSplits` |
 | 3 | `sessionCardsAndRoots` 가 `roots` 를 nil 로 내게 | `TestBoardFillsSplits`(루트가 없으면 보고가 못 나온다) |
+| 3a | `d.note("split-detect", "워크트리 루트를 못 읽었다…")` 한 줄 제거 | `TestBoardNotesWhenWorktreeRootsAreUnreadable` **만** |
+| 3b | `d.note("split-detect", "카드 %d장은…")` 한 줄 제거 | `TestBoardNotesUnattributedCards` **만** |
 | 4 | `TestOwningRootPicksTheLongestMatch` 에 더한 `wantUn` 단정 제거 뒤, `judge` 의 `owningRoot` 가 항상 `""` 를 내게 | 그 시험이 **단독으로** FAIL 해야 한다 |
 
 **2번이 이 과제의 핵심 방어다.** Task 2 에서 정확히 같은 자리(`view.Conversations` 배선)가
