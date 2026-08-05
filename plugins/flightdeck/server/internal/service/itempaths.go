@@ -38,7 +38,10 @@ func (s *Service) checkItemPaths(ctx context.Context, proj model.Project, paths 
 		return &v
 	}
 
-	in.Here = observeIn(proj.Path, paths)
+	// ★ 사유는 **이 프로젝트 축에서만** 모은다. 남의 프로젝트를 못 읽은 사실은
+	// in.Unreadable 이 이미 나르고, KindUnknown 문장은 Here 만 근거로 만들어진다.
+	in.UnknownReason = map[string]string{}
+	in.Here = observeIn(proj.Path, paths, in.UnknownReason)
 
 	// 1단에서 하나라도 봤으면(있다) 남을 볼 필요가 없다. 못 읽은 것이 섞여 있어도
 	// 판정은 unknown 으로 갈 것이므로 역시 남을 볼 필요가 없다.
@@ -71,7 +74,7 @@ func (s *Service) checkItemPaths(ctx context.Context, proj model.Project, paths 
 			in.Unreadable = append(in.Unreadable, o.ID)
 			continue
 		}
-		in.Elsewhere[o.ID] = observeIn(o.Path, paths)
+		in.Elsewhere[o.ID] = observeIn(o.Path, paths, nil)
 	}
 
 	v := judge.ClassifyItemPaths(in)
@@ -96,16 +99,30 @@ func allAbsent(paths []string, here map[string]judge.PathPresence) bool {
 // 내는데, 그것을 Absent 로 접으면 죽은 프로젝트의 항목이 nowhere 나 misregistered 로
 // **고발당한다.** "프로젝트를 못 열었으면 Unknown"과 "ErrNotExist 면 Absent"라는 두 규칙이
 // 정확히 이 지점에서 충돌하고, 루트 stat 이 그 충돌을 없애는 유일한 단계다.
-func observeIn(root string, paths []string) map[string]judge.PathPresence {
+// ★ why 는 PathUnknown 이 난 경로 → 사유다. nil 을 줘도 된다(남의 프로젝트를 볼 때가 그렇다) —
+// 사유가 문장에 실리는 것은 **이 프로젝트(Here)** 축뿐이라 그쪽만 채우면 된다.
+// errno 를 여기서 안 넘기면 그 자리에서 영영 버려진다: 원인 셋이 판정 계층에서
+// 바이트 단위로 같은 문장이 된다(judge.ItemPathInput.UnknownReason).
+func observeIn(root string, paths []string, why map[string]string) map[string]judge.PathPresence {
 	out := make(map[string]judge.PathPresence, len(paths))
 	if !rootUsable(root) {
+		// ★ 원인이 **경로가 아니라 레포**인 유일한 갈래다. 경로마다 같은 사유를 넣어 두면
+		// judge 가 "전부 같은 이유다"로 접어 레포를 지목한다. 그 접기가 없으면 화면이
+		// 경로 목록만 내고 운영자는 옮겨진 것이 레포라는 것을 못 읽는다.
 		for _, p := range paths {
 			out[p] = judge.PathUnknown // 0값이지만 명시한다 — 키 부재와 값을 가른다
+			if why != nil {
+				why[p] = "프로젝트 루트를 열 수 없다: " + clip(root, 120)
+			}
 		}
 		return out
 	}
 	for _, p := range paths {
-		out[p] = observeOne(root, p)
+		pres, reason := observeOne(root, p)
+		out[p] = pres
+		if why != nil && reason != "" {
+			why[p] = reason
+		}
 	}
 	return out
 }
@@ -128,20 +145,40 @@ func rootUsable(root string) bool {
 //
 // 밖인지는 문자열 접두가 아니라 filepath.Rel 로 성분 단위 계산한다 — 접두로 하면
 // root="/a/b" 일 때 "/a/bc/d" 가 안이라고 나온다(같은 모양의 결함이 이 레포에 실재했다).
-func observeOne(root, p string) judge.PathPresence {
+// ★ 둘째 반환값은 PathUnknown 일 때의 **사유**다. 나머지 둘(Absent·Present)은 빈 문자열이다 —
+// 사유는 "왜 판정을 못 했나"이지 판정 결과의 설명이 아니다.
+func observeOne(root, p string) (judge.PathPresence, string) {
 	if strings.TrimSpace(p) == "" {
-		return judge.PathUnknown
+		return judge.PathUnknown, "경로가 비었다"
 	}
 	joined := filepath.Join(root, p)
 	rel, err := filepath.Rel(filepath.Clean(root), joined)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return judge.PathUnknown // 루트 밖이다. 관측하지 않는다
+	if err != nil {
+		return judge.PathUnknown, "루트 기준 상대경로를 못 구했다: " + clip(err.Error(), 120)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// ★ 이 갈래는 **항목 등록이 잘못된 것**이라 고칠 사람이 있다. "못 읽었다"로만
+		// 말하면 그것이 입력 오류인 줄 모른다 — 그래서 사유가 특히 중요한 자리다.
+		return judge.PathUnknown, "'..' 로 프로젝트 루트 밖을 가리킨다 — 관측하지 않았다"
 	}
 	if _, err := os.Stat(joined); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return judge.PathAbsent
+			return judge.PathAbsent, ""
 		}
-		return judge.PathUnknown // 권한·I/O — **절대 Absent 가 아니다**
+		// 권한·I/O — **절대 Absent 가 아니다.** errno 문장을 그대로 나른다(EACCES 등).
+		return judge.PathUnknown, clip(errText(err), 120)
 	}
-	return judge.PathPresent
+	return judge.PathPresent, ""
+}
+
+// errText 는 stat 오류에서 사람이 읽을 부분만 낸다.
+//
+// *fs.PathError 의 Error() 는 "stat /긴/절대/경로: permission denied" 라 경로가 두 번
+// (문장 앞의 선언 경로 + 여기) 나오고 루트 절대경로까지 샌다. 원인만 남긴다.
+func errText(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		return pe.Err.Error()
+	}
+	return err.Error()
 }

@@ -50,6 +50,20 @@ type ItemPathInput struct {
 	Here       map[string]PathPresence            // 경로 → 이 프로젝트에서 본 결과
 	Elsewhere  map[string]map[string]PathPresence // 프로젝트 → 경로 → 결과
 	Unreadable []string                           // 아예 못 연 프로젝트
+	// UnknownReason 은 Here 에서 PathUnknown 이 난 경로 → **왜** 못 읽었는지다.
+	//
+	// ★ 왜 별도 맵인가. PathUnknown 하나로 원인 셋이 모인다 — 프로젝트 루트가 통째로 없다 ·
+	// 경로 토큰이 ".." 로 루트 밖에 나간다 · ErrNotExist 가 아닌 stat 오류(EACCES 등).
+	// 셋은 **고칠 사람과 고칠 자리가 전부 다른데** 문장이 바이트 단위로 같았다.
+	// 관측(service)은 errno 를 손에 쥐고 있었지만 넘길 통로가 없어 그 자리에서 버렸다.
+	//
+	// ★ PathPresence 를 구조체로 승격하지 않은 이유: 그 타입의 0값이 PathUnknown 이어야
+	// 한다는 안전장치가 거기 걸려 있다("못 봤다"가 "없다"로 접히면 이 기능 전체가 거짓말이 된다).
+	// 사유는 문장을 만들 때만 읽히는 곁가지라 판정 축을 건드릴 값어치가 없다.
+	//
+	// ★ Elsewhere 쪽은 안 담는다. 남의 프로젝트를 못 읽은 사실은 Unreadable 이 이미 나르고,
+	// 그 축의 문장은 "지목이 그만큼 약하다"라 원인별로 갈릴 이유가 없다.
+	UnknownReason map[string]string
 }
 
 // ItemPathVerdict 는 판정 하나다.
@@ -108,12 +122,12 @@ func ClassifyItemPaths(in ItemPathInput) ItemPathVerdict {
 		// ★ 여기가 이 함수에서 가장 중요한 분기다. 남은 것이 전부 Absent 여도
 		//   못 읽은 것이 하나라도 있으면 오등록이라 말하지 않는다.
 		//
-		// ★ 어느 경로를 못 읽었는지 문장에 낸다. 원인이 셋(루트 통째 없음 · ".." 로 루트
-		//   밖 · 권한 거부) 다 여기로 모이는데, 경로 이름이 없으면 세 경우가 바이트 단위로
-		//   같은 문장이 되어 운영자가 무엇이 진짜 고장인지 못 가린다(D2).
+		// ★ 어느 경로를 못 읽었는지, 그리고 **왜** 못 읽었는지 문장에 낸다. 원인이 셋
+		//   (루트 통째 없음 · ".." 로 루트 밖 · 권한 거부) 다 여기로 모이는데, 그것이 없으면
+		//   세 경우가 바이트 단위로 같은 문장이 되어 운영자가 무엇이 진짜 고장인지 못 가린다(D2).
 		v.Kind = KindUnknown
 		v.Summary = fmt.Sprintf("%d개 중 %d개를 못 읽었다 — '없다'가 아니다: %s. 이 축은 판정하지 않았다.",
-			len(in.Paths), unknown, strings.Join(clipList(unknownPaths, 3), ", "))
+			len(in.Paths), unknown, unknownDetail(unknownPaths, in.UnknownReason))
 	default:
 		v = classifyAllAbsent(in, v, absent)
 	}
@@ -169,6 +183,52 @@ func classifyAllAbsent(in ItemPathInput, v ItemPathVerdict, absent int) ItemPath
 			absent, in.Project, len(hits), strings.Join(hits, ", "))
 	}
 	return v
+}
+
+// unknownDetail 은 "무엇을 왜 못 읽었나"를 만든다. 순수 함수다.
+//
+// ★ **원인이 하나면 경로를 나열하지 않고 원인을 한 번만 말한다.** 이것이 이 함수의 요점이다.
+// 실패 시나리오가 정확히 그 모양이기 때문이다 — 어느 프로젝트의 등록 경로가 옮겨지면
+// 그 프로젝트의 **모든** 경로가 같은 이유로 unknown 이 되고, 그때 경로를 셋씩 나열하면
+// 화면은 **경로**를 지목하는데 실제 고장은 **레포**다. 운영자가 좌표를 못 받고
+// 엉뚱한 것을 고치러 간다.
+//
+// 원인이 갈릴 때만 경로별로 낸다 — 그때는 경로가 진짜 판별자다.
+// 사유를 하나도 못 받았으면(관측 계층이 안 채웠으면) 옛 거동인 경로 나열로 떨어진다.
+// 지어내지 않는다 — 사유 없음을 "원인 불명"이라 쓰면 그것도 거짓말이다.
+func unknownDetail(paths []string, reason map[string]string) string {
+	if len(reason) == 0 {
+		return strings.Join(clipList(paths, 3), ", ")
+	}
+	shared, uniform := "", true
+	for _, p := range paths {
+		r := reason[p]
+		if r == "" {
+			uniform = false
+			break
+		}
+		if shared == "" {
+			shared = r
+		} else if shared != r {
+			uniform = false
+			break
+		}
+	}
+	if uniform && shared != "" {
+		if len(paths) == 1 {
+			return paths[0] + " (" + shared + ")"
+		}
+		return fmt.Sprintf("%d개 전부 같은 이유다 — %s", len(paths), shared)
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if r := reason[p]; r != "" {
+			out = append(out, p+" ("+r+")")
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(clipList(out, 3), ", ")
 }
 
 // unreadableSuffix 는 못 연 프로젝트를 문장 끝에 붙인다.
