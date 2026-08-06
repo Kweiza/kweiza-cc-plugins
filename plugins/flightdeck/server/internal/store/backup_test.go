@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -322,5 +323,85 @@ func TestOpenLedgerRejectsMissingFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err == nil {
 		t.Error("없는 파일을 만들어 버렸다")
+	}
+}
+
+// 되쓰기는 원문을 그대로 되살린다 — id·at·NULL 까지.
+// AddJudgment 를 안 쓰는 이유가 이것이다(그것은 빈 ID/At 을 자기가 채운다).
+func TestWriteLedgerRestoresRowsVerbatim(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p")
+	first := linkJudgment(t, src, "p", model.JudgmentDecision, "i1", "i2")
+	// supersedes 가 실제로 걸린 행을 만든다 — 자기참조 FK 라 삽입 순서 제약이 여기서 드러난다.
+	//
+	// ★ id 를 일부러 first 보다 사전순으로 앞세운다. ULID 는 생성 시각순이라, 자연 생성
+	// 그대로 두면(id 를 비워 NewID 가 채우게 하면) supersedes 행은 참조 대상보다 **나중에**
+	// 만들어지므로 항상 더 큰 id 를 받는다 — 그러면 ReadLedger 의 id 오름차순 정렬에서
+	// 참조 대상이 항상 먼저 나와, WriteLedger 가 defer_foreign_keys 없이도 우연히 통과한다.
+	// 삽입 순서 제약을 실제로 시험하려면 참조하는 쪽이 먼저 나와야 하므로, crockford 알파벳의
+	// 최소 문자('0')로만 된 26자 id 를 손으로 박는다 — 어떤 실제 ULID 보다도 사전순으로 작다.
+	if _, err := src.AddJudgment(ctx, model.Judgment{
+		ID:      "00000000000000000000000000",
+		Project: "p", Kind: model.JudgmentDecision, Title: "정정", Body: "앞 판단을 대체한다",
+		Supersedes: first,
+	}); err != nil {
+		t.Fatalf("supersedes 판단 저장 실패: %v", err)
+	}
+	if err := src.PutSnapshot(ctx, model.Snapshot{
+		Project: "p", Key: "k", Value: "1", Method: model.SnapshotCommand,
+	}); err != nil {
+		t.Fatalf("스냅숏 저장 실패: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	// 빈 DB 에 되쓴다. project·session·machine 은 원장 밖이라 미리 만든다.
+	dst := newStore(t)
+	seed(t, dst, "p")
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("WriteLedger 실패: %v", err)
+	}
+
+	got, err := dst.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("복원본 읽기 실패: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("원본과 복원본이 다르다:\n원본 %+v\n복원 %+v", want, got)
+	}
+}
+
+// 같은 id 를 두 번 넣으면 거절한다. judgment 는 트리거로 UPDATE·DELETE 가 금지돼 있어
+// 잘못 넣은 행을 고치거나 지울 수 없다 — 조용히 넘어가면 되돌릴 방법이 없다.
+func TestWriteLedgerRejectsDuplicateID(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p")
+	linkJudgment(t, src, "p", model.JudgmentDecision, "i1")
+	d, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	dst := newStore(t)
+	seed(t, dst, "p")
+	if err := dst.WriteLedger(ctx, d); err != nil {
+		t.Fatalf("첫 되쓰기 실패: %v", err)
+	}
+	if err := dst.WriteLedger(ctx, d); err == nil {
+		t.Fatal("같은 원장을 두 번 되썼는데 통과했다 — 판단은 추가 전용이라 되돌릴 수 없다")
+	}
+
+	// 실패한 되쓰기가 부분 적용으로 남지 않는지 본다.
+	after, err := dst.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("재확인 실패: %v", err)
+	}
+	if len(after.Judgments) != len(d.Judgments) {
+		t.Errorf("판단이 %d건으로 늘었다 — 한 트랜잭션이라 그대로여야 한다", len(after.Judgments))
 	}
 }
