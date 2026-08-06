@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/kweiza/flightdeck/internal/ledger"
 	"github.com/kweiza/flightdeck/internal/legacy"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -142,6 +146,7 @@ func countFatal(p legacy.ImportPlan) int {
 func (a *App) runExport(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("export")
 	toLegacy := fs.Bool("to-legacy", false, "옛 형식(.claude/{sessions,queue,handoffs})으로 되쓴다")
+	toJudgments := fs.Bool("judgments", false, "판단 원장(judgment·judgment_link·snapshot)을 JSONL 로 낸다 — **DB 전량**이다")
 	outDir := fs.String("out", "", "되쓸 디렉토리(반드시 준다 — 원본 위에 쓰지 않기 위해서다)")
 	project := fs.String("project", "", "프로젝트 id(비면 FD_PROJECT)")
 	dbPath := fs.String("db", "", "SQLite 파일 경로(비면 자동)")
@@ -149,8 +154,14 @@ func (a *App) runExport(ctx context.Context, args []string, out io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if !*toLegacy {
-		fmt.Fprintln(out, "지금 있는 되쓰기 형식은 --to-legacy 하나다")
+	// ★ 형식은 정확히 하나여야 한다. 둘 다 없으면 무엇을 낼지 모르고, 둘 다 있으면
+	//   어느 쪽인지 알 수 없으므로 아무것도 하지 않는다(runImport 의 --apply/--dry-run 과 같은 규율).
+	switch {
+	case !*toLegacy && !*toJudgments:
+		fmt.Fprintln(out, "되쓰기 형식을 골라라 — --to-legacy(옛 형식) 또는 --judgments(판단 원장 JSONL)")
+		return 2
+	case *toLegacy && *toJudgments:
+		fmt.Fprintln(out, "--to-legacy 와 --judgments 를 함께 줬다 — 어느 쪽인지 알 수 없으므로 아무것도 하지 않는다")
 		return 2
 	}
 	if strings.TrimSpace(*outDir) == "" {
@@ -167,22 +178,48 @@ func (a *App) runExport(ctx context.Context, args []string, out io.Writer) int {
 		return 2
 	}
 	if v := legacy.JudgeOutTarget(outExists, inGit, hasLegacy, outEntries); !v.OK {
-		if !*force || !legacy.ForceAllows(v.Code) {
+		// ★ 원장은 같은 자리에 계속 쓰는 것이 정상 사용이다. 자기 산출물이면 갱신으로 본다 —
+		//   안 그러면 두 번째 실행부터 매번 --force 를 요구받는다.
+		//   git 작업 트리는 여기서도 안 뚫린다(ForceAllows 가 그것을 허용하지 않는다).
+		ours := *toJudgments && v.Code == "not-empty" && ledger.IsOurOutput(*outDir)
+		if !ours && (!*force || !legacy.ForceAllows(v.Code)) {
 			fmt.Fprintf(out, "되쓰기 거절 [%s]: %s\n", v.Code, v.Reason)
 			return 2
 		}
-		// --force 로 뒤집었다는 사실을 **로그에 남긴다.** 조용히 덮으면 나중에 무엇이 사라졌는지 못 찾는다.
-		a.log.Warn("되쓰기 자리가 비어 있지 않은데 --force 로 진행한다",
-			"route", clip(*outDir, 200), "reason", v.Code)
+		if !ours {
+			// --force 로 뒤집었다는 사실을 **로그에 남긴다.** 조용히 덮으면 나중에 무엇이 사라졌는지 못 찾는다.
+			a.log.Warn("되쓰기 자리가 비어 있지 않은데 --force 로 진행한다",
+				"route", clip(*outDir, 200), "reason", v.Code)
+		}
 	}
 
 	proj := strings.TrimSpace(*project)
-	if proj == "" {
-		proj = envOr(a.env, "FD_PROJECT", "")
+	if *toJudgments {
+		// ★ 판단 원장은 DB 전량이다. --project 를 **명시**하면 거절한다 —
+		//   조용히 무시하면 백업이 반쪽인 걸 아무도 모른다.
+		//   환경변수(FD_PROJECT)는 훅이 항상 심으므로 거절 조건에 넣지 않는다.
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "project" {
+				explicit = true
+			}
+		})
+		if explicit {
+			fmt.Fprintln(out, "판단 원장은 DB 전량이다 — --project 를 받지 않는다(프로젝트가 섞여 있어도 전부 나간다)")
+			return 2
+		}
+	} else {
+		if proj == "" {
+			proj = envOr(a.env, "FD_PROJECT", "")
+		}
+		if proj == "" {
+			fmt.Fprintln(out, "프로젝트 id 를 정하지 못했다 — --project 로 줘라")
+			return 2
+		}
 	}
-	if proj == "" {
-		fmt.Fprintln(out, "프로젝트 id 를 정하지 못했다 — --project 로 줘라")
-		return 2
+
+	if *toJudgments {
+		return a.exportJudgments(ctx, *dbPath, *outDir, out)
 	}
 
 	st, path, err := openDB(a.env, a.log, *dbPath)
@@ -213,4 +250,79 @@ func (a *App) runExport(ctx context.Context, args []string, out io.Writer) int {
 	a.log.Info("되쓰기 완료", "db_path", path, "mode", "to-legacy",
 		"targets", res.Items, "count", len(res.Files))
 	return 0
+}
+
+// exportJudgments 는 `fd export --judgments` 다.
+//
+// ★ openDB 를 쓰지 않는다. 그것은 store.OpenWithLogger 를 부르고, 그 안에서 반드시
+// migrate 가 돈다 — 낡은 DB 를 만나면 원장을 뜨기 전에 스키마를 바꾼다.
+// store.OpenLedger 는 ProbeMigration 으로 먼저 재고 이행이 필요하면 거절한다.
+func (a *App) exportJudgments(ctx context.Context, dbFlag, outDir string, out io.Writer) int {
+	path := strings.TrimSpace(dbFlag)
+	if path == "" {
+		home, _ := os.UserHomeDir()
+		_, derr := os.Stat("/data")
+		path = DefaultDBPath(a.env, home, derr == nil)
+	}
+
+	st, err := store.OpenLedger(ctx, path, a.log)
+	if err != nil {
+		a.log.Error("원장용 DB 를 열지 못했다", "db_path", path, "error", err.Error())
+		fmt.Fprintf(out, "%s\n", err)
+		return 1
+	}
+	defer func() {
+		if cerr := st.Close(); cerr != nil {
+			a.log.Error("DB 닫기 실패", "error", cerr.Error())
+		}
+	}()
+
+	dump, err := st.ReadLedger(ctx)
+	if err != nil {
+		a.log.Error("원장 읽기 실패", "db_path", path, "error", err.Error())
+		fmt.Fprintf(out, "원장 읽기 실패: %s\n", err)
+		return 1
+	}
+
+	files, m, err := ledger.Encode(dump, store.SchemaVersion, nowStampString())
+	if err != nil {
+		a.log.Error("원장 인코딩 실패", "error", err.Error())
+		fmt.Fprintf(out, "원장 인코딩 실패: %s\n", err)
+		return 1
+	}
+	names, err := ledger.Write(files, outDir)
+	if err != nil {
+		// ★ 사람이 읽는 줄은 오류 문구가 이미 담고 있다 — ledger.WriteError 가 되쓸 자리의
+		//   상태 판정(온전한가, 반쯤 덮였는가)을 실어 온다. 여기서 다시 판정하지 않는다.
+		//   로그에는 그 판정을 검색 가능한 필드로 눕힌다.
+		fields := []any{"route", clip(outDir, 200), "error", err.Error()}
+		var werr *ledger.WriteError
+		if errors.As(err, &werr) {
+			fields = append(fields, "out_state", werr.Verdict.Code, "out_intact", werr.Verdict.Intact)
+		}
+		a.log.Error("원장 쓰기 실패", fields...)
+		fmt.Fprintf(out, "원장 쓰기 실패: %s\n", err)
+		return 1
+	}
+
+	losses := ledger.Losses()
+	fmt.Fprintf(out, "fd export --judgments · DB 전량 → %s\n\n", outDir)
+	// ★ 여섯 표 전부를 낸다. Task 10 이 FK 폐포를 닫으면서 machine·project·session 이 늘었다 —
+	//   그 셋이 없으면 세션 걸린 판단(실측 85%)이 복원에서 전부 롤백된다.
+	fmt.Fprintf(out, "  판단 %d · 링크 %d · 스냅숏 %d · 세션 %d · 프로젝트 %d · 머신 %d (파일 %d)\n",
+		m.Counts.Judgments, m.Counts.Links, m.Counts.Snapshots,
+		m.Counts.Sessions, m.Counts.Projects, m.Counts.Machines, len(names))
+	fmt.Fprintf(out, "\n── 이 백업이 안 덮는 것 (%d건)\n", len(losses))
+	for _, l := range losses {
+		fmt.Fprintf(out, "  - %s\n", l)
+	}
+	a.log.Info("원장 내보내기 완료", "db_path", path, "mode", "judgments",
+		"targets", m.Counts.Judgments, "count", len(names))
+	return 0
+}
+
+// nowStampString 은 매니페스트에 실을 지금 시각이다. DB 의 저장 표기와 같은 폭 고정
+// 마이크로초를 쓴다 — 산출물 안에서 시각 표기가 두 벌이 되면 안 된다.
+func nowStampString() string {
+	return time.Now().UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
 }

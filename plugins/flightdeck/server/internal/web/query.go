@@ -61,40 +61,6 @@ func pickEvals(ctx context.Context, db *sql.DB, project string, limit int) ([]mo
 	return out, nil
 }
 
-// snapshots 는 프로젝트의 스냅숏 전부를 키 순으로 읽는다.
-// 수는 사람이 넣은 만큼이라 페이징이 없다.
-func snapshots(ctx context.Context, db *sql.DB, project string) ([]model.Snapshot, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT key, value, method, evidence, input_digest, computed_at
-		FROM snapshot WHERE project = ? ORDER BY key`, project)
-	if err != nil {
-		return nil, fmt.Errorf("스냅숏 조회 실패(project=%q): %w", Clip(project, 64), err)
-	}
-	defer rows.Close()
-
-	var out []model.Snapshot
-	for rows.Next() {
-		var (
-			sn                 model.Snapshot
-			method, computedAt string
-			evidence, digest   sql.NullString
-		)
-		if err := rows.Scan(&sn.Key, &sn.Value, &method, &evidence, &digest, &computedAt); err != nil {
-			return nil, fmt.Errorf("스냅숏 행 해석 실패: %w", err)
-		}
-		sn.Project, sn.Method = project, model.SnapshotMethod(method)
-		sn.Evidence, sn.InputDigest = evidence.String, digest.String
-		if sn.ComputedAt, err = parseStamp(computedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, sn)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("스냅숏 목록 순회 실패: %w", err)
-	}
-	return out, nil
-}
-
 // closedItems 는 종료된 항목을 최근 종료순으로 읽는다(랜딩 이력의 Tier A 분).
 func closedItems(ctx context.Context, db *sql.DB, project string, limit int) ([]model.Item, error) {
 	rows, err := db.QueryContext(ctx, `
