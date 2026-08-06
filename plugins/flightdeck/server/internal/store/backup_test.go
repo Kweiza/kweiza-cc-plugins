@@ -91,3 +91,160 @@ func TestReadLedgerKeepsRawTimestampString(t *testing.T) {
 		t.Fatalf("at 이 폭 고정이 아니다(%q, %d자) — DB 원문을 그대로 실어야 한다", at, len(at))
 	}
 }
+
+// snapshotByKey 는 d.Snapshots 에서 key 로 하나를 찾는다. 없으면 시험을 즉시 실패시킨다.
+func snapshotByKey(t *testing.T, d LedgerDump, key string) LedgerSnapshot {
+	t.Helper()
+	for _, sn := range d.Snapshots {
+		if sn.Key == key {
+			return sn
+		}
+	}
+	t.Fatalf("스냅숏 %q 를 원장에서 못 찾았다(%d건 중)", key, len(d.Snapshots))
+	return LedgerSnapshot{}
+}
+
+// readLedgerSnapshots 는 이전 시험 셋 어디에서도 실행되지 않는다 — snapshot 행을
+// 하나도 안 쓰기 때문에 rows.Next() 가 0행에서 바로 false 를 낸다. 이 아래 넷은
+// 실제 행을 넣어 Scan 이 진짜로 도는 경로를 잠근다.
+
+// evidence·input_digest 가 NULL 이면 nil 포인터로, 값이 있으면 그 값을 가리키는
+// 포인터로 나와야 한다. str() 을 썼다면 NULL 과 "" 가 똑같이 non-nil 빈 문자열
+// 포인터가 되어 이 시험이 못 잡는다 — ptrOf() 를 쓴 이유가 정확히 이것이다.
+func TestReadLedgerSnapshotsDistinguishNullFromValue(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p")
+
+	if err := s.PutSnapshot(ctx, model.Snapshot{
+		Project: "p", Key: "manual-key", Value: "42",
+		Method: model.SnapshotManual, Evidence: "근거 문서", InputDigest: "deadbeef",
+	}); err != nil {
+		t.Fatalf("manual 스냅숏 저장 실패: %v", err)
+	}
+	if err := s.PutSnapshot(ctx, model.Snapshot{
+		Project: "p", Key: "command-key", Value: "7",
+		Method: model.SnapshotCommand,
+	}); err != nil {
+		t.Fatalf("command 스냅숏 저장 실패: %v", err)
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+
+	manual := snapshotByKey(t, d, "manual-key")
+	if manual.Evidence == nil || *manual.Evidence != "근거 문서" {
+		t.Errorf("manual 스냅숏의 evidence 가 %v — \"근거 문서\" 를 가리키는 포인터를 기대한다", manual.Evidence)
+	}
+	if manual.InputDigest == nil || *manual.InputDigest != "deadbeef" {
+		t.Errorf("manual 스냅숏의 input_digest 가 %v — \"deadbeef\" 를 가리키는 포인터를 기대한다", manual.InputDigest)
+	}
+
+	cmd := snapshotByKey(t, d, "command-key")
+	if cmd.Evidence != nil {
+		t.Errorf("command 스냅숏의 evidence 가 nil 이어야 하는데 %q 를 가리킨다", *cmd.Evidence)
+	}
+	if cmd.InputDigest != nil {
+		t.Errorf("command 스냅숏의 input_digest 가 nil 이어야 하는데 %q 를 가리킨다", *cmd.InputDigest)
+	}
+}
+
+// 일곱 컬럼을 전부 서로 다른 값으로 채워 SELECT 목록과 Scan 인자 순서가
+// 어긋나면 반드시 걸리게 한다 — 예컨대 value 와 key 에 같은 문자열을 주면
+// 그 둘이 뒤바뀌어도 시험이 통과하므로, 값을 겹치지 않게 고른다.
+func TestReadLedgerSnapshotsPreserveColumnOrder(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "ordp")
+
+	if err := s.PutSnapshot(ctx, model.Snapshot{
+		Project: "ordp", Key: "ordkey", Value: "ordvalue",
+		Method: model.SnapshotManual, Evidence: "ordevidence", InputDigest: "orddigest",
+	}); err != nil {
+		t.Fatalf("스냅숏 저장 실패: %v", err)
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+	sn := snapshotByKey(t, d, "ordkey")
+
+	switch {
+	case sn.Project != "ordp":
+		t.Errorf("project = %q, 기대 %q", sn.Project, "ordp")
+	case sn.Key != "ordkey":
+		t.Errorf("key = %q, 기대 %q", sn.Key, "ordkey")
+	case sn.Value != "ordvalue":
+		t.Errorf("value = %q, 기대 %q", sn.Value, "ordvalue")
+	case sn.Method != "manual":
+		t.Errorf("method = %q, 기대 %q", sn.Method, "manual")
+	case sn.Evidence == nil || *sn.Evidence != "ordevidence":
+		t.Errorf("evidence = %v, 기대 \"ordevidence\" 를 가리키는 포인터", sn.Evidence)
+	case sn.InputDigest == nil || *sn.InputDigest != "orddigest":
+		t.Errorf("input_digest = %v, 기대 \"orddigest\" 를 가리키는 포인터", sn.InputDigest)
+	}
+}
+
+// 정렬은 (project, key) 오름차순이다. 두 프로젝트에 키를 사전순 역순으로 넣어
+// 삽입 순서가 아니라 ORDER BY 가 결과를 정한다는 것을 확인한다.
+func TestReadLedgerSnapshotsOrderedByProjectThenKey(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "q1")
+	seed(t, s, "q2")
+
+	// 삽입은 일부러 기대 순서의 역순으로 한다.
+	for _, sn := range []model.Snapshot{
+		{Project: "q2", Key: "k2", Value: "v-q2-k2", Method: model.SnapshotCommand},
+		{Project: "q1", Key: "k2", Value: "v-q1-k2", Method: model.SnapshotCommand},
+		{Project: "q2", Key: "k1", Value: "v-q2-k1", Method: model.SnapshotCommand},
+		{Project: "q1", Key: "k1", Value: "v-q1-k1", Method: model.SnapshotCommand},
+	} {
+		if err := s.PutSnapshot(ctx, sn); err != nil {
+			t.Fatalf("스냅숏 저장 실패(%s/%s): %v", sn.Project, sn.Key, err)
+		}
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+
+	want := [][2]string{{"q1", "k1"}, {"q1", "k2"}, {"q2", "k1"}, {"q2", "k2"}}
+	if len(d.Snapshots) != len(want) {
+		t.Fatalf("스냅숏이 %d건 — %d건을 기대한다", len(d.Snapshots), len(want))
+	}
+	for i, w := range want {
+		got := d.Snapshots[i]
+		if got.Project != w[0] || got.Key != w[1] {
+			t.Fatalf("%d번째가 (%q,%q) — (%q,%q) 를 기대한다(정렬이 project,key 순이 아니다)",
+				i, got.Project, got.Key, w[0], w[1])
+		}
+	}
+}
+
+// computed_at 도 판단의 at 과 같은 이유로 DB 원문 폭 고정 문자열이어야 한다
+// (time.Time 으로 접으면 마셜이 후행 0을 지워 폭이 흔들린다).
+func TestReadLedgerSnapshotsKeepRawTimestampString(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p")
+	if err := s.PutSnapshot(ctx, model.Snapshot{
+		Project: "p", Key: "k", Value: "v", Method: model.SnapshotCommand,
+	}); err != nil {
+		t.Fatalf("스냅숏 저장 실패: %v", err)
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+	sn := snapshotByKey(t, d, "k")
+	if len(sn.ComputedAt) != len("2006-01-02T15:04:05.000000Z") {
+		t.Fatalf("computed_at 이 폭 고정이 아니다(%q, %d자) — DB 원문을 그대로 실어야 한다",
+			sn.ComputedAt, len(sn.ComputedAt))
+	}
+}
