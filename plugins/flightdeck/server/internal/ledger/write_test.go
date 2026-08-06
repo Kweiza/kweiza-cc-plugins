@@ -21,8 +21,8 @@ func TestWriteLeavesNoTempFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write 실패: %v", err)
 	}
-	if len(written) != 4 {
-		t.Errorf("파일이 %d개 — 4개를 기대한다: %v", len(written), written)
+	if len(written) != 7 {
+		t.Errorf("파일이 %d개 — 7개를 기대한다: %v", len(written), written)
 	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -33,8 +33,8 @@ func TestWriteLeavesNoTempFiles(t *testing.T) {
 			t.Errorf("임시 파일이 남았다: %s", e.Name())
 		}
 	}
-	if len(ents) != 4 {
-		t.Errorf("디렉토리에 %d개가 있다 — 4개를 기대한다", len(ents))
+	if len(ents) != 7 {
+		t.Errorf("디렉토리에 %d개가 있다 — 7개를 기대한다", len(ents))
 	}
 }
 

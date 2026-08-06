@@ -359,9 +359,9 @@ func TestWriteLedgerRestoresRowsVerbatim(t *testing.T) {
 		t.Fatalf("원본 읽기 실패: %v", err)
 	}
 
-	// 빈 DB 에 되쓴다. project·session·machine 은 원장 밖이라 미리 만든다.
+	// 빈 DB 에 되쓴다. project·machine 도 원장에 실려 있으므로 미리 만들지 않는다
+	// (미리 만들면 WriteLedger 의 되쓰기와 id 가 겹쳐 UNIQUE 위반이 난다).
 	dst := newStore(t)
-	seed(t, dst, "p")
 	if err := dst.WriteLedger(ctx, want); err != nil {
 		t.Fatalf("WriteLedger 실패: %v", err)
 	}
@@ -387,8 +387,8 @@ func TestWriteLedgerRejectsDuplicateID(t *testing.T) {
 		t.Fatalf("원본 읽기 실패: %v", err)
 	}
 
+	// project·machine 도 원장에 실려 있으므로 미리 만들지 않는다(TestWriteLedgerRestoresRowsVerbatim 참고).
 	dst := newStore(t)
-	seed(t, dst, "p")
 	if err := dst.WriteLedger(ctx, d); err != nil {
 		t.Fatalf("첫 되쓰기 실패: %v", err)
 	}
@@ -403,5 +403,119 @@ func TestWriteLedgerRejectsDuplicateID(t *testing.T) {
 	}
 	if len(after.Judgments) != len(d.Judgments) {
 		t.Errorf("판단이 %d건으로 늘었다 — 한 트랜잭션이라 그대로여야 한다", len(after.Judgments))
+	}
+}
+
+// 원장은 FK 폐포를 통째로 담는다. session.id 는 서버 발급 ULID 라 새 DB 에서 재현할 수 없고,
+// 그래서 세션을 안 담으면 세션 걸린 판단(실측 85%)이 FK 위반으로 전부 롤백된다.
+func TestReadLedgerCoversTheFullFKClosure(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p1")
+	sess := mustSession(t, s, "p1", "cc-closure")
+
+	if _, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "p1", SessionID: sess.ID, Kind: model.JudgmentDecision, Body: "세션 걸린 판단",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+	if len(d.Machines) == 0 {
+		t.Error("machine 이 원장에 없다 — session.machine_id 가 가리킬 대상이 사라진다")
+	}
+	if len(d.Projects) == 0 {
+		t.Error("project 가 원장에 없다")
+	}
+	if len(d.Sessions) == 0 {
+		t.Fatal("session 이 원장에 없다 — 판단의 85%가 이것을 가리킨다")
+	}
+	var found bool
+	for _, x := range d.Sessions {
+		if x.ID == sess.ID {
+			found = true
+			if x.Project != "p1" || x.MachineID != "m1" {
+				t.Errorf("세션 필드가 틀리다: %+v", x)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("판단이 가리키는 세션 %q 가 원장에 없다", sess.ID)
+	}
+}
+
+// 빈 DB 에 되쓰면 폐포가 통째로 복원된다 — 미리 심어 둘 것이 하나도 없어야 한다.
+// 이것이 "무손실" 등급의 실제 의미다.
+func TestWriteLedgerRestoresIntoATrulyEmptyDB(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p1")
+	sess := mustSession(t, src, "p1", "cc-restore")
+
+	if _, err := src.AddJudgment(ctx, model.Judgment{
+		Project: "p1", SessionID: sess.ID, Kind: model.JudgmentAsk,
+		Title: "제목", Body: "세션 걸린 판단",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+	if err := src.PutSnapshot(ctx, model.Snapshot{
+		Project: "p1", Key: "k", Value: "1", Method: model.SnapshotCommand,
+	}); err != nil {
+		t.Fatalf("스냅숏 저장 실패: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	// ★ seed 를 부르지 않는다. 원장이 project·machine·session 을 다 갖고 와야 한다.
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("빈 DB 되쓰기 실패 — 폐포가 안 닫혔다: %v", err)
+	}
+	got, err := dst.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("복원본 읽기 실패: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("왕복에서 원장이 달라졌다:\n원본 %+v\n복원 %+v", want, got)
+	}
+}
+
+// state='blocked' 세션은 CHECK(state<>'blocked' OR blocked_why 가 비지 않음) 를 통과해야 한다.
+// 지금 실 DB 에 blocked 세션이 0건이라 이 축은 시험이 만들어야만 검증된다.
+func TestWriteLedgerRestoresBlockedSession(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p1")
+	sess := mustSession(t, src, "p1", "cc-blocked")
+	if err := src.SetSessionState(ctx, sess.ID, model.SessionBlocked, "왜 막혔는지"); err != nil {
+		t.Fatalf("세션을 막힘으로 못 바꿨다: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+	var blocked bool
+	for _, x := range want.Sessions {
+		if x.State == "blocked" {
+			blocked = true
+			if x.BlockedWhy == nil || *x.BlockedWhy == "" {
+				t.Fatalf("blocked 세션인데 사유가 비었다: %+v", x)
+			}
+		}
+	}
+	if !blocked {
+		t.Fatal("전제가 깨졌다 — blocked 세션이 원장에 없다")
+	}
+
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("blocked 세션 되쓰기 실패(CHECK 위반?): %v", err)
 	}
 }

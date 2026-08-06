@@ -11,6 +11,28 @@ func ptr(s string) *string { return &s }
 
 func sampleDump() store.LedgerDump {
 	return store.LedgerDump{
+		// machine 은 NULL 가능 컬럼이 없다 — 섞을 축이 없으므로 한 행이면 충분하다.
+		Machines: []store.LedgerMachine{
+			{ID: "m1", Hostname: "host-1",
+				FirstSeen: "2026-08-01T00:00:00.000000Z", LastSeen: "2026-08-06T00:00:00.000000Z"},
+		},
+		// project 는 remote_url·config·config_from_sha 셋이 NULL 가능하다 — 한 행은 전부 NULL,
+		// 한 행은 전부 값이 있게 섞는다.
+		Projects: []store.LedgerProject{
+			{ID: "p", Path: "/repo/p", RemoteURL: nil, DefaultBranch: "main",
+				Config: nil, ConfigFromSHA: nil, CreatedAt: "2026-08-01T00:00:00.000000Z"},
+			{ID: "p2", Path: "/repo/p2", RemoteURL: ptr("git@example.com:p2.git"), DefaultBranch: "trunk",
+				Config: ptr(`{"lane":1}`), ConfigFromSHA: ptr("deadbeef"), CreatedAt: "2026-08-02T00:00:00.000000Z"},
+		},
+		// session 은 label·blocked_why 둘이 NULL 가능하다 — 한 행은 둘 다 NULL(active),
+		// 한 행은 둘 다 값이 있다(blocked).
+		Sessions: []store.LedgerSession{
+			{ID: "s1", Project: "p", MachineID: "m1", Worktree: "/w/s1", CCSessionID: "cc1",
+				Label: nil, State: "active", BlockedWhy: nil, OpenedAt: "2026-08-06T00:00:00.000000Z"},
+			{ID: "s2", Project: "p2", MachineID: "m1", Worktree: "/w/s2", CCSessionID: "cc2",
+				Label: ptr("표시 이름"), State: "blocked", BlockedWhy: ptr("왜 막혔는지"),
+				OpenedAt: "2026-08-06T00:00:03.000000Z"},
+		},
 		Judgments: []store.LedgerJudgment{
 			{ID: "01A", Project: ptr("p"), SessionID: nil,
 				At: "2026-08-06T00:00:01.000000Z", Kind: "decision",
@@ -75,13 +97,16 @@ func TestEncodeKeepsRawTimestamp(t *testing.T) {
 	}
 }
 
-// 한 줄이 한 행이다. 그리고 파일 넷이 나온다.
-func TestEncodeProducesFourFilesAndLinePerRow(t *testing.T) {
+// 한 줄이 한 행이다. 그리고 파일 일곱(JSONL 여섯 + manifest)이 나온다.
+func TestEncodeProducesSevenFilesAndLinePerRow(t *testing.T) {
 	files, m, err := Encode(sampleDump(), 4, "2026-08-06T00:00:00.000000Z")
 	if err != nil {
 		t.Fatalf("Encode 실패: %v", err)
 	}
-	for _, name := range []string{"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl", ManifestName} {
+	for _, name := range []string{
+		"machines.jsonl", "projects.jsonl", "sessions.jsonl",
+		"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl", ManifestName,
+	} {
 		if _, ok := files[name]; !ok {
 			t.Errorf("%s 가 없다", name)
 		}
@@ -93,7 +118,8 @@ func TestEncodeProducesFourFilesAndLinePerRow(t *testing.T) {
 	if m.SchemaVersion != 4 || m.FormatVersion != FormatVersion || m.Format != FormatName {
 		t.Errorf("manifest 가 이상하다: %+v", m)
 	}
-	if m.Counts.Judgments != 2 || m.Counts.Links != 1 || m.Counts.Snapshots != 1 {
+	if m.Counts.Machines != 1 || m.Counts.Projects != 2 || m.Counts.Sessions != 2 ||
+		m.Counts.Judgments != 2 || m.Counts.Links != 1 || m.Counts.Snapshots != 1 {
 		t.Errorf("건수가 틀리다: %+v", m.Counts)
 	}
 }
@@ -116,7 +142,7 @@ func TestEncodeHandlesBodyOverScannerDefault(t *testing.T) {
 // 손실 목록은 순수 함수다. 산문에만 적어 두면 코드가 더 잃기 시작해도 아무도 모른다.
 func TestLossesNamesTheKnownGaps(t *testing.T) {
 	joined := strings.Join(Losses(), "\n")
-	for _, want := range []string{"아웃박스", "judgment_fts", "project", "session", "machine"} {
+	for _, want := range []string{"아웃박스", "judgment_fts", "폐포 밖", "judgment_link.target_id"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("손실 목록에 %q 축이 없다: %v", want, Losses())
 		}
