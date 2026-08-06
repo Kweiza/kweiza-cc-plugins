@@ -3,10 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kweiza/flightdeck/internal/ledger"
 )
 
 // 이관 CLI 의 소비자 좌표계는 **stdout 과 파일시스템**이다.
@@ -192,4 +195,149 @@ func treeFingerprint(t *testing.T, root string) string {
 func hashOf(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// 형식을 하나도 안 고르면 거절한다. 둘을 함께 골라도 거절한다 —
+// 어느 쪽인지 알 수 없으므로 아무것도 하지 않는다.
+func TestExportRequiresExactlyOneFormat(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	rc, out := h.run("", "export", "--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("형식 없이 통과했다: %s", out)
+	}
+	mustContain(t, "형식 없음 거절", out, "--to-legacy", "--judgments")
+
+	rc, out = h.run("", "export", "--to-legacy", "--judgments",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("둘을 함께 줬는데 통과했다: %s", out)
+	}
+	mustContain(t, "형식 둘 거절", out, "함께")
+}
+
+// --judgments 는 DB 전량이다. --project 를 명시하면 거절한다 —
+// 조용히 무시하면 백업이 반쪽인 걸 아무도 모른다.
+func TestExportJudgmentsRejectsExplicitProject(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	rc, out := h.run("", "export", "--judgments", "--project", "p",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("--project 를 줬는데 통과했다: %s", out)
+	}
+	mustContain(t, "--project 거절", out, "전량")
+}
+
+// 실제로 내보낸다. FD_PROJECT 는 환경에 있지만 거절 사유가 아니다.
+func TestExportJudgmentsWritesFilesAndPrintsLosses(t *testing.T) {
+	h := newHarness(t)
+
+	// 판단을 REST 로 넣는다 — 실물 경로다. closeStore 뒤에는 REST 를 못 쓴다.
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "왕복 대상 판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패(rc=%d): %s", rc, out)
+	}
+
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	rc, out = h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("내보내기 실패(rc=%d): %s", rc, out)
+	}
+	mustContain(t, "내보내기 출력", out,
+		"fd export --judgments", "DB 전량", "이 백업이 안 덮는 것", "아웃박스")
+
+	for _, name := range []string{
+		"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl",
+		"machines.jsonl", "projects.jsonl", "sessions.jsonl", "manifest.json",
+	} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Errorf("%s 가 안 났다: %v", name, err)
+		}
+	}
+}
+
+// 같은 자리에 두 번 내보내도 --force 가 필요 없다 — 자기 산출물을 알아본다.
+//
+// ★ rc==0 만 보면 "아무 일도 안 하고 그냥 통과시켰다"와 "실제로 다시 썼다"를
+//   구분하지 못한다. exported_at 축을 고른 이유: exportJudgments 가 실행마다
+//   nowStampString() 으로 새로 찍고 그 값이 manifest.json 에 실린다. 두 h.run
+//   호출 사이에는 DB 를 열고 ReadLedger 로 여섯 표를 읽고 파일 일곱 개를
+//   tmp→rename 으로 쓰는 실 I/O 가 끼어 있어(같은 프로세스 안에서 순차 실행되지만
+//   이 I/O 만으로 마이크로초 여러 개가 흐른다), nowStampString() 의 마이크로초
+//   해상도에서 두 값이 우연히 같을 실무적 여지가 없다.
+func TestExportJudgmentsRerunNeedsNoForce(t *testing.T) {
+	h := newHarness(t)
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("첫 내보내기 실패: %s", out)
+	}
+	first := readManifestExportedAt(t, outDir)
+
+	rc, out = h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("두 번째 내보내기가 거절됐다 — 자기 산출물을 알아봐야 한다(rc=%d): %s", rc, out)
+	}
+	second := readManifestExportedAt(t, outDir)
+	if second == first {
+		t.Fatalf("두 번째 실행이 산출물을 실제로 갱신하지 않았다 — manifest.json 의 exported_at 이 그대로다: %s", first)
+	}
+}
+
+// readManifestExportedAt 은 dir/manifest.json 을 읽어 exported_at 을 낸다.
+// TestExportJudgmentsRerunNeedsNoForce 가 "재실행이 rc==0 만 내고 실제로는
+// 아무것도 다시 쓰지 않는다" 회귀를 잡는 유일한 좌표계다.
+func readManifestExportedAt(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest.json 을 못 읽었다: %v", err)
+	}
+	var m ledger.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("manifest.json 파싱 실패: %v", err)
+	}
+	return m.ExportedAt
+}
+
+// 내보내기는 DB 를 안 건드린다.
+func TestExportJudgmentsLeavesDBUntouched(t *testing.T) {
+	h := newHarness(t)
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	before, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+	if rc, out := h.run("", "export", "--judgments",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+	after, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("DB 가 바뀌었다: %d/%v → %d/%v",
+			before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
 }

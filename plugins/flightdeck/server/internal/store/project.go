@@ -18,6 +18,14 @@ import (
 // project
 // ─────────────────────────────────────────────────────────────────────────────
 
+// projectCols 는 프로젝트 조회의 컬럼 목록이다.
+// judgmentCols·sessionCols 와 같은 이유로 상수다 — 목록을 손으로 다시 적으면
+// 순서가 어긋나는 순간 Scan 이 조용히 엉뚱한 값을 채운다(전부 문자열이라 타입 오류도 안 난다).
+const projectCols = `id, path, remote_url, default_branch, config, config_from_sha, created_at`
+
+// machineCols 는 머신 조회의 컬럼 목록이다.
+const machineCols = `id, hostname, first_seen, last_seen`
+
 // UpsertProject 는 프로젝트를 등록하거나 갱신한다.
 //
 // created_at 은 첫 등록 시각을 보존한다 — 재등록이 나이를 0으로 되돌리면
@@ -59,7 +67,7 @@ func getProject(ctx context.Context, q dbtx, id string) (model.Project, error) {
 	var remote, config, fromSHA sql.NullString
 	var created string
 	err := q.QueryRowContext(ctx, `
-		SELECT id, path, remote_url, default_branch, config, config_from_sha, created_at
+		SELECT `+projectCols+`
 		FROM project WHERE id = ?`, id).
 		Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch, &config, &fromSHA, &created)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -88,7 +96,7 @@ func (t *Tx) GetProject(id string) (model.Project, error) {
 // ListProjects 는 전부를 id 순으로 낸다. 프로젝트 수는 사람이 등록한 만큼이라 페이징이 없다.
 func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, path, remote_url, default_branch, config, config_from_sha, created_at
+		SELECT `+projectCols+`
 		FROM project ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("프로젝트 목록 조회 실패: %w", err)
@@ -158,7 +166,7 @@ func (s *Store) GetMachine(ctx context.Context, id string) (model.Machine, error
 	var m model.Machine
 	var first, last string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, hostname, first_seen, last_seen FROM machine WHERE id = ?`, id).
+		`SELECT `+machineCols+` FROM machine WHERE id = ?`, id).
 		Scan(&m.ID, &m.Hostname, &first, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, notFound(NFMachine, "", id)
