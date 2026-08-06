@@ -193,3 +193,118 @@ func hashOf(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// 형식을 하나도 안 고르면 거절한다. 둘을 함께 골라도 거절한다 —
+// 어느 쪽인지 알 수 없으므로 아무것도 하지 않는다.
+func TestExportRequiresExactlyOneFormat(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	rc, out := h.run("", "export", "--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("형식 없이 통과했다: %s", out)
+	}
+	mustContain(t, "형식 없음 거절", out, "--to-legacy", "--judgments")
+
+	rc, out = h.run("", "export", "--to-legacy", "--judgments",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("둘을 함께 줬는데 통과했다: %s", out)
+	}
+	mustContain(t, "형식 둘 거절", out, "함께")
+}
+
+// --judgments 는 DB 전량이다. --project 를 명시하면 거절한다 —
+// 조용히 무시하면 백업이 반쪽인 걸 아무도 모른다.
+func TestExportJudgmentsRejectsExplicitProject(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	rc, out := h.run("", "export", "--judgments", "--project", "p",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("--project 를 줬는데 통과했다: %s", out)
+	}
+	mustContain(t, "--project 거절", out, "전량")
+}
+
+// 실제로 내보낸다. FD_PROJECT 는 환경에 있지만 거절 사유가 아니다.
+func TestExportJudgmentsWritesFilesAndPrintsLosses(t *testing.T) {
+	h := newHarness(t)
+
+	// 판단을 REST 로 넣는다 — 실물 경로다. closeStore 뒤에는 REST 를 못 쓴다.
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "왕복 대상 판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패(rc=%d): %s", rc, out)
+	}
+
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	rc, out = h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("내보내기 실패(rc=%d): %s", rc, out)
+	}
+	mustContain(t, "내보내기 출력", out,
+		"fd export --judgments", "DB 전량", "이 백업이 안 덮는 것", "아웃박스")
+
+	for _, name := range []string{
+		"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl",
+		"machines.jsonl", "projects.jsonl", "sessions.jsonl", "manifest.json",
+	} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Errorf("%s 가 안 났다: %v", name, err)
+		}
+	}
+}
+
+// 같은 자리에 두 번 내보내도 --force 가 필요 없다 — 자기 산출물을 알아본다.
+func TestExportJudgmentsRerunNeedsNoForce(t *testing.T) {
+	h := newHarness(t)
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("첫 내보내기 실패: %s", out)
+	}
+	rc, out = h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
+	if rc != 0 {
+		t.Fatalf("두 번째 내보내기가 거절됐다 — 자기 산출물을 알아봐야 한다(rc=%d): %s", rc, out)
+	}
+}
+
+// 내보내기는 DB 를 안 건드린다.
+func TestExportJudgmentsLeavesDBUntouched(t *testing.T) {
+	h := newHarness(t)
+	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")
+	if rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	before, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+	if rc, out := h.run("", "export", "--judgments",
+		"--out", filepath.Join(t.TempDir(), "o"), "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+	after, err := os.Stat(h.db)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("DB 가 바뀌었다: %d/%v → %d/%v",
+			before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+}
