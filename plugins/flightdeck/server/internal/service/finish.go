@@ -236,7 +236,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			//   (store/event.go:203)이 만들지도 않은 항목을 재생산율 R 의 분자로 더한다 —
 			//   DESIGN §10 이 R 을 이 설계의 판정 축으로 세운 자리라 조용히 거짓이 된다.
 			"count": len(plan.Create), "linked": len(plan.Link),
-			"bytes": len(in.Body), // §10 "세션당 판단 바이트"
+			"bytes": len(in.Body), // §10 "세션당 판단 바이트" — 0 에 수렴하면 위험 신호다
 		})
 
 		// ★ 무엇을 만들고 무엇을 이을지 **이 안에서** 확정한다. 트랜잭션 밖 분류는 참고값이고,
