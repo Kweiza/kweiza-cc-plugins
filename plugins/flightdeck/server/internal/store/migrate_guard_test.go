@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -198,38 +199,49 @@ func stripSQLComments(sql string) string {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ★ 이 시험과 아래 TestNeverExemptOpsAreActuallyDetected 가 왜 둘 다 필요한가:
+// **op 와 정규식의 대응이 어긋나면 예외가 엉뚱한 조작을 면제한다.** len(got)>0 만 보면
+// checks 표에서 복붙 실수로 {opDeleteFrom, `\bDROP\s+TABLE\b`} 가 돼도 "파괴적이다"는
+// 여전히 참이라 이 시험이 안 잡는다 — 그러면 증분 5 안의 DROP TABLE 이 opDeleteFrom 으로
+// 보고돼 destructiveExempt[5] 에 면제되고, neverExempt 가 막아야 할 DROP TABLE 이 조용히
+// 빠져나간다. want=true 케이스는 그래서 **찾은 op 집합**까지 wantOps 로 대조한다.
 func TestDestructiveOpsNamesWhatItFound(t *testing.T) {
 	cases := []struct {
-		name string
-		sql  string
-		want bool
+		name    string
+		sql     string
+		want    bool
+		wantOps []op // want=true 일 때만 채운다. 순서 무관 집합 비교(sameOpSet)다.
 	}{
 		// ── 가산 — 걸리면 안 된다 ────────────────────────────────────────────
-		{"표 생성", "CREATE TABLE t (a TEXT);", false},
-		{"인덱스 생성", "CREATE INDEX t_by_a ON t(a);", false},
-		{"컬럼 추가", "ALTER TABLE t ADD COLUMN b TEXT;", false},
-		{"트리거 생성", "CREATE TRIGGER g BEFORE DELETE ON t BEGIN SELECT 1; END;", false},
-		{"씨앗 삽입", "INSERT INTO t (a) VALUES ('x');", false},
-		{"인덱스 삭제는 파괴가 아니다", "DROP INDEX t_by_a;", false},
+		{"표 생성", "CREATE TABLE t (a TEXT);", false, nil},
+		{"인덱스 생성", "CREATE INDEX t_by_a ON t(a);", false, nil},
+		{"컬럼 추가", "ALTER TABLE t ADD COLUMN b TEXT;", false, nil},
+		{"트리거 생성", "CREATE TRIGGER g BEFORE DELETE ON t BEGIN SELECT 1; END;", false, nil},
+		{"씨앗 삽입", "INSERT INTO t (a) VALUES ('x');", false, nil},
+		{"인덱스 삭제는 파괴가 아니다", "DROP INDEX t_by_a;", false, nil},
 
 		// ★ 헛걸림 회귀 — 이 스키마의 외래 키가 실제로 쓰는 구문이다.
 		//   낱말 UPDATE 로 찾으면 제약을 적은 증분이 전부 데이터 이행으로 걸린다.
 		{"ON UPDATE NO ACTION 은 이행이 아니다",
-			"CREATE TABLE c (p TEXT REFERENCES t(a) ON UPDATE NO ACTION ON DELETE CASCADE);", false},
+			"CREATE TABLE c (p TEXT REFERENCES t(a) ON UPDATE NO ACTION ON DELETE CASCADE);", false, nil},
 
 		// ★ 주석 안의 낱말로 걸리면 안 된다 — 설명이 길수록 잘 걸리는 거꾸로 된 시험이 된다.
-		{"줄 주석 속 낱말", "-- 옛 판은 DROP TABLE 을 썼다. 지금은 안 쓴다.\nCREATE TABLE t (a TEXT);", false},
-		{"블록 주석 속 낱말", "/* DELETE FROM t 를 하지 않는 이유 */ CREATE TABLE t (a TEXT);", false},
+		{"줄 주석 속 낱말", "-- 옛 판은 DROP TABLE 을 썼다. 지금은 안 쓴다.\nCREATE TABLE t (a TEXT);", false, nil},
+		{"블록 주석 속 낱말", "/* DELETE FROM t 를 하지 않는 이유 */ CREATE TABLE t (a TEXT);", false, nil},
 
-		// ── 파괴적 — 반드시 걸려야 한다 ──────────────────────────────────────
-		{"표 삭제", "DROP TABLE t;", true},
-		{"컬럼 삭제", "ALTER TABLE t DROP COLUMN b;", true},
-		{"표 개명", "ALTER TABLE t RENAME TO t_old;", true},
-		{"컬럼 개명", "ALTER TABLE t RENAME COLUMN a TO z;", true},
-		{"행 삭제", "DELETE FROM t WHERE a = 'x';", true},
-		{"데이터 이행(UPDATE)", "UPDATE t SET a = 'y';", true},
-		{"데이터 이행(INSERT SELECT)", "INSERT INTO t2 (a) SELECT a FROM t;", true},
-		{"표 재작성 관용구", "CREATE TABLE t_new (a INTEGER);\nINSERT INTO t_new SELECT a FROM t;\nDROP TABLE t;\nALTER TABLE t_new RENAME TO t;", true},
+		// ── 파괴적 — 반드시 걸려야 하고, **그 op 로** 걸려야 한다 ──────────────
+		{"표 삭제", "DROP TABLE t;", true, []op{opDropTable}},
+		{"컬럼 삭제", "ALTER TABLE t DROP COLUMN b;", true, []op{opDropColumn}},
+		{"표 개명", "ALTER TABLE t RENAME TO t_old;", true, []op{opRename}},
+		{"컬럼 개명", "ALTER TABLE t RENAME COLUMN a TO z;", true, []op{opRename}},
+		{"행 삭제", "DELETE FROM t WHERE a = 'x';", true, []op{opDeleteFrom}},
+		{"데이터 이행(UPDATE)", "UPDATE t SET a = 'y';", true, []op{opUpdateSet}},
+		{"데이터 이행(INSERT SELECT)", "INSERT INTO t2 (a) SELECT a FROM t;", true, []op{opInsertSelect}},
+		// ★ 이 SQL 은 opDropTable · opRename · opInsertSelect 셋을 동시에 건다. 아래
+		// wantOps 는 checks 표 순서(destructiveOps 가 append 하는 순서)와 우연히 같지만,
+		// 대조는 sameOpSet 으로 **순서 무관 집합**으로 한다 — 그 우연에 기대지 않는다.
+		{"표 재작성 관용구", "CREATE TABLE t_new (a INTEGER);\nINSERT INTO t_new SELECT a FROM t;\nDROP TABLE t;\nALTER TABLE t_new RENAME TO t;",
+			true, []op{opDropTable, opRename, opInsertSelect}},
 	}
 
 	for _, c := range cases {
@@ -237,8 +249,33 @@ func TestDestructiveOpsNamesWhatItFound(t *testing.T) {
 		if (len(got) > 0) != c.want {
 			t.Errorf("%s: 파괴적=%v 여야 하는데 %v 다 (찾은 것: %v)\nSQL: %s",
 				c.name, c.want, len(got) > 0, got, c.sql)
+			continue
+		}
+		if c.want && !sameOpSet(got, c.wantOps) {
+			t.Errorf("%s: 찾은 op 가 %v 여야 하는데 %v 다 — op↔정규식 대응이 어긋났을 수 있다\nSQL: %s",
+				c.name, c.wantOps, got, c.sql)
 		}
 	}
+}
+
+// sameOpSet 은 두 op 슬라이스가 **순서 무관하게** 같은 다중집합인지 본다.
+func sameOpSet(a, b []op) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	count := map[op]int{}
+	for _, o := range a {
+		count[o]++
+	}
+	for _, o := range b {
+		count[o]--
+	}
+	for _, n := range count {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // TestBundledMigrationsAreAdditive 는 **지금 번들된 증분이 전부 순수 가산인지**를 단정한다.
@@ -339,10 +376,17 @@ func TestExemptionMechanism(t *testing.T) {
 	}
 }
 
-// neverExempt 에 오른 것이 destructiveOps 가 실제로 찾는 조작인지 확인한다.
+// neverExempt 에 오른 것이 destructiveOps 가 **그 op 로** 실제로 찾는 조작인지 확인한다.
 //
 // ★ 이 대조가 없으면 금지 목록이 **없는 조작을 금지**할 수 있다. 그러면 목록은 있는데
 // 아무것도 안 막고, 그 사실은 아무 데도 안 보인다.
+//
+// ★ len(found)==0 만 보던 전판은 이 구멍을 못 잡았다. checks 표에서 opDropTable 에
+// `\bDELETE\s+FROM\b` 같은 엉뚱한 정규식이 결합돼도, 그 SQL 이 다른 이유로 뭔가는
+// 찾히면(예: 같은 문장에 RENAME 이 섞이면) len(found)>0 이라 통과한다 — **금지하려는 그
+// op 자체**가 걸렸는지는 안 본 것이다. 그래서 slices.Contains(found, banned) 로
+// 대상 op 가 정확히 그 자리에 있는지를 본다(TestDestructiveOpsNamesWhatItFound 의
+// wantOps 대조와 같은 이유 — op 와 정규식의 대응이 어긋나면 예외가 엉뚱한 조작을 면제한다).
 func TestNeverExemptOpsAreActuallyDetected(t *testing.T) {
 	samples := map[op]string{
 		opDropTable:  "DROP TABLE t;",
@@ -355,9 +399,10 @@ func TestNeverExemptOpsAreActuallyDetected(t *testing.T) {
 			t.Fatalf("금지 목록의 %s 에 대응하는 표본이 이 시험에 없다 — 목록을 늘렸으면 표본도 늘려라", banned)
 		}
 		found := destructiveOps(sql)
-		if len(found) == 0 {
-			t.Fatalf("금지 목록에 %s 가 있는데 destructiveOps 가 %q 에서 아무것도 못 찾는다 — 금지 목록이 없는 조작을 막고 있다",
-				banned, sql)
+		if !slices.Contains(found, banned) {
+			t.Fatalf("금지 목록에 %s 가 있는데 destructiveOps 가 %q 에서 **그 조작으로는** 못 찾는다"+
+				"(찾은 것: %v) — op↔정규식 대응이 어긋나 금지 목록이 없는 조작을 막고 있을 수 있다",
+				banned, sql, found)
 		}
 	}
 }

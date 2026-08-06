@@ -173,8 +173,9 @@ func TestMigration005IsIdempotent(t *testing.T) {
 	if first != 1 {
 		t.Fatalf("1회차 뒤 발자국이 %d건이다, want 1 — 이 값이 틀리면 멱등 비교가 무의미하다", first)
 	}
-	// 2회차는 schema_version 이 이미 5라 증분이 안 돈다. 그래도 결과가 같아야 한다 —
-	// 판올림이 다시 도는 경로(백업 복구)에서 이 단정이 값을 갖는다.
+	// schema_version 을 4로 되돌려 **2회차 적용을 강제한다** — 그냥 다시 열면 이미 5라
+	// 증분이 안 돌아 아래 단정이 공허해진다. 멱등이 필요한 이유는 되돌리기가 백업 파일
+	// 손 복사뿐이라 복구 도중 증분이 다시 도는 경로가 실재하기 때문이다.
 	if _, err := func() (sql.Result, error) {
 		raw, err := sql.Open("sqlite", dsn(path))
 		if err != nil {
