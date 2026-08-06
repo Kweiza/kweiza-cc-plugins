@@ -352,14 +352,46 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // ★ **"선점 0건"이 셋을 뭉갠다.** 한 번도 안 집었다(처방이 맞다) · 집고 일하는 중
 // (Claims 가 막는다) · **방금 제대로 끝냈다**(처방이 틀리다). finish 가 선점을 반납하므로
 // 셋째가 첫째와 똑같이 보이고, 그래서 성실하게 마무리한 세션이 잔소리를 듣는다.
-// coveredByClosed 가 그 셋째만 갈라낸다.
+// uncoveredByClosed 가 그 셋째만 갈라낸다.
+//
+// ★ **문구는 판정이 실제로 든 근거만 댄다(2026-08-06 개정).** 앞선 판은 `in.TurnPaths` 의
+// 앞 3개를 그대로 실었다 — 덮였는지 안 덮였는지를 안 보고. 그래서 판정이 옳은 발화에서도
+// 문구가 **덮인 경로**를 지목했고, 읽는 쪽은 "선점이 저 파일을 덮는데 왜 뜨지"로 읽어
+// 거짓 양성으로 오진했다(실측 2026-08-05, 세션 01KZ85KS: 지목된
+// `tools/gitleaks-config.test.sh` 는 닫은 항목 둘이 선언한 경로였고, 안 덮인 것은
+// `tools/gitleaks-allowlist.test.sh` 였다). 그 오진은 원장에 잘못된 판단 하나와 큐 항목
+// 하나를 남겼고 둘 다 철회됐다 — **안 덮인 경로 하나만 댔으면 5초짜리 일이었다.**
+//
+// 처방의 값어치는 "틀리지 않는다"가 아니라 **"고칠 자리를 가리킨다"** 이고, 맞는 처방이
+// 틀린 증거를 들고 오면 그 다음부터 처방 전체가 안 읽힌다(설계 §4 의 상시 점등과 같은 종착).
 func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 	if len(in.Claims) > 0 || len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
 		return Prescription{}, false
 	}
-	if coveredByClosed(in) {
-		return Prescription{}, false
+	uncovered, grounded := uncoveredByClosed(in)
+	if grounded && len(uncovered) == 0 {
+		return Prescription{}, false // 전부 덮였다 = 방금 제대로 끝냈다
 	}
+	if grounded {
+		// 근거가 있는 발화다 — 상태를 이름으로 부르고 **안 덮인 것만** 증거로 댄다.
+		//
+		// ★ 여기서 `paths` 를 고치라고 하지 않는다. fd 에 항목의 등록 경로를 나중에 갱신하는
+		// 수단이 **없다**(`fd move` 는 프로젝트 축뿐이고 재등록은 409 다). 실행할 수 없는 지시를
+		// 싣는 것은 이 개정이 없애려는 결함 — 문구가 사람을 헛되이 움직이는 것 — 의 재발이다.
+		ids := claimIDs(in.Closed)
+		return Prescription{
+			Key: PrescribeUnclaimed,
+			Reason: fmt.Sprintf("끝낸 항목 %s 가 선언하지 않은 경로 %d개를 편집했다(이번 구간 %d개 중)",
+				ids, len(uncovered), len(in.TurnPaths)),
+			Text: fmt.Sprintf(
+				"끝낸 항목 %s 가 선언하지 않은 %s 를 만졌다 — 그 자리는 큐에도 카드에도 없다.\n"+
+					"  → 같은 작업의 남은 자리면 note(kind='decision') 으로 범위가 왜 늘었는지 남겨라.\n"+
+					"  → 별개 작업이면 add(id=…, title=…, body=…, paths=[…]) 로 항목을 세우고 집어라.",
+				ids, strings.Join(clipList(uncovered, 3), ", ")),
+		}, true
+	}
+	// 근거가 없다 — 닫은 항목이 없거나(한 번도 안 집었다) 비교 가능한 경로가 하나도 없다.
+	// 그때는 "안 덮인 집합"이라는 말 자체가 성립하지 않으므로 만진 것을 그대로 댄다.
 	return Prescription{
 		Key:    PrescribeUnclaimed,
 		Reason: fmt.Sprintf("선점 0건인데 경로 %d개를 편집했다", len(in.TurnPaths)),
@@ -371,18 +403,24 @@ func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 	}, true
 }
 
-// coveredByClosed 는 이번 구간에 만진 경로가 **전부** 방금 끝낸 항목의 선언 경로 안인지 본다.
+// uncoveredByClosed 는 이번 구간에 만진 경로 중 **방금 끝낸 항목이 안 덮은** 것을 낸다.
+// grounded 는 그 판정에 근거가 있었는지다 — false 면 uncovered 는 뜻이 없다(언제나 비어 있다).
 //
-// ★ 전부여야 한다. 하나라도 밖이면 그것은 새 일이고, 새 일에 대고 "무엇을 하는지가 큐에 없다"는
+// ★ **불리언이 아니라 집합을 낸다.** 앞선 판(coveredByClosed)은 안 덮인 것을 하나 찾는 즉시
+// `return false` 해서 그 집합을 버렸다. 발화 조건을 만드는 계산이 곧 **문구에 실을 값**을
+// 만드는 계산인데 그것을 버리면, 호출부는 댈 것이 `TurnPaths` 전부밖에 없어진다.
+// 이 함수의 이름이 뒤집힌 것이 그 개정의 전부다.
+//
+// ★ 하나라도 밖이면 발화한다. 그것은 새 일이고, 새 일에 대고 "무엇을 하는지가 큐에 없다"는
 // 여전히 참이다 — 부분 일치로 접으면 큰 항목 하나를 닫은 세션이 그 뒤 무엇을 하든 안 걸린다.
 //
 // ★ 선언 경로가 없는 항목은 접을 근거를 못 준다. 빈 선언을 "전부 덮음"으로 읽으면
 // paths 를 안 적은 항목 하나가 이 축을 통째로 끈다 — outsidePrescriptions 가 빈 선언에
 // 대고 "밖"을 판정하지 않는 것과 같은 이유다.
-func coveredByClosed(in PrescribeInput) bool {
+func uncoveredByClosed(in PrescribeInput) (uncovered []string, grounded bool) {
 	declared := declaredPaths(in.Closed)
 	if len(declared) == 0 {
-		return false
+		return nil, false
 	}
 	// ★ **비교 불가능한 좌표의 경로는 근거로 쓰지 않는다.**
 	//
@@ -399,19 +437,21 @@ func coveredByClosed(in PrescribeInput) bool {
 	// 이 함수가 막으라고 있는 바로 그 결과다. "못 읽었다"는 "없다"가 아니라는
 	// 같은 규율이 경로 실재 축(judge/itempaths.go 의 PathUnknown)에도 있다.
 	//
-	// 다만 비교 가능한 것이 **하나도 없으면** 덮였다고 말하지 않는다. 근거가 0인 것을
-	// 통과로 접으면 이번엔 반대로 처방이 통째로 꺼진다.
-	comparable := 0
+	// ★ 그래서 이런 경로는 **증거로도 안 쓴다.** 덮였는지 아닌지 판정할 수 없는 것을
+	// "안 덮였다"고 문구에 지목하면 그것이 곧 이 함수가 없애려는 거짓 증거다.
+	//
+	// 다만 비교 가능한 것이 **하나도 없으면** 덮였다고 말하지 않는다(grounded=false).
+	// 근거가 0인 것을 통과로 접으면 이번엔 반대로 처방이 통째로 꺼진다.
 	for _, p := range in.TurnPaths {
 		if !comparablePath(p) {
 			continue
 		}
-		comparable++
+		grounded = true
 		if !PathsOverlap([]string{p}, declared) {
-			return false
+			uncovered = append(uncovered, p)
 		}
 	}
-	return comparable > 0
+	return uncovered, grounded
 }
 
 // comparablePath 는 그 경로가 선언 경로와 **같은 좌표계**에 있는지다. 순수 함수다.

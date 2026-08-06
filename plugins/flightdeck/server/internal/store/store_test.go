@@ -975,7 +975,7 @@ func TestAcquireResourceRaceOnlyOneWins(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = s.AcquireResource(ctx, "p", "staging", Holder{SessionID: sessions[i]})
+			_, errs[i] = s.AcquireResource(ctx, "p", "staging", Holder{SessionID: sessions[i]}, time.Time{})
 		}(i)
 	}
 	close(start)
@@ -1083,7 +1083,7 @@ func TestListHeldOrdersByAcquisitionThenResource(t *testing.T) {
 	}
 	// 대조 전제 — raw 로 넣은 시각이 진짜 경로가 만드는 시각과 같은 축 위에 있는지.
 	// 없으면 위 다섯 줄이 정렬 규칙이 아니라 **시험 전용 표기**만 잠글 수 있다.
-	if _, err := s.AcquireResource(ctx, "p", "방금-잡은-것", Holder{SessionID: a.ID}); err != nil {
+	if _, err := s.AcquireResource(ctx, "p", "방금-잡은-것", Holder{SessionID: a.ID}, time.Time{}); err != nil {
 		t.Fatalf("전제가 깨졌다 — 진짜 경로의 획득이 실패했다: %v", err)
 	}
 
@@ -1126,7 +1126,7 @@ func TestReleaseResourceOnlyByHolder(t *testing.T) {
 	a := mustSession(t, s, "p", "cc-A")
 	b := mustSession(t, s, "p", "cc-B")
 
-	if _, err := s.AcquireResource(ctx, "p", "staging", Holder{SessionID: a.ID}); err != nil {
+	if _, err := s.AcquireResource(ctx, "p", "staging", Holder{SessionID: a.ID}, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReleaseResource(ctx, "p", "staging", Holder{SessionID: b.ID}); err == nil {
@@ -1136,7 +1136,7 @@ func TestReleaseResourceOnlyByHolder(t *testing.T) {
 		t.Fatalf("자기 자원 반납 실패: %v", err)
 	}
 	// 반납했으면 남이 잡을 수 있어야 한다(부분 유니크 인덱스가 released 행을 안 막는다).
-	if _, err := s.AcquireResource(ctx, "p", "staging", Holder{SessionID: b.ID}); err != nil {
+	if _, err := s.AcquireResource(ctx, "p", "staging", Holder{SessionID: b.ID}, time.Time{}); err != nil {
 		t.Fatalf("반납된 자원을 다시 못 잡는다: %v", err)
 	}
 	// 강제 반납은 사유 필수.

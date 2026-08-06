@@ -111,13 +111,19 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	// ★ 시각을 **한 번만** 잡아 줄 서기와 취득 둘에 같은 값을 넘긴다.
+	//   ① 저장층이 각자 실시계를 찍으면 화면(주입된 시계로 now 를 잡는다)과 갈려
+	//      대기·획득 두 경과가 통째로 거짓이 된다 — 이 함수가 그 시계의 유일한 출처다.
+	//   ② 둘을 따로 찍으면 같은 트랜잭션에서 취득한 행의 획득 경과가 대기 경과보다
+	//      미세하게 짧아진다. 같은 순간에 일어난 일이므로 같은 값이어야 한다.
+	now := s.now()
 	var out LandResult
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		// 시도를 **먼저** 예약한다 — 롤백돼도 남는다. 끝에 두면 성공한 것만 세게 되고,
 		// 그러면 §10 의 "세션당 쓰기 호출 수"가 대기 폴링의 비용을 못 본다.
 		t.LogEvent("lane.land", in.Project, in.SessionID, map[string]any{"mode": "acquire"})
 
-		mine, err := t.EnqueueLanding(in.Project, in.SessionID)
+		mine, err := t.EnqueueLanding(in.Project, in.SessionID, now)
 		if err != nil {
 			return err
 		}
@@ -128,7 +134,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 			return err // 방금 넣었으므로 ErrNotFound 는 불가능하다
 		}
 		if front.ID == mine.ID {
-			_, aerr := t.AcquireResource(in.Project, LaneResource, store.Holder{SessionID: in.SessionID})
+			_, aerr := t.AcquireResource(in.Project, LaneResource, store.Holder{SessionID: in.SessionID}, now)
 			if aerr == nil {
 				out.State = "turn"
 				out.Position = 1

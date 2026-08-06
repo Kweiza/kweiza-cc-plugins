@@ -84,16 +84,23 @@ func scanLandingRow(sc interface{ Scan(...any) error }) (model.LandingRow, error
 //
 // Store 짝을 두지 않는다 — 이 호출은 항상 service 가 다른 쓰기와 묶어 부르는 것이
 // 설계 의도다(레인이 비어 있으면 곧바로 AcquireResource 를 같은 트랜잭션에서 잇는다).
-func (t *Tx) EnqueueLanding(project, sessionID string) (model.LandingRow, error) {
+//
+// ★ 대기 시각을 **받는다**(Beat·Touch 와 같은 문법 — 영값이면 지금이다. atStamp 참조).
+// 스스로 실시계를
+// 찍으면 서비스에 주입된 시계와 갈리고, 그 어긋남은 **화면의 대기 경과를 통째로 거짓으로**
+// 만든다: 페이지는 주입된 시계로 now 를 잡는데 이 행만 실시계라 그 차가 경과로 찍힌다.
+// 운영에서는 양쪽 다 실시계라 안 드러나고 시험에서만 갈려서, 이 축은 실제로 한 번도
+// 검증된 적이 없었다(fd-lane-timestamps-ignore-injected-clock).
+func (t *Tx) EnqueueLanding(project, sessionID string, at time.Time) (model.LandingRow, error) {
 	if project == "" || sessionID == "" {
 		return model.LandingRow{}, fmt.Errorf("랜딩 줄 좌표가 비었다(project=%q session=%q)",
 			clip(project, 64), clip(sessionID, 64))
 	}
-	now := nowStamp()
+	at = atStamp(at)
 	res, err := t.tx.ExecContext(t.ctx, `
 		INSERT INTO landing_queue(project, session_id, enqueued_at, left_at, left_kind, left_detail)
 		VALUES (?, ?, ?, NULL, NULL, NULL)`,
-		project, sessionID, fmtTime(now))
+		project, sessionID, fmtTime(at))
 	if err != nil {
 		row, qErr := liveLandingRow(t.ctx, t.tx, project, sessionID)
 		if qErr == nil {
@@ -117,7 +124,7 @@ func (t *Tx) EnqueueLanding(project, sessionID string) (model.LandingRow, error)
 		return model.LandingRow{}, fmt.Errorf("랜딩 줄 순번 확인 실패(project=%q session=%q): %w",
 			clip(project, 64), clip(sessionID, 64), err)
 	}
-	return model.LandingRow{ID: id, Project: project, SessionID: sessionID, EnqueuedAt: now}, nil
+	return model.LandingRow{ID: id, Project: project, SessionID: sessionID, EnqueuedAt: at}, nil
 }
 
 // liveLandingRow 는 세션의 살아 있는(left_at IS NULL) 줄 행을 읽는다. 없으면 ErrNotFound.

@@ -463,7 +463,7 @@ func TestBlockedPanelShowsNoteResourceAndDiskAxis(t *testing.T) {
 		t.Fatalf("판단 저장 실패: %v", err)
 	}
 	if _, err := f.st.AcquireResource(ctx, testProject, "staging",
-		store.Holder{SessionID: sess.ID}); err != nil {
+		store.Holder{SessionID: sess.ID}, time.Time{}); err != nil {
 		t.Fatalf("자원 점유 실패: %v", err)
 	}
 

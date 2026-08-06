@@ -349,6 +349,44 @@ func TestHealthzObservesLoopbackOnceALoopbackRequestArrives(t *testing.T) {
 	}
 }
 
+// `/healthz` 요청 자신은 도달 관측을 **안 남긴다** — 그리고 그것은 사고가 아니라 하중이다.
+//
+// ★ `withAuth` 의 `/healthz` 조기 반환은 라우팅 목적으로 놓였지만(배너 훅이 인증 없이
+// 물을 창), 그 줄이 관측 저장보다 **위에** 있는 덕에 컨테이너 헬스체크가 관측에서 빠진다.
+// 순서를 뒤집으면 **모든 컨테이너 배포가 기동 30초 안에 `loopback_open:true` 가 된다**:
+// 이미지의 HEALTHCHECK 가 컨테이너 **안에서** `fd doctor` 를 30초마다 돌리고
+// (`server/Dockerfile` 의 HEALTHCHECK · `compose.yaml` 의 healthcheck), `fd doctor` 가
+// 치는 것은 `/healthz` 하나뿐이다(`cmd/fd/cmds.go` 의 `a.cli.Healthz` — REST 에 진단
+// 엔드포인트가 없어서다). 컨테이너 안에서 서버를 치면 그것은 루프백이다.
+//
+// 그러면 면제를 받는 클라이언트가 하나도 없는데 "면제가 닿는다"를 내게 된다 — 이 축이
+// 존재하는 이유인 바로 그 거짓 광고다(2026-08-05 사고). `notice`·`guidance` 의 컨테이너
+// 갈래(`Configured && !Observed && InContainer`)는 도달 불가가 된다.
+//
+// 위 시험이 관측을 만들려고 `/api/v1` 을 치는 것은 이 사실의 **우회**일 뿐 단정이 아니다.
+// 이 시험이 그 단정이다 — 없으면 `:121-125` 의 ★("관측은 판정보다 먼저")를 읽고 그 줄을
+// 조기 반환 위로 올리는 가장 자연스러운 리팩터링이 **전 시험 초록인 채** 이것을 깬다.
+func TestHealthzItselfDoesNotCountAsLoopbackReach(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Token = "s3cret" })
+
+	reach := func() map[string]any {
+		return decodeBody(t, e.do(http.MethodGet, "/healthz", nil, loopback()))["auth"].(map[string]any)
+	}
+
+	// 컨테이너 헬스체크가 30초마다 하는 일이다. 몇 번을 쳐도 관측이 안 쌓여야 한다.
+	for i := 0; i < 5; i++ {
+		if a := reach(); a["loopback_open"] != false {
+			t.Fatalf("루프백에서 온 %d번째 /healthz 가 도달 관측을 남겼다 — 컨테이너 헬스체크가"+
+				" 30초마다 이것을 치므로 모든 컨테이너가 곧 '면제가 닿는다'를 내게 된다: %v", i+1, a)
+		}
+	}
+
+	// 문구까지 잠근다. loopback_open 만 보면 notice 가 갈래를 잘못 골라도 안 걸린다.
+	if s, _ := reach()["notice"].(string); strings.Contains(s, "루프백 요청만 토큰 없이 통과한다") {
+		t.Fatalf("도달한 요청이 없는데 면제가 닿는다고 말한다: %q", s)
+	}
+}
+
 // 401 의 처방도 **관측을 따라야** 한다.
 //
 // ★ 실물 사고의 가장 나쁜 조각이 여기였다. 루프백에서 401 을 맞은 사람이 받은 안내가

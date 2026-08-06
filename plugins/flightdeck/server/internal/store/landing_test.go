@@ -27,7 +27,10 @@ func mustEnqueue(t *testing.T, s *Store, project, sessionID string) model.Landin
 	var row model.LandingRow
 	if err := s.Tx(context.Background(), func(tx *Tx) error {
 		var err error
-		row, err = tx.EnqueueLanding(project, sessionID)
+		// 시각은 영값으로 넘긴다 — 이 헬퍼의 축은 순번·재진입이지 시각이 아니고,
+		// 영값이면 저장층이 nowStamp 를 찍어 이 파일의 기존 시험들이 보던 그 값 그대로다.
+		// 시각 자체를 잠그는 것은 TestLaneTimestampsTakeTheGivenClock 하나다.
+		row, err = tx.EnqueueLanding(project, sessionID, time.Time{})
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 서기 실패(project=%s session=%s): %v", project, sessionID, err)
@@ -83,18 +86,18 @@ func TestEnqueueLandingReentryDoesNotPoisonTheTransaction(t *testing.T) {
 	b := mustSession(t, s, "p", "cc-B")
 
 	err := s.Tx(ctx, func(tx *Tx) error {
-		if _, err := tx.EnqueueLanding("p", a.ID); err != nil {
+		if _, err := tx.EnqueueLanding("p", a.ID, time.Time{}); err != nil {
 			return fmt.Errorf("첫 서기: %w", err)
 		}
 		// 재진입 — 부분 유니크 인덱스 위반을 내부에서 직접 거친다. SQLite 의 기본
 		// 충돌 해법(ABORT)은 이 INSERT 문 하나만 되돌리고 트랜잭션 자체는 안 죽는다.
 		// 그 성질을 다음 줄의 성공으로 직접 확인한다.
-		if _, err := tx.EnqueueLanding("p", a.ID); err != nil {
+		if _, err := tx.EnqueueLanding("p", a.ID, time.Time{}); err != nil {
 			return fmt.Errorf("재진입: %w", err)
 		}
 		// 같은 트랜잭션에서 다른 세션의 쓰기가 계속 성립해야 한다 — 문장 단위 롤백이
 		// 아니라 트랜잭션 단위 롤백이었다면 이 호출도 이미 죽은 트랜잭션 위에서 실패한다.
-		if _, err := tx.EnqueueLanding("p", b.ID); err != nil {
+		if _, err := tx.EnqueueLanding("p", b.ID, time.Time{}); err != nil {
 			return fmt.Errorf("재진입 뒤 다른 세션의 쓰기: %w", err)
 		}
 		return nil
@@ -139,7 +142,7 @@ func TestEnqueueLandingRefusesEmptyCoordsWithItsOwnWords(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := s.Tx(ctx, func(tx *Tx) error {
-				_, e := tx.EnqueueLanding(c.project, c.sessionID)
+				_, e := tx.EnqueueLanding(c.project, c.sessionID, time.Time{})
 				return e
 			})
 			if err == nil {
@@ -457,7 +460,7 @@ func TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction(t *testing.T) 
 	a := mustSession(t, s, "p", "cc-A")
 
 	if err := s.Tx(ctx, func(tx *Tx) error {
-		row, err := tx.EnqueueLanding("p", a.ID)
+		row, err := tx.EnqueueLanding("p", a.ID, time.Time{})
 		if err != nil {
 			return err
 		}
@@ -524,6 +527,102 @@ func TestLastLandingRowReadsClosedRowsThatLiveLandingRowCannot(t *testing.T) {
 
 // mustLastLandingRow 는 Tx.LastLandingRow 를 단발 트랜잭션으로 감싼 시험 전용 헬퍼다
 // (Store 짝을 안 둔 이유는 mustEnqueue 와 같다 — 호출부가 서비스의 트랜잭션 안뿐이다).
+// TestLaneTimestampsTakeTheGivenClock 은 레인의 두 시각이 **받은 시계**로 찍히는지 본다.
+//
+// 두 축은 서로 다른 표에서 온다: 대기 경과는 landing_queue.enqueued_at, 획득 경과는
+// resource_hold.acquired_at 이다. 한쪽만 주입을 받으면 화면의 두 숫자 중 하나만 참이 되고
+// **그 절반의 거짓은 운영에서 안 드러난다** — 운영은 페이지도 실시계라 양쪽이 맞는다.
+// 그래서 이 두 축은 시험이 시계를 밀어야만 관측되고, 실제로 한 번도 관측된 적이 없었다.
+//
+// 영값 갈래도 같이 본다. 이 파일의 다른 시험 전부가 그 갈래를 타므로, 영값이 nowStamp 로
+// 안 떨어지면 시각을 안 보는 시험들이 통째로 0값 시각 위에서 돈다.
+func TestLaneTimestampsTakeTheGivenClock(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+	a := mustSession(t, s, "p", "cc-A")
+
+	// 실시계와 **한참 떨어진** 값을 고른다. 가까운 값이면 주입을 통째로 무시하고
+	// nowStamp 를 찍어도 이 시험이 초록이다.
+	want := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
+	var row model.LandingRow
+	var hold model.ResourceHold
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		var err error
+		if row, err = tx.EnqueueLanding("p", a.ID, want); err != nil {
+			return err
+		}
+		hold, err = tx.AcquireResource("p", "landing", Holder{SessionID: a.ID}, want)
+		return err
+	}); err != nil {
+		t.Fatalf("줄 서기·취득 실패: %v", err)
+	}
+	if !row.EnqueuedAt.Equal(want) {
+		t.Fatalf("반환된 대기 시각이 %s 다 — 준 값(%s)이 아니다", row.EnqueuedAt, want)
+	}
+	if !hold.AcquiredAt.Equal(want) {
+		t.Fatalf("반환된 획득 시각이 %s 다 — 준 값(%s)이 아니다", hold.AcquiredAt, want)
+	}
+
+	// ★ 반환값만 보면 안 된다. 구조체에는 준 값을 담고 INSERT 에는 실시계를 넣어도 위 둘은
+	//   통과하는데, **화면이 읽는 것은 DB 쪽이다**(보드도 페이지도 다시 조회해서 그린다).
+	back, err := s.LiveLandingRow(ctx, "p", a.ID)
+	if err != nil {
+		t.Fatalf("줄 행 되읽기 실패: %v", err)
+	}
+	if !back.EnqueuedAt.Equal(want) {
+		t.Fatalf("DB 의 대기 시각이 %s 다 — 반환값만 준 값이고 행에는 실시계가 박혔다", back.EnqueuedAt)
+	}
+	heldBack, err := s.HeldBy(ctx, "p", "landing")
+	if err != nil {
+		t.Fatalf("점유 행 되읽기 실패: %v", err)
+	}
+	if !heldBack.AcquiredAt.Equal(want) {
+		t.Fatalf("DB 의 획득 시각이 %s 다 — 반환값만 준 값이고 행에는 실시계가 박혔다", heldBack.AcquiredAt)
+	}
+
+	// ★ 나노초 갈래. 운영의 시계는 `time.Now().UTC()` 라 나노초를 담고 있는데 행은
+	//   마이크로초로 저장된다(timeLayout). 받은 값을 그대로 구조체에 담아 돌려주면
+	//   **"방금 만든 것"과 "다시 읽은 것"이 갈린다** — nowStamp 가 존재하는 이유 그대로다.
+	//   여기서 안 잡으면 그 어긋남은 두 값을 비교하는 먼 자리에서야 드러난다.
+	c := mustSession(t, s, "p", "cc-C")
+	nano := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	var nanoRow model.LandingRow
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		var e error
+		nanoRow, e = tx.EnqueueLanding("p", c.ID, nano)
+		return e
+	}); err != nil {
+		t.Fatalf("나노초 줄 서기 실패: %v", err)
+	}
+	nanoBack, err := s.LiveLandingRow(ctx, "p", c.ID)
+	if err != nil {
+		t.Fatalf("나노초 줄 행 되읽기 실패: %v", err)
+	}
+	if !nanoRow.EnqueuedAt.Equal(nanoBack.EnqueuedAt) {
+		t.Fatalf("반환값 %s 와 행 %s 가 갈렸다 — 받은 시각을 저장 해상도로 안 맞췄다",
+			nanoRow.EnqueuedAt, nanoBack.EnqueuedAt)
+	}
+
+	// 영값 갈래 — 저장층이 스스로 지금을 찍는다.
+	b := mustSession(t, s, "p", "cc-B")
+	zero := mustEnqueue(t, s, "p", b.ID)
+	if d := time.Since(zero.EnqueuedAt); d < -time.Second || d > time.Minute {
+		t.Fatalf("영값 갈래가 %s 를 찍었다(지금과 %s 차) — nowStamp 로 안 떨어졌다", zero.EnqueuedAt, d)
+	}
+	var zeroHold model.ResourceHold
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		var e error
+		zeroHold, e = tx.AcquireResource("p", "staging", Holder{SessionID: b.ID}, time.Time{})
+		return e
+	}); err != nil {
+		t.Fatalf("영값 취득 실패: %v", err)
+	}
+	if d := time.Since(zeroHold.AcquiredAt); d < -time.Second || d > time.Minute {
+		t.Fatalf("영값 갈래가 %s 를 찍었다(지금과 %s 차) — nowStamp 로 안 떨어졌다", zeroHold.AcquiredAt, d)
+	}
+}
+
 func mustLastLandingRow(t *testing.T, s *Store, project, sessionID string) model.LandingRow {
 	t.Helper()
 	var row model.LandingRow
