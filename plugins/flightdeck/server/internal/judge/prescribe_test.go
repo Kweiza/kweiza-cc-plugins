@@ -287,13 +287,15 @@ func TestFoldPrescriptions(t *testing.T) {
 //
 // 순서만 단정하는 표 케이스로는 이 축이 원리적으로 안 보인다. 표는 전부 상한 아래에서
 // 돌아 lane-turn 이 목록 어디에 있든 초록이 나기 때문이다. 그런데 lane-turn 에게 접힘은
-// **영구 소실**이다: 접힌 처방도 호출자가 전부 발화 기록하고(PrescribeMax 주석),
-// suppressed 는 silent 외 모든 키를 무조건 누른다. 한 번 접히면 그 줄 행의 차례 통지는
-// 다시 안 뜨고, 그 세션은 레인을 안 쥔 채 남아 **뒤에 선 전원의 랜딩이 선다.**
-// 그리고 그 실패는 화면에 안 뜬다 — 원장에는 "정상적으로 접혔다"로만 남는다.
+// **한 턴 지연**이다(2026-08-06 개정 전에는 영구 소실이었다 — PrescribeMax 주석 참고.
+// 지금은 표시분만 발화 기록하므로 접힌 것이 다음 턴에 올라온다). 그 한 턴 동안 그 세션은
+// 레인을 안 쥔 채 남고 **뒤에 선 전원의 랜딩이 그만큼 선다** — 소실은 아니지만 **그 한 턴은
+// 남의 시간**이라 맨 앞이 여전히 값을 한다. 그리고 그 지연은 화면에 안 뜬다 —
+// 원장에는 "정상적으로 접혔다"로만 남는다.
 //
 // overlap 을 상한만큼 까는 것이 억지 상황이 아니다: 발화 55건 중 31건이 overlap 이고
-// 세션 7개에 몰렸다(PrescribeMax 주석의 실측). 한 턴 최대 발화는 6건이었다.
+// 세션 7개에 몰렸다(PrescribeMax 주석의 2026-08-04 기준선). 그 기준선 당시 한 턴 최대
+// 발화는 6건이었고, 2026-08-06 재측에서는 7건이다.
 func TestLaneTurnSurvivesFolding(t *testing.T) {
 	others := []LiveSession{
 		{ID: "01SESSIONA", Paths: []string{"cmd/fd/hook.go"}},
@@ -333,7 +335,7 @@ func TestLaneTurnSurvivesFolding(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지는 영구히 사라지고 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
+		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지가 한 턴 늦고 그동안 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
 			len(others), keys(shown), folded)
 	}
 	if shown[0].Key != "lane-turn:7" {
@@ -397,9 +399,9 @@ func TestAxisOrderIsLockedWhereverTwoAxesCanCoexist(t *testing.T) {
 				t.Fatalf("축 순서가 다르다:\n got %v\nwant %v", got, c.want)
 			}
 
-			// 순서가 정하는 것은 표시가 아니라 **버릴 것**이다. 상한을 넘는 만큼이 맨 뒤에서
-			// 떨어져야 하고, 여기서 떨어지는 것은 silent 다 — 접혀도 판단 뒤에 다시 뜨는
-			// 유일한 축이라(suppressed) 접힘이 영구 소실이 아닌 자리도 그것 하나뿐이다.
+			// 순서가 정하는 것은 표시가 아니라 **뒤로 미룰 것**이다. 상한을 넘는 만큼이 맨
+			// 뒤에서 떨어져야 하고, 여기서 떨어지는 것은 silent 다 — 판단 뒤 해제 규칙까지
+			// 가진 유일한 축이라(suppressed) 입력이 다시 안 생겨도 돌아오는 자리는 그것뿐이다.
 			if PrescribeMax >= len(c.want) {
 				return // 상한이 이 목록을 못 넘으면 접힘에 대해 말할 것이 없다
 			}
@@ -436,6 +438,131 @@ func TestLaneTurnTextNamesTheCallAndTheRow(t *testing.T) {
 	for _, want := range []string{"land()", "land(result='ok')", "land(leave=", fmt.Sprintf("%d", row)} {
 		if !strings.Contains(ps[0].Text, want) {
 			t.Errorf("차례 처방 문구가 %q 를 안 말한다 — 세션이 읽는 것은 이 문자열 하나다:\n%s", want, ps[0].Text)
+		}
+	}
+}
+
+// hasKey 는 처방 키 하나가 나왔는지만 본다. 겹침 축은 상대마다 키가 갈리므로
+// keys() 전체를 단정하면 상대 id 까지 시험이 외워야 한다.
+func hasKey(ps []Prescription, key string) bool {
+	for _, p := range ps {
+		if p.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// sameConversation 의 `strings.TrimSpace` 한 줄이 **정반대 두 결함**을 동시에 쥔다.
+// 그 한 줄을 지워도 전 패키지가 초록이었다(실측: main a0978cb 에서 변이 주입 후
+// `go test ./internal/... ./cmd/fd/` 전건 통과). 그래서 두 갈래를 함께 잠근다:
+//
+//	① 공백만 있는 cc 끼리 — `a != "" && a == b` 가 **참**이 되어 cc 를 못 읽은 두 카드가
+//	   한 대화로 접힌다. 서로 다른 두 대화의 겹침이 통째로 사라진다. 그 함수 주석이
+//	   명시적으로 금지한 실패 모양("못 읽었다"를 "같다"로 접기)이 빈 문자열 대신
+//	   **공백**으로 들어왔을 때만 되살아난다 — 주석은 빈 문자열만 막고 있었다.
+//	② 앞뒤 공백만 다른 같은 cc — 남남이 되어 형제 카드에 겹침이 뜬다. 세션이
+//	   **자기 자신과 조율하라는** 발화를 받는다(01KZ8XVK 의 실측 32건 중 5건).
+//
+// 두 갈래는 서로 반대 방향이라 한쪽만 잠그면 다른 쪽이 그대로 열린다.
+func TestWhitespaceOnlyCCIsNeverOneConversationAndPaddedCCAlwaysIs(t *testing.T) {
+	const otherID = "01SESSIONOTHER"
+	// Claims 가 턴 경로를 덮으므로 unclaimed·outside 축은 안 돈다 — 남는 것은 겹침뿐이다.
+	in := func(selfCC, otherCC string) PrescribeInput {
+		return PrescribeInput{
+			Now: pt0, SessionID: "me", SelfCC: selfCC,
+			Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{"cmd/fd"}}},
+			TurnPaths:    []string{"cmd/fd/hook.go"},
+			Others:       []LiveSession{{ID: otherID, CCSessionID: otherCC, Paths: []string{"cmd/fd/hook.go"}}},
+			LastJudgment: pt0, NewPaths: 1,
+		}
+	}
+	cases := []struct {
+		name            string
+		selfCC, otherCC string
+		wantOverlap     bool
+		why             string
+	}{
+		{
+			name: "공백만 있는 cc 끼리는 같은 대화가 아니다", selfCC: "   ", otherCC: "   ", wantOverlap: true,
+			why: "관측이 깨진 두 카드를 한 대화로 접으면 겹침 축이 조용히 꺼진다",
+		},
+		{
+			name: "빈 cc 끼리도 같은 대화가 아니다", selfCC: "", otherCC: "", wantOverlap: true,
+			why: "이미 잠긴 계약이다 — 공백 갈래를 고치다 이쪽을 깨뜨리면 여기서 걸린다",
+		},
+		{
+			name: "앞뒤 공백만 다르면 같은 대화다", selfCC: " cc-1", otherCC: "cc-1\t", wantOverlap: false,
+			why: "형제 카드에 겹침이 뜨면 세션이 자기 자신과 조율하라는 발화를 받는다",
+		},
+		{
+			name: "다른 cc 는 다듬어도 남남이다", selfCC: "cc-1", otherCC: "cc-2", wantOverlap: true,
+			why: "부정 대조 — 다듬기가 서로 다른 대화까지 접으면 여기서 걸린다",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := hasKey(Prescribe(in(c.selfCC, c.otherCC)), PrescribeOverlap+":"+otherID)
+			if got != c.wantOverlap {
+				t.Fatalf("self=%q other=%q 에서 겹침 처방 %v 를 기대했는데 %v — %s",
+					c.selfCC, c.otherCC, c.wantOverlap, got, c.why)
+			}
+		})
+	}
+}
+
+// 겹침 처방의 **좌우**와 **쌍의 수**를 잠근다. 셋 다 변이가 살아남던 자리다:
+// `mine, theirs` 교환 · `pairs[0]` → `pairs[len-1]` · `len(pairs)` → `len(pairs)+1`.
+//
+// 기존 시험이 못 잡은 이유는 양쪽에 **같은 경로**를 주고 `strings.Contains` 로만 봤기 때문이다 —
+// 두 문자열이 같으면 뒤바뀜이 원리적으로 안 보인다. 그래서 여기서는 겹침을 **조상 관계**로 만든다
+// (내가 파일, 상대가 그 디렉토리). 좌우가 바뀌면 세션은 **자기가 만지지도 않은 경로**를 근거로
+// ask 를 남기게 되고, 그것이 이 축이 나르는 유일한 행동이다.
+//
+// 잠그는 것은 행동 가능한 정보 셋뿐이다: 내가 만진 것이 어느 쪽인가 · 상대가 잡은 것이 어느 쪽인가 ·
+// 겹친 쌍이 몇인가(`Prescription` 주석이 "사유는 시험이 단정하는 축"이라 못박은 자리인데 수만 빠져 있었다).
+func TestOverlapReasonPinsMineTheirsAndPairCount(t *testing.T) {
+	const (
+		mine     = "internal/judge/prescribe.go" // 첫 쌍이 된다 — TurnPaths 순회가 바깥이다
+		alsoMine = "internal/judge/paths.go"     // 둘째 쌍. pairs[len-1] 변이가 이걸 mine 으로 만든다
+		theirs   = "internal/judge"              // 조상이라 둘 다와 겹친다 → 쌍이 정확히 둘
+		otherID  = "01SESSIONOTHER"
+	)
+	ps := Prescribe(PrescribeInput{
+		Now: pt0, SessionID: "me",
+		Claims:       []ClaimView{{ItemID: "fd-x", Paths: []string{theirs}}},
+		TurnPaths:    []string{mine, alsoMine},
+		Others:       []LiveSession{{ID: otherID, Paths: []string{theirs}}},
+		LastJudgment: pt0, NewPaths: 2,
+	})
+	if len(ps) != 1 || ps[0].Key != PrescribeOverlap+":"+otherID {
+		t.Fatalf("겹침 처방 하나만 나와야 한다: %v", keys(ps))
+	}
+	p := ps[0]
+
+	for _, w := range []struct{ where, in, why string }{
+		{"사유", "이번에 만진 " + mine + " 가", "내가 만진 것이 첫 쌍의 왼쪽이다"},
+		{"사유", "의 발자국 " + theirs + " 와", "상대가 잡은 것이 첫 쌍의 오른쪽이다"},
+		{"사유", "(겹친 쌍 2)", "쌍의 수는 세션이 조율 범위를 가늠하는 값이다"},
+		{"문구", mine + " 를 만졌는데", "세션이 실제로 읽는 문자열에서도 좌우가 같아야 한다"},
+		{"문구", "도 " + theirs + " 를 잡고 있다", "상대가 잡은 것이 상대 자리에 있어야 한다"},
+	} {
+		got := p.Reason
+		if w.where == "문구" {
+			got = p.Text
+		}
+		if !strings.Contains(got, w.in) {
+			t.Errorf("%s가 %q 를 안 말한다 — %s:\n%s", w.where, w.in, w.why, got)
+		}
+	}
+	// 부정 대조 — 좌우가 바뀌거나 마지막 쌍을 집으면 이 조각들이 나타난다.
+	for _, never := range []string{
+		"이번에 만진 " + theirs + " 가",   // 좌우 교환
+		"이번에 만진 " + alsoMine + " 가", // pairs[len-1]
+		"의 발자국 " + mine + " 와",      // 좌우 교환
+	} {
+		if strings.Contains(p.Reason, never) {
+			t.Errorf("사유가 %q 라고 말한다 — 세션이 자기가 만지지도 않은 경로를 근거로 ask 를 남기게 된다:\n%s", never, p.Reason)
 		}
 	}
 }

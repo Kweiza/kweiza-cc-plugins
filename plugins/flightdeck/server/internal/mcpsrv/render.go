@@ -141,7 +141,7 @@ func FormatSignals(sig map[model.SignalKind]time.Time, now time.Time) string {
 // 자동 초안까지 들어온다. 포함하면 아무 일도 안 한 세션이 점등돼 판별력이 0이 된다.
 // push 는 랜딩하고 떠난 세션이 계속 일하는 것처럼 보인다.
 // (옛 근거였던 "세션 열기·상태 전이가 찍는다"는 그 두 자리를 지워 사라졌다 —
-//  web/format.go 의 같은 주석과 함께 읽어라.)
+// web/format.go 의 같은 주석과 함께 읽어라.)
 var activityKinds = []model.SignalKind{model.SignalPrompt, model.SignalTool, model.SignalCommit}
 
 // activityOf 는 "이 세션이 일하고 있나"와 그 사유를 낸다. 순수 함수다.
@@ -756,7 +756,30 @@ func renderLane(l *service.LaneView, now time.Time) string {
 	if l.Holder != nil && !laneHolderIsQueued(l) {
 		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
 		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
-		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남)", ShortID(l.Holder.SessionID))
+		//
+		// ★ 점유자의 **신호 나이**도 여기서 낸다(설계 §9 — ① 이 아니라 **그 절 끝의 점유자
+		// 신호 문단**이다. ① 은 신호 나이를 대기 줄 항목 괄호 안에만 두고, 점유자에 대해서는
+		// "창 밖 세션도 답하는 접근자가 필요하다"를 따로 적는다). 위 완전 어긋남 갈래(항목 0건)는
+		// 회수 판정용 두 나이를 다 싣는데 이쪽은 획득 경과만 머리에 있고 신호 나이가 없었다 —
+		// **같은 종류의 사고인데 한쪽만 고친 자리다.** 항목마다 붙는 `신호 %s전` 은 줄에
+		// **있는** 세션들의 것이고 점유자는 정의상 그 목록에 없으므로, 그 값이 이 화면
+		// 어디에도 없었다. 회수를 판정하는 사람은 "누구의 줄 행이 사라졌나"만 듣고
+		// "그 세션이 얼마나 조용한가"는 되물어야 했다.
+		//
+		// ★ 낱말은 완전 어긋남 갈래와 정상 경로에서 그대로 베낀다(`신호 %s전`/`신호 없음`).
+		// 같은 축이 한 화면에서 두 어휘로 읽히면 회수 판정이 대조부터 해야 한다.
+		// nil 을 "신호 없음"으로 적는 것의 한계도 그 갈래 주석과 같다 — 이 nil 은
+		// 못 읽음과 없음이 이미 뭉개진 값이고, 가르는 축은 화면에 애초에 안 온다.
+		//
+		// ★ 이 모양이 세 자리째지만 헬퍼로 **안 뽑는다.** 지금 render.go 를 쥔 세션이
+		// 더 있어(겹침 통보 완료) 기존 두 자리를 건드리면 충돌 면적이 그만큼 넓어진다.
+		// 뽑는 것은 그 자리가 조용해진 뒤에 할 별개의 일이다.
+		sig := "신호 없음"
+		if l.Holder.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*l.Holder.LastSignalAt)) + "전"
+		}
+		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남) · %s",
+			ShortID(l.Holder.SessionID), sig)
 	}
 	return line
 }

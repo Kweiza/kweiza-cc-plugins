@@ -1108,12 +1108,19 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 // 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
 // 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
 func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
+	// ★ 네 나이를 **전부 다른 값**으로 심는다(획득 3분 · 점유자 신호 47분 · 대기 30초 ·
+	//   대기자 신호 9초). 같은 값이 둘이면 한 숫자를 두 번 찍는 구현도 초록이 된다.
+	ghostSignal := t0.Add(-47 * time.Minute)
+	waiterSignal := t0.Add(-9 * time.Second)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
 		Lane: &service.LaneView{
-			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Holder: &service.LaneHolder{
+				SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute),
+				LastSignalAt: &ghostSignal,
+			},
 			Entries: []service.LaneEntry{
-				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second), LastSignalAt: &waiterSignal},
 			},
 		},
 	}, BoardRenderOptions{Now: t0})
@@ -1123,6 +1130,33 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 	}
 	if !strings.Contains(got, ShortID("01GHOSTHOLDER")) {
 		t.Fatalf("경고가 어느 세션의 점유인지 말하지 않는다 — 누구를 회수해야 하는지 답이 없다:\n%s", got)
+	}
+	// ★ 회수 판정용 **두 나이 중 뒤엣것**(설계 §9 의 절 끝 점유자 신호 문단. ① 은 신호
+	//   나이를 대기 줄 항목에만 요구한다). 획득 경과는 머리에 이미 있는데
+	//   점유자의 신호 나이는 이 화면 어디에도 없었다 — 항목마다 붙는 `신호 %s전` 은 줄에
+	//   **있는** 세션들의 것이고, 점유자는 정의상 그 목록에 없다. 완전 어긋남 갈래는
+	//   두 나이를 다 싣는데 이쪽만 안 실어서, 같은 불변식의 형제 갈래가 비대칭이었다.
+	//
+	//   경고 꼬리를 **통째로** 단정한다. 전체 문자열에서 "신호 47분전"만 찾으면 그 나이가
+	//   엉뚱한 자리에 붙어도 통과하고, "신호 없음"류는 대기자 조각이 대신 통과시킨다.
+	if want := "의 줄 행이 안 보인다(정합 어긋남) · 신호 47분전"; !strings.Contains(got, want) {
+		t.Fatalf("부분 어긋남 경고에 점유자의 신호 나이가 없다 — 회수를 판정하는 사람이\n"+
+			"'누구'만 듣고 '얼마나 조용한가'는 되물어야 한다.\n찾는 것: %q\n전체:\n%s", want, got)
+	}
+
+	// 신호가 한 번도 안 온 점유자는 침묵이 아니라 "없음"으로 낸다(못 읽음/없음을 가르는 규율).
+	// 대기자에게는 신호를 심어 둔다 — 안 그러면 대기자 조각의 "신호 없음"이 이 단정을 대신 통과시킨다.
+	noSignal := RenderBoard(service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
+		Lane: &service.LaneView{
+			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second), LastSignalAt: &waiterSignal},
+			},
+		},
+	}, BoardRenderOptions{Now: t0})
+	if want := "의 줄 행이 안 보인다(정합 어긋남) · 신호 없음"; !strings.Contains(noSignal, want) {
+		t.Fatalf("신호가 없는 점유자의 그 사실이 부분 어긋남 경고에 안 보인다 — 빈칸은 '못 읽었다'와 구분이 안 된다.\n찾는 것: %q\n전체:\n%s", want, noSignal)
 	}
 	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
 	ok := RenderBoard(service.BoardView{
