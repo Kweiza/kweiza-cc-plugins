@@ -91,7 +91,7 @@ func (s *Service) judgeMissingFollowups(ctx context.Context, in FinishInput) *Re
 // 관문(judgeMissingFollowups)은 못 읽었으면 **안 막고**(마무리를 잃지 않는 쪽), 잇기
 // (classifyFollowups)는 못 읽었으면 **안 잇는다**(거짓 링크를 안 만드는 쪽). 빈 슬라이스
 // 하나로 접으면 그 둘이 같은 값이 되어, 다음 개정이 한쪽을 고치며 다른 쪽을 조용히 뒤집는다.
-// FinishResult 의 StillHeld·QueueBalance 를 포인터로 둔 것과 같은 규율이다(finish.go:80·89).
+// FinishResult 의 StillHeld·QueueBalance 를 포인터로 둔 것과 같은 규율이다(finish.go:78·97).
 //
 // ★ **item.add 이벤트로만 판정한다.** 그 이벤트를 남기는 자리는 Service.AddItem(pick.go:1164)
 // 하나뿐이라, **finish 의 후속으로 만들어진 항목은 여기 안 걸린다.** 그것까지 세려면 finish 도
@@ -182,7 +182,7 @@ func eventItemID(e model.Event) string {
 //
 // ★ 이것이 없으면 **판단이 사라진다.** judgment_link 의 PK 는
 // (judgment_id, target_kind, target_id)(schema.sql:271) 이고 AddJudgment 는 평범한
-// INSERT 다(store/judgment.go:54). finish 는 in.ItemID · in.Links · 후속 id 를 이어 붙이므로
+// INSERT 다(store/judgment.go:59). finish 는 in.ItemID · in.Links · 후속 id 를 이어 붙이므로
 // 셋 중 무엇이든 겹치면 ① 이 ConflictDuplicate 를 내고 Store.Tx 가 ①②③④ 를 통째로
 // 롤백한다 — 넷 중 판단만이 원리적으로 파생 불가하다.
 //
@@ -229,7 +229,7 @@ type followupPlan struct {
 // 분기에만 쓴다(finish.go 의 tx 절을 보라).
 //
 // ★ 거절이 안전한 이유. 이 자리는 트랜잭션 전이라 **아무것도 안 쓴다.** 판단 본문은 아직
-// 세션 손에 있으므로 그 후속만 빼고 다시 부르면 된다 — title·body 누락 거절(finish.go:166)과
+// 세션 손에 있으므로 그 후속만 빼고 다시 부르면 된다 — title·body 누락 거절(finish.go:204)과
 // 같은 자리·같은 성격이다.
 func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (followupPlan, *RefusedError) {
 	var plan followupPlan
