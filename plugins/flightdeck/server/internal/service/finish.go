@@ -27,7 +27,7 @@ const HandoffGuidance = `무엇을 적어야 하는가 — 넷이다:
   ④ 확인했으나 못 한 것
 안 남기면 다음 세션이 같은 조사를 처음부터 다시 하거나,
 더 나쁘게는 **의도적으로 남긴 자리를 결함으로 보고 고치러 간다.**
-후속이 있으면 followups 로 같은 호출에 넣어라(이미 있는 항목이면 id 만) — 그러면 판단과 후속이 판단 링크로 이어진다.`
+후속이 있으면 followups 로 같은 호출에 넣어라(이미 있는 항목이면 id 만, 이 선점 뒤 이 세션이 만든 열린 항목만 이어진다) — 그러면 판단과 후속이 판단 링크로 이어진다.`
 
 // FollowupInput 은 마무리와 같은 호출에 넣는 후속 항목이다.
 type FollowupInput struct {
@@ -58,11 +58,11 @@ type FinishResult struct {
 	Judgment  model.Judgment `json:"judgment"`
 	Followups []model.Item   `json:"followups,omitempty"`
 	Released  []string       `json:"released,omitempty"` // 함께 반납한 자원
-	// SkippedFollowups 는 **id 가 이미 있어 안 넣은** 후속이다.
-	//
-	// 이 칸이 없으면 흡수가 거짓말이 된다 — 세션은 후속이 들어간 줄 알고 떠나고,
-	// 그 id 의 항목은 남이 만든 다른 것이다. Released 와 같은 성격의 칸이다:
-	// "요청한 것과 실제로 된 것이 다르다"를 그 자리에서 말한다.
+	// SkippedFollowups 는 판단을 지키려고 tx 안에서 건너뛴 후속이다. 사유는 셋이다:
+	// 새로 만들려던 id 가 분류 뒤 이 트랜잭션 사이에 이미 생겼다 · 이을 대상이
+	// 사라졌거나 못 읽었다 · 이을 대상이 분류 뒤 닫혔다. 각 사유는 원장
+	// item.followup_skipped 에 남는다(이 칸은 id 만 낸다). Released 와 같은 성격의
+	// 칸이다: "요청한 것과 실제로 된 것이 다르다"를 그 자리에서 말한다.
 	SkippedFollowups []string `json:"skipped_followups,omitempty"`
 
 	// LinkedFollowups 는 **새로 만들지 않고 판단에 이은** 기존 항목이다.

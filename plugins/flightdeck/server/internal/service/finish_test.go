@@ -619,7 +619,7 @@ func TestFinishAcceptsFollowupWithGoodCoordinatePaths(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 후속 id 충돌 — 판단은 롤백되지 않는다
+// 후속 id 충돌 — 부적격이면 tx 전에 거절하고 아무것도 안 쓴다
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestFinishWritesNothingWhenAFollowupIsIneligible 은 **옛 계약을 뒤집은 자리**다.

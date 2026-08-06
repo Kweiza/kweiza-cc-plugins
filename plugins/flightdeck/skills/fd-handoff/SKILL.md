@@ -16,7 +16,7 @@ finish(
   outcome: "done",          // 또는 "dropped" — 그때는 close_reason 이 필수다
   title:   "<한 줄>",
   body:    "<아래 넷>",
-  followups: [ { id, title, body, paths } ]   // 새 후속. **이미 있는 항목은 id 만** — 잇는다
+  followups: [ { id, title, body, paths } ]   // 새 후속. **이미 있는 항목(이 선점 뒤 내가 만든 열린 항목만)은 id 만** — 잇는다
 )
 ```
 
