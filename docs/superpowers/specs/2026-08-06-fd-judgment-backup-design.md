@@ -105,10 +105,11 @@ fd export --judgments --out <디렉토리>
 
 ```
 fd export --judgments · DB 전량 → /tmp/backup
-판단 984 · 링크 1413 · 스냅숏 12 (파일 4)
-── 이 백업이 안 덮는 것 (2건)
+판단 1141 · 링크 1413 · 스냅숏 12 · 세션 300 · 프로젝트 8 · 머신 8 (파일 7)
+── 이 백업이 안 덮는 것 (3건)
   · 아웃박스에 갇힌 판단(pending·rejected) — 이 명령은 DB 만 읽는다
   · judgment_fts — 되읽기 때 삽입 트리거가 다시 만든다(손실 0)
+  · 폐포 밖 표 전부(item·job·counter·event·landing_row 등)
 ```
 
 **안 덮는 것을 코드가 열거하고 시험이 문다.** `legacy.RoundTripLosses` 와 같은 형태다 —
@@ -185,10 +186,18 @@ deferred 의 알려진 위험(읽기 스냅숏 뒤 쓰기 승격이 `SQLITE_BUSY
 
 ## 5. 산출물
 
-`--out` 디렉토리 아래 파일 넷. 이미 있으면 덮어쓴다(③에서 git 이 이력을 갖는다).
+`--out` 디렉토리 아래 파일 **일곱**(JSONL 여섯 + 매니페스트). 이미 있으면 덮어쓴다(③에서 git 이 이력을 갖는다).
+
+> **정정(구현 중, Task 7 이 찾았다).** 원래 셋(`judgment`·`judgment_link`·`snapshot`)만 담기로 했으나
+> **FK 폐포가 그것으로 안 닫힌다.** `session.id` 는 서버 발급 ULID 라 새 DB 에서 재현 불가고,
+> 판단의 85%(실측 973/1141)가 그것을 가리킨다. `machines.jsonl`·`projects.jsonl`·`sessions.jsonl`
+> 셋을 더해 폐포를 닫는다(316행). 자세한 근거는 판단 01KZB6P8 에 있다.
 
 | 파일 | 내용 | 정렬 |
 |---|---|---|
+| `machines.jsonl` | `machine` 전량 (폐포 leaf) | `ORDER BY id` |
+| `projects.jsonl` | `project` 전량 (폐포 leaf) | `ORDER BY id` |
+| `sessions.jsonl` | `session` 전량 | `ORDER BY id` |
 | `judgments.jsonl` | `judgment` 전량 | `ORDER BY id` — ULID 라 생성순이고 안정 |
 | `judgment_links.jsonl` | `judgment_link` 전량 | `ORDER BY judgment_id, target_kind, target_id` |
 | `snapshots.jsonl` | `snapshot` 전량 | `ORDER BY project, key` |
@@ -291,9 +300,9 @@ unexported `snapshots` 다. `store` 에 만들고 `web` 이 그것을 쓰게 고
   가 물리적으로 금지돼 있어, 잘못 넣은 행을 고치거나 지울 수 없다. 중복 id 는 거절한다.
 - FK 폐포 때문에 `project`·`session` 행이 먼저 있어야 한다. `supersedes` 자기참조가 실제로 16행
   있으므로 `PRAGMA defer_foreign_keys = ON`(`store/move.go` 선례)을 쓰거나 삽입 순서를 보장한다.
-- **이번 범위는 `judgment`·`judgment_link`·`snapshot` 셋만 복원한다.** `project`·`session`·
-  `machine` 은 백업 대상이 아니므로, 되읽기는 그 셋이 이미 있는 DB 를 전제한다. 이 제약을 손실
-  목록에 적고 시험이 문다.
+- **폐포 여섯 표를 통째로 복원한다** — `machine`·`project`·`session` 이 판단보다 먼저 들어가고,
+  앞 둘은 아무것도 참조하지 않는 leaf 라 여기서 닫힌다. **빈 DB 에 되쓰면 미리 심어 둘 것이
+  하나도 없다** — 그것이 이 함수가 증명하는 "무손실"의 실제 의미다.
 
 ### ask 재선언
 
@@ -335,7 +344,7 @@ id 를 적는다.** fd 큐가 만료 조건의 보관소다(§11 "떼어낼 조�
    `judgment.project → project`, `judgment.session_id → session`, `session → machine`,
    `snapshot.project → project`, `judgment.supersedes → judgment` 가 전부 FK 이고
    `foreign_keys=1` 이 켜져 있다. 이번 백업은 `judgment`·`judgment_link`·`snapshot` 셋을 담고,
-   **`project`·`session`·`machine` 이 있는 DB 를 복원 전제로 삼는다.** 그 전제를 문단에 적는다.
+   **폐포 여섯 표를 통째로 담는다.** `session.id` 가 서버 발급이라 재현 불가라는 것이 그 근거다.
 2. "마크다운/JSONL" 을 JSONL 하나로 좁힌다.
 3. **아웃박스 구멍 한 줄** — 이 백업은 DB 만 덮으므로 아웃박스에 갇힌 판단은 안 잡힌다(실측 1건).
 
@@ -383,7 +392,7 @@ export/import 시험은 `h.closeStore()` 로 하네스 DB 핸들을 먼저 닫�
 | ③ 매시간 · bare 레포 · 별도 볼륨 | 주기 작업 자리가 코드에 없다(선례 0건). serve 티커 / 호스트 cron / compose 두 번째 서비스 중 무엇을 세울지가 독립 결정이고, `compose.yaml` 이 볼륨 분리를 이 시점에 걸어 뒀다 |
 | 아웃박스 합류 | `rejected.jsonl` 1건이 실재하지만, 넣으면 상태 디렉토리 갈림과 시각 표기 차이가 이 명령의 문제가 된다. 별도 축이다 |
 | `fd import --judgments` CLI 표면 | 함수는 있고 배선만 없다 |
-| `project`·`session`·`machine` 백업 | 무손실 복원의 FK 폐포에 필요하지만 §5 는 이것들을 파생 불가로 안 꼽았다. 폐포를 닫을지는 별도 판단 |
+| ~~`project`·`session`·`machine` 백업~~ | **후속이 아니라 이번에 했다** — Task 7 이 폐포가 안 닫힌 것을 찾았고 사용자가 닫기로 정했다(판단 01KZB6P8) |
 | `legacy/outguard.go` 의 범용 판정이 `legacy` 패키지에 사는 것 | 이름과 자리가 안 맞지만 이번에 옮기면 남의 자리를 건드린다 |
 
 ---

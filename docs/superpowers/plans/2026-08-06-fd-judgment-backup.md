@@ -1724,17 +1724,18 @@ func TestLedgerSurvivesFullRoundTrip(t *testing.T) {
 		t.Errorf("스키마 버전이 달라졌다: %d → %d", m.SchemaVersion, gotM.SchemaVersion)
 	}
 
-	// 빈 DB 에 되쓴다. project·session·machine 은 원장 밖이라 미리 만든다(Losses 가 그걸 말한다).
+	// ★ 완전히 빈 DB 에 되쓴다. seed 를 부르지 않는다 — Task 10 이 폐포를 닫았으므로
+	//   machine·project·session 까지 원장이 다 갖고 와야 한다. 미리 심어 줘야 통과한다면
+	//   그것은 폐포가 안 닫힌 것이고, 이 시험의 존재 이유가 바로 그것을 잡는 것이다.
 	dstPath := filepath.Join(t.TempDir(), "dst.db")
 	dst, err := store.OpenWithLogger(dstPath, quiet)
 	if err != nil {
 		t.Fatalf("복원 DB 열기 실패: %v", err)
 	}
 	defer dst.Close()
-	seedLedgerRefs(t, dst)
 
 	if err := dst.WriteLedger(ctx, got); err != nil {
-		t.Fatalf("WriteLedger 실패: %v", err)
+		t.Fatalf("빈 DB 되쓰기 실패 — 폐포가 안 닫혔다: %v", err)
 	}
 
 	final, err := dst.ReadLedger(ctx)
@@ -1769,7 +1770,7 @@ func TestRestoredDBHasWorkingFullTextSearch(t *testing.T) {
 		t.Fatalf("복원 DB 열기 실패: %v", err)
 	}
 	defer dst.Close()
-	seedLedgerRefs(t, dst)
+	// 여기도 seed 를 안 부른다 — 폐포가 닫혔으므로 원장만으로 복원된다.
 	if err := dst.WriteLedger(ctx, dump); err != nil {
 		t.Fatalf("WriteLedger 실패: %v", err)
 	}
@@ -2322,6 +2323,532 @@ git commit -m "docs(flightdeck): §7 볼륨 손상 행의 실제를 적는다 �
 foreign_keys=1 이 항상 켜져 있어, 무손실 폐포는 machine·project·session 까지 여섯이다.
 
 만료 조건은 시험이 못 지킨다('매시간 도는가'는 코드 안에서 관측되지 않는다). 보관소는 fd 큐다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+```
+
+---
+
+## Task 10: FK 폐포를 닫는다 — `session`·`machine`·`project` 를 원장에 더한다
+
+> **실행 순서: 이 태스크는 Task 7 보다 먼저 돈다.** Task 7 이 이 결함을 찾았고(왕복이 FK 로 죽었다),
+> Task 7 의 시험은 이 태스크가 끝나야 통과한다. 순서는 1→2→3→4→5→6→**10**→7→8→9 다.
+
+Task 7 의 통합 시험이 계획 결함을 찾았다. 스펙의 결정 ⑫("`machine`·`project`·`session` 이 있는 DB 를
+복원 전제로 삼는다")가 셋을 같은 것으로 취급했는데 **셋이 다르다**:
+
+| 가리키는 것 | 값의 성질 | 새 DB 에서 같은 값을 만들 수 있나 |
+|---|---|---|
+| `project` | 사람이 정한 **이름** | 가능 — 그대로 다시 등록하면 된다 |
+| `machine_id` | 클라이언트가 만들어 로컬에 보관하는 안정 id | 가능 |
+| `session_id` | **서버 발급 ULID**(`NewID()`) | **불가능** — 같은 3중키로 다시 열어도 새 값이 나온다 |
+
+실측: `judgment` 1,141행 중 **973행(85%)** 이 `session_id` 를 갖는다. 복원은 한 트랜잭션이라
+973행이 FK 로 실패하면 **나머지 168행도 함께 롤백된다** — 부분 복원이 아니라 전부 실패다.
+
+폐포를 닫는 비용은 `project` 8 + `machine` 8 + `session` 300 = **316행**. `machine` 과 `project` 는
+FK 가 하나도 없는 leaf 라 여기서 닫힌다.
+
+**Files:**
+- Modify: `internal/store/backup.go` (DTO 3개 · `LedgerDump` 필드 3개 · 조회 3개 · 되쓰기 3개)
+- Modify: `internal/store/project.go` (`projectCols`·`machineCols` 상수를 뽑고 기존 SELECT 가 쓰게)
+- Modify: `internal/ledger/export.go` (파일 3개 · `Counts` 3필드 · `FormatVersion` 2)
+- Modify: `internal/ledger/read.go` (`readLines` 3개)
+- Test: `internal/store/backup_test.go` · `internal/ledger/export_test.go` · `internal/ledger/write_test.go`
+
+**Interfaces:**
+- Consumes: `sessionCols`(`internal/store/session.go:115` 에 **이미 있다** — 정확히 필요한 9컬럼이다), `dbtx`, `ptrOf`, `clip`
+- Produces:
+  - `store.LedgerMachine{ID, Hostname, FirstSeen, LastSeen string}`
+  - `store.LedgerProject{ID, Path string; RemoteURL *string; DefaultBranch string; Config, ConfigFromSHA *string; CreatedAt string}`
+  - `store.LedgerSession{ID, Project, MachineID, Worktree, CCSessionID string; Label *string; State string; BlockedWhy *string; OpenedAt string}`
+  - `store.LedgerDump` 에 `Machines`·`Projects`·`Sessions` 필드
+  - `const projectCols`·`const machineCols` (`internal/store/project.go`)
+
+- [ ] **Step 1: `projectCols`·`machineCols` 를 뽑고 기존 호출부가 쓰게 한다**
+
+`internal/store/project.go` 에 컬럼 상수가 없어서 SELECT 목록을 여러 자리가 손으로 적는다(`:62`·`:91`·`:161`).
+Task 1 에서 리뷰가 잡았던 것과 같은 결함이니 **여기서 미리 없앤다** — 상수만 만들고 기존 SELECT 를 안 고치면
+"이름만 선례"가 되어 같은 지적을 다시 받는다.
+
+`internal/store/project.go` 에 추가하고, 그 파일의 기존 `SELECT` 들이 이 상수를 쓰게 고친다:
+
+```go
+// projectCols 는 프로젝트 조회의 컬럼 목록이다.
+// judgmentCols·sessionCols 와 같은 이유로 상수다 — 목록을 손으로 다시 적으면
+// 순서가 어긋나는 순간 Scan 이 조용히 엉뚱한 값을 채운다(전부 문자열이라 타입 오류도 안 난다).
+const projectCols = `id, path, remote_url, default_branch, config, config_from_sha, created_at`
+
+// machineCols 는 머신 조회의 컬럼 목록이다.
+const machineCols = `id, hostname, first_seen, last_seen`
+```
+
+기존 SELECT 를 `SELECT `+projectCols+` FROM project …` / `SELECT `+machineCols+` FROM machine …` 형태로
+바꾼다. **Scan 인자 순서는 건드리지 마라** — 컬럼 순서가 같으므로 그대로 동작한다.
+
+- [ ] **Step 2: store 계층 시험을 쓴다 (실패해야 한다)**
+
+`internal/store/backup_test.go` 끝에 붙인다.
+
+```go
+// 원장은 FK 폐포를 통째로 담는다. session.id 는 서버 발급 ULID 라 새 DB 에서 재현할 수 없고,
+// 그래서 세션을 안 담으면 세션 걸린 판단(실측 85%)이 FK 위반으로 전부 롤백된다.
+func TestReadLedgerCoversTheFullFKClosure(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p1")
+	sess := mustSession(t, s, "p1", "cc-closure")
+
+	if _, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "p1", SessionID: sess.ID, Kind: model.JudgmentDecision, Body: "세션 걸린 판단",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	d, err := s.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+	if len(d.Machines) == 0 {
+		t.Error("machine 이 원장에 없다 — session.machine_id 가 가리킬 대상이 사라진다")
+	}
+	if len(d.Projects) == 0 {
+		t.Error("project 가 원장에 없다")
+	}
+	if len(d.Sessions) == 0 {
+		t.Fatal("session 이 원장에 없다 — 판단의 85%가 이것을 가리킨다")
+	}
+	var found bool
+	for _, x := range d.Sessions {
+		if x.ID == sess.ID {
+			found = true
+			if x.Project != "p1" || x.MachineID != "m1" {
+				t.Errorf("세션 필드가 틀리다: %+v", x)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("판단이 가리키는 세션 %q 가 원장에 없다", sess.ID)
+	}
+}
+
+// 빈 DB 에 되쓰면 폐포가 통째로 복원된다 — 미리 심어 둘 것이 하나도 없어야 한다.
+// 이것이 "무손실" 등급의 실제 의미다.
+func TestWriteLedgerRestoresIntoATrulyEmptyDB(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p1")
+	sess := mustSession(t, src, "p1", "cc-restore")
+
+	if _, err := src.AddJudgment(ctx, model.Judgment{
+		Project: "p1", SessionID: sess.ID, Kind: model.JudgmentAsk,
+		Title: "제목", Body: "세션 걸린 판단",
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+	if err := src.PutSnapshot(ctx, model.Snapshot{
+		Project: "p1", Key: "k", Value: "1", Method: model.SnapshotCommand,
+	}); err != nil {
+		t.Fatalf("스냅숏 저장 실패: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	// ★ seed 를 부르지 않는다. 원장이 project·machine·session 을 다 갖고 와야 한다.
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("빈 DB 되쓰기 실패 — 폐포가 안 닫혔다: %v", err)
+	}
+	got, err := dst.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("복원본 읽기 실패: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("왕복에서 원장이 달라졌다:\n원본 %+v\n복원 %+v", want, got)
+	}
+}
+
+// state='blocked' 세션은 CHECK(state<>'blocked' OR blocked_why 가 비지 않음) 를 통과해야 한다.
+// 지금 실 DB 에 blocked 세션이 0건이라 이 축은 시험이 만들어야만 검증된다.
+func TestWriteLedgerRestoresBlockedSession(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p1")
+	sess := mustSession(t, src, "p1", "cc-blocked")
+	if err := src.SetSessionState(ctx, sess.ID, model.SessionBlocked, "왜 막혔는지"); err != nil {
+		t.Fatalf("세션을 막힘으로 못 바꿨다: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+	var blocked bool
+	for _, x := range want.Sessions {
+		if x.State == "blocked" {
+			blocked = true
+			if x.BlockedWhy == nil || *x.BlockedWhy == "" {
+				t.Fatalf("blocked 세션인데 사유가 비었다: %+v", x)
+			}
+		}
+	}
+	if !blocked {
+		t.Fatal("전제가 깨졌다 — blocked 세션이 원장에 없다")
+	}
+
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("blocked 세션 되쓰기 실패(CHECK 위반?): %v", err)
+	}
+}
+```
+
+> `mustSession` 은 `internal/store/store_test.go` 에 이미 있다(`mustSession(t, s, project, cc) model.Session`).
+> 세션 상태를 바꾸는 메서드의 정확한 이름·시그니처는 `grep -n "func (s \*Store).*Session" internal/store/session.go`
+> 로 확인해 맞춰라 — 위 코드의 `SetSessionState` 는 추정이다. 이름이 다르면 실제 것을 쓰고,
+> 상태를 바꾸는 공개 경로가 없으면 `s.DB()` 대신 **`store` 패키지 안이라 가능한 raw UPDATE** 로
+> 픽스처를 만들되 그 사실을 주석에 적어라.
+
+- [ ] **Step 3: 시험이 실패하는지 본다**
+
+```
+cd plugins/flightdeck/server && go test ./internal/store/ -run 'ClosureFull|TrulyEmptyDB|BlockedSession' -v
+```
+
+기대: 컴파일 실패(`d.Machines` 등이 없다) 또는 `TestWriteLedgerRestoresIntoATrulyEmptyDB` 가 FK 위반으로 실패.
+
+- [ ] **Step 4: DTO 셋과 `LedgerDump` 필드를 더한다**
+
+`internal/store/backup.go` 의 `LedgerSnapshot` 뒤, `LedgerDump` 앞에 순삽입한다.
+
+```go
+// LedgerMachine 은 machine 표 한 행의 원문이다. NULL 가능 컬럼이 없다.
+type LedgerMachine struct {
+	ID        string `json:"id"`
+	Hostname  string `json:"hostname"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+// LedgerProject 는 project 표 한 행의 원문이다.
+type LedgerProject struct {
+	ID            string  `json:"id"`
+	Path          string  `json:"path"`
+	RemoteURL     *string `json:"remote_url"`
+	DefaultBranch string  `json:"default_branch"`
+	Config        *string `json:"config"`
+	ConfigFromSHA *string `json:"config_from_sha"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+// LedgerSession 은 session 표 한 행의 원문이다.
+//
+// ★ 이 표가 원장에 있는 이유. session.id 는 서버 발급 ULID 라 같은 3중키로 다시 열어도
+// 새 값이 나온다 — project·machine 처럼 "이름을 다시 부르면 같은 것"이 아니다.
+// 판단의 85%(실측 973/1141)가 session_id 를 갖고, 복원이 한 트랜잭션이라 그 FK 가 하나만
+// 깨져도 판단 전체가 롤백된다.
+type LedgerSession struct {
+	ID          string  `json:"id"`
+	Project     string  `json:"project"`
+	MachineID   string  `json:"machine_id"`
+	Worktree    string  `json:"worktree"`
+	CCSessionID string  `json:"cc_session_id"`
+	Label       *string `json:"label"`
+	State       string  `json:"state"`
+	BlockedWhy  *string `json:"blocked_why"`
+	OpenedAt    string  `json:"opened_at"`
+}
+```
+
+`LedgerDump` 를 고친다. **필드 순서가 FK 의존 순서다** — 읽는 사람이 복원 순서를 바로 안다:
+
+```go
+// LedgerDump 는 한 순간의 FK 폐포 전량이다.
+//
+// 여섯 표다. 앞 셋(machine·project·session)이 뒤 셋의 FK 대상이고, machine·project 는
+// 아무것도 참조하지 않는 leaf 라 폐포가 여기서 닫힌다.
+type LedgerDump struct {
+	Machines  []LedgerMachine
+	Projects  []LedgerProject
+	Sessions  []LedgerSession
+	Judgments []LedgerJudgment
+	Links     []LedgerLink
+	Snapshots []LedgerSnapshot
+}
+```
+
+- [ ] **Step 5: 조회 셋을 더하고 `ReadLedger` 에 잇는다**
+
+`ReadLedger` 본문의 `d.Judgments` 읽기 **앞**에 셋을 넣는다(같은 `tx` 를 쓴다):
+
+```go
+	if d.Machines, err = readLedgerMachines(ctx, tx); err != nil {
+		return d, err
+	}
+	if d.Projects, err = readLedgerProjects(ctx, tx); err != nil {
+		return d, err
+	}
+	if d.Sessions, err = readLedgerSessions(ctx, tx); err != nil {
+		return d, err
+	}
+```
+
+그리고 `readLedgerSnapshots` 뒤에 함수 셋을 순삽입한다:
+
+```go
+// readLedgerMachines 는 머신 전량을 id 순으로 읽는다.
+func readLedgerMachines(ctx context.Context, q dbtx) ([]LedgerMachine, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+machineCols+` FROM machine ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 머신 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerMachine
+	for rows.Next() {
+		var m LedgerMachine
+		if err := rows.Scan(&m.ID, &m.Hostname, &m.FirstSeen, &m.LastSeen); err != nil {
+			return nil, fmt.Errorf("원장 머신 행 해석 실패: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 머신 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// readLedgerProjects 는 프로젝트 전량을 id 순으로 읽는다.
+func readLedgerProjects(ctx context.Context, q dbtx) ([]LedgerProject, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+projectCols+` FROM project ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 프로젝트 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerProject
+	for rows.Next() {
+		var p LedgerProject
+		var remote, config, fromSHA sql.NullString
+		if err := rows.Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch,
+			&config, &fromSHA, &p.CreatedAt); err != nil {
+			return nil, fmt.Errorf("원장 프로젝트 행 해석 실패: %w", err)
+		}
+		p.RemoteURL, p.Config, p.ConfigFromSHA = ptrOf(remote), ptrOf(config), ptrOf(fromSHA)
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 프로젝트 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// readLedgerSessions 는 세션 전량을 id 순으로 읽는다.
+func readLedgerSessions(ctx context.Context, q dbtx) ([]LedgerSession, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+sessionCols+` FROM session ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 세션 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerSession
+	for rows.Next() {
+		var x LedgerSession
+		var label, blockedWhy sql.NullString
+		if err := rows.Scan(&x.ID, &x.Project, &x.MachineID, &x.Worktree, &x.CCSessionID,
+			&label, &x.State, &blockedWhy, &x.OpenedAt); err != nil {
+			return nil, fmt.Errorf("원장 세션 행 해석 실패: %w", err)
+		}
+		x.Label, x.BlockedWhy = ptrOf(label), ptrOf(blockedWhy)
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 세션 순회 실패: %w", err)
+	}
+	return out, nil
+}
+```
+
+- [ ] **Step 6: `WriteLedger` 에 되쓰기 셋을 더한다**
+
+`WriteLedger` 안, `PRAGMA defer_foreign_keys` 직후·판단 루프 **앞**에 넣는다. `defer_foreign_keys` 가
+켜져 있어 순서는 무관하지만, FK 의존 순서대로 두면 읽는 사람이 폐포를 바로 안다.
+
+```go
+		for _, m := range d.Machines {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO machine(id, hostname, first_seen, last_seen)
+				VALUES (?, ?, ?, ?)`,
+				m.ID, m.Hostname, m.FirstSeen, m.LastSeen); err != nil {
+				return fmt.Errorf("원장 머신 되쓰기 실패(id=%q): %w", clip(m.ID, 64), err)
+			}
+		}
+		for _, p := range d.Projects {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO project(id, path, remote_url, default_branch, config, config_from_sha, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				p.ID, p.Path, p.RemoteURL, p.DefaultBranch,
+				p.Config, p.ConfigFromSHA, p.CreatedAt); err != nil {
+				return fmt.Errorf("원장 프로젝트 되쓰기 실패(id=%q): %w", clip(p.ID, 64), err)
+			}
+		}
+		for _, x := range d.Sessions {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO session(id, project, machine_id, worktree, cc_session_id,
+				                    label, state, blocked_why, opened_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				x.ID, x.Project, x.MachineID, x.Worktree, x.CCSessionID,
+				x.Label, x.State, x.BlockedWhy, x.OpenedAt); err != nil {
+				return fmt.Errorf("원장 세션 되쓰기 실패(id=%q project=%q): %w",
+					clip(x.ID, 64), clip(x.Project, 64), err)
+			}
+		}
+```
+
+그리고 `WriteLedger` 의 doc 주석에서 **거짓이 된 문장을 고친다**:
+
+```go
+// ★ project·session·machine 은 원장 밖이다. 이 셋이 이미 있는 DB 를 전제한다.
+// 없으면 FK 위반으로 트랜잭션 전체가 거절되고, 그 거절이 곧 "전제가 안 맞다"는 신호다.
+```
+
+를 아래로 바꾼다:
+
+```go
+// ★ 폐포를 통째로 되쓴다. machine·project·session 이 판단보다 먼저 들어가고, 그 셋은
+// 아무것도 참조하지 않거나 서로만 참조하므로 여기서 닫힌다. 빈 DB 에 되쓰면 미리 심어 둘
+// 것이 하나도 없다 — 그것이 이 함수가 증명하는 "무손실"의 실제 의미다.
+```
+
+- [ ] **Step 7: `internal/ledger` 에 파일 셋을 더하고 형식 버전을 올린다**
+
+`internal/ledger/export.go` 의 상수 블록:
+
+```go
+	// FormatVersion 은 이 산출물 배치의 버전이다. 파일 이름이나 줄 구조가 바뀌면 올린다.
+	//
+	// 2: FK 폐포를 닫으며 machines·projects·sessions 셋이 늘었다. 버전 1 산출물로 복원하면
+	//    세션 걸린 판단(실측 85%)이 FK 위반으로 전부 롤백되므로, Read 가 그것을 거절하는 것이 맞다.
+	FormatVersion = 2
+
+	judgmentsFile = "judgments.jsonl"
+	linksFile     = "judgment_links.jsonl"
+	snapshotsFile = "snapshots.jsonl"
+	machinesFile  = "machines.jsonl"
+	projectsFile  = "projects.jsonl"
+	sessionsFile  = "sessions.jsonl"
+```
+
+`Counts` 를 확장한다(필드 순서는 `LedgerDump` 와 같게):
+
+```go
+// Counts 는 내보낸 행 수다.
+type Counts struct {
+	Machines  int `json:"machines"`
+	Projects  int `json:"projects"`
+	Sessions  int `json:"sessions"`
+	Judgments int `json:"judgments"`
+	Links     int `json:"judgment_links"`
+	Snapshots int `json:"snapshots"`
+}
+```
+
+`Encode` 의 `Counts` 리터럴에 셋을 더하고, 인코딩 셋을 더하고, 반환 맵에 셋을 더한다:
+
+```go
+	machines, err := encodeLines(len(d.Machines), func(i int) any { return d.Machines[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("머신 인코딩 실패: %w", err)
+	}
+	projects, err := encodeLines(len(d.Projects), func(i int) any { return d.Projects[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("프로젝트 인코딩 실패: %w", err)
+	}
+	sessions, err := encodeLines(len(d.Sessions), func(i int) any { return d.Sessions[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("세션 인코딩 실패: %w", err)
+	}
+```
+
+반환 맵에 `machinesFile: machines`·`projectsFile: projects`·`sessionsFile: sessions` 를 더한다.
+
+`internal/ledger/read.go` 의 `Read` 에서 판단 읽기 **앞**에 셋을 넣는다:
+
+```go
+	if d.Machines, err = readLines[store.LedgerMachine](dir, machinesFile); err != nil {
+		return d, m, err
+	}
+	if d.Projects, err = readLines[store.LedgerProject](dir, projectsFile); err != nil {
+		return d, m, err
+	}
+	if d.Sessions, err = readLines[store.LedgerSession](dir, sessionsFile); err != nil {
+		return d, m, err
+	}
+```
+
+- [ ] **Step 8: 손실 목록을 갱신한다 — 한 항목이 거짓이 됐다**
+
+`internal/ledger/losses.go` 의 마지막 항목이 이제 거짓이다:
+
+```go
+		"`project`·`session`·`machine` 표 — 무손실 복원의 FK 폐포에 필요하지만 원장 밖이다. " +
+			"되읽기는 이 셋이 이미 있는 DB 를 전제한다",
+```
+
+**지우고** 그 자리에 지금 참인 것을 적는다 — 폐포 밖 표들이 새 손실이다:
+
+```go
+		"폐포 밖 표 전부(`item`·`job`·`counter`·`event`·`landing_row` 등) — 원장은 판단의 FK 폐포 " +
+			"여섯 표만 담는다. `judgment_link.target_id` 는 FK 가 아니라(CHECK 만) 링크 자체는 " +
+			"복원되지만, 그것이 가리키는 항목은 복원된 DB 에 없다",
+```
+
+`Losses()` 는 순수 함수이고 명령이 그대로 출력하므로, **거짓 항목을 남기면 사용자가 화면에서 거짓을 읽는다.**
+그리고 `TestLossesNamesTheKnownGaps` 가 기대하는 키워드 목록도 실제에 맞게 고쳐라 — 지금은
+`"project"`·`"session"`·`"machine"` 을 요구하는데 그 축이 손실이 아니게 됐다.
+
+- [ ] **Step 9: `ledger` 시험을 갱신한다**
+
+`export_test.go` 의 `sampleDump()` 에 세 표를 채운다 — 안 채우면 새 인코딩 경로가 한 번도 안 돈다.
+`machine` 은 NULL 가능 컬럼이 없고, `project` 는 셋(`remote_url`·`config`·`config_from_sha`),
+`session` 은 둘(`label`·`blocked_why`)이 NULL 가능하니 **각 표에 NULL 인 행과 값이 있는 행을 섞어라.**
+
+파일 개수를 단정하는 기존 시험(`TestEncodeProducesFourFilesAndLinePerRow`)이 **넷을 기대하므로 깨진다.**
+이름과 기대값을 일곱(JSONL 여섯 + manifest)으로 고쳐라. 시험 이름도 실제를 말하게 바꾼다.
+
+`write_test.go` 의 `TestWriteLeavesNoTempFiles` 도 `len(ents) != 4` 를 일곱으로 고쳐야 한다.
+
+- [ ] **Step 10: 전 시험을 돌린다**
+
+```
+cd plugins/flightdeck/server && go vet ./... && go test ./...
+```
+
+기대: 전부 PASS. `internal/ledger` 의 왕복 시험과 `internal/store` 의 새 시험 셋 포함.
+
+- [ ] **Step 11: 커밋**
+
+```bash
+git add internal/store/backup.go internal/store/backup_test.go internal/store/project.go \
+        internal/ledger/export.go internal/ledger/read.go \
+        internal/ledger/export_test.go internal/ledger/write_test.go
+git commit -m "feat(flightdeck): FK 폐포를 닫는다 — session·machine·project 를 원장에 더한다
+
+Task 7 의 왕복 시험이 찾은 결함이다. 스펙은 이 셋이 '있는 DB 를 전제한다'고 적었는데
+셋이 다르다: project 와 machine 은 이름이라 다시 부를 수 있지만 session.id 는 서버 발급
+ULID 라 같은 3중키로 다시 열어도 새 값이 나온다.
+
+실측: 판단 1,141행 중 973행(85%)이 session_id 를 갖는다. 복원은 한 트랜잭션이라
+그 FK 가 깨지면 나머지 168행도 함께 롤백된다 — 부분 복원이 아니라 전부 실패다.
+
+폐포 비용은 316행(project 8 + machine 8 + session 300)이고, 두 leaf 표가
+아무것도 참조하지 않아 여기서 닫힌다.
+
+형식 버전을 2로 올린다. 버전 1 산출물로 복원하면 세션 걸린 판단이 전부 롤백되므로
+Read 가 그것을 거절하는 것이 맞다.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
