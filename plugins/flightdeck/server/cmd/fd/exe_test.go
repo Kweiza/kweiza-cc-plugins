@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +107,121 @@ func TestExeLinesSeesThroughSymlinkedHome(t *testing.T) {
 	got := ExeLines(filepath.Join(old, "fd-%2fhome%2fu%2fsrc"), nil, want)
 	if len(got) != 2 || !strings.Contains(got[1], "자리 밖") {
 		t.Fatalf("진짜 옛 자리인데 침묵했다: %v", got)
+	}
+}
+
+// ★ **자리 비교를 감싸는 세 조각이 한 자리에 있는가.**
+//
+// 판정(os.SameFile)은 앞 라운드가 sameDir 한 자리로 모았는데, 그것을 감싸는 셋 — Clean ·
+// 문자열 지름길 · 그다음의 sameDir — 은 exe.go(부정 방향)와 selfwatch.go(긍정 방향)에 각각
+// 있었다. 그 셋이 갈리면 **심볼릭 링크 홈에서만** 두 화면이 다른 답을 내므로, 링크가 없는
+// 머신에서는 갈린 채로도 전 시험이 초록이다. 그래서 헬퍼 자체에 표를 붙인다.
+//
+// 표의 자리 중 셋(끝 슬래시·`.` 성분·**없는 자리**)이 Clean 을 잰다. 특히 마지막 짝은
+// **Clean 과 지름길이 stat 앞에 있다**는 계약을 잰다 — 순서가 뒤집히면 없는 자리는 양쪽 stat 이
+// 다 실패해 false 가 된다. (호출 횟수는 안 잰다. sameDir 에 이음매를 내야 하는데, 그것을
+// 재려고 제품에 주입 자리를 파는 것이 이 후속이 없애려는 모양이다 — 안 잰 축은 안 잰다.)
+func TestSameDirAsWrapsThePlaceComparison(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "bigdisk", "cache")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	sameAlias := filepath.Join(root, "samelink")
+	otherAlias := filepath.Join(root, "otherlink")
+	if err := os.Symlink(real, sameAlias); err != nil {
+		t.Skipf("이 판에서 심볼릭 링크를 못 만든다: %v", err)
+	}
+	if err := os.Symlink(other, otherAlias); err != nil {
+		t.Skipf("이 판에서 심볼릭 링크를 못 만든다: %v", err)
+	}
+	// 만들지 않는다 — 런처가 한 번도 안 돈 머신의 binDir 이 이 모양이다.
+	missing := filepath.Join(root, "never-built")
+
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"같은 문자열이면 같다", real, real, true},
+		{"끝 슬래시는 표기 차이다", real + "/", real, true},
+		{"중복 슬래시와 `.` 성분도 표기 차이다", root + "//bigdisk/./cache", real, true},
+		{
+			// ★ 이 짝이 "Clean·지름길이 stat 앞"이라는 계약을 잰다. 뒤로 밀면 여기가 빨간불이다.
+			name: "없는 자리라도 표기만 다르면 같은 자리다 — 여기서 stat 은 양쪽 다 실패한다",
+			a:    missing + "/", b: missing, want: true,
+		},
+		{"한 자리를 두 이름으로 부른 것 — inode 로 알아본다", sameAlias, real, true},
+		// ★ 위 갈래의 대조. inode 비교가 "링크면 무조건 같다"로 무너지면 여기가 빨간불이다.
+		{"링크라도 가리키는 곳이 다르면 다른 자리다", otherAlias, real, false},
+		{"실재하는 서로 다른 자리", other, real, false},
+		{"둘 다 없고 문자열도 다르면 — 모르는 것은 같은 것이 아니다", missing, missing + "-2", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameDirAs(tc.a, tc.b); got != tc.want {
+				t.Fatalf("sameDirAs(%q, %q) = %v, 원한 것 %v", tc.a, tc.b, got, tc.want)
+			}
+			// 대칭이 아니면 부정 방향(ExeLines)과 긍정 방향(newSelfWatcher)이 같은 입력에
+			// 다른 답을 낼 수 있다 — 이 함수가 존재하는 이유가 정확히 그 갈림이다.
+			if got := sameDirAs(tc.b, tc.a); got != tc.want {
+				t.Fatalf("인자 순서를 바꾸니 답이 달라졌다: sameDirAs(%q, %q) = %v, 원한 것 %v",
+					tc.b, tc.a, got, tc.want)
+			}
+		})
+	}
+}
+
+// ★ **거동이 아니라 모양을 잰다 — 이 후속이 고친 것이 모양이기 때문이다.**
+//
+// 위 표와 두 소비부의 링크 시험은 "지금 답이 맞는가"를 잠근다. 하지만 누군가 호출부에서
+// 세 조각을 **다시 인라인**하면(복사·붙여넣기 한 번이면 된다) 그 시험들은 전부 초록인 채로
+// 후속이 없앤 모양이 돌아온다 — 갈림이 링크 홈에서만 드러나기 때문이다. 그래서 여기서만
+// 파서로 구조를 단정한다: `sameDir` 를 부르는 자리는 `sameDirAs` 하나뿐이다.
+//
+// 주석은 안 센다(parser 가 버린다) — `sameDir` 를 **말하는** 주석은 두 파일에 여럿이다.
+func TestSameDirIsCalledOnlyByItsWrapper(t *testing.T) {
+	for _, file := range []string{"exe.go", "selfwatch.go"} {
+		t.Run(file, func(t *testing.T) {
+			f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+			if err != nil {
+				t.Fatalf("%s 를 못 읽었다: %v", file, err)
+			}
+			var wrapped int
+			for _, d := range f.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					id, ok := call.Fun.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					switch id.Name {
+					case "sameDirAs":
+						wrapped++
+					case "sameDir":
+						if fn.Name.Name != "sameDirAs" {
+							t.Errorf("%s 의 %s 가 sameDir 를 직접 부른다 — 감싸는 세 조각"+
+								"(Clean·문자열 지름길·inode 비교)이 다시 두 벌이 된다. "+
+								"그 갈림은 심볼릭 링크 홈에서만 드러나 시험이 놓친다",
+								file, fn.Name.Name)
+						}
+					}
+					return true
+				})
+			}
+			// ★ 대조가 없으면 이 시험은 "축을 통째로 껐다"로도 통과한다.
+			if wrapped == 0 {
+				t.Errorf("%s 에서 sameDirAs 를 부르는 자리가 사라졌다 — 이 파일의 자리 축이 꺼졌다", file)
+			}
+		})
 	}
 }
 

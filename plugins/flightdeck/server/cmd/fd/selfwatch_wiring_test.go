@@ -15,6 +15,11 @@ import (
 //
 // 자리는 **실제로 만든다**(빈 파일). newSelfWatcher 는 /proc/self/exe 를 못 읽는 판에서
 // 이 경로를 stat 해 기준값을 잡으므로, 없는 경로를 주면 리눅스 밖에서만 갈래가 달라진다.
+//
+// ★ **이 파일에는 t.Parallel() 을 넣지 마라.** osExecutable 은 패키지 전역이라 이 헬퍼가
+// 그것을 갈아 끼우고 t.Cleanup 이 되돌린다 — 병렬로 돌면 한 시험의 Cleanup 이 다른 시험이
+// 세워 둔 값을 지운다(같은 시험 안에서 ①과 ②가 순서대로 갈아 끼우는 것도 그 순서에 기댄다).
+// 지금 아무도 안 쓰지만, 없는 금지는 다음 사람이 "왜 여기만 병렬이 아니지" 하며 넣는다.
 func withExecutable(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -78,5 +83,53 @@ func TestServeWatcherFeedsLauncherDirToWatcher(t *testing.T) {
 	if st := newServeWatcher(quietLogger(), env, home, db).Status(); strings.TrimSpace(st.Uncovered) != "" {
 		t.Fatalf("런처 자리(%s) 밖(%s)에서 도는데 Uncovered 가 찼다 — "+
 			"조립이 자리를 견주는 것이 아니라 무조건 켜고 있다: %q", want, outside, st.Uncovered)
+	}
+}
+
+// ★ **조립이 감시기의 상태를 api 표면까지 실제로 나르는가.**
+//
+// 위 시험은 감시기가 자리를 **받는** 것까지 잠갔고, 변환(selfUpdateStatusOf)은 serve_test.go
+// 가 필드별로 잠갔다. 그런데 그 둘을 **잇는 콜백 한 자리**는 여전히 투명했다 — 2026-08-07
+// 실측: runServe 의 클로저를 `api.SelfUpdateStatus{}` 로 바꿔도 `go test ./...` 전 패키지가
+// 초록이었다. self_update 절이 통째로 영값으로 나가는 회귀가 조용히 통과한다는 뜻이고,
+// 그때 화면은 이 브랜치 **이전과 정확히 같아진다**(watching 조차 안 나온다).
+//
+// serveAPIOptions 가 콜백 대신 감시기를 받게 되면서 그 자리가 이 시험의 사정권에 들어왔다.
+// 조립을 밖으로 뺄수록 안 잠긴 자리가 한 칸씩 얕아질 뿐 사라지지는 않는다는 것도 그 함수
+// 주석에 적어 뒀다 — 여기서 멈춘 근거는 **실패 모양이 침묵**이라는 것이다.
+func TestServeAPIOptionsCarriesTheWatcherStatus(t *testing.T) {
+	home := t.TempDir()
+	env := envOf(map[string]string{"HOME": home})
+	want, src := BinCacheDir(env, home)
+	if want == "" {
+		t.Fatalf("대조 전제가 깨졌다 — 가짜 HOME 인데 자리가 안 나왔다(%s)", src)
+	}
+	withExecutable(t, filepath.Join(want, "fd-이름은-안-본다"))
+
+	w := newServeWatcher(quietLogger(), env, home, filepath.Join(home, "fd.db"))
+	st := w.Status()
+	if !st.Watching {
+		t.Skipf("이 배치는 감시를 아예 안 켠다(%s) — 나르기는 그 뒤의 축이다", st.Reason)
+	}
+
+	opt := serveAPIOptions("tok", 60, quietLogger(), false, w)
+	if opt.SelfUpdate == nil {
+		t.Fatal("감시기를 줬는데 조립이 self_update 콜백을 안 달았다 — /healthz 에서 그 절이 통째로 빠진다")
+	}
+	got := opt.SelfUpdate()
+	if !got.Watching {
+		t.Fatalf("감시기의 상태가 api 표면까지 안 간다 — 조립이 빈 값을 물린다: %+v", got)
+	}
+	if strings.TrimSpace(got.Uncovered) != strings.TrimSpace(st.Uncovered) {
+		t.Fatalf("Uncovered 가 조립을 건너면서 갈렸다: 감시기=%q · api=%q", st.Uncovered, got.Uncovered)
+	}
+
+	// ── 대조. 감시기가 없으면 콜백을 **안 단다.**
+	//
+	// ★ 이것이 없으면 위 단정은 "늘 콜백을 단다"로도 통과한다. 그리고 nil 감시기에 콜백을
+	// 달면 부르는 순간 패닉이고, api 는 "감시기가 없다"와 "감시기가 빈 값을 답한다"를
+	// 가를 근거를 잃는다(handlers_meta.go 는 SelfUpdate 가 nil 이면 그 절을 통째로 뺀다).
+	if serveAPIOptions("tok", 60, quietLogger(), false, nil).SelfUpdate != nil {
+		t.Fatal("감시기가 nil 인데 콜백을 달았다 — 부르면 패닉이고, api 가 그 절을 뺄 근거를 잃는다")
 	}
 }

@@ -567,8 +567,12 @@ func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
 
 // ★ 시도가 없었으면 last_at 은 응답에서 아예 **빠져야** 한다(omitempty). 제로 시각을
 // null 로 찍으면 "시도가 있었는데 시각을 모른다"로 읽힐 수 있다 — 부재와 null 은 다른 말이다.
-// serve.go 의 LastAt.IsZero() 변환(time.Time 제로값 → nil *time.Time)이 이 축의 유일한
-// 방어이고, 그 변환이 깨지면(예: 항상 &at 를 채우면) 이 시험이 잡는다.
+//
+// ★ 이 시험이 재는 것은 **omitempty 하나**다. 앞선 판의 주석은 "serve.go 의 변환이
+// 깨지면 이 시험이 잡는다"고 적었는데 거짓이었다 — 여기서는 nil 을 직접 넣으므로 상류가
+// 항상 &at 를 채우게 바뀌어도 이 시험은 초록이다(2026-08-07 실측: 그 자리는 아무 시험에도
+// 안 걸렸다). 그 변환을 재는 것은 cmd/fd 의 selfUpdateStatusOf 갈래이고, 이 선의 두
+// 조각은 **각자 자기 것만** 잰다.
 func TestHealthzOmitsLastAtWhenNoAttemptEver(t *testing.T) {
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
 		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
