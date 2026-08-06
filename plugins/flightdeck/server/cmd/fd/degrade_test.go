@@ -199,6 +199,9 @@ func TestIdempotencyStableTable(t *testing.T) {
 		{"note", true}, {"finish", true}, {"add", true},
 		{"alloc", false}, {"open", false}, {"beat", false},
 		{"pick", false}, {"claim", false},
+		// 회수 둘 — 아는 명령이라 명시 갈래다. 기본 문구("모르는 명령")를 보고
+		// 다음 사람이 고정 목록에 넣는 표류를 막는다.
+		{CmdLaneRelease, false}, {CmdClaimRelease, false},
 		{"모르는명령", false}, // ★ 표 밖: 기본값은 고정하지 않는 쪽이다
 		{"", false},
 	}

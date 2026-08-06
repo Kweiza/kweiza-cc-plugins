@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -51,8 +52,25 @@ func TestClaimReleaseEndpointReclaimsWithLedgerAndLog(t *testing.T) {
 	if rb["item"] != "cr-1" || rb["holder"] != sess {
 		t.Fatalf("결과 좌표가 다르다: %v (점유자 기대 %s)", rb, sess)
 	}
-	if s, _ := rb["judgment_id"].(string); s == "" {
+	jid, _ := rb["judgment_id"].(string)
+	if jid == "" {
 		t.Fatalf("판단 id 가 안 왔다 — 회수가 기록 없이 지나간 것처럼 보인다: %v", rb)
+	}
+	// id 가 원장의 실물과 이어져 있다 — "비어 있지 않다"만 보면 가짜 id 가 통과한다
+	// (AddJudgment 를 지우고 상수를 넣는 뮤테이션에 이 시험이 초록이었다).
+	js, err := e.st.JudgmentsForItem(context.Background(), testProject, "cr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, j := range js {
+		if j.ID == jid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("응답의 judgment_id %s 가 원장에 없다: %+v", jid, js)
 	}
 
 	// 액세스 로그 — 요청 본문에 세션이 없으므로, 회수당한 세션이 로그의 세션 축에
