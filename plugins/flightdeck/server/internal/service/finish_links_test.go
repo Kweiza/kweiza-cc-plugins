@@ -211,8 +211,9 @@ func TestFinishRefusesWithUnobservedEligibilityWhenClaimIsUnreadable(t *testing.
 // 종류의 오류로 죽지 않고 이 시험이 겨눈 "이 이름의 표를 못 찾는다" 하나로만 죽는다.
 //
 // ★ **fail-closed 인 이유.** itemExists 가 이 실패를 "없다"로 접으면 그 후속은 '만들기'로
-// 가는데, 판단 링크는 아직 in.Followups 전수로 짜이므로(Task 4 전까지는) 조회가 실패했을
-// 뿐인 남의 항목에도 링크가 tx 안에서 그대로 걸려 판단과 함께 **커밋되어 되돌릴 수 없다.**
+// 간다. 판단 링크는 이제 **트랜잭션 안에서 확정한 것으로만** 짜이므로 남의 항목에 링크가
+// 걸리지는 않지만, tx 안 선검사가 그 항목을 건너뛰며 원장에 **"분류 뒤 같은 id 가 생겼다"**고
+// 적는다 — 원인이 경합이 아니라 조회 실패인데 event 는 추가 전용이라 그 거짓이 영구히 남는다.
 // 반대로 거절은 트랜잭션 전이라 아무것도 안 쓰므로 그 후속만 빼고 그대로 되부를 수 있다 —
 // 비대칭이 fail-closed 를 요구한다(itemExists 의 함수 주석과 같은 논리).
 func TestFinishRefusesWhenItemTableCannotBeReadForExistenceCheck(t *testing.T) {
@@ -540,5 +541,77 @@ func TestFinishSeparatesLinkedFromCreatedInTheLedger(t *testing.T) {
 	}
 	if n := countRows(t, st, `SELECT count(*) FROM event WHERE kind = 'item.followup_linked'`); n != 1 {
 		t.Fatalf("item.followup_linked 가 %d건이다 — 1건이어야 한다", n)
+	}
+}
+
+// TestFinishSkipsALinkTargetThatClosedBetweenClassifyAndTx 는 **판단 링크가 무엇으로 짜이는가**를
+// 잠근다 — in.Followups 전수가 아니라 트랜잭션 안에서 확정한 "실제로 만들 것 + 실제로 이을 것"이다.
+//
+// ★ **왜 시계 후크인가.** 이 갈래는 분류(classifyFollowups, tx 밖)와 tx 사이에 남이 그 항목을
+// 닫아야 도달한다. 실물로는 경합으로만 벌어지는 창이라 시험이 고를 수 없는데, Service.now
+// (service.go:88, WithClock 로 주입한다)가 **정확히 그 창 안에서** 불린다 — finish.go 의
+// now := s.now() 는 classifyFollowups 뒤·s.st.Tx 앞이고, Finish 를 통틀어 시계를 읽는 자리가
+// 거기 하나뿐이다. 그래서 주입한 시계 안에서 대상을 닫으면 창이 **결정론적으로** 벌어진다.
+// 시험 전용 후크의 선례는 outOfWindowLister(service.go:93-99)이고, "주입은 실물로 만들기
+// 어려운 실패에만 쓴다"는 이 패키지의 규율(helper_test.go 머리)과 같은 자리다.
+//
+// ★ **이 축은 이 시험만 잡는다.** 위 두 시험은 정상 경로라 만들 것 ∪ 이을 것 == in.Followups
+// 이고, 그래서 링크를 옛 전수 조립으로 되돌려도 초록이다. 갈리는 자리가 여기뿐이다.
+//
+// 잠그는 것 넷: 그 후속이 ⓐ LinkedFollowups 에 **안** 들어가고 ⓑ SkippedFollowups 에 들어가며
+// ⓒ **판단 링크가 그 항목에 안 걸리고** ⓓ 마무리 자체는 성공한다(판단 1건). ⓒ 가 심장이다.
+func TestFinishSkipsALinkTargetThatClosedBetweenClassifyAndTx(t *testing.T) {
+	// arm 은 **분류와 tx 사이에 딱 한 번** 돈다. 픽스처(openSession·addItem·claimed·addItemAs)도
+	// 시계를 읽으므로 무장은 그것들이 끝난 뒤에 한다.
+	var arm func()
+	s, st := newSvcWithClock(t, func() time.Time {
+		if arm != nil {
+			f := arm
+			arm = nil
+			f()
+		}
+		return time.Now()
+	})
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "vanishing-axis") // 분류 시점에는 이을 자격이 있다
+
+	arm = func() {
+		if err := st.SetItemState(ctx(), "p", "vanishing-axis", model.ItemDone, ""); err != nil {
+			t.Errorf("창 안에서 대상 닫기 실패(시험 전제 준비): %v", err)
+		}
+	}
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{{ID: "vanishing-axis"}},
+	})
+	if err != nil {
+		t.Fatalf("이을 대상이 닫혔다고 마무리가 통째로 죽었다 — 판단이 함께 죽는다: %v", err)
+	}
+	if arm != nil {
+		t.Fatalf("시계 후크가 안 불렸다 — 창이 안 벌어졌으니 이 시험은 아무것도 안 잠근다")
+	}
+	if len(res.LinkedFollowups) != 0 {
+		t.Fatalf("이었다고 말한다: %v — 분류 뒤 닫힌 항목은 못 잇는다", res.LinkedFollowups)
+	}
+	if len(res.SkippedFollowups) != 1 || res.SkippedFollowups[0] != "vanishing-axis" {
+		t.Fatalf("건너뛴 후속이 %v 다 — vanishing-axis 하나여야 한다", res.SkippedFollowups)
+	}
+	// ★ 심장. 링크를 in.Followups 전수로 짜면 여기가 1이 된다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM judgment_link WHERE target_kind = 'item' AND target_id = 'vanishing-axis'`); n != 0 {
+		t.Fatalf("판단 링크가 %d건 걸렸다 — 못 이은 항목에는 링크가 없어야 한다", n)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 1 {
+		t.Fatalf("판단이 %d건이다 — 후속을 건너뛰어도 판단은 살아야 한다", n)
+	}
+	// 건너뜀의 **원인**도 원장에 남는다 — "닫혔다"와 "지워졌다"·"못 읽었다"는 다른 사실이다.
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped' AND payload LIKE '%분류 뒤 닫혔다%'`); n != 1 {
+		t.Fatalf("건너뛴 원인이 '닫혔다'로 원장에 안 남았다(%d건) — 추가 전용 원장이라 나중에 못 되짚는다", n)
 	}
 }

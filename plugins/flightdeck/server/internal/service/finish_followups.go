@@ -250,12 +250,14 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 		switch {
 		case !itemObserved:
 			// ★ **fail-closed 다 — 아래 있음/없음 갈래와 반대 방향.** sessionSpawnedOpen 의
-			// observed 와 같은 이유다: 여기서 "없다"로 접어 만들기로 보내면, 그 id 가 실은
-			// 남의 항목이었을 때 판단 링크가 tx 안에서 그 항목을 그대로 가리킨다(finish.go 가
-			// AddItem 보다 먼저 링크를 짠다 — 아직은. Task 3 현재). 그 링크는 판단과 함께
-			// 커밋되어 **되돌릴 수 없다.** 반대로 여기서 거절하면 트랜잭션 전이라 아무것도
-			// 안 쓴다 — title·body 누락 거절과 같은 자리·같은 성격이고, 그 후속만 빼면
-			// 그대로 되부를 수 있다. 비대칭이 fail-closed 를 요구한다.
+			// observed 와 같은 이유다: 여기서 "없다"로 접으면 그 후속은 '만들기'로 간다.
+			// 판단 링크는 이제 **트랜잭션 안에서 확정한 것으로만** 짜이므로(finish.go 의 tx 절)
+			// 남의 항목에 링크가 걸리지는 않는다 — 그 자리의 선검사가 잡아 건너뛴다. 그래도
+			// 접으면 안 되는 이유는, 그 건너뜀이 **경합을 위한 최후 방어**라 원장에 "분류 뒤
+			// 같은 id 가 생겼다"고 적기 때문이다. 못 읽었을 뿐인 것이 경합으로 굳고, event 는
+			// 추가 전용이라 그 거짓이 영구히 남는다. 반대로 여기서 거절하면 트랜잭션 전이라
+			// 아무것도 안 쓴다 — title·body 누락 거절과 같은 자리·같은 성격이고, 그 후속만
+			// 빼면 그대로 되부를 수 있다. 비대칭이 fail-closed 를 요구한다.
 			return followupPlan{}, refuseUnreadableFollowupExistence(i+1, f.ID)
 		case exists:
 			return followupPlan{}, refuseIneligibleFollowup(i+1, f.ID, in.ItemID, eligible, observed)
@@ -269,10 +271,16 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 // itemExists 는 그 id 의 항목이 지금 있는지와, 그 판정을 실제로 관측했는지다.
 //
 // ★ **개정 — 원래 이 함수는 모든 조회 실패를 "없다"로 접었다.** 그러면 그 id 는 '만들기'로
-// 분류되는데, 판단 링크는 아직 in.Followups 전수로 짜이므로(Task 4 전까지는) 조회가 DB 오류
-// 등으로 실패했을 뿐인 **남의 항목에 링크가 그대로 걸린다**(리뷰 실측: 링크 1건). 같은 파일의
+// 분류되는데, 그 판(판단 링크가 in.Followups 전수로 짜이던 판)에서는 조회가 DB 오류 등으로
+// 실패했을 뿐인 **남의 항목에 링크가 그대로 걸렸다**(리뷰 실측: 링크 1건). 같은 파일의
 // sessionSpawnedOpen 은 관측 실패를 observed=false 로 나르는데 이 함수만 반대 방향으로
 // fail-open 이었던 것이 그 안전 축을 되열었다.
+//
+// ★ **링크 조립이 바뀐 지금도 fail-closed 다 — 근거가 옮겨갔을 뿐이다.** 링크는 이제
+// 트랜잭션 안에서 확정한 것으로만 짜여(finish.go 의 tx 절) 잘못된 링크는 안 걸린다. 대신
+// 남는 것이 원장이다: 못 읽은 것을 '만들기'로 보내면 tx 안 선검사가 그 항목을 건너뛰며
+// **"분류 뒤 같은 id 가 생겼다"**고 적는다. 원인이 경합이 아니라 조회 실패인데 event 는
+// 추가 전용이라 그 거짓을 나중에 되짚을 수 없다. 거절은 트랜잭션 전이라 아무것도 안 쓴다.
 //
 // ★ **store.ErrNotFound 만 "없다"로 접는다.** 그 밖의 오류(DB 접속 실패 등)는 "있는지 모른다"
 // 로 나르고, classifyFollowups 가 그것을 거절로 접는다 — 정본 판정이 트랜잭션 안의 INSERT 가

@@ -263,14 +263,31 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		linked := make([]string, 0, len(plan.Link))
 		for _, id := range plan.Link {
 			it, err := t.GetItem(in.Project, id)
-			// ★ 이 갈래는 **이 브랜치의 시험이 못 밟는다**(분류 뒤 남이 그 항목을 닫아야 도달한다).
-			//   원장 축은 위 경합 갈래에서 잠갔고, 여기는 같은 payload 모양을 손으로 맞춘 것이다 —
-			//   "item" 키를 빼면 나중에 어느 후속이 사라졌는지 못 되짚는다.
-			if err != nil || it.State != model.ItemOpen {
+			// ★ **사유를 셋으로 가른다.** judgment·event 는 추가 전용이라 여기 적은 원인이
+			//   영구히 남는다 — "사라졌거나 닫혔다" 한 문구로 접으면 DB 를 못 읽었을 뿐인 것이
+			//   "닫혔다"로 굳고, 그 거짓은 나중에 되짚을 방법이 없다. 같은 파일의 itemExists 가
+			//   (exists, observed) 로 가르고 refuseIneligibleFollowup 이 사유를 셋으로 가르는
+			//   것과 같은 규율이다.
+			//
+			// ★ "item" 키는 세 갈래 모두에 남긴다 — 빼면 나중에 **어느** 후속이 빠졌는지 못 되짚는다.
+			//
+			// ★ 이 갈래들은 **분류 뒤 이 트랜잭션 사이**에만 도달한다. 그 창은 Service.now 가
+			//   불리는 자리라 시계 후크로 결정론적으로 벌릴 수 있다 — 닫힘 갈래는
+			//   TestFinishSkipsALinkTargetThatClosedBetweenClassifyAndTx 가 잠근다.
+			//   나머지 둘(지워짐·못 읽음)은 아직 시험이 못 밟는다.
+			var why string
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				why = "이을 대상이 분류 뒤 지워졌다 — 판단을 지키려고 이 후속만 건너뛴다"
+			case err != nil:
+				why = "이을 대상을 못 읽었다(원인 미상) — 판단을 지키려고 이 후속만 건너뛴다"
+			case it.State != model.ItemOpen:
+				why = "이을 대상이 분류 뒤 닫혔다 — 판단을 지키려고 이 후속만 건너뛴다"
+			}
+			if why != "" {
 				out.SkippedFollowups = append(out.SkippedFollowups, id)
 				t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
-					"item": id,
-					"why":  "이을 대상이 분류 뒤 사라졌거나 닫혔다 — 판단을 지키려고 이 후속만 건너뛴다",
+					"item": id, "why": why,
 				})
 				continue
 			}
