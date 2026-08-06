@@ -296,6 +296,17 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		}
 	}
 	a.pruneWindows()
+	// ★ 바이너리 캐시 GC 도 **같은 자리**다. 위 함수가 "훅에서만 한다 — SessionStart
+	// 타임아웃이 10초라 디렉토리 하나를 훑을 여유가 있고 MCP 는 도구 응답 지연에
+	// 민감하다"고 적어 둔 그 판정이 여기에 그대로 선다. 잴 것도 같은 모양이다 —
+	// 디렉토리 하나의 목록 + 파일 몇 개의 stat 이고, 내용은 안 읽으니 비콘 쪽보다 싸다.
+	// 이 GC 가 없으면 자리가 소스 트리마다 갈리므로(릴리스마다 키가 바뀐다) 22MB×N 이
+	// 무한히 쌓인다 — 상한을 가진 자리가 여기 하나뿐이다.
+	//
+	// pruneWindows 와 **실패 모양도 같게** 둔다: 반환값이 없고 사유는 Debug 로만 남는다.
+	// 캐시가 안 잘린 것에 대해 사용자가 지금 할 수 있는 일이 없고, 세션 시작을 막을
+	// 이유는 더더욱 없다(이 훅의 존재 이유는 조정이지 청소가 아니다).
+	a.pruneBinCache()
 
 	v, boardBanner, berr := a.Board(ctx, in.SessionID)
 	if berr != nil {

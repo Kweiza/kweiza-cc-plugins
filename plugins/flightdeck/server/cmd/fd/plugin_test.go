@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -197,19 +199,29 @@ func TestLauncherIsFailOpenWithoutGo(t *testing.T) {
 	// PATH 를 비워 Go 를 없앤다. 스크립트 자체는 절대경로 bash 로 띄운다
 	// (shebang 의 /usr/bin/env 도 PATH 를 타므로).
 	state := t.TempDir()
-	cmd := exec.Command("/bin/bash", script, "status")
-	cmd.Env = []string{"PATH=", "HOME=" + t.TempDir(), "FD_STATE_DIR=" + state}
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, code := runLauncher(t, map[string]string{
+		"PATH": "", "HOME": t.TempDir(), "FD_STATE_DIR": state,
+	}, "status")
 
 	// 대조 전제: 정말 Go 없이 돌았나. 캐시된 바이너리가 있으면 이 시험은 아무것도 안 본다.
-	if _, serr := os.Stat(filepath.Join(state, "bin", "fd")); serr == nil {
-		t.Fatal("대조 전제가 깨졌다 — Go 없이 돌렸는데 바이너리가 만들어졌다")
+	//
+	// ★★ **파일 이름이 아니라 디렉토리를 본다 — 이름으로 되돌리지 마라.**
+	//    앞선 판은 `os.Stat(state/bin/fd)` 의 **실패**를 이 전제로 썼다. 그런데 산출물
+	//    이름에 소스 트리 지문이 붙자(`fd-%2f…`) 그 stat 은 **어떤 경우에도** 실패하게 되어
+	//    전제가 영영 참이 됐다 — 시험은 초록인 채로 아무것도 안 보게 되고, 그 무력화는
+	//    아무 신호도 안 낸다(안 고쳐도 초록이라 놓치기 쉬운 유일한 자리였다).
+	//    이름 규칙의 주인은 런처 하나이고 앞으로도 바뀔 수 있다. 디렉토리는 안 바뀐다.
+	assertEmptyOrAbsent(t, filepath.Join(state, "bin"),
+		"대조 전제가 깨졌다 — Go 없이 돌렸는데 바이너리 캐시 자리에 무언가 생겼다")
+
+	if code != 0 {
+		t.Fatalf("런처가 실패했다(종료코드 0 이어야 한다): code=%d\n%s%s", code, stdout, stderr)
 	}
-	if err != nil {
-		t.Fatalf("런처가 실패했다(종료코드 0 이어야 한다): %v\n%s", err, out)
+	// stdout 은 훅 계약과 MCP 프레임의 자리다 — 안내 한 줄이라도 섞이면 그 둘이 통째로 깨진다.
+	if stdout != "" {
+		t.Fatalf("런처가 stdout 에 %d바이트를 썼다: %q", len(stdout), stdout)
 	}
-	got := string(out)
-	mustContain(t, "런처 안내", got,
+	mustContain(t, "런처 안내", stderr,
 		"Go 툴체인이 없어",
 		"조정 기능 없이 그대로 진행된다",
 	)
@@ -226,6 +238,10 @@ func TestLauncherBuildsAndRuns(t *testing.T) {
 	root := pluginRoot(t)
 	state := t.TempDir()
 	cmd := exec.Command(filepath.Join(root, "bin", "fd"), "version")
+	// ★ 여기만 runLauncher(통제된 환경)를 **안 쓴다 — 그렇게 고치지 마라.** 이 시험은 실제로
+	//   `go build` 를 돌리므로 PATH·GOMODCACHE·HOME 같은 툴체인 환경이 통째로 필요하다.
+	//   대신 FD_STATE_DIR 가 사다리의 첫 갈래라 자리는 t.TempDir() 로 못박히고, 진짜 홈의
+	//   `~/.cache/flightdeck` 은 이 갈래에서 아예 계산되지 않는다.
 	cmd.Env = append(os.Environ(), "FD_STATE_DIR="+state)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -234,8 +250,389 @@ func TestLauncherBuildsAndRuns(t *testing.T) {
 	if !strings.Contains(string(out), "fd api=") {
 		t.Fatalf("빌드된 바이너리가 안 돌았다:\n%s", out)
 	}
-	if _, serr := os.Stat(filepath.Join(state, "bin", "fd")); serr != nil {
-		t.Fatalf("바이너리가 캐시되지 않았다 — 매 훅마다 다시 빌드하게 된다: %v", serr)
+	// ★ **이름을 박아 단정하지 않는다.** 키 규칙(소스 트리를 단사로 접어 이름에 박는다)의
+	//   주인은 런처 하나다. Go 에 그 규칙을 다시 구현하면 같은 판정이 두 자리에 살게 되고,
+	//   한쪽만 고칠 때 조용히 어긋난다(client.go newClient 주석의 규율). 여기서 잠그는 것은
+	//   둘뿐이다 — **캐시됐다** + **이름이 `fd-` 접두를 따른다**.
+	//
+	// ★ 정확히 1개여야 한다. 런처의 빌드 임시 파일 `$bin.$$` 도 같은 접두를 갖기 때문에,
+	//   1개라는 것은 곧 `mv -f` 로 제자리에 놓였다(임시 파일이 안 남았다)는 뜻이기도 하다.
+	cached, gerr := filepath.Glob(filepath.Join(state, "bin", "fd-*"))
+	if gerr != nil {
+		t.Fatalf("바이너리 캐시 자리를 못 훑었다: %v", gerr)
+	}
+	if len(cached) != 1 {
+		t.Fatalf("캐시된 바이너리가 %d개다 — 정확히 1개여야 한다(0이면 매 훅마다 다시 빌드하게 된다): %v",
+			len(cached), cached)
+	}
+}
+
+// ── 런처의 **자리 규칙** ────────────────────────────────────────────────────
+//
+// 아래 셋은 2026-08-06 의 두 사고에 대한 회귀 시험이다.
+//
+//	① 07:15 — 같은 소스가 채널마다 다른 자리에 두 번 지어져 빌드 시각이 55분 어긋났고
+//	   (16:10:44 ↔ 17:05:29), 그 창에서 한 응답의 서버 축과 렌더 축이 서로 다른 판을 봤다.
+//	   바이너리는 exec 되고 나면 자기가 어느 판인지 **안 말하고 답한다** — 그래서 두 벌이
+//	   다르면 하나는 최신인 척하는 옛 코드다. → TestLauncherAddressIgnoresChannel
+//	② 워크트리 오염 — 재빌드 판정이 mtime 이라 한 이름을 여러 소스가 나눠 쓰면 **먼저 지은
+//	   쪽이 전 채널을 대표한다**. 워크트리에서 런처를 한 번 부르는 것만으로 모든 세션의
+//	   훅·MCP 가 그 브랜치 빌드로 갈아 끼워진다. → TestLauncherAddressSplitsBySource
+//
+// 셋 다 `FD_PRINT_BIN` 이음매를 쓴다 — 런처가 자리를 정한 직후 stderr 에 `bin=<절대경로>`
+// 한 줄만 찍고 아무것도 안 지은 채 종료코드 0 으로 끝나는 자리다. **Go 도 빌드도 안 필요해서**
+// `-short` 에서도 돌고, 22MB 를 안 지으므로 자리 규칙만 초 단위로 잠글 수 있다.
+//
+// ★★ **이 시험들은 사용자의 진짜 홈을 절대 건드리면 안 된다.** 런처는 이제 기본으로
+//
+//	`$HOME/.cache/flightdeck/bin` 에 짓는다. 시험이 HOME 을 잊고 부르면 그 자리에 22MB 를
+//	남기고, 그건 시험의 부작용이 아니라 **결함**이다 — 다음 세션의 훅이 시험이 지은 판을
+//	exec 하게 된다. 그래서 환경은 map 하나로 통째로 만들고(`env -i` 상당) os.Environ() 을
+//	섞지 않는다. 섞으면 CLAUDE_PLUGIN_DATA·XDG_STATE_HOME 이 시험이 모르는 채 딸려 들어와
+//	정확히 이 시험들이 잠그려는 축을 오염시킨다. 그 위에 sealedEnv(입력)와 launcherBin(출력)이
+//	두 겹으로 막는다 — 통제가 새면 시험이 조용히 통과하는 대신 그 자리에서 죽는다.
+
+// seamToken 은 FD_PRINT_BIN 이음매를 여는 **정확한 값**이다. 런처는 `-n` 이 아니라 이 값과의
+// 일치를 본다(bin/fd 의 `[ "${FD_PRINT_BIN:-}" = ... ]`) — 아무 값에나 열리면 셸 프로필에 남은
+// 디버그용 export 하나로 플러그인 전체가 **조용한 no-op** 이 되고, 그 무력화는 종료코드 0 이라
+// 아무 신호도 안 낸다(이 파일이 다른 자리에서 결함으로 못박은 축과 같다).
+//
+// ★ 값이 사는 자리는 여기와 런처 **둘뿐**이고, 그것은 피할 수 없다(이음매의 양쪽 끝이다).
+// 바꿀 거면 두 자리를 같이 바꿔라 — 한쪽만 고치면 아래 시험들이 이음매를 못 타고 빌드 경로로
+// 내려가 "소스를 못 찾았다"로 죽는다(실측: 실제로 그렇게 죽어 있었다).
+const seamToken = "__fd_addr__"
+
+// runLauncher 는 런처를 **완전히 통제된 환경**으로 부른다. env 는 통째로 쓰인다.
+//
+// stdout·stderr 를 안 합친다. 훅 계약과 MCP 프레임이 stdout 을 쓰므로 "stdout 이 0바이트"가
+// 그 자체로 단정 대상이고, CombinedOutput 은 그 축을 지운다.
+func runLauncher(t *testing.T, env map[string]string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	script := filepath.Join(pluginRoot(t), "bin", "fd")
+	// 절대경로 bash 로 띄운다 — shebang 의 /usr/bin/env 도 PATH 를 타는데, 여기서는
+	// PATH 를 비운 채로 부르는 갈래가 있다.
+	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
+	cmd.Env = sealedEnv(t, env)
+	var o, e bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &o, &e
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("런처를 못 띄웠다: %v", err)
+		}
+	}
+	return o.String(), e.String(), cmd.ProcessState.ExitCode()
+}
+
+// sealedEnv 는 시험이 넘긴 map 을 그대로 환경으로 만들되, **진짜 홈이 새어 들어왔는지** 본다.
+// 여기가 첫 겹이다. 둘째 겹은 launcherBin 이 계산된 자리를 보고 친다.
+func sealedEnv(t *testing.T, kv map[string]string) []string {
+	t.Helper()
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if kv["HOME"] == home {
+			t.Fatalf("시험이 HOME 으로 진짜 홈(%s)을 준다 — t.TempDir() 를 써라", home)
+		}
+	}
+	out := make([]string, 0, len(kv))
+	for k, v := range kv {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// launcherBin 은 FD_PRINT_BIN 이음매로 런처가 **계산만 한** 바이너리 경로를 받아 온다.
+// 이음매 계약(정확히 한 줄·stderr·exit 0·stdout 0바이트)을 여기서 함께 단정하므로,
+// 아래 시험들은 경로 비교에만 집중하면 된다.
+func launcherBin(t *testing.T, env map[string]string) string {
+	t.Helper()
+	sealed := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		sealed[k] = v
+	}
+	sealed["FD_PRINT_BIN"] = seamToken
+
+	stdout, stderr, code := runLauncher(t, sealed, "status")
+	if code != 0 {
+		t.Fatalf("이음매가 종료코드 %d 를 냈다 — 0 이어야 한다:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("이음매가 stdout 에 %d바이트를 썼다 — 그 자리는 훅 계약과 MCP 프레임의 것이다: %q",
+			len(stdout), stdout)
+	}
+	line := strings.TrimSuffix(stderr, "\n")
+	if strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(line, "bin=") {
+		t.Fatalf("이음매 출력이 `bin=<절대경로>` 한 줄이 아니다(안내가 섞였을 수 있다):\n%s", stderr)
+	}
+	bin := strings.TrimPrefix(line, "bin=")
+	if !filepath.IsAbs(bin) {
+		t.Fatalf("이음매가 절대경로가 아닌 %q 를 냈다", bin)
+	}
+
+	// ★★ 둘째 겹 — 계산된 자리가 사용자의 진짜 캐시 안이면 그 자체가 결함이다.
+	//    이 단정이 없으면 환경 통제가 샜을 때 시험은 **조용히 통과하면서** 진짜 홈에 짓는다.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if underDir(bin, filepath.Join(home, ".cache", "flightdeck")) {
+			t.Fatalf("시험이 사용자의 진짜 바이너리 캐시를 겨눴다(%s) — 환경 통제가 샜다", bin)
+		}
+	}
+	return bin
+}
+
+// underDir 은 path 가 dir 안(또는 dir 자신)인지 본다. 심볼릭 링크는 안 푼다 —
+// 여기 쓰임은 "시험이 진짜 홈을 겨눴나"라서 문자열 축만으로 충분하다.
+func underDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// assertEmptyOrAbsent 는 dir 이 **없거나 비었음**을 단정한다.
+// 이름이 아니라 디렉토리를 보는 이유는 위 TestLauncherIsFailOpenWithoutGo 주석에 있다.
+func assertEmptyOrAbsent(t *testing.T, dir, why string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("%s: %s 를 못 읽었다: %v", why, dir, err)
+	}
+	if len(ents) != 0 {
+		names := make([]string, 0, len(ents))
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("%s: %s 에 %d개가 있다(%s)", why, dir, len(ents), strings.Join(names, ", "))
+	}
+}
+
+// 바이너리 자리는 **채널 환경의 함수가 아니다** — 07:15 사고의 회귀 시험.
+//
+// 옛 런처는 FD_STATE_DIR → CLAUDE_PLUGIN_DATA → XDG_STATE_HOME → HOME 사다리를 탔다.
+// 뒤의 둘은 **채널마다 있고 없다**: 훅·MCP 에는 Claude Code 가 넣어 주고 Bash 도구와
+// Cursor 확장 호스트에는 없다. 그래서 같은 소스가 같은 머신에서 두 자리에 두 번 지어졌다.
+func TestLauncherAddressIgnoresChannel(t *testing.T) {
+	home := t.TempDir()
+	// 소스 축을 고정한다 — 여기서 흔들리면 아래 SplitsBySource 와 축이 섞인다.
+	base := map[string]string{
+		"PATH":               "",
+		"HOME":               home,
+		"CLAUDE_PLUGIN_ROOT": "/opt/flightdeck",
+	}
+
+	cases := []struct {
+		name  string
+		extra map[string]string
+	}{
+		{"CLAUDE_PLUGIN_DATA 있음", map[string]string{"CLAUDE_PLUGIN_DATA": t.TempDir()}},
+		{"XDG_STATE_HOME 있음", map[string]string{"XDG_STATE_HOME": t.TempDir()}},
+		{"둘 다 있음", map[string]string{"CLAUDE_PLUGIN_DATA": t.TempDir(), "XDG_STATE_HOME": t.TempDir()}},
+		{"둘 다 없음", nil},
+	}
+
+	var want string
+	for _, c := range cases {
+		env := make(map[string]string, len(base)+len(c.extra))
+		for k, v := range base {
+			env[k] = v
+		}
+		for k, v := range c.extra {
+			env[k] = v
+		}
+		got := launcherBin(t, env)
+		if want == "" {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("%s 에서 자리가 달라졌다:\n  %s\n  %s\n"+
+				"바이너리 자리가 채널 환경을 타면 같은 소스가 두 번 지어지고, 두 판의 빌드 시각이\n"+
+				"어긋난 창에서 한 응답의 서버 축과 렌더 축이 서로 다른 판을 본다(2026-08-06 07:15).",
+				c.name, want, got)
+		}
+	}
+
+	// 이음매는 **아무것도 안 짓는다** — 그래야 이 시험이 -short 에서도 돌고, 자리 규칙을
+	// 재는 행위 자체가 자리를 만들어 버리는 일이 없다.
+	assertEmptyOrAbsent(t, filepath.Join(home, ".cache"),
+		"FD_PRINT_BIN 이음매가 무언가를 지었다")
+}
+
+// 다른 소스 트리는 **다른 자리**를 갖는다 — 워크트리 오염의 회귀 시험.
+//
+// 재빌드 판정이 mtime 이므로 한 이름을 여러 소스가 나눠 쓰면 먼저 지은 쪽이 전 채널을
+// 대표한다. 이름 규칙을 여기서 다시 구현하지 않는다(주인은 런처 하나다) — 단정하는 것은
+// **갈린다**는 것뿐이고, 갈리는 방식은 런처의 것이다.
+func TestLauncherAddressSplitsBySource(t *testing.T) {
+	home := t.TempDir()
+
+	cases := []struct {
+		name, a, b string
+	}{
+		{"릴리스가 다르다", "/opt/flightdeck-0.10.0", "/opt/flightdeck-0.9.0"},
+		// ★ 단사 적대 쌍. `/` 를 그냥 `-` 로 접으면 이 둘이 **한 이름**이 되어
+		//   방금 없앤 결함(먼저 지은 쪽이 전 채널을 대표한다)이 그대로 돌아온다.
+		{"구분자가 충돌한다", "/a/b-c", "/a-b/c"},
+		// ★ 이스케이프 문자가 소스 경로에 이미 있는 경우. 접기 전에 이스케이프를
+		//   두 배로 안 만들면 이 둘도 한 이름이 된다.
+		{"% 가 이미 소스에 있다", "/x%2fy", "/x/y"},
+	}
+
+	for _, c := range cases {
+		env := map[string]string{"PATH": "", "HOME": home}
+		env["CLAUDE_PLUGIN_ROOT"] = c.a
+		a := launcherBin(t, env)
+		env["CLAUDE_PLUGIN_ROOT"] = c.b
+		b := launcherBin(t, env)
+
+		if a == b {
+			t.Fatalf("%s: 서로 다른 소스(%s · %s)가 한 자리를 쓴다 — %s\n"+
+				"재빌드 판정이 mtime 이라 이러면 **먼저 지은 쪽이 전 채널을 대표한다**.",
+				c.name, c.a, c.b, a)
+		}
+		// 같은 HOME 이면 **디렉토리는 같고 이름만 갈려야** 한다. 갈림이 자리(뿌리)로
+		// 새면 채널 무관이라는 위 시험의 성질이 조용히 무너진다.
+		if filepath.Dir(a) != filepath.Dir(b) {
+			t.Fatalf("%s: 같은 HOME 인데 뿌리가 갈렸다:\n  %s\n  %s", c.name, filepath.Dir(a), filepath.Dir(b))
+		}
+	}
+}
+
+// 런처와 BinCacheDir 은 FD_STATE_DIR 을 **같은 법으로 읽는다.**
+//
+// ★ 이 시험이 env.go(BinCacheDir 주석 꼬리)와 env_test.go(TestBinCacheDir 머리)가 **가리키는
+// 실물**이다. 그 두 자리는 "런처가 같은 답을 내는지는 plugin_test.go 가 런처를 실제로 돌려
+// 디렉토리째 견준다"라고 적어 두었고, 그 문장이 참이려면 대조가 여기 있어야 한다 — 없으면
+// 계약의 절반은 **아무도 안 재는 문장**이 된다(env_test.go 가 그 사고를 이미 기록해 뒀다:
+// 한동안 대조가 없었고 그사이 둘은 공백 처리에서 실제로 갈려 있었다).
+//
+// 자리 규칙이 두 언어에 사는 것은 여기서만 피할 수 없다 — 런처는 Go 를 못 부르고(Go 가 없어도
+// 돌아야 한다) Go 는 런처보다 늦게 뜬다. 계약 전문(⑴트림 ⑵트림 후 비면 미설정 ⑶끝 슬래시는
+// 자리를 안 바꾼다)의 주인은 env.go 의 BinCacheDir 주석 **하나**다. 여기서 다시 적지 않는다 —
+// 이 시험이 하는 일은 두 구현을 같은 입력에 세워 **바이트로** 견주는 것뿐이다.
+//
+// 갈리면 무엇이 깨지는지도 그 주석에 있다(GC 가 없는 디렉토리를 훑고 · doctor 가 없는 자리를
+// 찍고 · ExeLines 가 재기동해도 안 없어지는 "자리 밖" 거짓 경보를 낸다). 셋 다 이 브랜치가
+// 새로 만든 소비부라, 잠자던 불일치에 이빨을 단 것도 이 브랜치다.
+//
+// ★ **상대경로 갈래는 일부러 표에 없다.** 거기서 둘은 갈리고, 그것이 **의도된 비대칭**이다:
+// 런처는 상대 FD_STATE_DIR 를 거부하고(안내 + exit 0, `bin=` 을 안 찍는다) BinCacheDir 은
+// `state/bin` 을 낸다. 자리에 **쓰는 것은 런처뿐**이라 Go 쪽 관문은 무의미하고, 런처가 거부하면
+// 바이너리가 없어 Go 가 뜨지도 않는다. 표에 넣으면 launcherBin 이 `bin=` 을 못 받아 죽는다.
+func TestLauncherAndBinCacheDirAgree(t *testing.T) {
+	home := t.TempDir()
+
+	// 소스 축은 고정한다 — 여기서 견주는 것은 **디렉토리**뿐이고, 이름(파일명)의 주인은
+	// 런처 하나다(env.go 가 "Go 쪽은 키를 만들지도 해독하지도 않는다"고 못박은 축).
+	const src = "/opt/flightdeck"
+
+	cases := []struct {
+		name string
+		set  bool // FD_STATE_DIR 를 아예 안 준다 vs 값을 준다(빈 값도 '준 것'이다)
+		val  string
+	}{
+		{"미설정이면 HOME 갈래", false, ""},
+		{"명시 지정", true, "/x"},
+		{"앞뒤 공백은 값의 일부가 아니다", true, " /x "},
+		{"끝 슬래시는 자리를 안 바꾼다", true, "/x/"},
+		{"끝 슬래시가 여럿이어도 같다", true, "/x//"},
+		{"루트", true, "/"},
+		{"공백뿐인 값은 미설정과 같다", true, "  "},
+		{"빈 값도 미설정과 같다", true, ""},
+		// ★ CRLF 로 편집된 env 파일이 실제로 만드는 값. 셸의 `[[:space:]]` 와 Go 의
+		//   TrimSpace 가 여기서 같은 집합을 봐야 한다(탭·CR 둘 다).
+		{"탭과 CR 도 공백이다", true, "\t/x\r"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := map[string]string{"PATH": "", "HOME": home, "CLAUDE_PLUGIN_ROOT": src}
+			if c.set {
+				env["FD_STATE_DIR"] = c.val
+			}
+
+			// 런처의 답 — 실제로 돌려 받는다. 이음매라 아무것도 안 짓는다.
+			got := filepath.Dir(launcherBin(t, env))
+
+			// Go 의 답 — 런처가 본 것과 **같은 환경**을 그대로 먹인다.
+			want, binSrc := BinCacheDir(envOf(env), env["HOME"])
+			if want == "" {
+				t.Fatalf("이 표에는 HOME 이 항상 있다 — BinCacheDir 이 자리를 안 냈다(%s)", binSrc)
+			}
+
+			if got != want {
+				t.Fatalf("FD_STATE_DIR=%q 에서 두 구현이 갈렸다:\n  런처: %s\n  Go  : %s\n"+
+					"갈리면 셋이 동시에 틀어진다 — pruneBinCache 가 없는 디렉토리를 훑어 GC 가 영영\n"+
+					"안 돌고(22MB×N 이 상한 없이 쌓인다), doctor 가 없는 자리를 찍고, ExeLines 가\n"+
+					"제자리의 프로세스에 재기동해도 안 없어지는 '자리 밖' 거짓 경보를 낸다.\n"+
+					"계약 전문은 env.go 의 BinCacheDir 주석에 있다.", c.val, got, want)
+			}
+		})
+	}
+
+	// 대조 자체가 자리를 만들면 안 된다 — 이음매는 아무것도 안 짓는다.
+	assertEmptyOrAbsent(t, filepath.Join(home, ".cache"),
+		"FD_STATE_DIR 대조가 무언가를 지었다")
+}
+
+// HOME 도 FD_STATE_DIR 도 없으면 **짓지 않는다.**
+//
+// 옛 런처는 `${HOME:-/tmp}/.local/state/flightdeck` 로 떨어졌다. 부모가 world-writable 인
+// 자리는 남이 심어 둔 것을 내가 exec 하는 길이다 — env.go 의 LegacyOutboxDirs 가 tmp 를
+// 후보에서 뺀 것과 같은 축이고, 실행 파일은 그쪽보다 무겁다. 그 사다리가 되살아나는 것을
+// 여기서 막는다. 대신 세션은 계속돼야 하므로 종료코드는 **0** 이다(훅은 세션을 막지 않는다).
+func TestLauncherRefusesWithoutHome(t *testing.T) {
+	tmp := t.TempDir()
+	// ★ PATH 는 **진짜 것을 준다.** Go 가 있는데도 안 짓는다는 것이 이 시험의 단정이다.
+	//   PATH 를 비우면 "Go 가 없어서 안 지었다"와 구별이 안 돼 단정이 공허해진다.
+	env := map[string]string{
+		"PATH":               os.Getenv("PATH"),
+		"TMPDIR":             tmp,
+		"CLAUDE_PLUGIN_ROOT": pluginRoot(t),
+	}
+
+	// 옛 자리의 **정확한 좌표**를 스냅숏으로 잡는다. 그 줄은 TMPDIR 을 안 보고 `/tmp` 를
+	// 박아 뒀으므로, 사다리가 되살아나면 위 TMPDIR 주입으로는 안 잡힌다.
+	// 진짜 /tmp 를 통째로 훑지는 않는다 — 이 머신에서 세션 20~30건이 동시에 도는 자리라
+	// 남이 만든 파일과 경주하게 된다. 전후 비교라 이 시험이 만든 것만 걸린다.
+	const legacyTmp = "/tmp/.local/state/flightdeck/bin"
+	before, _ := filepath.Glob(filepath.Join(legacyTmp, "*"))
+
+	for _, seam := range []bool{false, true} {
+		e := make(map[string]string, len(env)+1)
+		for k, v := range env {
+			e[k] = v
+		}
+		what := "평범한 호출"
+		if seam {
+			// 이음매도 거부를 **우회하면 안 된다** — 자리 결정 뒤에 찍히므로 여기선 안 찍힌다.
+			e["FD_PRINT_BIN"] = seamToken
+			what = "FD_PRINT_BIN 이음매"
+		}
+
+		stdout, stderr, code := runLauncher(t, e, "status")
+		if code != 0 {
+			t.Fatalf("%s: 종료코드가 %d 다 — 0 이어야 한다(훅이 세션을 막으면 안 된다):\n%s", what, code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("%s: stdout 에 %d바이트를 썼다: %q", what, len(stdout), stdout)
+		}
+		mustContain(t, what+"의 안내", stderr,
+			"HOME 도 FD_STATE_DIR 도 없어",
+			"조정 기능 없이 세션은 계속된다",
+		)
+		if strings.Contains(stderr, "bin=") {
+			t.Fatalf("%s: 자리가 없는데 자리를 냈다:\n%s", what, stderr)
+		}
+	}
+
+	assertEmptyOrAbsent(t, tmp, "HOME 없이 부른 런처가 임시 자리에 무언가를 남겼다")
+
+	after, _ := filepath.Glob(filepath.Join(legacyTmp, "*"))
+	if strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Fatalf("옛 /tmp 사다리가 되살아났다(%s):\n  전: %v\n  후: %v", legacyTmp, before, after)
 	}
 }
 

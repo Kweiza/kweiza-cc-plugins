@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -201,6 +202,27 @@ type selfUpdateStatus struct {
 	//
 	// **다시 재지면 비운다.** 지나간 고장을 현재형으로 말하면 화면이 반대 방향으로 거짓말한다.
 	Stalled string
+
+	// Uncovered 는 **보고는 있는데 이 감시가 구조적으로 못 덮는 갈래**다.
+	//
+	// ★ **Stalled 와 다른 축이다. 한 필드로 접지 마라.** Stalled 는 "지금 못 잰다"는 일시
+	// 고장이고(다시 재지면 비운다), 이것은 재고 있는데도 **영영 안 바뀔 자리**를 재고 있다는
+	// 사실이다 — 고장이 아니라 성질이라 회복이 없다. 처방도 갈린다: 전자는 "왜 못 재는지
+	// 고쳐라", 후자는 "이 갱신은 사람이 재기동해야 한다"다.
+	//
+	// 런처(bin/fd)가 짓는 이름에는 소스 트리가 박혀 있고 그 경로에는 플러그인 버전이
+	// 들어간다(bincache.go 의 상한 주석이 같은 사실을 센다) — 버전이 오르면 새 세션은
+	// **다른 이름**을 짓고 이 자리는 아무도 안 덮는다. 그때 Decide 는 영원히 "그대로다"이고,
+	// 그것을 watching=true 만으로 말하면 침묵보다 나쁜 **틀린 안심**이다(containerVerdict 가
+	// 감시를 아예 안 켜는 이유와 같은 모양).
+	//
+	// **2026-08-06 A/B 실측.** 옛 방식(고정 이름)은 같은 자리가 새 inode 로 덮여 30초 안에
+	// 자기 갱신이 돌았고, 지문 이름에서는 0.11.0 빌드 뒤 75초가 지나도 0.10.0 파일의
+	// inode·mtime 이 불변이고 /healthz 는 `watching=true` 뿐이었다.
+	//
+	// **그래도 감시를 끄지는 않는다.** 같은 소스 트리의 재빌드(개발 워크트리·`git pull`)는
+	// 여전히 이 자리를 `mv -f` 로 덮어 사슬이 정상으로 돈다 — watching=false 는 과보고다.
+	Uncovered string
 }
 
 // selfWatcher 는 실행 파일 교체를 감시하고, 검증을 거쳐 스스로 재기동한다.
@@ -277,7 +299,17 @@ func detectContainer() (bool, string) {
 }
 
 // newSelfWatcher 는 감시기를 만든다. **기준값을 여기서 정한다.**
-func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
+//
+// ★ **이 감시가 실제로 뜨는 범위는 좁다.** 신호는 `w.exePath` **한 자리**의 교체뿐인데,
+// 런처(bin/fd)가 바이너리 이름에 소스 트리를 박으므로 플러그인 **버전이 오르는 갱신은 이
+// 파일을 안 건드리고 다른 이름을 짓는다.** 즉 설치본에서 이 축은 안 뜬다 — 뜨는 것은 소스
+// 경로가 그대로인 채 파일이 다시 지어지는 경우(워크트리 서버·`git pull` 뒤 재빌드)뿐이다.
+// 코드만 읽고 "돈다"고 믿지 않게 여기 적어 둔다. 설계 §7 이 같은 말을 한다.
+//
+// binDir 은 그 사실을 **화면까지 보내려고** 받는다(selfUpdateStatus.Uncovered). 자리 계산의
+// 주인은 BinCacheDir 하나이므로 여기서 다시 조립하지 않고 **받은 것과 견주기만** 한다.
+// 빈 문자열이면 견줄 것이 없다는 뜻이라 그 갈래를 안 낸다 — 모르면 침묵한다(설계 §13).
+func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 	w := &selfWatcher{
 		log: log, dbPath: dbPath, interval: defaultSelfWatchInterval,
 		stat: exeIDOfPath, verify: verifyWithSelfcheck, execSelf: execSelf,
@@ -310,11 +342,33 @@ func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
 		w.reason = fmt.Sprintf("실행 파일을 못 쟀다: %v", err)
 		return w
 	}
+
+	// ★ 런처가 소스 지문으로 이름 붙인 자리에서 도는가. 그렇다면 같은 소스의 재빌드는
+	// `mv -f` 가 이 파일을 덮어 감지되지만, **플러그인 버전이 오르면 키가 바뀌어** 새 세션이
+	// 다른 파일을 짓고 이 자리는 영영 안 바뀐다. 그 갈래를 말로 남긴다.
+	//
+	// ★ **파일 이름 규칙을 여기서 재구현하지 않는다 — 부모 디렉토리만 견준다.** 이름에
+	// 소스 트리를 접어 넣는 키의 유일한 주인은 런처이고, 그 사본을 여기 두면 한쪽만 고칠 때
+	// 조용히 어긋난다(ExeLines 가 같은 자리에서 같은 결정을 했다). `(deleted)` 표식은 안 뗀다:
+	// 그 접미는 basename 에만 붙어 filepath.Dir 이 안 흔들린다.
+	//
+	// ★ 심볼릭 링크는 안 푼다(EvalSymlinks 는 파일시스템을 두드린다). 못 알아본 경우의 결과가
+	// **침묵**이라 그 값을 여기서 치를 수 있다 — 안 잰 것을 잰 척하는 쪽이 더 비싸다.
+	if d := strings.TrimSpace(binDir); d != "" && filepath.Dir(exe) == filepath.Clean(d) {
+		w.status.Uncovered = "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd) — " +
+			"같은 소스의 재빌드는 이 자리를 덮어 감지되지만, 플러그인 **버전이 오르면 다른 이름**이 지어져 " +
+			"이 자리는 아무도 안 덮는다. 그 갱신은 사람이 서버를 재기동해야 한다"
+	}
+
 	w.watching = true
 	return w
 }
 
 // Status 는 /healthz 가 실을 값이다. 동시 호출된다.
+//
+// Uncovered 는 여기서 따로 실을 것이 없다 — 기동 때 한 번 정해져 status 에 박히므로
+// 값 복사에 그대로 따라온다. Watching·Reason 만 밖에 사는 것은 그 둘이 status 가 아니라
+// 감시기 자신의 필드이기 때문이다.
 func (w *selfWatcher) Status() selfUpdateStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -369,8 +423,15 @@ func (w *selfWatcher) Run(ctx context.Context, drain func()) {
 		w.log.Info("자기 재기동 감시를 안 켠다", "reason", clip(w.reason, 200))
 		return
 	}
-	w.log.Info("자기 재기동 감시 시작",
-		"exe", clip(w.exePath, 200), "interval", w.interval.String())
+	// ★ 못 덮는 갈래는 **기동 로그에도** 싣는다. "왜 갱신했는데 안 바뀌냐"를 뒤지는 사람이
+	// 먼저 여는 것이 서버 로그이고, 그 줄이 `exe=…` 만 말하면 여기서 답이 끊긴다(실측 A/B 에서
+	// 지문 방식은 로그에 한 줄도 안 남겼다). 기동 때 한 번뿐이라 배경이 되지 않는다 —
+	// 티커마다 같은 줄을 쌓지 않으려고 noteStall 이 사유로 접는 것과 같은 규율의 반대편이다.
+	attrs := []any{"exe", clip(w.exePath, 200), "interval", w.interval.String()}
+	if s := strings.TrimSpace(w.Status().Uncovered); s != "" {
+		attrs = append(attrs, "uncovered", clip(s, 300))
+	}
+	w.log.Info("자기 재기동 감시 시작", attrs...)
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 	for {

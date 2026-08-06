@@ -98,7 +98,7 @@ var platformAxes = []struct{ name, why string }{
 	{"CLAUDE_CODE_ENTRYPOINT", "어느 입구로 띄웠나(cli 등)"},
 	{"CLAUDE_CODE_SSE_PORT", "부모 프로세스의 SSE 포트. 부모 대조에 쓴다"},
 	{"CLAUDE_PLUGIN_ROOT", "훅이 절대경로로 부르는 기준. **버전이 들어가므로 저장하지 않는다**"},
-	{"CLAUDE_PLUGIN_DATA", "캐시(재생성 가능한 열화 상태)를 두는 곳. PLUGIN_ROOT 는 갱신마다 바뀌므로 거기 두면 안 된다. 아웃박스·격리 보관소는 채널 무관한 고정 자리(~/.flightdeck/outbox)에 있다"},
+	{"CLAUDE_PLUGIN_DATA", "**응답 캐시**를 두는 곳. PLUGIN_ROOT 는 갱신마다 바뀌므로 거기 두면 안 된다. 바이너리 캐시(~/.cache/flightdeck/bin)와 아웃박스·격리(~/.flightdeck)는 채널 무관한 고정 자리에 있다"},
 	{"CLAUDE_ENV_FILE", "2.1.220 에는 없는 것이 정상이다 — 먼저 푼 플러그인이 여기서 세션 id 를 뽑다 조용히 None 이 됐다"},
 }
 

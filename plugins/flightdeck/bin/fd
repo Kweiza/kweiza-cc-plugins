@@ -8,8 +8,8 @@
 #   세션이 안 뜬다. 안내는 stderr 로 낸다 — stdout 은 훅 계약과 MCP 프레임이 쓰는 자리라
 #   한 줄이라도 섞이면 그 둘이 통째로 깨진다.
 #
-# ★ 캐시는 ${CLAUDE_PLUGIN_DATA} 에 둔다. ${CLAUDE_PLUGIN_ROOT} 에는 플러그인 **버전이
-#   들어가서** 갱신될 때마다 경로가 바뀌고, 그러면 매번 다시 빌드하게 된다.
+# ★ 바이너리 캐시는 **채널 환경을 안 타는 고정 자리**에 두고 이름에 소스 트리를 박는다.
+#   응답 캐시(HTTP)는 여전히 ${CLAUDE_PLUGIN_DATA} 다 — 아래 자리 블록에 판정 전문이 있다.
 
 set -uo pipefail
 
@@ -21,19 +21,132 @@ here="$(cd "${self%/*}" 2>/dev/null && pwd)" || here="."
 plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$here/.." && pwd)}"
 src="$plugin_root/server"
 
-# ── 상태 디렉토리 — Go 쪽 ResolveStateDir 과 같은 우선순위 ──────────────────
-if [ -n "${FD_STATE_DIR:-}" ]; then
-  state="$FD_STATE_DIR"
-elif [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
-  state="$CLAUDE_PLUGIN_DATA/flightdeck"
-elif [ -n "${XDG_STATE_HOME:-}" ]; then
-  state="$XDG_STATE_HOME/flightdeck"
+# ── 바이너리 캐시 자리 — 채널 환경을 안 탄다 ──────────────────────────────
+#
+# ★ **Go 쪽 ResolveStateDir 과 규칙이 다르다.** 그쪽은 이제 **응답 캐시**만 고르고
+#   CLAUDE_PLUGIN_DATA·XDG_STATE_HOME 사다리를 그대로 둔다. 응답 캐시는 자기 시각을
+#   값에 달고 다녀서(cache.go 의 CacheEntry.At) 채널마다 갈려도 **각자 옳다**.
+#   바이너리는 아니다 — exec 되고 나면 자기가 어느 판인지 안 말하고 답한다. 두 벌이
+#   다르면 하나는 **최신인 척하는 옛 코드**다(2026-08-06 실측: 두 자리의 빌드 시각이
+#   16:10:44 ↔ 17:05:29 로 55분 어긋났고, 그 창에서 한 응답의 서버 축과 렌더 축이 갈렸다).
+#
+# ★ CLAUDE_PLUGIN_DATA·XDG_STATE_HOME 를 안 본다. 그 둘은 **채널마다 있고 없다** —
+#   훅·MCP 에는 Claude Code 가 넣어 주고, Bash 도구와 Cursor 확장 호스트에는 없다(실측).
+#   그래서 같은 소스가 같은 머신에서 두 자리에 두 번 지어졌다.
+#
+# ★ ~/.flightdeck 가 아니다. 그 자리는 compose.yaml 이 컨테이너에 `/data` 로 **쓰기 가능**
+#   하게 물리고 재생성 불가한 fd.db·판단 백업이 산다. 거기 실행 파일을 두면 네트워크에
+#   열린 컨테이너가 **호스트가 exec 하는 파일**을 쓸 수 있게 되고, 백업이 22MB 를 함께 뜬다.
+#   보호막은 물려받지 않고 **짓는다** — 아래 mkdir 을 `umask 077` 서브셸에서 돌려 **새로 만드는**
+#   자리를 0700 으로 둔다(이미 있는 자리는 안 건드린다). `~/.local/state` 가 **우연히** 주던 것을
+#   우연에 안 맡긴다: `~/.cache` 가 없는 머신에서는 이 스크립트가 그 디렉토리의 첫 생성자다.
+#
+# ★ HOME 이 없으면 **짓지 않는다.** 예전에는 /tmp 로 떨어졌는데, 부모가 world-writable 인
+#   자리는 남이 심어 둔 것을 내가 exec 하는 길이다 — env.go 의 LegacyOutboxDirs 가 tmp 를
+#   후보에서 뺀 것과 같은 축이고, 실행 파일은 그쪽보다 무겁다.
+#
+# ★ **FD_STATE_DIR 는 Go 쪽 BinCacheDir(env.go)과 한 계약이다** — 값 규칙이 두 구현에 산다.
+#   피할 수 없다: 런처는 Go 를 못 부르고(Go 가 없어도 돌아야 한다) Go 는 런처보다 늦게 뜬다.
+#   그래서 규칙을 여기 한 문단에 적어 둔다 — ⑴ 앞뒤 공백을 접고 ⑵ 접고 나서 비면 **미설정
+#   취급**(HOME 갈래로 내려간다) ⑶ 끝 슬래시를 벗기고 `/bin` 을 붙인다.
+#   ⑴⑵ 가 Go 의 `strings.TrimSpace(v) != ""` 이고, ⑶ 이 Go 의 `filepath.Clean`+`Join` 이다.
+#   안 맞추면 꼬리 공백 하나(또는 CRLF 로 편집된 env 파일의 `\r`)가 둘을 갈라 놓는다 —
+#   런처는 `/x /bin` 에 22MB 를 짓고 Go 는 `/x/bin` 을 본다. 그러면 이 브랜치가 새로 만든
+#   소비부 **셋이 동시에** 틀어진다(실측): pruneBinCache 가 **없는 디렉토리**를 훑어 GC 가
+#   영영 안 돌고(22MB×N 이 상한 없이 쌓인다), doctor 가 없는 자리를 찍고, ExeLines 가
+#   제자리의 프로세스에 **재기동해도 안 없어지는** "자리 밖" 거짓 경보를 낸다.
+#   `filepath.Clean` 을 셸로 옮기지는 **않는다** — `/x/`·`/x/./y`·`/x/y/../z` 는 ExeLines 의
+#   `filepath.Dir`(내부 Clean)과 POSIX 의 `//` 동치성이 이미 흡수해 실측상 안 갈리고, 옮기면
+#   판정이 두 자리에 사는 것을 하나 더 만든다. 실제로 갈리는 것은 **공백류뿐**이다.
+#   외부 명령은 안 쓴다 — PATH 가 비어도 돌아야 한다(위 dirname 주석과 같은 축).
+sd="${FD_STATE_DIR:-}"
+sd="${sd#"${sd%%[![:space:]]*}"}"
+sd="${sd%"${sd##*[![:space:]]}"}"
+if [ -n "$sd" ]; then
+  # 끝 슬래시를 벗긴다(`/x/` → `/x`, `/` → 빈 문자열 → `/bin`). Go 는 Clean 이 같은 일을 한다.
+  sd="${sd%"${sd##*[!/]}"}"
+  binroot="$sd/bin"
+elif [ -n "${HOME:-}" ]; then
+  binroot="$HOME/.cache/flightdeck/bin"
 else
-  state="${HOME:-/tmp}/.local/state/flightdeck"
+  binroot=""
 fi
-bin="$state/bin/fd"
 
 note() { printf 'flightdeck: %s\n' "$1" >&2; }
+
+# ★ 상대경로면 **짓지 않는다.** 빌드가 `(cd "$src" && go build -o "$tmp")` 안에서 도는데
+#   그 산출물은 상대경로면 **플러그인 소스 트리 아래**로 떨어지고, 뒤이은 `mv` 도 정리용
+#   `rm -f` 도 원래 cwd 기준이라 둘 다 빗나간다 — 22MB 고아가 훅마다(프롬프트마다) 하나씩
+#   소스 트리에 쌓이고 GC 는 그 자리를 모른다(실측). 자리가 없다고 **말하는** 쪽이 조용히
+#   새는 쪽보다 낫다. `note` 정의 뒤에 두려고 플래그만 세우고 아래 한 자리에서 찍는다.
+case "$binroot" in
+  "" | /*) ;;
+  *) relroot="$binroot"; binroot="" ;;
+esac
+
+if [ -z "$binroot" ]; then
+  if [ -n "${relroot:-}" ]; then
+    note "바이너리를 둘 자리가 상대경로다($relroot) — FD_STATE_DIR 를 절대경로로 줘라."
+  else
+    note "HOME 도 FD_STATE_DIR 도 없어 바이너리를 둘 자리가 없다(공용 /tmp 에는 안 짓는다)."
+  fi
+  note "  조정 기능 없이 세션은 계속된다."
+  exit 0
+fi
+
+# ── 이름은 **소스 트리**를 탄다 ────────────────────────────────────────────
+# 재빌드 판정이 mtime 이라(아래), 한 이름을 여러 소스가 나눠 쓰면 **먼저 지은 쪽이 전
+# 채널을 대표한다** — 워크트리에서 런처를 한 번 부르는 것만으로 모든 세션의 훅·MCP 가
+# 그 브랜치 빌드로 갈아 끼워진다(실측으로 재현했다). 채널 분기는 같은 입력이 다른 출력을
+# 내는 것이고(관측 불가), 소스 분기는 다른 입력이 다른 출력을 내는 것이다(주소에 적혀 있다).
+#
+# 접음은 **단사여야 한다.** `/` 를 그냥 `-` 로 바꾸면 `/a/b-c` 와 `/a-b/c` 가 한 이름이 되어
+# 위에서 없앤 결함이 그대로 돌아온다. 그래서 이스케이프 문자를 먼저 두 배로 만든 뒤
+# `/` 를 두 글자로 편다. 외부 명령(md5sum·sha1sum)은 안 쓴다 — PATH 가 비어도 돌아야 한다.
+key="${src//%/%%}"
+key="${key//\//%2f}"
+name="fd-$key"
+
+# 파일 이름 상한(대개 255)을 넘으면 **짓지 않는다.** 잘라 붙이면 단사가 깨져
+# 방금 세운 계약이 조용히 거짓이 된다(실측: 이 머신의 가장 긴 이름이 159바이트).
+#
+# ★ **바이트로 잰다.** 상한은 바이트인데(`getconf NAME_MAX` = 255) `${#name}` 은 UTF-8
+#   로케일에서 **글자 수**를 센다 — 한글이 섞인 경로에서 관문이 통째로 헛돈다(실측:
+#   `fd-`+`가`×150 은 `${#name}`=153 이라 통과하지만 453바이트라 만들 때 ENAMETOOLONG 이고,
+#   그러면 사람이 보는 사유는 이 관문이 준비한 문장이 아니라 `go build` 의 원문이다 —
+#   그것도 **매 훅마다**. 훅은 프롬프트마다 돈다). 로케일은 서브셸에 가둔다: 부모의 것을
+#   안 건드리고, printf 는 내장이라 PATH 가 비어도 돈다.
+#   240 은 뒤에 붙는 `.$$`(최대 8바이트)까지 255 안에 들도록 잡은 값이다.
+#
+# ★ 여기서 **FD_STATE_DIR 를 처방하지 마라.** 그것은 binroot(디렉토리)만 바꾼다 — 이름은
+#   $src 에서만 나오므로 한 바이트도 안 준다(실측: `FD_STATE_DIR=/` 로도 이 갈래가 그대로
+#   열린다). NAME_MAX 문제에 PATH_MAX 처방을 주는 꼴이고, 이 stderr 가 유일한 채널이라
+#   (doctor 를 띄우는 것이 바로 못 지은 그 바이너리다) 거짓이면 사람은 영영 조정 없이 돈다.
+#   지렛대는 **소스 트리를 얕게 두는 것** 하나뿐이다.
+nbytes="$(LC_ALL=C; printf %s "${#name}")"
+if [ "$nbytes" -gt 240 ]; then
+  note "소스 경로가 너무 깊어 바이너리 캐시 이름을 못 만들었다($src)"
+  note "  조정 기능 없이 세션은 계속된다. 이 이름은 소스 트리 경로에서만 나온다 —"
+  note "  쓰려면 플러그인(워크트리라면 그 워크트리)을 더 얕은 자리에 두고 세션을 다시 시작해라."
+  note "  FD_STATE_DIR 는 디렉토리만 바꿔서 이 상한에는 안 듣는다."
+  exit 0
+fi
+bin="$binroot/$name"
+
+# 시험용 이음매 — 자리 규칙을 **빌드 없이** 단정하게 한다. 아무것도 안 짓고 종료코드 0 이다.
+# stdout 에 안 쓴다: 그 자리는 훅 계약과 MCP 프레임의 것이다(위 주석).
+#
+# ★ **값을 잠근다 — `-n` 으로 되돌리지 마라.** 이 스크립트는 훅 6개와 MCP stdio 서버의
+#   유일한 진입점이고, 여기서 끊기면 종료코드가 0 이라 훅 축은 **아무 신호도 안 낸다**
+#   (SessionStart 카드 없음 · PostToolUse 심기 없음 · `fd doctor` 도 여기서 먼저 죽어
+#   진단으로 가는 실이 없다 — 실측: `hook session-start` 도 `mcp` 도 exit 0 / stdout 0바이트).
+#   아무 값에나 걸리면 셸 프로필에 남은 디버그용 export 하나로 플러그인 전체가 조용한
+#   no-op 이 된다 — plugin_test.go 가 "무력화는 아무 신호도 안 낸다"를 결함으로 못박은 것과
+#   같은 축이다. 토큰을 아는 것은 시험뿐이다(plugin_test.go 의 seamToken 상수).
+if [ "${FD_PRINT_BIN:-}" = "__fd_addr__" ]; then
+  printf 'bin=%s\n' "$bin" >&2
+  exit 0
+fi
 
 # ── 이미 빌드된 것이 최신이면 그대로 쓴다 ─────────────────────────────────
 # 판정은 mtime 이다: 바이너리보다 새로운 소스가 하나라도 있으면 다시 빌드한다.
@@ -59,7 +172,13 @@ if [ "$needs_build" -eq 1 ]; then
     note "  이미 빌드된 바이너리를 쓰려면 그 경로를 $bin 에 두면 된다."
     exit 0
   fi
-  mkdir -p "$state/bin" || { note "상태 디렉토리를 못 만들었다($state)"; exit 0; }
+  # ★ 자리 모드를 **자기가 정한다.** `~/.cache` 가 아직 없는 머신(새 컨테이너 이미지 · CI 러너 ·
+  #   갓 만든 계정)에서는 이 줄이 그것을 **만드는** 쪽이고, 맨 `mkdir -p` 는 ambient umask 를 탄다 —
+  #   umask 002 아래 0775 가 되어 위 자리 블록이 근거로 든 0700 이 안 따라온다(실측으로 재현:
+  #   .cache · flightdeck · bin · 산출물이 전부 775). 그 자리는 거절한 `~/.flightdeck`(Go 가 0o755 로
+  #   짓는다)보다 오히려 넓다. 서브셸 umask 라 **이 mkdir 이 새로 만드는 자리에만** 걸린다 —
+  #   이미 있는 자리(사람이 지정한 FD_STATE_DIR 포함)는 안 건드린다. chmod 로 하면 남의 자리를 갈아엎는다.
+  ( umask 077; mkdir -p "$binroot" ) || { note "바이너리 캐시 자리를 못 만들었다($binroot)"; exit 0; }
   tmp="$bin.$$"
   # CGO 0 — 정적 바이너리라 어느 컨테이너·머신에도 그대로 옮겨진다(외부 의존은 sqlite 순수 Go 구현뿐).
   if ! build_log="$(cd "$src" && CGO_ENABLED=0 go build -o "$tmp" ./cmd/fd 2>&1)"; then
