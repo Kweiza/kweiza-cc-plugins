@@ -195,6 +195,58 @@ func ledgerDSN(path string) string {
 	return "file:" + path + "?" + q.Encode()
 }
 
+// WriteLedger 는 원장을 DB 에 되쓴다. **CLI 표면이 없다** — 지금은 무손실을 시험이 증명하는
+// 데 쓰이고, 후속에서 `fd import --judgments` 를 배선만 하면 된다.
+//
+// ★ AddJudgment 를 쓰지 않는다. 그것은 빈 ID 에 새 ULID 를, 빈 At 에 지금 시각을 채운다 —
+// 복원은 원문을 그대로 되살려야 하므로 raw INSERT 로 간다. 트리거와 CHECK 는 그대로 걸린다
+// (그것이 안전핀이다).
+//
+// ★ 정책은 "빈 표 전제"다. judgment 는 judgment_no_update·judgment_no_delete 트리거로
+// UPDATE·DELETE 가 물리적으로 금지돼 있어, 잘못 넣은 행을 고치거나 지울 수 없다.
+// 그래서 중복 id 를 건너뛰지 않고 거절한다 — 조용히 넘어가면 무엇이 반쯤 들어갔는지 모른다.
+//
+// ★ project·session·machine 은 원장 밖이다. 이 셋이 이미 있는 DB 를 전제한다.
+// 없으면 FK 위반으로 트랜잭션 전체가 거절되고, 그 거절이 곧 "전제가 안 맞다"는 신호다.
+func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
+	return s.Tx(ctx, func(t *Tx) error {
+		// ★ supersedes 는 judgment 를 자기참조하고, 원장의 id 순서가 그 참조 순서와 같다는
+		//   보장이 없다. FK 검사를 커밋 시점으로 미뤄 순서 제약을 없앤다(move.go 와 같은 수단).
+		//   이 pragma 는 **이 트랜잭션에만** 걸리고 커밋 때 전부 검사된다.
+		if _, err := t.tx.ExecContext(t.ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+			return fmt.Errorf("FK 검사 미루기 실패: %w", err)
+		}
+		for _, j := range d.Judgments {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO judgment(id, project, session_id, at, kind, title, body, supersedes)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				j.ID, j.Project, j.SessionID, j.At, j.Kind, j.Title, j.Body, j.Supersedes); err != nil {
+				return fmt.Errorf("원장 판단 되쓰기 실패(id=%q kind=%q): %w",
+					clip(j.ID, 64), clip(j.Kind, 32), err)
+			}
+		}
+		for _, l := range d.Links {
+			if _, err := t.tx.ExecContext(t.ctx,
+				`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
+				l.JudgmentID, l.TargetKind, l.TargetID); err != nil {
+				return fmt.Errorf("원장 링크 되쓰기 실패(judgment=%q target=%s/%s): %w",
+					clip(l.JudgmentID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
+			}
+		}
+		for _, sn := range d.Snapshots {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO snapshot(project, key, value, method, evidence, input_digest, computed_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				sn.Project, sn.Key, sn.Value, sn.Method,
+				sn.Evidence, sn.InputDigest, sn.ComputedAt); err != nil {
+				return fmt.Errorf("원장 스냅숏 되쓰기 실패(project=%q key=%q): %w",
+					clip(sn.Project, 64), clip(sn.Key, 64), err)
+			}
+		}
+		return nil
+	})
+}
+
 // OpenLedger 는 원장을 읽기 위해 DB 를 연다. **스키마를 바꾸지 않는다.**
 //
 // ★ store.Open 을 쓰지 않는 이유. 그것은 verifyPragmas 다음에 반드시 s.migrate 를 돌고,
