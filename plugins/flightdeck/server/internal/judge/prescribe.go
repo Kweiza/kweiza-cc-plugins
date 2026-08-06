@@ -390,7 +390,9 @@ func coveredByClosed(in PrescribeInput) bool {
 	// 절대경로 그대로 남는다(service.RelPath). 선언 경로는 언제나 저장소 상대다.
 	// pathRelated 는 성분을 **앞에서부터** 맞추므로 그 둘은 원리적으로 절대 안 맞는다 —
 	// 즉 절대경로가 하나라도 섞이면 이 가드가 통째로 무력해진다.
-	// 실측: 2026-08-05 에 observed 406개 중 108개(27%)였고, 2026-08-06 에 1592개 중 174개(10.9%)였다.
+	// 실측: 2026-08-05 에 observed 406개 중 108개(27%)였고, 2026-08-06 에 **전체** 1592개 중
+	// 174개(observed 기준으로는 1284개 중 174개, 13.6%)였다. 분모가 갈리므로 27%→10.9% 로
+	// 읽으면 안 된다 — 같은 분모(observed)로 재면 27%→13.6% 다.
 	// 증분 005(절대경로 발자국 삭제)가 랜딩한 뒤로는 **0개**다 — 그래도 이 가드는 존치한다(아래).
 	//
 	// 그것을 "안 덮였다"로 세면 **가장 성실하게 마무리한 세션이 잔소리를 듣는다** —
@@ -424,14 +426,24 @@ func coveredByClosed(in PrescribeInput) bool {
 //	① (소멸했다) 이미 들어온 것이 DB 에 남아 있었다 — 실측 시점(2026-08-05) observed 발자국
 //	   406개 중 108개(27%)가 절대경로였다. **증분 005 가 그 행들을 전부 지웠으므로 이 사유는
 //	   더 이상 존치 근거가 아니다.** 지운다면 ② 만 보고 판단해야 한다.
-//	② 발자국의 원천이 훅 하나가 아니다. 선언 경로(declared)·항목 경로도 같은 컬럼에
-//	   들어오고, 그중 이관(legacy)은 좌표계만 보고 포함 축은 안 본다 —
-//	   legacy/plan.go 가 "포함 축은 기준 트리를 알아야 하는데 PlanOptions 에 그것이 없다.
-//	   **그리고 없는 것이 옳다**" 고 적고 fail-open 으로 통과시킨다. 즉 005 뒤에도 절대경로가
-//	   다시 들어올 문이 하나 열려 있고, **그것은 의도적으로 열어 둔 문이다.**
+//	② 관문이 서는 자리가 **다른 계층의 검증에 기대고 있다.** Beat 가 태우는
+//	   service.RelPathWithin 은 root 가 비었거나 filepath.Rel 이 실패하면 절대경로를
+//	   within=true 로 그대로 통과시킨다(의도된 fail-open 이고 legacy/plan.go 가 자기
+//	   fail-open 의 전례로 이것을 인용한다). 지금 그 경로가 안 열리는 이유는 오직
+//	   service.OpenSession 이 빈 worktree 와 비절대 worktree 를 거절하기 때문이다.
+//	   **그 검증이 느슨해지는 순간 절대경로가 다시 들어오고, 이 가드가 그 뒤에 선다.**
 //
-// 즉 이것은 중복 방어가 아니라 **다른 시점의 데이터를 읽는 방어**다. 지우려면 먼저
-// 옛 행을 옮기거나 지워야 하고, 그것은 별개 항목이다.
+//	   ★ 앞 판은 여기서 legacy.PlanImport 의 fail-open("포함 축은 기준 트리가 없어 안 본다")을
+//	   근거로 들었다. **거짓이다** — internal/legacy 는 footprint·Touch 를 아예 안 만진다.
+//	   legacy 의 절대경로는 item.paths 로 가고, 거기서 발자국이 되는 유일한 길인 Pick 도
+//	   같은 RelPathWithin 관문을 태우며 origin=claimed 라 TurnPaths(service.Prescriptions 가
+//	   origin=='observed' 인 발자국만 채운다)에서 걸러진다. declared 는 쓰는 코드가 아예 없다
+//	   (model.OriginDeclared 주석: "지금 생산자가 없다"). 즉 legacy 의 문은 이 가드가 보는
+//	   집합으로 안 통한다 — 다음 사람이 같은 추론을 다시 하지 않도록 여기 남긴다.
+//
+// 즉 이것은 중복 방어가 아니라 **다른 계층이 서는 자리를 대신 지키는 방어**다. 지우려면
+// 먼저 service.OpenSession 의 worktree 검증이 여전히 절대경로 유입을 막는지부터 확인해야
+// 하고, 그것은 별개 항목이다.
 func comparablePath(p string) bool {
 	p = strings.TrimSpace(p)
 	return p != "" && !strings.HasPrefix(p, "/")

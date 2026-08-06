@@ -73,6 +73,7 @@ func TestOverlapDoesNotFoldUnknownConversationIDs(t *testing.T) {
 // **방금 제대로 finish 한 세션이 "선점 0건인데 편집했다"는 잔소리를 듣는다.**
 //
 // 실측(2026-08-05): observed 발자국 406개 중 108개(27%)가 절대경로다. 실물 발화도 관측됐다.
+// (그 모집단은 증분 005 로 0이 됐다. 존치 사유는 judge.comparablePath 주석에 있다.)
 func TestClosedCoverageSurvivesUncomparablePaths(t *testing.T) {
 	in := PrescribeInput{
 		Now:       time.Now(),
