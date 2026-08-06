@@ -1956,7 +1956,10 @@ func TestExportJudgmentsWritesFilesAndPrintsLosses(t *testing.T) {
 	mustContain(t, "내보내기 출력", out,
 		"fd export --judgments", "DB 전량", "이 백업이 안 덮는 것", "아웃박스")
 
-	for _, name := range []string{"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl", "manifest.json"} {
+	for _, name := range []string{
+		"judgments.jsonl", "judgment_links.jsonl", "snapshots.jsonl",
+		"machines.jsonl", "projects.jsonl", "sessions.jsonl", "manifest.json",
+	} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Errorf("%s 가 안 났다: %v", name, err)
 		}
@@ -2159,8 +2162,11 @@ func (a *App) exportJudgments(ctx context.Context, dbFlag, outDir string, out io
 
 	losses := ledger.Losses()
 	fmt.Fprintf(out, "fd export --judgments · DB 전량 → %s\n\n", outDir)
-	fmt.Fprintf(out, "  판단 %d · 링크 %d · 스냅숏 %d (파일 %d)\n",
-		m.Counts.Judgments, m.Counts.Links, m.Counts.Snapshots, len(names))
+	// ★ 여섯 표 전부를 낸다. Task 10 이 FK 폐포를 닫으면서 machine·project·session 이 늘었다 —
+	//   그 셋이 없으면 세션 걸린 판단(실측 85%)이 복원에서 전부 롤백된다.
+	fmt.Fprintf(out, "  판단 %d · 링크 %d · 스냅숏 %d · 세션 %d · 프로젝트 %d · 머신 %d (파일 %d)\n",
+		m.Counts.Judgments, m.Counts.Links, m.Counts.Snapshots,
+		m.Counts.Sessions, m.Counts.Projects, m.Counts.Machines, len(names))
 	fmt.Fprintf(out, "\n── 이 백업이 안 덮는 것 (%d건)\n", len(losses))
 	for _, l := range losses {
 		fmt.Fprintf(out, "  - %s\n", l)
