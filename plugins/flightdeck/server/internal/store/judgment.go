@@ -388,25 +388,20 @@ func (s *Store) JudgmentsForItem(ctx context.Context, project, itemID string) ([
 // GetSnapshot 은 스냅숏 하나를 읽는다.
 // "낡음" 판정은 여기서 하지 않는다 — input_digest 를 현재 트리와 대조하는 것은
 // git 을 읽는 계층의 몫이고, 저장 계층이 그 판정을 흉내 내면 두 벌이 된다.
+//
+// GetJudgment 와 같은 형태(SELECT snapshotCols + scanSnapshot)다 — 컬럼 목록과
+// Scan 순서를 이 함수가 따로 손으로 적으면 snapshotCols 옆에 같은 목록이 또 생기고,
+// 그 순간 이 태스크가 없애려던 이중화가 store 파일 **안에서** 되살아난다.
 func (s *Store) GetSnapshot(ctx context.Context, project, key string) (model.Snapshot, error) {
-	var sn model.Snapshot
-	var evidence, digest sql.NullString
-	var method, at string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT project, key, value, method, evidence, input_digest, computed_at
-		FROM snapshot WHERE project = ? AND key = ?`, project, key).
-		Scan(&sn.Project, &sn.Key, &sn.Value, &method, &evidence, &digest, &at)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+snapshotCols+` FROM snapshot WHERE project = ? AND key = ?`, project, key)
+	sn, err := scanSnapshot(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sn, notFound(NFSnapshot, project, key)
 	}
 	if err != nil {
 		return sn, fmt.Errorf("스냅숏 조회 실패(project=%q key=%q): %w",
 			clip(project, 64), clip(key, 64), err)
-	}
-	sn.Method = model.SnapshotMethod(method)
-	sn.Evidence, sn.InputDigest = str(evidence), str(digest)
-	if sn.ComputedAt, err = parseTime(at); err != nil {
-		return sn, err
 	}
 	return sn, nil
 }
