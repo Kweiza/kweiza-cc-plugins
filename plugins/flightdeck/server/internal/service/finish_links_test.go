@@ -187,6 +187,74 @@ func TestFinishRefusesWithUnobservedEligibilityWhenClaimIsUnreadable(t *testing.
 	}
 }
 
+// TestFinishRefusesWhenItemTableCannotBeReadForExistenceCheck 는
+// **itemExists 의 fail-closed 갈래를 잠그는 유일한 시험이다.**
+//
+// ★ 이 갈래는 위 TestFinishRefusesWithUnobservedEligibilityWhenClaimIsUnreadable 과 다르다
+// — 그 시험은 sessionSpawnedOpen(GetClaim) 이 **실패**해 observed=false 가 되는 경로이고,
+// 이 시험은 sessionSpawnedOpen 은 **성공**(observed=true·eligible=nil) 하는데
+// itemExists 의 GetItem 만 실패하는 경로다. 두 갈래를 같은 시험으로 묶으면 다음 개정이
+// itemExists 의 fail-closed 를 지워도(예전처럼 조회 실패를 "없다"로 접어도) 이 축은 안
+// 잡힌다 — 리뷰가 실측으로 확인한 구멍이 정확히 이것이다.
+//
+// ★ **실물 DB로 GetItem 만 골라 실패시키는 방법.** claim·event·item 은 별도 표라, 픽스처
+// (claim·이벤트)를 다 만든 **뒤에** item 표만 숨기면 sessionSpawnedOpen(GetClaim·
+// ListSessionEvents) 은 성공하고 itemExists 의 GetItem 만 진짜 SQL 오류로 죽는 경로가
+// 격리된다. 이 저장소의 선례 둘과 같은 수법이다 — landing_test.go:735
+// (TestLaneReleaseJudgmentSaysWhenTheSignalCouldNotBeRead, signal 표를 RENAME 으로
+// 숨겨 신호 조회만 실패시킨다) · board_conversation_test.go:194
+// (TestBoardNotesWhenAckReachFails, event 표를 DROP 해 확인율 조회만 실패시킨다).
+// 여기서는 DROP 대신 RENAME 을 쓴다 — item 표 자체는 남아 있어야 그 표를 참조하는 다른
+// 어떤 질의(예: 트랜잭션이 실수로라도 열리면 도는 FK 참조)가 "표가 아예 없다"는 다른
+// 종류의 오류로 죽지 않고 이 시험이 겨눈 "이 이름의 표를 못 찾는다" 하나로만 죽는다.
+//
+// ★ **fail-closed 인 이유.** itemExists 가 이 실패를 "없다"로 접으면 그 후속은 '만들기'로
+// 가는데, 판단 링크는 아직 in.Followups 전수로 짜이므로(Task 4 전까지는) 조회가 실패했을
+// 뿐인 남의 항목에도 링크가 tx 안에서 그대로 걸려 판단과 함께 **커밋되어 되돌릴 수 없다.**
+// 반대로 거절은 트랜잭션 전이라 아무것도 안 쓰므로 그 후속만 빼고 그대로 되부를 수 있다 —
+// 비대칭이 fail-closed 를 요구한다(itemExists 의 함수 주석과 같은 논리).
+func TestFinishRefusesWhenItemTableCannotBeReadForExistenceCheck(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	// ★ addItemAs 를 여기서 부르지 않는다 — 부르면 sessionSpawnedOpen 의 루프가 그 항목을
+	//   자기 GetItem 으로 읽으려다 아래에서 숨긴 item 표에 먼저 걸려 observed 축까지
+	//   뒤섞인다. eligible=nil·observed=true 로 itemExists 갈래만 순수하게 격리하려면
+	//   claim 뒤에 item.add 이벤트가 하나도 없어야 한다.
+
+	if _, err := st.DB().ExecContext(ctx(), `ALTER TABLE item RENAME TO item_hidden`); err != nil {
+		t.Fatalf("item 표 숨기기 실패(시험 전제 준비): %v", err)
+	}
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "본문",
+		Followups: []FollowupInput{{ID: "mystery-followup", Title: "제목", Body: "본문"}},
+	})
+	if err == nil {
+		t.Fatalf("item 표를 못 읽는데 마무리가 통과했다")
+	}
+	// itemExists 고유 문구 — refuseUnreadableFollowupExistence 의 Reason 그대로다.
+	if !strings.Contains(err.Error(), "그 id 의 항목이 있는지 못 읽어 자격을 판정할 수 없다") {
+		t.Fatalf("itemExists 의 fail-closed 갈래가 아닌 다른 사유로 거절했다:\n%s", err.Error())
+	}
+	// 다른 두 갈래의 고유 문구가 안 섞이는 것도 함께 단정한다 — 그래야 갈래가 진짜로
+	// itemExists 로 갈렸다는 것이 잠긴다.
+	if strings.Contains(err.Error(), "언제 선점했는지") {
+		t.Fatalf("observed=false(sessionSpawnedOpen) 갈래의 문구가 섞여 나온다 — "+
+			"itemExists 갈래가 아니라 다른 갈래가 거절했다:\n%s", err.Error())
+	}
+	if strings.Contains(err.Error(), "하나도 없다") {
+		t.Fatalf("'남의 항목이다'(refuseIneligibleFollowup) 갈래의 문구가 섞여 나온다 — "+
+			"itemExists 갈래가 아니라 다른 갈래가 거절했다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 아무것도 안 써야 한다", n)
+	}
+}
+
 // TestFinishRefusesAFollowupThatIsAlreadyClosed 는 닫힌 항목을 못 잇게 한다.
 //
 // 닫힌 것을 이으면 판단이 "이 작업이 낳은 후속"이라고 말하는 대상이 이미 끝난 일이 된다.
