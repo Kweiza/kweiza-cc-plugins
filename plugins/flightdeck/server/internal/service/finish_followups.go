@@ -74,42 +74,70 @@ func (s *Service) judgeMissingFollowups(ctx context.Context, in FinishInput) *Re
 	}
 }
 
-// followupCandidates 는 "이 세션이 이 선점 뒤에 만들었고, 아직 열려 있고,
-// 이번 followups 에 없는" 항목 id 들이다.
+// sessionSpawnedOpen 은 "이 세션이 이 선점 뒤에 만들었고 아직 열려 있는" 항목 id 들과,
+// **그 판정을 실제로 관측했는지**다.
 //
 // ★ **닫힌 것은 세지 않는다.** 실측 사례가 있다: 한 세션이 만든
 // `fd-footprint-has-no-containment-gate` 를 남이 집어 랜딩까지 해서, 그 세션이 마무리할
-// 때는 이미 닫혀 있었다. 그것까지 세면 거짓 거절이 된다 — 남이 끝내 준 일을 두고
-// "후속으로 넣어라"라고 하는 꼴이다.
+// 때는 이미 닫혀 있었다. 그것까지 세면 거짓 거절이 된다.
 //
 // ★ **선점 뒤로 자른다.** 오래 사는 세션은 앞선 작업에서 만든 항목을 갖고 있다.
 // 그것까지 세면 항목 하나를 끝낼 때마다 과거 전부가 딸려 온다.
-func (s *Service) followupCandidates(ctx context.Context, in FinishInput) []string {
+//
+// ★ **관측 여부를 값으로 나르는 이유.** 소비자 둘이 같은 빈 목록에 정반대로 반응해야 한다 —
+// 관문(judgeMissingFollowups)은 못 읽었으면 **안 막고**(마무리를 잃지 않는 쪽), 잇기
+// (classifyFollowups)는 못 읽었으면 **안 잇는다**(거짓 링크를 안 만드는 쪽). 빈 슬라이스
+// 하나로 접으면 그 둘이 같은 값이 되어, 다음 개정이 한쪽을 고치며 다른 쪽을 조용히 뒤집는다.
+// FinishResult 의 StillHeld·QueueBalance 를 포인터로 둔 것과 같은 규율이다(finish.go:80·89).
+//
+// ★ **item.add 이벤트로만 판정한다.** 그 이벤트를 남기는 자리는 Service.AddItem(pick.go:1164)
+// 하나뿐이라, **finish 의 후속으로 만들어진 항목은 여기 안 걸린다.** 그것까지 세려면 finish 도
+// item.add 를 남겨야 하는데, 그러면 관문의 사정거리가 함께 넓어져 거짓 거절이 는다 —
+// 별개 축이라 후속 항목으로 낸다. 거절 문구가 이 부류를 갈라 말한다.
+func (s *Service) sessionSpawnedOpen(ctx context.Context, in FinishInput) ([]string, bool) {
 	claim, err := s.st.GetClaim(ctx, in.Project, in.ItemID)
 	if err != nil || claim.At.IsZero() {
-		return nil // 언제부터 쥐었는지 모르면 자를 지점이 없다 — 안 막는다
+		return nil, false // 언제부터 쥐었는지 모르면 자를 지점이 없다
 	}
 	evs, err := s.st.ListSessionEvents(ctx, in.SessionID, "item.add", claim.At)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-
-	given := make(map[string]bool, len(in.Followups))
-	for _, f := range in.Followups {
-		given[f.ID] = true
-	}
-
 	seen := map[string]bool{}
 	var out []string
 	for _, e := range evs {
 		id := eventItemID(e)
-		if id == "" || id == in.ItemID || given[id] || seen[id] {
+		if id == "" || id == in.ItemID || seen[id] {
 			continue
 		}
 		seen[id] = true
 		it, err := s.st.GetItem(ctx, in.Project, id)
 		if err != nil || it.State != model.ItemOpen {
 			continue // 못 읽었거나 이미 닫혔다
+		}
+		out = append(out, id)
+	}
+	return out, true
+}
+
+// followupCandidates 는 위에서 **이번 followups 에 실린 것을 뺀** 목록이다.
+// 관문이 "바닥에 떨어뜨린 후속"이라고 부르는 것이 이것이다.
+//
+// 관측을 못 하면 빈 목록이다 — 관문은 그때 **안 막는다**(fail-open). 계측 하나가
+// 실패했다고 마무리를 잃는 것이 훨씬 나쁘고, 그 판정은 이 파일이 아니라 원장이 내려야 한다.
+func (s *Service) followupCandidates(ctx context.Context, in FinishInput) []string {
+	ids, observed := s.sessionSpawnedOpen(ctx, in)
+	if !observed {
+		return nil
+	}
+	given := make(map[string]bool, len(in.Followups))
+	for _, f := range in.Followups {
+		given[f.ID] = true
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if given[id] {
+			continue
 		}
 		out = append(out, id)
 	}
