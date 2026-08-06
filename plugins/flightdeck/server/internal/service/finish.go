@@ -157,6 +157,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			return FinishResult{}, refused
 		}
 	}
+	// ① id 자체는 전부 본다 — 잇기든 만들기든 브랜치 이름 규칙을 지나야 한다.
 	// ★ 같은 호출에 같은 후속 id 가 두 번 실리면 여기서 끊는다. 링크는 dedupeLinks 가
 	//   살리지만, 두 번째 AddItem 은 **자기 트랜잭션의 첫 INSERT** 때문에 중복 흡수로 빠져
 	//   "남이 만든 것이라 건너뛰었다"는 거짓 사유가 응답에 나간다.
@@ -173,21 +174,40 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				Guidance: "같은 항목을 두 번 만들 수도, 두 번 이을 수도 없다 — 한 번만 실어라."}
 		}
 		seen[f.ID] = true
+	}
+	// ② 만들 것과 이을 것을 가른다. **부적격이면 여기서 거절한다** — 트랜잭션 진입 전이라
+	//    아무것도 안 쓴다. 자격 정의와 사유는 finish_followups.go 에 있다.
+	plan, refused := s.classifyFollowups(ctx, in)
+	if refused != nil {
+		s.log.WarnContext(ctx, "마무리 거절 — 이을 자격이 없는 후속",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"item", clip(in.ItemID, 64))
+		return FinishResult{}, refused
+	}
+	// ③ 제목·본문·경로 좌표는 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 본문을
+	//    안 덮으므로(store 에 그럴 메서드가 아예 없다) 다시 적게 할 이유가 없다 —
+	//    적게 하고 버리는 것이 조용한 거짓이다.
+	for _, c := range plan.Create {
+		f := c.Item
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i+1, clip(f.ID, 64)),
+				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", c.Index, clip(f.ID, 64)),
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
-					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다."}
+					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다.\n" +
+					linkableHint(plan.Eligible)}
 		}
 		// ★ followup.paths 도 add(item.paths)와 같은 관문(judgeItemPathsCoordinate,
-		// pick.go)을 거친다. Finish 는 아래 ②에서 t.AddItem 을 직접 불러 AddItem 의
+		// pick.go)을 거친다. Finish 는 tx 안에서 t.AddItem 을 직접 불러 Service.AddItem 의
 		// 검증 루프를 거치지 않으므로, 여기서 따로 부르지 않으면 같은 사람이 같은
 		// 세션에서 add 는 거절당하고 finish followup 은 조용히 통과하는 우회 문이
 		// 된다 — 반쪽 발화는 균일한 부재보다 나쁘다(관문이 발화한다는 것만 가르치고
 		// 다른 문에서 배신한다).
+		//
+		// ★ 이제 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 경로를 안 건드리므로
+		// 통과시킬 우회 문 자체가 없다(store 에 그 항목의 paths 를 덮을 메서드가 없다).
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i+1, clip(f.ID, 64), err),
+				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", c.Index, clip(f.ID, 64), err),
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
 					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
 		}

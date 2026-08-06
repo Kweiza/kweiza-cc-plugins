@@ -200,3 +200,109 @@ func dedupeLinks(links []model.JudgmentLink) []model.JudgmentLink {
 	}
 	return out
 }
+
+// followupCreate 는 "새로 만들 후속"이다. Index 는 **요청에서 몇 번째였나**(1-based) —
+// 분류로 순서가 갈려도 오류 문구가 요청 좌표를 잃지 않게 나른다.
+type followupCreate struct {
+	Index int
+	Item  FollowupInput
+}
+
+// followupPlan 은 이번 마무리의 후속을 만들 것과 이을 것으로 가른 결과다.
+//
+// ★ Eligible 은 **이 호출에서 이을 수 있었던 것 전부**다. 거절 문구가 이름을 내는 데 쓴다 —
+// id 만 실었는데 그 id 의 항목이 아예 없으면(오타) 분류는 '만들기'로 떨어지고, 그때
+// "이으려던 것이 없다"는 진짜 사유를 낼 자리가 finish.go 의 ③ 밖에 없다.
+type followupPlan struct {
+	Create   []followupCreate
+	Link     []string
+	Eligible []string
+}
+
+// classifyFollowups 는 후속마다 만들기·잇기·거절 중 하나를 고른다.
+//
+// ★ **여기가 거절할 수 있는 마지막 자리다.** 트랜잭션 안에서 거절하면 Store.Tx 가 ①②③④ 를
+// 통째로 롤백해 판단이 함께 죽는다. 그래서 자격 판정은 tx **밖**에 있고, tx 안의 같은 판정은
+// 분기에만 쓴다(finish.go 의 tx 절을 보라).
+//
+// ★ 거절이 안전한 이유. 이 자리는 트랜잭션 전이라 **아무것도 안 쓴다.** 판단 본문은 아직
+// 세션 손에 있으므로 그 후속만 빼고 다시 부르면 된다 — title·body 누락 거절(finish.go:166)과
+// 같은 자리·같은 성격이다.
+func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (followupPlan, *RefusedError) {
+	var plan followupPlan
+	if len(in.Followups) == 0 {
+		return plan, nil
+	}
+	eligible, observed := s.sessionSpawnedOpen(ctx, in)
+	plan.Eligible = eligible // 거절 문구가 이름을 내는 데 쓴다 — 위 followupPlan 주석
+	canLink := make(map[string]bool, len(eligible))
+	for _, id := range eligible {
+		canLink[id] = true
+	}
+	for i, f := range in.Followups {
+		switch {
+		case canLink[f.ID]:
+			plan.Link = append(plan.Link, f.ID)
+		case s.itemExists(ctx, in.Project, f.ID):
+			return followupPlan{}, refuseIneligibleFollowup(i+1, f.ID, in.ItemID, eligible, observed)
+		default:
+			plan.Create = append(plan.Create, followupCreate{Index: i + 1, Item: f})
+		}
+	}
+	return plan, nil
+}
+
+// itemExists 는 그 id 의 항목이 지금 있는지다.
+//
+// ★ **조회가 실패하면 "없다"로 접는다.** 이 판정은 갈래를 고르는 참고값이고, 정본 판정은
+// 트랜잭션 안의 INSERT 가 내는 *store.ConflictError 다 — store 패키지 머리가 못박은 규율
+// ("제약을 미리 흉내 내 판정하지 않는다")을 이 계층도 따른다. 없다고 접어 만들러 가면
+// 최악의 경우 tx 가 중복을 잡아 그 후속만 건너뛴다(판단은 산다).
+func (s *Service) itemExists(ctx context.Context, project, id string) bool {
+	_, err := s.st.GetItem(ctx, project, id)
+	return err == nil
+}
+
+// refuseIneligibleFollowup 은 "이미 있는데 이을 자격이 없는" 후속을 거절한다.
+//
+// ★ **사유를 셋으로 가른다.** 관측을 못 한 것과 남의 항목인 것을 같은 문구로 접으면 세션이
+// 없는 사고를 쫓는다. 그리고 이을 수 있는 것의 **이름을 전부** 낸다 — 수만 말하면 무엇을
+// 실을지 다시 조사해야 한다(관문 judgeMissingFollowups 가 같은 규율을 쓴다).
+func refuseIneligibleFollowup(nth int, id, itemID string, eligible []string, observed bool) *RefusedError {
+	var why string
+	switch {
+	case !observed:
+		why = fmt.Sprintf("%s 를 언제 선점했는지 원장에서 못 읽어 자격을 판정할 수 없다", clip(itemID, 64))
+	case len(eligible) == 0:
+		why = "이 세션이 이 선점 뒤에 add 로 만든 열린 항목이 하나도 없다"
+	default:
+		why = fmt.Sprintf("이을 수 있는 것은 %s 뿐이다", strings.Join(eligible, ", "))
+	}
+	return &RefusedError{
+		What: "finish",
+		Reason: fmt.Sprintf("%d번째 후속(%s)은 이미 있는 항목인데 이을 자격이 없다 — %s",
+			nth, clip(id, 64), why),
+		Guidance: `이을 수 있는 것은 **이 세션이 이 선점 뒤에 add 로 만든, 아직 열린 항목**뿐이다.
+남의 항목 · 이미 닫힌 항목 · 선점 전에 만든 항목은 못 잇는다 — 오타 하나로 남의 항목이
+내 판단에 이어지는 것을 막는 유일한 자리다. finish 의 후속으로 만들어진 항목도 못 잇는다
+(원장에 "이 세션이 만들었다"가 안 남는다).
+
+내용이 다르면 다른 id 로 add 해서 이번 followups 에 실어라.
+그 항목에 판단만 걸고 싶으면 note(kind='handoff', item_id=<그 항목>) 를 쓴다.`,
+	}
+}
+
+// linkableHint 는 "이을 수 있었던 것"의 이름을 낸다.
+//
+// ★ id 만 실은 후속이 **만들기**로 떨어지는 길은 하나뿐이다 — 그 id 의 항목이 없다(오타).
+// 그때 "제목이나 본문이 없다"만 내면 세션은 제목·본문을 지어내 옆에 새 항목을 만든다.
+// 이으려던 항목은 큐에 그대로 남고 쌍둥이가 하나 는다 — 이 도구가 없애려는 부류의
+// 조용한 거짓이다. 이름을 내는 이유는 refuseIneligibleFollowup 과 같다(수만 말하면
+// 무엇을 실을지 다시 조사해야 한다).
+func linkableHint(eligible []string) string {
+	if len(eligible) == 0 {
+		return "이을 셈이었다면 — 이 선점 뒤 이 세션이 add 로 만든 열린 항목이 하나도 없어 이을 것이 없다."
+	}
+	return "이을 셈이었다면 그 id 의 항목이 없다는 뜻이다 — 지금 이을 수 있는 것은 " +
+		strings.Join(eligible, ", ") + " 뿐이다."
+}
