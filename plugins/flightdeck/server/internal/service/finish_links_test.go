@@ -1,8 +1,10 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -430,5 +432,113 @@ func TestRefuseIneligibleFollowupSaysWhichOfTheThreeReasons(t *testing.T) {
 	}
 	if !strings.Contains(named.Reason, "2번째") {
 		t.Fatalf("요청 좌표(몇 번째 후속인지)를 잃었다:\n%s", named.Reason)
+	}
+}
+
+// TestFinishLinksAnExistingItemInsteadOfCreatingIt 은 이 기능의 본체다.
+//
+// id 만 실은 기존 항목은 **새로 만들지 않고** 판단에 잇는다. 항목의 제목·본문은 그대로다 —
+// store 에 항목 본문을 고치는 메서드가 아예 없고, 있어도 안 고칠 것이다(다른 세션이 그 항목의
+// 본문을 근거로 계획을 세운다).
+func TestFinishLinksAnExistingItemInsteadOfCreatingIt(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "spun-off-axis") // 선점 뒤 · 이 세션 · 열림
+
+	res, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{
+			{ID: "spun-off-axis"}, // id 만 — 잇는다
+			{ID: "brand-new", Title: "새 제목", Body: "새 본문"}, // 만든다
+		},
+	})
+	if err != nil {
+		t.Fatalf("잇기가 실패했다: %v", err)
+	}
+	if len(res.LinkedFollowups) != 1 || res.LinkedFollowups[0] != "spun-off-axis" {
+		t.Fatalf("이은 항목을 응답이 안 낸다: %v", res.LinkedFollowups)
+	}
+	if len(res.Followups) != 1 || res.Followups[0].ID != "brand-new" {
+		t.Fatalf("만든 후속이 %v 다 — brand-new 하나여야 한다", res.Followups)
+	}
+	if len(res.SkippedFollowups) != 0 {
+		t.Fatalf("건너뛴 후속이 %v 다 — 잇기는 건너뛴 것이 아니다", res.SkippedFollowups)
+	}
+
+	it, err := st.GetItem(ctx(), "p", "spun-off-axis")
+	if err != nil {
+		t.Fatalf("이은 항목을 못 읽는다: %v", err)
+	}
+	if it.Title != "spun-off-axis 제목" || it.Body != "spun-off-axis 본문" {
+		t.Fatalf("잇기가 항목 본문을 덮었다: title=%q body=%q", it.Title, it.Body)
+	}
+	if it.State != model.ItemOpen {
+		t.Fatalf("이은 항목이 %s 다 — 열린 채로 남아야 한다", it.State)
+	}
+
+	js, err := st.JudgmentsForItem(ctx(), "p", "spun-off-axis")
+	if err != nil {
+		t.Fatalf("판단 조회 실패: %v", err)
+	}
+	if len(js) != 1 || js[0].ID != res.Judgment.ID {
+		t.Fatalf("이 마무리의 판단이 그 항목에 안 걸렸다: %v", js)
+	}
+
+	// 큐 수지는 **만든 것만** 센다 — 이은 항목은 이미 큐에 있었다.
+	if res.QueueBalance == nil {
+		t.Fatalf("큐 수지를 못 읽었다")
+	}
+	if res.QueueBalance.Added != 1 {
+		t.Fatalf("큐 수지 added 가 %d 다 — 만든 것 1건만 세야 한다", res.QueueBalance.Added)
+	}
+}
+
+// TestFinishSeparatesLinkedFromCreatedInTheLedger 는 **재생산율 R 이 오염되는 자리**를 잠근다.
+//
+// store.QueueReproduction(store/event.go:203)이 item.finish 의 count 를 R 의 분자로 그대로
+// 더한다. 잇기를 거기 세면 만들지도 않은 항목이 R 을 부풀리고, DESIGN §10 이 이 설계를
+// 판정하겠다고 세운 축이 조용히 거짓이 된다.
+func TestFinishSeparatesLinkedFromCreatedInTheLedger(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "spun-off-axis")
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{
+			{ID: "spun-off-axis"},
+			{ID: "brand-new", Title: "새 제목", Body: "새 본문"},
+		},
+	}); err != nil {
+		t.Fatalf("마무리 실패: %v", err)
+	}
+
+	evs, err := st.ListSessionEvents(ctx(), me.Session.ID, "item.finish", time.Time{})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("item.finish 이벤트가 %d건이다(err=%v)", len(evs), err)
+	}
+	var p struct {
+		Count  int `json:"count"`
+		Linked int `json:"linked"`
+	}
+	if err := json.Unmarshal([]byte(evs[0].Payload), &p); err != nil {
+		t.Fatalf("payload 를 못 읽는다: %v", err)
+	}
+	if p.Count != 1 {
+		t.Fatalf("count 가 %d 다 — 만든 것 1건만 세야 재생산율이 안 부푼다", p.Count)
+	}
+	if p.Linked != 1 {
+		t.Fatalf("linked 가 %d 다 — 이은 것 1건이 원장에 있어야 한다", p.Linked)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM event WHERE kind = 'item.followup_linked'`); n != 1 {
+		t.Fatalf("item.followup_linked 가 %d건이다 — 1건이어야 한다", n)
 	}
 }
