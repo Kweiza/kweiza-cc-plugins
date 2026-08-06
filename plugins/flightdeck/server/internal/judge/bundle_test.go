@@ -414,6 +414,123 @@ func TestLessBundlePrefersOlder(t *testing.T) {
 	}
 }
 
+// 정렬 키 ①′(기아)를 lessBundle 을 직접 불러 확인한다.
+//
+// ★ 이 축이 없으면 큐가 FIFO 로 보이면서 실제로는 LIFO 로 돈다.
+// 실측(kweiza-cc-plugins · 판단 01KZAW342JAC6EAW8C31RCXXK0):
+//
+//	열린 26건의 의존자 분포 = {0: 26}      ← 키 ①이 상수다
+//
+// ①이 상수면 ②(묶음 크기)가 실질 1차 키가 된다. 그런데 묶음은
+// (형제 판단 ∨ 같은 선행)으로만 서므로(LinkOf), 형제가 없는 항목은 묶음 크기가
+// **영구히 1**이다. 그 결과가 이것이었다:
+//
+//	7.5h 이상 묵은 17건 — 전부 형제 0(단독)
+//	6.5h 이하 8건       — 전부 형제 있음
+//
+// 경계가 하나뿐이다. ③(최고령)이 이미 있는데도 그렇다 — ③은 ②가 동점일 때만
+// 발화하기 때문이다. 그리고 followups 로 만든 항목은 같은 판단에 FK 로 걸려
+// **자동으로 서로 형제**라, 새 유입이 들어올 때마다 기존 단독 전부를 추월한다.
+//
+// ★ 축 격리: 이 시험은 ②③④를 **전부 big 편으로** 몰아 둔다(묶음 4건 · 더 오래됨 ·
+// id 사전순 앞). 기아 축 하나만 solo 편이다. 그래서 이 축을 지우면 반드시 잡힌다.
+// "굶었는데 더 최근"은 부자연스러운 배치이지만, 축을 섞으면 무엇이 이겼는지
+// 시험이 못 말한다.
+func TestLessBundleStarvedBeatsLargerBundle(t *testing.T) {
+	solo := Bundle{Lead: cand("z-starved", 0, nil), Oldest: t0.Add(72 * time.Hour), Starved: true}
+	big := Bundle{
+		Lead:    cand("a-fresh", 0, nil),
+		Members: []Candidate{cand("m1", 0, nil), cand("m2", 0, nil), cand("m3", 0, nil)},
+		Oldest:  t0,
+	}
+	if !lessBundle(solo, big) {
+		t.Fatalf("굶은 단독이 4건 묶음에 밀렸다 — 이 축이 없으면 큐가 LIFO 로 돈다")
+	}
+	if lessBundle(big, solo) {
+		t.Fatalf("역방향이 대칭이 아니다 — 안 굶은 묶음이 굶은 단독을 이겼다")
+	}
+}
+
+// 기아 영역 안에서는 **묶음 크기를 안 본다** — 순수 최고령순이다.
+//
+// ★ 여기서 ②(묶음 크기)를 다시 넣으면 위 시험이 고발한 바로 그 함정이
+// 기아 영역 **안에서 그대로 재현된다**: 굶은 단독이 굶은 묶음에 영구히 밀리고,
+// 가장 오래 굶은 것이 영영 안 나온다. 기아는 예외 상태이고, 예외 상태에서
+// 방어 가능한 규칙은 "가장 오래 굶은 것부터" 하나뿐이다.
+//
+// 축 격리는 위와 같은 방식이다 — ②(묶음 크기)와 ④(id)를 둘 다 newer 편에 둔다.
+func TestLessBundleStarvedTiesGoToOldestNotBiggest(t *testing.T) {
+	older := Bundle{Lead: cand("z-old", 0, nil), Oldest: t0, Starved: true}
+	newer := Bundle{
+		Lead:    cand("a-new", 0, nil),
+		Members: []Candidate{cand("m1", 0, nil), cand("m2", 0, nil)},
+		Oldest:  t0.Add(time.Hour),
+		Starved: true,
+	}
+	if !lessBundle(older, newer) {
+		t.Fatalf("둘 다 굶었는데 최고령이 아니라 큰 묶음이 이겼다 — 기아 영역에 같은 함정을 다시 들였다")
+	}
+	if lessBundle(newer, older) {
+		t.Fatalf("역방향이 대칭이 아니다")
+	}
+}
+
+// EligibleBundle 이 Now 로 기아를 판정하는지 — 배선이 실제로 이어져 있는지 본다.
+//
+// ★ lessBundle 단위 시험만 있으면 Starved 를 **아무도 안 채우는** 상태가 통과한다.
+// 이 저장소가 여러 번 겪은 실패 모양이다(계산은 되는데 읽는 쪽이 0건).
+func TestEligibleBundleMarksStarvation(t *testing.T) {
+	// 단독 최고령 vs 형제 둘. 형제 쪽이 묶음 크기로 이기게 두고, 나이로만 뒤집는다.
+	old := cand("z-old-solo", 0, nil)
+	n1 := cand("a-new-1", 600, nil)
+	n2 := cand("a-new-2", 600, nil)
+	sib := SiblingIndex{"a-new-1": {"J1"}, "a-new-2": {"J1"}}
+
+	// 기아 전: 형제 묶음이 이긴다(지금 거동 그대로).
+	best, _ := EligibleBundle(EligibleInput{
+		Candidates: []Candidate{old, n1, n2},
+		Now:        t0.Add(time.Hour),
+	}, sib)
+	if best == nil || best.Lead.Item.ID != "a-new-1" {
+		t.Fatalf("기아 전에는 형제 묶음이 선두여야 한다 — 평시 순서가 바뀌었다: %v", best)
+	}
+
+	// 기아 후: 단독 최고령이 이긴다.
+	best, _ = EligibleBundle(EligibleInput{
+		Candidates: []Candidate{old, n1, n2},
+		Now:        t0.Add(StarvationAge + time.Minute),
+	}, sib)
+	if best == nil || best.Lead.Item.ID != "z-old-solo" {
+		t.Fatalf("임계를 넘긴 단독이 선두가 아니다 — Starved 가 안 채워졌거나 배선이 끊겼다: %v", best)
+	}
+	if !best.Starved {
+		t.Fatalf("선두가 굶었는데 Starved 가 false 다 — Reason 이 근거를 못 낸다")
+	}
+}
+
+// Now 를 안 준 호출은 기아 판정을 **안 돌린다**.
+//
+// ★ zero time 을 그대로 쓰면 모든 항목이 "1년 넘게 굶었다"로 판정돼 묶음 기능이
+// 통째로 죽는다. 관측을 못 하면 판정하지 않는다 — 이 저장소의 fail-open 규율이
+// judgeMissingFollowups·followupCandidates 에서 이미 같은 모양으로 서 있다.
+func TestEligibleBundleWithoutNowDoesNotStarve(t *testing.T) {
+	old := cand("z-old-solo", 0, nil)
+	n1 := cand("a-new-1", 600, nil)
+	n2 := cand("a-new-2", 600, nil)
+	sib := SiblingIndex{"a-new-1": {"J1"}, "a-new-2": {"J1"}}
+
+	best, _ := EligibleBundle(EligibleInput{Candidates: []Candidate{old, n1, n2}}, sib)
+	if best == nil {
+		t.Fatalf("적격이 있는데 nil 이 나왔다")
+	}
+	if best.Starved {
+		t.Fatalf("Now 가 zero 인데 굶었다고 판정했다 — 묶음 기능이 통째로 죽는다")
+	}
+	if best.Lead.Item.ID != "a-new-1" {
+		t.Fatalf("Now 없는 호출의 순서가 기존과 달라졌다: %s", best.Lead.Item.ID)
+	}
+}
+
 // Reason 의 최고령 표기가 분 단위로 잘리면, 실측 형제들처럼 초·마이크로초
 // 단위로만 다른 두 최고령이 ③으로 서로 다른 승자를 냈는데도 Reason 문자열은
 // 똑같이 찍힌다 — "왜 이것이고 저것이 아닌가"에 답해야 하는 원장이

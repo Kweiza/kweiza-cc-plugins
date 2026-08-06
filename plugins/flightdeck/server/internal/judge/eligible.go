@@ -3,6 +3,7 @@ package judge
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -84,6 +85,13 @@ type EligibleInput struct {
 	Live          []LiveSession
 	Facts         AfterFacts
 	HeldResources map[string]string // 자원 -> 점유 세션 id. 비어 있으면 아무도 안 쥠
+	// Now 는 기아 판정(EligibleBundle 의 StarvationAge)에만 쓴다.
+	//
+	// ★ zero 면 그 판정을 **안 돌린다**. 넣지 않은 호출이 "모든 항목이 1년 넘게
+	// 굶었다"로 판정되면 묶음 기능이 통째로 죽는다 — 관측을 못 하면 판정하지 않는
+	// 이 저장소의 규율 그대로다(judgeMissingFollowups 의 fail-open 과 같은 모양).
+	// Eligible(단일 추천)은 이 값을 아예 안 본다.
+	Now time.Time
 }
 
 // Eligible 은 지금 집을 수 있는 항목 하나를 고르고, **고르지 않은 전부의 사유**를 돌려준다.

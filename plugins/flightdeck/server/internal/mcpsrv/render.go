@@ -602,6 +602,61 @@ func noteLines(sessionID string, asks, blocked []model.Judgment, now time.Time) 
 	return out
 }
 
+// queueAgeClause 는 큐 줄에 붙는 나이 절이다 — "(최고령 1일 6시간 · 1일+ 2건)".
+//
+// ★ 이 절이 없으면 화석이 안 보인다. 보드는 이미 최고령부터 냈다
+// (store/item.go 의 ORDER BY created_at). 그런데 나이를 안 찍어서 "26시간째 아무도
+// 안 집었다"가 화면 어디에도 없었고, 세션은 그 줄을 그냥 "큐에 있는 항목 셋"으로
+// 읽고 지나갔다(판단 01KZAW342JAC6EAW8C31RCXXK0 의 실측).
+//
+// ★ 순서를 **가정하지 않는다.** OpenItems 가 나이순으로 온다는 것은 지금 저장 계층의
+// 성질이고, 여기서 [0] 을 최고령으로 단정하면 그 성질이 바뀌는 날 조용히 틀린다.
+// 전부 훑는 비용은 큐 길이에 선형이고 큐는 수십 건이다.
+//
+// v.At 이 zero 거나 CreatedAt 이 zero 인 항목은 **안 센다** — 관측을 못 한 것을
+// 값으로 접지 않는다. 전부 못 읽으면 절 자체가 안 나간다.
+func queueAgeClause(v service.BoardView) string {
+	if len(v.OpenItems) == 0 || v.At.IsZero() {
+		return ""
+	}
+	var oldest time.Duration
+	starved := 0
+	for _, it := range v.OpenItems {
+		if it.CreatedAt.IsZero() {
+			continue
+		}
+		if age := v.At.Sub(it.CreatedAt); age > oldest {
+			oldest = age
+		}
+		if v.At.Sub(it.CreatedAt) >= judge.StarvationAge {
+			starved++
+		}
+	}
+	if oldest <= 0 {
+		return ""
+	}
+	s := "(최고령 " + FormatAge(oldest)
+	// 굶은 것이 0건이면 그 절을 안 낸다 — 상시 점등된 경고는 판별력이 0이 된다.
+	if starved > 0 {
+		s += fmt.Sprintf(" · %s+ %d건", FormatAge(judge.StarvationAge), starved)
+	}
+	return s + ")"
+}
+
+// queueItemAge 는 detail 줄 앞머리의 항목 나이다. 임계를 넘긴 것은 ★ 를 단다.
+//
+// 못 재면 "나이?" 를 낸다 — 0 이나 빈 문자열로 접으면 "방금 생겼다"로 읽힌다.
+func queueItemAge(at time.Time, it model.Item) string {
+	if at.IsZero() || it.CreatedAt.IsZero() {
+		return "나이?"
+	}
+	age := at.Sub(it.CreatedAt)
+	if age >= judge.StarvationAge {
+		return "★" + FormatAge(age)
+	}
+	return FormatAge(age)
+}
+
 func boardBriefFoot(v service.BoardView) []string {
 	var out []string
 	if len(v.OpenItems) > 0 {
@@ -612,7 +667,7 @@ func boardBriefFoot(v service.BoardView) []string {
 			}
 			ids = append(ids, it.ID)
 		}
-		line := fmt.Sprintf("큐 열림 %d건: %s", len(v.OpenItems), strings.Join(ids, ", "))
+		line := fmt.Sprintf("큐 열림 %d건%s: %s", len(v.OpenItems), queueAgeClause(v), strings.Join(ids, ", "))
 		if len(v.OpenItems) > 3 {
 			line += fmt.Sprintf(" +%d", len(v.OpenItems)-3)
 		}
@@ -628,9 +683,9 @@ func boardBriefFoot(v service.BoardView) []string {
 
 func boardDetailFoot(v service.BoardView) []string {
 	var out []string
-	out = append(out, fmt.Sprintf("큐 열림 %d건", len(v.OpenItems)))
+	out = append(out, fmt.Sprintf("큐 열림 %d건%s", len(v.OpenItems), queueAgeClause(v)))
 	for _, it := range v.OpenItems {
-		line := fmt.Sprintf("  · %s — %s", it.ID, clip(it.Title, 90))
+		line := fmt.Sprintf("  · %s · %s — %s", queueItemAge(v.At, it), it.ID, clip(it.Title, 90))
 		if len(it.Paths) > 0 {
 			line += " [" + strings.Join(it.Paths, ", ") + "]"
 		}
