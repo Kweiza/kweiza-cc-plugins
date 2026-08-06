@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -237,19 +239,69 @@ func TestLauncherBuildsAndRuns(t *testing.T) {
 	}
 }
 
-// 스킬은 **60줄 미만**이다. 컨텍스트 예산이 이 설계의 제약이고,
-// 스킬 목록은 항목당 잘리므로 규율 산문을 넣으면 그것이 도구 설명을 밀어낸다.
+// 스킬 본문의 줄 수 상한은 **호출 빈도로 갈린다.**
+//
+// ★ 앞선 판의 주석은 "스킬 목록은 항목당 잘리므로"를 60줄의 근거로 댔는데, 그 문장이
+// 맞다면 **본문을 아무리 길게 써도 목록은 안 밀린다** — 근거와 결론이 안 이어진다.
+// 그래서 상한을 "부른 턴의 예산"으로 다시 세우고 호출 빈도로 갈랐다. 그 비용은 부르는
+// 만큼 반복해서 들기 때문이다.
+//
+// ★ **다만 그 재정의가 기대는 플랫폼 동작은 아직 안 쟀다 — 측정 전 잠정이다.**
+// "목록에는 frontmatter 의 `description`(항목당 1,536자)만 실리고 본문은 스킬을 부른
+// 뒤에 실린다"는 이 레포 어디에도 측정 기록이 없다(§13 「아직 아님」에 올려 뒀다).
+// 앞선 판이 두 축을 섞은 자리를 **또 다른 미측정값**으로 메우지 않기 위해 여기 적어 둔다 —
+// §13 의 첫 줄이 "추측을 사실로 적지 않는다"다. 80 을 지탱하는 실질 근거는 아래 회귀선이고,
+// 그쪽은 이 측정과 무관하게 선다.
+//
+// ★ 머신 스킬의 80은 계산이 아니라 **회귀선**이다. `fd-update` 가 지금 72줄이고, 그 산문은
+// 갱신 판정을 코드로 안 뺐기 때문에 있다(DESIGN §1 의 2026-08-06 개정). 여기서 더 늘면
+// 줄을 깎을 것이 아니라 `fd update` 를 만들지를 다시 판정해야 한다 — 그 판정을 미루는 대신
+// 상한을 올리는 것이 이 항목이 고발한 표류다.
+var skillLineCaps = map[string]int{
+	"fd-pickup":  60, // 매 세션 부른다
+	"fd-handoff": 60, // 매 세션 부른다
+	"fd-setup":   80, // 머신당 1회
+	"fd-update":  80, // 머신당 1회
+}
+
 func TestSkillsStayWithinTheContextBudget(t *testing.T) {
 	root := pluginRoot(t)
-	for _, name := range []string{"fd-pickup", "fd-handoff", "fd-setup"} {
+
+	// ★ 스킬 **전수**를 표에 물린다. 이 항목의 뿌리가 "넷째(`fd-update`)가 이 표에서 빠진
+	// 채로 DESIGN 도 셋이라 적고 아무도 안 세었다"이다. 표를 손으로만 유지하면 다섯째에
+	// 같은 일이 그대로 난다 — 빠진 스킬은 줄 수도 frontmatter 도 검사받지 않는다.
+	ents, err := os.ReadDir(filepath.Join(root, "skills"))
+	if err != nil {
+		t.Fatalf("skills 디렉토리를 못 읽었다: %v", err)
+	}
+	onDisk := map[string]bool{}
+	for _, e := range ents {
+		if e.IsDir() {
+			onDisk[e.Name()] = true
+		}
+	}
+	for name := range onDisk {
+		if _, ok := skillLineCaps[name]; !ok {
+			t.Fatalf("스킬 %s 가 상한 표에 없다 — 표에 없는 스킬은 줄 수도 frontmatter 도\n"+
+				"검사받지 않는다. 수를 늘리기 전에 DESIGN §1 이 그것을 정당화하는지부터 정해라", name)
+		}
+	}
+	for name := range skillLineCaps {
+		if !onDisk[name] {
+			t.Fatalf("상한 표의 %s 가 skills/ 에 없다 — 죽은 이름이 표에 남으면\n"+
+				"그 표를 근거로 센 수가 전부 틀린다", name)
+		}
+	}
+
+	for name, limit := range skillLineCaps {
 		path := filepath.Join(root, "skills", name, "SKILL.md")
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("%s 를 못 읽었다: %v", name, err)
 		}
 		lines := strings.Count(strings.TrimRight(string(raw), "\n"), "\n") + 1
-		if lines >= 60 {
-			t.Fatalf("%s 가 %d줄이다 — 60줄 미만이어야 한다", name, lines)
+		if lines >= limit {
+			t.Fatalf("%s 가 %d줄이다 — %d줄 미만이어야 한다", name, lines, limit)
 		}
 		// frontmatter 의 name·description 이 없으면 스킬이 목록에 안 뜬다.
 		head := string(raw)
@@ -257,6 +309,55 @@ func TestSkillsStayWithinTheContextBudget(t *testing.T) {
 			t.Fatalf("%s 에 frontmatter 가 없다", name)
 		}
 		mustContain(t, name+" frontmatter", head, "name: "+name, "description:")
+	}
+}
+
+// 문서가 세는 스킬 수와 실재하는 수가 어긋나면 여기서 걸린다.
+//
+// ★ 이 시험이 없어서 난 일이 이 항목이다: `cdce59d` 가 넷째를 만들었고 README 는 넷으로
+// 고쳤는데 DESIGN §1 만 셋으로 남았다. 그 문장 바로 아래 문단이 **"셋인 근거"**를 대고
+// 있었으므로, 수만 고치면 그 문단이 통째로 거짓이 되는 자리였다 — 즉 이 어긋남은
+// 오탈자가 아니라 **설계 판정이 밀린 흔적**이고, 그래서 조용히 오래 남았다.
+//
+// ★ 잠그는 것은 **수**뿐이다. 근거 산문까지 잠그면 개정할 때마다 시험이 깨져서
+// 근거를 안 고치고 수만 고치는 쪽으로 사람을 민다.
+//
+// ★ **"어딘가에 그 수가 있다"로는 부족하다 — 모든 출현을 본다.** 앞선 판은
+// `strings.Contains(파일 전체, "스킬은 4개")` 였는데, 그러면 문서 끝에 "스킬은 3개"를
+// 덧붙여도 초록이다(격리 사본에서 실증). 이 저장소는 옛 문단을 안 지우고 개정 블록을
+// 얹는 습관이 있어서(§1 이 그 예다) 낡은 수가 남기 쉽고, 그게 정확히 이 항목의 뿌리였다.
+// 그래서 정규식으로 **출현 전부**를 뽑아 하나라도 다르면 실패시킨다. 0건도 실패다.
+// §1 이 보존한 옛 문단의 "셋"·"넷"은 한글이라 이 정규식에 안 걸린다 — 사료 서술은
+// 살아남고 현재형 수만 잠긴다.
+func TestDocsCountTheSkillsThatActuallyExist(t *testing.T) {
+	root := pluginRoot(t)
+	// ★ 수를 상한 표에서 뽑는다. 표는 위 시험이 skills/ 전수에 물려 뒀으므로, 다섯째가
+	// 생기면 연쇄가 정확히 돈다: 전수 검사가 "표에 없다"로 먼저 걸리고 → 표에 넣으면
+	// 이 시험이 문서의 수를 요구한다. 어느 한 자리만 고치고 지나가는 길이 없다.
+	want := len(skillLineCaps)
+	for _, doc := range []struct{ file, pattern string }{
+		{"DESIGN.md", `스킬은 (\d+)개`},
+		{"README.md", `스킬 (\d+)개`},
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, doc.file))
+		if err != nil {
+			t.Fatalf("%s 를 못 읽었다: %v", doc.file, err)
+		}
+		hits := regexp.MustCompile(doc.pattern).FindAllStringSubmatch(string(raw), -1)
+		if len(hits) == 0 {
+			t.Fatalf("%s 가 스킬 수를 아예 안 말한다(정규식 %q) — 실재하는 스킬은 %d개다(skills/).\n"+
+				"수를 고칠 때는 그 수의 **근거**를 대는 문단이 같이 거짓이 되는지 보고,\n"+
+				"거짓이 되면 근거부터 다시 써라(DESIGN §1 의 2026-08-06 개정이 그 예다)",
+				doc.file, doc.pattern, want)
+		}
+		for _, h := range hits {
+			if h[1] != fmt.Sprintf("%d", want) {
+				t.Fatalf("%s 가 %q 라고 말한다 — 실재하는 스킬은 %d개다(skills/).\n"+
+					"출현 %d건 중 하나라도 어긋나면 실패다. 개정 블록을 얹을 때 **낡은 수를 현재형으로**\n"+
+					"남기지 마라 — 이 항목의 뿌리가 바로 그것이다(사료로 남길 것은 한글로 적어라)",
+					doc.file, h[0], want, len(hits))
+			}
+		}
 	}
 }
 

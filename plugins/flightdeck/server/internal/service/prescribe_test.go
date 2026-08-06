@@ -39,21 +39,43 @@ func TestPrescriptionsAreEmittedOnceAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("이벤트 조회 실패: %v", err)
 	}
-	if len(evs) != len(first.All) {
-		t.Fatalf("발화 기록 수가 다르다: events=%d, prescriptions=%d", len(evs), len(first.All))
+	// ★ 분모는 `Shown` 이다 — 원장에 남는 것이 그것뿐이기 때문이다(2026-08-06 개정).
+	//   `All` 로 비교하면 이 입력에 접힘이 없어 **우연히** 초록이고, 접힘이 생기는 순간
+	//   틀린 이유로 빨개진다.
+	if len(evs) != len(first.Shown) {
+		t.Fatalf("발화 기록 수가 표시분과 다르다: events=%d, shown=%d(all=%d)",
+			len(evs), len(first.Shown), len(first.All))
 	}
 	if !strings.Contains(evs[0].Payload, `"key"`) {
 		t.Fatalf("payload 에 key 가 없다: %s", evs[0].Payload)
 	}
 }
 
-// 접힌 것도 발화 기록된다. 요약된 것은 "안 낸 것"이 아니다.
-func TestFoldedPrescriptionsAreStillRecorded(t *testing.T) {
+// TestFoldedPrescriptionsAreNotRecordedAndComeBack — **접힌 것은 발화로 안 센다.**
+//
+// 앞선 판은 정반대를 계약으로 두고("요약된 것도 이미 낸 것") 접힌 것까지 기록했다.
+// 그 조합이 접힌 처방을 **영구히 지웠다**: 기록되면 suppressed 가 그 키를 누르고
+// (해제 규칙은 silent 에만 있다), 세션은 그 문구를 한 번도 못 본 채 원장에는
+// "정상적으로 접혔다"로만 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다)나
+// `unclaimed` 면 그 사실을 아무도 못 듣는다.
+//
+// ★ 상한이 무의미해지지 않는다는 것까지 여기서 단정한다 — **순환**이 그 답이다.
+// 표시된 셋은 기록되어 눌리므로, 다음 턴에 같은 조건이 다시 오면 접혔던 것이 올라온다.
+// 그래서 둘째 턴에 **다섯 경로를 전부 다시** 만지고도 뜨는 것이 접혔던 둘뿐인지를 본다.
+// 이 단정이 상시 점등(설계 §4: 같은 것이 매 턴 반복)과 이 동작을 가르는 자리다.
+//
+// ★ "다음 턴에 다시 뜬다"의 정확한 조건은 **그 축의 입력이 다시 생길 때**다. `outside`·
+// `overlap` 의 입력인 TurnPaths 는 `f.LastAt.After(since)` 로 뽑고 그 `since` 가
+// **마지막 발화 시각**이라, 아무것도 안 만진 턴에는 축 자체가 안 돈다. 그러니 이 시험이
+// 경로를 다시 만지는 것은 편의가 아니라 **일하는 세션의 정상 흐름을 그대로 재현하는 것**이다
+// (훅은 매 턴 부르고, 그 사이 세션은 파일을 만진다).
+func TestFoldedPrescriptionsAreNotRecordedAndComeBack(t *testing.T) {
 	svc, st := newSvc(t)
 
+	paths := []string{"a/1.go", "b/2.go", "c/3.go", "d/4.go", "e/5.go"}
 	sess := openSessionForPrescribeTest(t, svc)
 	claimItemForPrescribeTest(t, svc, st, sess, "fd-x", []string{"internal/judge"})
-	for _, p := range []string{"a/1.go", "b/2.go", "c/3.go", "d/4.go", "e/5.go"} {
+	for _, p := range paths {
 		touchPathForPrescribeTest(t, st, sess, p)
 	}
 
@@ -65,9 +87,60 @@ func TestFoldedPrescriptionsAreStillRecorded(t *testing.T) {
 		t.Fatalf("5개 경로가 선언 밖인데 안 접혔다: shown=%d", len(res.Shown))
 	}
 	evs, _ := st.ListSessionEvents(ctx(), sess, "prescribe", time.Time{})
-	if len(evs) != len(res.All) {
-		t.Fatalf("접힌 것이 발화 기록에서 빠졌다: events=%d, all=%d", len(evs), len(res.All))
+	if len(evs) != len(res.Shown) {
+		t.Fatalf("발화 기록이 표시분과 다르다: events=%d, shown=%d, all=%d\n"+
+			"접힌 것을 기록하면 suppressed 가 눌러서 그 문구는 영영 안 나간다",
+			len(evs), len(res.Shown), len(res.All))
 	}
+
+	firstShown := map[string]bool{}
+	for _, p := range res.Shown {
+		firstShown[p.Key] = true
+	}
+	folded := map[string]bool{}
+	for _, p := range res.All[len(res.Shown):] {
+		folded[p.Key] = true
+	}
+
+	// 둘째 턴 — 같은 다섯을 전부 다시 만진다. 표시됐던 셋은 눌려 있어야 하고,
+	// 접혔던 둘은 올라와야 한다.
+	for _, p := range paths {
+		touchPathForPrescribeTest(t, st, sess, p)
+	}
+	second, err := svc.Prescriptions(ctx(), sess)
+	if err != nil {
+		t.Fatalf("둘째 호출 실패: %v", err)
+	}
+	if len(second.Shown) == 0 {
+		t.Fatalf("접힌 것이 다음 턴에 안 올라왔다 — 그대로 소실이다(첫 턴 접힘 %d건)", res.Folded)
+	}
+	for _, p := range second.Shown {
+		if firstShown[p.Key] {
+			t.Fatalf("첫 턴에 이미 표시된 %q 가 다시 떴다 — 이것이 설계 §4 의 상시 점등이다.\n"+
+				"눌려야 할 것은 **표시된 것**이고, 다시 떠야 할 것은 접힌 것뿐이다", p.Key)
+		}
+	}
+	for key := range folded {
+		var seen bool
+		for _, p := range second.Shown {
+			if p.Key == key {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Fatalf("접혔던 %q 가 같은 조건이 다시 왔는데도 안 떴다 — 이 수리가 막으려는 소실 그대로다:\n"+
+				"둘째 턴 표시분 %v", key, keysOf(second.Shown))
+		}
+	}
+}
+
+// keysOf 는 실패 메시지용이다.
+func keysOf(ps []judge.Prescription) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.Key)
+	}
+	return out
 }
 
 // note 하나가 그 시점 열린 처방 전부를 닫고, 무엇이 열려 있었는지가 ack 에 남는다.
@@ -454,5 +527,68 @@ func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
 		t.Fatalf("새 줄 행(%d)에 차례가 왔는데 처방이 %v 다(기대 [%s])\n"+
 			"억제 키에 줄 행 번호가 안 실리면 재시도 세션에게 두 번째 차례는 영영 안 온다",
 			second.RowID, got, wantSecond)
+	}
+}
+
+// TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed 은 이 축이 **지금 무엇을 재는지**를
+// 그대로 잠근다. 고발이 아니라 관측이다.
+//
+// `lane-turn` 이 지정하는 행동은 `land()` 인데 **land 경로는 ackPrescriptions 를 한 번도
+// 안 지난다.** 반대로 처방과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 을 확인 처리한다 —
+// ackPrescriptions 가 키를 안 가리고 그 세션에 **열린 것을 전부** 닫기 때문이다.
+// 즉 이 키에 대해 확인은 **정확히 반대 신호**를 잰다: 처방대로 랜딩한 세션은 미확인으로
+// 남고, 처방을 무시하고 판단만 남긴 세션이 확인으로 잡힌다.
+//
+// ★ 여기 잠긴 것은 **계약이 아니라 현재 사실**이다(godoc 에 사실을 적고 그 사실을 잠그는
+// 이 레포의 방식). 통로를 뚫는 수리 — land 가 자기가 응답한 키만 골라 ack — 를 하면 이
+// 시험이 **먼저** 빨개진다. 그때 고칠 것은 이 시험이 아니라 여기 적힌 사실이고, 그 자리를
+// 놓치지 말라고 이 시험이 있다. 통로 뚫기는 선언 경로(service/landing.go) 밖이라
+// 후속 항목으로 올렸다.
+//
+// ★ AckReach(board.go)는 이것과 **다른 축**이다 — 키를 안 보고 세션 단위로 센다.
+// 그래서 "lane-turn 확인율"이라는 수치는 코드 어디에도 없다. 설계 §10 이 인용하는
+// "overlap 0/31" 은 사람이 따로 잰 값이다. 이 구분을 안 적으면 다음 사람이 §10 의
+// 수치를 키별 확인율로 읽는다.
+func TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed(t *testing.T) {
+	svc, st := newSvc(t)
+	a, b := twoSessions(t, svc)
+
+	// a 가 레인을 쥐고 b 가 뒤에 선다. a 가 놓으면 b 의 차례다.
+	landOrFail(t, svc, a, "turn")
+	mine := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+
+	want := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, mine.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != want {
+		t.Fatalf("차례 처방이 안 떴다(기대 %q): %v — 이 시험의 전제가 깨졌다", want, got)
+	}
+
+	// ① 처방이 시킨 그대로 한다 — land() 를 부른다.
+	landOrFail(t, svc, b, "turn")
+
+	acks, err := st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 0 {
+		t.Fatalf("land 경로가 ack 을 남겼다(%d건) — **통로가 뚫렸다는 뜻이다.**\n"+
+			"그렇다면 고칠 것은 이 시험이 아니라 이 시험의 주석과 DESIGN §10 의 서술이다: %+v",
+			len(acks), acks)
+	}
+
+	// ② 처방과 아무 상관 없는 판단 한 줄을 남긴다.
+	if _, err := svc.Note(ctx(), NoteInput{
+		Project: "p", SessionID: b, Kind: model.JudgmentDecision,
+		Title: "레인과 무관한 판단", Body: "랜딩과 아무 상관 없는 내용이다",
+	}); err != nil {
+		t.Fatalf("note 실패: %v", err)
+	}
+	acks, err = st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 1 || !strings.Contains(acks[0].Payload, want) {
+		t.Fatalf("상관없는 note 가 %q 를 확인 처리하지 않았다: %+v\n"+
+			"이 단정이 깨졌다면 ackPrescriptions 가 키를 가리기 시작한 것이다 — 그것이 수리다", want, acks)
 	}
 }

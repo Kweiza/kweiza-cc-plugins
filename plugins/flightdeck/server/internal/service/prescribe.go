@@ -28,10 +28,15 @@ const (
 )
 
 // PrescribeResult 는 한 턴의 처방이다.
+//
+// ★ **원장에 남는 것은 Shown 뿐이다**(2026-08-06 개정. 아래 Prescriptions 의 기록 루프).
+// 세 필드가 서로 다른 것을 세므로 셋을 같은 뜻으로 읽으면 안 된다 — 특히 `All` 은
+// `POST /api/v1/sessions/{id}/prescriptions` 의 `all` 로 서버 밖에 나가는데 비시험
+// 소비자가 0건이라, 이 주석이 그 필드의 유일한 계약이다.
 type PrescribeResult struct {
-	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax)
-	Folded int                  `json:"folded"` // 요약으로 접힌 수
-	All    []judge.Prescription `json:"all"`    // 발화 기록된 전부
+	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax) — **이것만 event 에 남는다**
+	Folded int                  `json:"folded"` // 요약으로 접힌 수 — 원장에 안 남는다(아래 ★)
+	All    []judge.Prescription `json:"all"`    // 이번 턴에 판정된 전부(표시분 + 접힌 것). 기록되는 것은 Shown 뿐이다
 }
 
 // prescribePayload 는 event.payload 의 모양이다.
@@ -134,9 +139,31 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	all := judge.Prescribe(in)
 	shown, folded := judge.FoldPrescriptions(all)
 
-	// **접힌 것도 기록한다.** 요약된 것은 "안 낸 것"이 아니다 —
-	// 안 기록하면 다음 턴에 그대로 다시 떠서 상한이 무의미해진다.
-	for _, p := range all {
+	// **표시된 것만 기록한다(2026-08-06 개정).** 앞선 판은 접힌 것까지 기록하고 그 근거를
+	// "안 기록하면 다음 턴에 그대로 다시 떠서 상한이 무의미해진다"라고 적었는데, 그 조합이
+	// **접힌 처방을 영구히 지웠다**: 기록되면 suppressed 가 그 키를 누르고(해제 규칙은
+	// silent 에만 있다), 세션은 그 문구를 **한 번도 못 본 채** 원장에는 "정상적으로 접혔다"로만
+	// 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다) 나 `unclaimed` 면
+	// 그 사실을 아무도 못 듣는다.
+	//
+	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 표시된 셋만 눌리므로, **그 축의 입력이
+	// 다시 생기는 턴**에 넷째가 첫 칸으로 올라온다. 다만 그 조건이 전부는 아니다:
+	// 세션이 그 경로를 다시 안 만지면 안 올라온다(`TurnPaths` 는 `f.LastAt.After(since)` 로
+	// 뽑고 `since` 는 **마지막 발화 시각**이다). 그래서 **한 턴에 몰아친 outside 다발은
+	// 여전히 소실**이고, 그것은 이 개정이 아니라 상한 자체의 한계다(후속:
+	// fd-folded-outside-burst-still-lost). 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴
+	// 반복)과는 다르다 — 눌리는 것은 표시된 것뿐이다.
+	//
+	// ★ 재측(2026-08-06): 처방이 뜬 턴 129개 중 접힌 턴 **15개**(11.6%)이고 한 턴 최대는
+	// **7건**이다. 접혀서 사라지던 축은 overlap 11 · unclaimed 11 · silent 4 · outside 2 —
+	// 앞선 판의 "35턴 중 2개"는 **표본이 4배가 되기 전** 값이다(lane-turn 은 원장에 전 기간
+	// 0건이라 그 축의 효과가 아니다. PrescribeMax 주석의 재측 문단).
+	//
+	// ★ **이 커밋 뒤로 접힘 빈도는 원장에서 못 잰다.** 표시분만 기록하므로 한 턴의 prescribe
+	// 이벤트 수가 구조적으로 PrescribeMax 를 못 넘고, `folded` 는 slog 와 화면 문구에만 남는다.
+	// 위 129/15 는 **마지막으로 잴 수 있었던 값**이고, 다시 재려면 folded 를 원장에 실어야
+	// 한다(후속: fd-folded-count-left-no-ledger-trace).
+	for _, p := range shown {
 		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID,
 			prescribePayload{Key: p.Key, Reason: p.Reason})
 	}
@@ -229,6 +256,19 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 //
 // ★ **실패해도 판단 저장을 되돌리지 않는다.** 판단이 재생성 불가한 자산이고 ack 은 계측이다.
 // 다만 삼키지 않는다 — WARN 으로 남긴다.
+//
+// ★ **이 통로를 지나는 것은 판단을 남기는 경로뿐이다(note·finish). `land` 는 안 지난다.**
+// 그래서 행동이 `land()` 인 처방(`lane-turn`)에 대해 확인은 **정확히 반대 신호**를 잰다 —
+// 처방대로 랜딩한 세션은 미확인으로 남고, 처방을 무시하고 상관없는 판단만 남긴 세션이
+// 확인으로 잡힌다. 위 "note 한 번이 전부를 닫는다"가 그 뒤집힘을 완성한다: 키를 안 가리므로
+// 레인과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 까지 닫는다.
+//
+// 이것은 **계약이 아니라 현재 사실**이고 `TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed`
+// 가 그대로 잠갔다 — 통로를 뚫으면(land 가 자기가 응답한 키만 골라 ack) 그 시험이 먼저
+// 빨개진다. 그때 고칠 것은 시험이 아니라 여기 적힌 사실이다.
+//
+// ★ 이 축과 `AckReach`(board.go)를 섞지 마라. 저쪽은 키를 안 보고 **세션 단위**로 센다.
+// 키별 확인율을 내는 코드는 없다 — 설계 §10 의 "overlap 0/31" 은 사람이 따로 잰 값이다.
 func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID string) {
 	sess, err := s.st.GetSession(ctx, sessionID)
 	if err != nil {
