@@ -88,3 +88,233 @@ func TestFinishRefusesTheSameFollowupIDTwiceInOneCall(t *testing.T) {
 		t.Fatalf("거절했는데 항목이 %d건 만들어졌다", n)
 	}
 }
+
+// TestFinishRefusesAFollowupThatBelongsToSomeoneElse 는 이 기능의 **안전 축**이다.
+//
+// ★ 회귀이기도 하다. 오늘은 남의 항목 id 를 후속으로 넣으면 항목만 안 만들어지고
+// **판단 링크는 그대로 걸린다**(finish.go:199 가 AddItem 보다 먼저 링크를 짜고
+// judgment_link.target_id 에 REFERENCES 가 없다). 즉 오타 하나로 남의 항목이 내 판단에
+// 조용히 이어진다. 아래 링크 0건 단정이 그 문을 닫는다.
+//
+// ★ **title·body 를 일부러 채운다.** 안 채우면 지금 판이 finish.go:166 의
+// "제목이나 본문이 없다" 로 **먼저** 거절하고, 그 사유 문자열에 id 가 박혀 있어
+// 아래 Contains 까지 참이 된다 — err != nil · id 포함 · 판단 0건 · 링크 0건이
+// 전부 만족돼 시험이 **구현 전에도 초록**이 된다(실측으로 셋 다 PASS 했다).
+// 그러면 이 시험은 자격 축을 하나도 안 잠근다 — classifyFollowups 를 통째로 지워도 초록이다.
+// 채우면 지금 판이 실제로 성공하고(err == nil) judgment_link 에 남의 항목이 걸려,
+// 링크 0건 단정이 진짜로 회귀를 잠근다. 구현 뒤에는 classifyFollowups 거절이
+// 제목·본문 관문보다 먼저 오므로(Step 4 의 ②→③ 순서) 이 값들은 경로를 안 바꾼다.
+// id 만 싣는 잇기 경로는 Task 4 의 성공 시험이 잠근다.
+func TestFinishRefusesAFollowupThatBelongsToSomeoneElse(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", other.Session.ID, "someone-elses")
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "본문",
+		Followups: []FollowupInput{{ID: "someone-elses", Title: "제목", Body: "본문"}},
+	})
+	if err == nil {
+		t.Fatalf("남이 만든 항목을 후속으로 이었는데 통과했다")
+	}
+	if !strings.Contains(err.Error(), "someone-elses") {
+		t.Fatalf("거절 사유가 어느 id 인지 안 낸다:\n%s", err.Error())
+	}
+	// ★ **title/body 거절로 되돌아가는 회귀를 이 줄이 막는다.** "이을 자격이 없다" 는
+	//   refuseIneligibleFollowup 의 Reason 에만 있고 다른 어떤 거절에도 없다.
+	//   ("이을 수 있는 것은" 은 그 Guidance 첫 줄에도 있어 사유 갈래와 무관하게 늘 맞으므로
+	//    쓰면 안 된다 — 이 셋 중 둘은 len(eligible)==0 갈래라 Reason 쪽 그 문구가 안 나온다.)
+	if !strings.Contains(err.Error(), "이을 자격이 없다") {
+		t.Fatalf("자격 축이 아닌 다른 관문이 먼저 거절했다 — 이 시험은 무엇도 안 잠근다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 아무것도 안 써야 한다", n)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM judgment_link WHERE target_id = 'someone-elses'`); n != 0 {
+		t.Fatalf("남의 항목에 판단 링크가 %d건 걸렸다 — 오타 하나로 남의 항목이 내 판단에 붙는다", n)
+	}
+}
+
+// TestFinishRefusesAFollowupThatIsAlreadyClosed 는 닫힌 항목을 못 잇게 한다.
+//
+// 닫힌 것을 이으면 판단이 "이 작업이 낳은 후속"이라고 말하는 대상이 이미 끝난 일이 된다.
+// 관문(sessionSpawnedOpen)도 같은 이유로 닫힌 것을 안 센다 — 두 목록이 한 정의에서 나온다.
+func TestFinishRefusesAFollowupThatIsAlreadyClosed(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "already-landed")
+	if err := st.SetItemState(ctx(), "p", "already-landed", model.ItemDone, "남이 끝냈다"); err != nil {
+		t.Fatalf("전제 구성 실패: %v", err)
+	}
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "본문",
+		Followups: []FollowupInput{{ID: "already-landed", Title: "제목", Body: "본문"}},
+	})
+	if err == nil {
+		t.Fatalf("이미 닫힌 항목을 후속으로 이었는데 통과했다")
+	}
+	// ★ 위 시험과 같은 이유로 자격 축 문구를 못 박는다 — title·body 를 빼면 다른 관문이
+	//   먼저 거절해 이 시험이 구현 전에도 초록이 된다.
+	if !strings.Contains(err.Error(), "이을 자격이 없다") {
+		t.Fatalf("자격 축이 아닌 다른 관문이 먼저 거절했다 — 이 시험은 무엇도 안 잠근다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다", n)
+	}
+}
+
+// TestFinishRefusesAFollowupMadeBeforeTheClaim 은 **선점 전**에 만든 자기 항목도 못 잇게 한다.
+//
+// 오래 사는 세션은 앞선 작업의 항목을 갖고 있다. 그것을 이으면 이번 판단이 낳지 않은 일까지
+// "이 작업의 후속"이 된다 — 관문이 선점 시각으로 자르는 것과 같은 이유다.
+func TestFinishRefusesAFollowupMadeBeforeTheClaim(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItemAs(t, s, "p", me.Session.ID, "from-earlier-work")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "본문",
+		Followups: []FollowupInput{{ID: "from-earlier-work", Title: "제목", Body: "본문"}},
+	})
+	if err == nil {
+		t.Fatalf("선점 전에 만든 항목을 후속으로 이었는데 통과했다")
+	}
+	// ★ 위 둘과 같은 이유로 자격 축 문구를 못 박는다.
+	if !strings.Contains(err.Error(), "이을 자격이 없다") {
+		t.Fatalf("자격 축이 아닌 다른 관문이 먼저 거절했다 — 이 시험은 무엇도 안 잠근다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다", n)
+	}
+}
+
+// TestFinishStillRequiresTitleAndBodyForANewFollowup 은 이 태스크가 **안 뒤집는** 계약이다
+// (설계 §6-4). 새로 만드는 후속은 여전히 title·body 가 필수다.
+//
+// ★ 이 관문의 문구 "제목이나 본문"을 단정하는 시험이 저장소에 **하나도 없다** —
+// FollowupInput 을 쓰는 시험 13곳이 전부 Title·Body 를 채운다. 그런데 이 태스크는
+// 그 검사를 in.Followups 루프에서 plan.Create 루프로 **옮기고**, Task 6 은
+// followupSchema 의 required 를 id 하나로 낮춘다(tools.go:67). 그러면 title 없이 보내는 것이
+// **처음으로 정상 경로**가 되고 이 서비스 계층 검사가 남는 유일한 관문이 되는데,
+// 그 관문을 보는 시험이 없으면 조건을 흘려도(Create 가 비어 루프를 안 돌거나, c.Item 대신
+// 다른 것을 보거나) 전 스위트가 초록이다. 스키마 required 를 단정하는 시험도 저장소에 없다.
+//
+// ★ **적격 잇기를 첫째에, 새 후속을 둘째에 놓는다.** 이것이 이 시험을 빨강으로도 만든다:
+//
+//	지금 판은 in.Followups 를 전수로 도므로 **첫째**(spun-off-axis)에서 먼저 죽어
+//	"1번째 후속(spun-off-axis)에 제목이나 본문이 없다" 를 낸다 — 아래 "2번째 후속(brand-new)"
+//	단정이 그것을 잡는다. 구현 뒤에는 첫째가 잇기로 빠지고 둘째만 관문을 지나며,
+//	요청 좌표(followupCreate.Index)가 살아 있어야만 "2번째" 가 나온다.
+//	그 필드를 이 태스크가 일부러 만들었는데 그것을 보는 단정이 여기 말고 없다.
+func TestFinishStillRequiresTitleAndBodyForANewFollowup(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "spun-off-axis") // 선점 뒤 · 이 세션 · 열림 → 이을 수 있다
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{
+			{ID: "spun-off-axis"}, // id 만 — 이것은 이어진다(제목·본문을 다시 안 적는다)
+			{ID: "brand-new"},     // id 만 — 이것은 **새로 만들 것**이라 거절돼야 한다
+		},
+	})
+	if err == nil {
+		t.Fatalf("제목·본문 없는 새 후속이 통과했다 — 빈 항목이 큐에 들어간다")
+	}
+	msg := err.Error()
+	for _, want := range []string{"2번째 후속(brand-new)", "제목이나 본문이 없다"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("거절 사유에 %q 가 없다:\n%s", want, msg)
+		}
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 아무것도 안 써야 한다", n)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'brand-new'`); n != 0 {
+		t.Fatalf("거절인데 항목이 %d건 만들어졌다", n)
+	}
+}
+
+// TestFinishNamesTheLinkTargetWhenTheFollowupIDDoesNotExist 는 **오타의 사유가 갈리는 자리**다.
+//
+// id 만 실은 후속은 이제 "잇겠다"는 뜻이다(도구 스키마가 그렇게 가르친다 — Task 6).
+// 그 id 가 오타면 그런 항목이 없어 분류가 '만들기'로 떨어지고, 거절은 "제목이나 본문이 없다"가
+// 된다 — 세션은 진짜 사유를 못 받고 제목·본문을 지어내 **쌍둥이**를 만든다. 이으려던 항목은
+// 큐에 그대로 남는다. 이 도구가 없애려는 부류의 조용한 거짓과 같은 모양이라 여기서 닫는다.
+func TestFinishNamesTheLinkTargetWhenTheFollowupIDDoesNotExist(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", me.Session.ID, "spun-off-axis") // 이을 수 있었던 것
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{{ID: "spun-of-axis"}}, // 오타 — 이런 항목은 없다
+	})
+	if err == nil {
+		t.Fatalf("없는 id 를 id 만 실었는데 통과했다")
+	}
+	for _, want := range []string{"이을 셈이었다면", "spun-off-axis"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("거절이 %q 를 안 낸다 — 세션이 제목·본문을 지어내 쌍둥이를 만든다:\n%s", want, err.Error())
+		}
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'spun-of-axis'`); n != 0 {
+		t.Fatalf("오타 id 로 항목이 %d건 만들어졌다", n)
+	}
+}
+
+// TestRefuseIneligibleFollowupSaysWhichOfTheThreeReasons 는
+// **`observed` bool 을 지키는 유일한 자리다.**
+//
+// 위 통합 시험 셋은 전부 `observed=true · eligible 빈 목록` 한 갈래만 밟는다(셋 다 claimed 를
+// 먼저 하고, 자격자가 있으면 거절이 아니라 잇기가 되기 때문이다). 관측 실패 갈래와 이름을 내는
+// 갈래는 통합 경로로 안 걸린다. 그래서 세 갈래를 여기서 **순수 함수로 직접** 부른다 —
+// 이 단정이 없으면 다음 개정이 sessionSpawnedOpen 을 []string 하나로 되접어도 전부 초록이다.
+// 같은 빈 값이 두 뜻을 갖는 모양은 이 저장소가 반복해서 닫아 온 실패고,
+// render_accounting_test.go:245 가 StillHeld 의 nil 갈래를 같은 방식으로 직접 단정한다.
+func TestRefuseIneligibleFollowupSaysWhichOfTheThreeReasons(t *testing.T) {
+	unobserved := refuseIneligibleFollowup(1, "x", "batch7", nil, false)
+	none := refuseIneligibleFollowup(1, "x", "batch7", nil, true)
+	named := refuseIneligibleFollowup(2, "x", "batch7", []string{"spun-off-axis"}, true)
+
+	if !strings.Contains(unobserved.Reason, "못 읽어") {
+		t.Fatalf("관측 실패를 사유로 안 낸다:\n%s", unobserved.Reason)
+	}
+	if unobserved.Reason == none.Reason {
+		t.Fatalf("관측 실패와 '만든 것이 없다'가 같은 문구다 — 세션이 없는 사고를 쫓는다:\n%s",
+			unobserved.Reason)
+	}
+	if !strings.Contains(none.Reason, "하나도 없다") {
+		t.Fatalf("관측은 했는데 자격자가 없다는 사실을 안 낸다:\n%s", none.Reason)
+	}
+	if !strings.Contains(named.Reason, "spun-off-axis") {
+		t.Fatalf("이을 수 있는 것의 이름을 안 낸다 — 수만 말하면 다시 조사해야 한다:\n%s",
+			named.Reason)
+	}
+	if !strings.Contains(named.Reason, "2번째") {
+		t.Fatalf("요청 좌표(몇 번째 후속인지)를 잃었다:\n%s", named.Reason)
+	}
+}
