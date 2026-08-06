@@ -146,3 +146,29 @@ func eventItemID(e model.Event) string {
 	}
 	return strings.TrimSpace(p.Item)
 }
+
+// dedupeLinks 는 판단 링크에서 같은 (종류·대상)을 처음 것만 남긴다.
+//
+// ★ 이것이 없으면 **판단이 사라진다.** judgment_link 의 PK 는
+// (judgment_id, target_kind, target_id)(schema.sql:271) 이고 AddJudgment 는 평범한
+// INSERT 다(store/judgment.go:54). finish 는 in.ItemID · in.Links · 후속 id 를 이어 붙이므로
+// 셋 중 무엇이든 겹치면 ① 이 ConflictDuplicate 를 내고 Store.Tx 가 ①②③④ 를 통째로
+// 롤백한다 — 넷 중 판단만이 원리적으로 파생 불가하다.
+//
+// ★ **잠금으로는 못 닫는 창이다.** _txlock=immediate(store/store.go:211)가 배제하는 것은
+// 다른 커넥션이고, 이 겹침은 한 호출이 자기와 부딪히는 것이다.
+//
+// 저장층에 OR IGNORE 를 넣지 않는 이유: 그러면 "링크가 겹쳤다"가 어느 호출에서도 안 보이게
+// 되고, 판단 링크를 조립하는 책임이 있는 이 계층이 자기 실수를 못 배운다.
+func dedupeLinks(links []model.JudgmentLink) []model.JudgmentLink {
+	seen := make(map[model.JudgmentLink]bool, len(links))
+	out := make([]model.JudgmentLink, 0, len(links))
+	for _, l := range links {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	return out
+}
