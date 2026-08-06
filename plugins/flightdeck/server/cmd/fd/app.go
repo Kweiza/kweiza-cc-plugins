@@ -31,9 +31,29 @@ type App struct {
 	// "왜 저 값인가"에 답할 자리가 없으면 /proc 을 뒤지게 된다. 새 정체 경로를 더해 놓고
 	// 같은 줄을 빼먹었던 것이 fd-doctor-beacon-axis 다.
 	beaconSrc string
-	host      string
-	stdin     io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
-	now       func() time.Time
+	// binDir 는 **바이너리 캐시 디렉토리**(BinCacheDir)다 — 셸 런처가 빌드 산출물을 두는
+	// 그 자리와 같은 값이어야 한다. 소비자가 둘이다: hook.go 의 pruneBinCache 가 이
+	// 디렉토리를 훑어 상한을 잡고, doctor 의 ExeLines 가 "지금 도는 실행 파일이 그 자리
+	// 안인가"를 이것과 견준다.
+	//
+	// ★ **자리 계산의 주인은 BinCacheDir 하나다.** 여기서 filepath.Join(home, ".cache", …) 을
+	//   다시 조립하면 같은 판단이 두 자리에 살게 되고, 그때 어긋남은 화면에 안 뜬다 —
+	//   doctor 가 멀쩡한 프로세스에 "자리 밖이다"라고 조용히 거짓 경보를 낸다
+	//   (client.go 의 newClient 주석이 적어 둔 규율. 이 레포는 그 사고를 세 번 겪었다).
+	// ★ **디렉토리까지만이다.** 파일 이름(fd-<접은 소스 트리>)의 키 규칙은 런처가 유일한
+	//   주인이고, 그 역함수를 Go 에 두지 않는다. 그래서 이 필드에 파일 이름을 붙이지 마라.
+	// ★ **빈 문자열일 수 있다** — 형제들(MachineIDPath·ConfigPath·OutboxPath·BeaconDir)과
+	//   다른 유일한 갈래다. HOME 도 FD_STATE_DIR 도 없으면 런처 자신이 짓기를 거절하기
+	//   때문이고(공용 /tmp 에는 실행 파일을 안 놓는다 — 남이 심은 것을 exec 하게 된다),
+	//   그때는 소비부도 침묵해야 한다: 훑을 자리가 없고, 견줄 자리도 없다. 안 잰 축을 잰
+	//   척하지 않는다(설계 §13). 그래서 두 소비부가 각자 먼저 빈 값을 가른다.
+	binDir string
+	// binSrc 는 그 자리를 **고른 사유**다. beaconSrc·machineSrc 가 선례이고,
+	// **binDir 이 비어도 항상 채워진다** — '자리가 없다'는 것 자체가 사유를 갖는 판정이다.
+	binSrc string
+	host   string
+	stdin  io.Reader // note·finish 의 본문이 여기서 온다. os.Stdin 을 본문에 박으면 시험이 못 준다
+	now    func() time.Time
 }
 
 func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin io.Reader) *App {
@@ -41,6 +61,10 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 	sd := ResolveStateDir(env, home)
 	mid, midSrc, warn := MachineID(env, home)
 	beaconDir, beaconSrc := BeaconDir(env, home)
+	// ★ 바이너리 캐시 자리는 **여기서 한 번만** 계산한다. 소비자가 둘이라(GC · doctor 의
+	// 자리 축) 각자 부르게 두면 두 답이 갈릴 수 있고, 그러면 GC 가 훑는 디렉토리와
+	// doctor 가 견주는 디렉토리가 서로 다른 채로 둘 다 초록이 된다.
+	binDir, binSrc := BinCacheDir(env, home)
 	host, herr := os.Hostname()
 	if herr != nil {
 		host = "unknown"
@@ -60,6 +84,8 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 		machineSrc: midSrc,
 		beaconDir:  beaconDir,
 		beaconSrc:  beaconSrc,
+		binDir:     binDir,
+		binSrc:     binSrc,
 		notice:     warn,
 		host:       host,
 		stdin:      stdin,

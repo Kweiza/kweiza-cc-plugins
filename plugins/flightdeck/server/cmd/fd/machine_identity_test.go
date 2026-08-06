@@ -104,8 +104,8 @@ func TestDoctorReportsMachineAxisWithSource(t *testing.T) {
 		t.Fatal("대조 전제가 깨졌다 — App 의 머신 id 가 비었다")
 	}
 	// ★ 값과 자리를 **한 줄로** 단정한다. 따로 찾으면 공허해진다 —
-	// "FD_STATE_DIR" 는 바로 위 상태 디렉토리 줄에도 있어서, 머신 줄이 통째로 없어도
-	// 통과하는 단정이 된다.
+	// "FD_STATE_DIR" 는 바로 위 응답 캐시·바이너리 캐시 줄에도 있어서, 머신 줄이 통째로
+	// 없어도 통과하는 단정이 된다(그 한 줄이 둘로 갈린 뒤로는 그런 이웃이 둘이다).
 	line := "  머신 " + want + " (FD_STATE_DIR"
 	if !strings.Contains(out, line) {
 		t.Errorf("doctor 에 머신 축 줄(%q)이 없다:\n%s", line, out)

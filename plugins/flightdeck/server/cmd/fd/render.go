@@ -205,6 +205,13 @@ func selfUpdateLines(h healthzResponse) []string {
 	if s := strings.TrimSpace(su.Stalled); s != "" {
 		lines = append(lines, "자동 갱신  **막혔다** — "+clip(s, 300))
 	}
+	// ★ **못 덮는 갈래를 "보는 중"으로 접지 않는다.** 이름에 소스 지문이 박힌 자리를 감시하는
+	// 프로세스는 플러그인 버전이 오르는 갱신을 영영 못 본다 — 그 사실을 안 말하면 화면이
+	// "따라오고 있다"고 거짓말한다(설계 §13). **막혔다**와 다른 문구인 것은 처방이 다르기
+	// 때문이다: 저쪽은 못 재는 원인을 고치는 것이고, 이쪽은 고칠 것이 없고 사람이 재기동한다.
+	if s := strings.TrimSpace(su.Uncovered); s != "" {
+		lines = append(lines, "자동 갱신  **한 갈래를 못 덮는다** — "+clip(s, 300))
+	}
 	if su.Outcome == "" {
 		if len(lines) == 0 {
 			lines = append(lines, "자동 갱신  보는 중 — 아직 교체를 못 봤다")

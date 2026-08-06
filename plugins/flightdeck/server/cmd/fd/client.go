@@ -456,11 +456,15 @@ type healthzResponse struct {
 		Watching bool   `json:"watching"`
 		Reason   string `json:"reason"`
 		Stalled  string `json:"stalled"`
-		LastAt   string `json:"last_at"`
-		From     string `json:"from"`
-		To       string `json:"to"`
-		Outcome  string `json:"outcome"`
-		Detail   string `json:"detail"`
+		// Uncovered 는 보고 있는데도 **구조적으로 못 덮는 갈래**다(감시 자리의 이름에 소스
+		// 트리가 박혀 있어 버전이 오르는 갱신을 영영 못 본다). Stalled 와 다른 축이라 따로 받는다 —
+		// 이 축을 안 내는 옛 서버면 빈 문자열이고, 그 침묵은 Build.Known 이 이미 설명한다.
+		Uncovered string `json:"uncovered"`
+		LastAt    string `json:"last_at"`
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Outcome   string `json:"outcome"`
+		Detail    string `json:"detail"`
 	} `json:"self_update"`
 }
 

@@ -893,10 +893,35 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 여기였다 — 코드는 멀쩡하고 도는 판이 낡았을 뿐인데 그 사실이 어디에도 안 보였다.
 	// api_version 은 계약이 깨질 때만 오르므로 이 축을 못 나른다.
 	fmt.Fprintf(out, "  이 판 %s\n", buildinfo.Short(buildinfo.Self()))
-	for _, line := range ExeLines(os.Executable()) {
+	// ★ 스프레드 호출(`ExeLines(os.Executable())`)이 더 이상 안 된다 — **기대 자리**를 셋째
+	// 인자로 받기 때문이다. 그 자리를 여기서 다시 조립하지 않는다: a.binDir 은 newApp 이
+	// BinCacheDir 로 한 번만 채운 값이고, 판단이 두 자리에 살면 이 줄이 조용히 거짓 경보를
+	// 낸다(app.go 의 binDir 주석). 빈 문자열도 **그대로 넘긴다** — ExeLines 가 그때 자리
+	// 축을 안 내는 것이 계약이라 호출부가 가를 것이 없다.
+	exe, exeErr := os.Executable()
+	for _, line := range ExeLines(exe, exeErr, a.binDir) {
 		fmt.Fprintln(out, "  "+line)
 	}
-	fmt.Fprintf(out, "  상태 디렉토리 %s (%s)\n", a.sd.Path, a.sd.Source)
+	// ★ **한 줄이던 것을 둘로 가른다.** 예전에는 「상태 디렉토리」 한 줄이었는데 그 이름이
+	// 이제 두 자리를 뜻한다 — 응답 캐시는 여전히 채널 사다리(CLAUDE_PLUGIN_DATA·
+	// XDG_STATE_HOME)를 타고(값이 자기 시각을 달고 다녀 채널마다 갈려도 각자 옳다 —
+	// cache.go 의 CacheEntry.At), 바이너리 캐시는 채널 무관한 고정 자리로 떨어져 나갔다
+	// (exec 되고 나면 어느 판인지 안 말하고 답하므로 두 벌이 다르면 하나가 거짓이다).
+	// 한 줄로 두면 그 갈림 자체가 화면에서 사라진다 — 2026-08-06 에 두 자리의 빌드 시각이
+	// 55분 어긋나 한 응답의 서버 축과 렌더 축이 갈렸을 때, 이 줄을 본 사람은
+	// "상태 디렉토리는 맞는데?"에서 멈췄다. 축이 둘이면 줄도 둘이어야 한다.
+	fmt.Fprintf(out, "  응답 캐시 %s (%s)\n", a.sd.Path, a.sd.Source)
+	if a.binDir == "" {
+		// ★ 빈 자리를 %s 로 흘리면 「바이너리 캐시  (…)」가 되어 '못 읽었다'로 읽힌다.
+		// 여기는 **자리가 없는 것이 정상 판정인** 유일한 축이다(HOME 도 FD_STATE_DIR 도
+		// 없어 런처가 짓기를 거절한 상태). 값이 없으므로 답은 사유 쪽에 있다.
+		fmt.Fprintf(out, "  바이너리 캐시 없음 (%s)\n", a.binSrc)
+	} else {
+		// 파일 이름이 아니라 **디렉토리**를 찍는다 — 이름의 키 규칙(fd-<접은 소스 트리>)은
+		// 런처가 유일한 주인이라 여기서 해독하지 않는다. 지금 도는 파일이 무엇인지는
+		// 바로 위 '실행 파일' 줄이 이미 답했고, 둘을 견주는 일도 그 줄이 한다.
+		fmt.Fprintf(out, "  바이너리 캐시 %s (%s)\n", a.binDir, a.binSrc)
+	}
 	// 머신 id 는 세션 정체 3중키의 첫 축이다. **값만 찍으면 부족하고 읽은 자리를 함께 찍는다** —
 	// 이 축이 채널마다 갈려 한 세션이 카드 세 장으로 떴을 때, 값이 다르다는 것보다
 	// "어느 파일에서 왔나"가 원인에 이르는 열쇠였다(그 줄이 없어 /proc 을 뒤져야 했다).
@@ -942,10 +967,40 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))
 		}
 	}
+	// ★ 옛 **바이너리** 자리에 남은 것. 위 아웃박스 줄과 **판이 다르다**: 저쪽은 다음 재생이
+	// 보내서 스스로 비우고, 이쪽은 **아무도 안 비운다.** 자리를 고정 자리로 옮길 때 옛 자리를
+	// 이관도 삭제도 안 하기로 했고(그 판정은 유효하다 — LegacyBinDirs 주석), pruneBinCache 는
+	// 지금 자리 한 디렉토리만 훑는다. 그래서 이 줄이 **그 자리를 말하는 유일한 표면**이다.
+	// 여기에 지우는 코드를 얹지 마라 — doctor 는 말만 한다.
+	//
+	// ★ ExeLines 의 "자리 밖" 줄과 **겹칠 수 있고, 겹쳐도 된다.** 축이 다르다: 그쪽은 지금
+	// 도는 **프로세스**, 이쪽은 아무도 안 도는 **파일**이다. 이행 창에는 둘 다 참이고,
+	// 하나로 접으면 세션이 재기동한 뒤 42MB 가 다시 안 보이게 된다(그 침묵이 이 항목이다).
+	//
+	// ★ **자리를 여기서 조립하지 않는다.** 후보 목록은 LegacyBinDirs 하나가 갖고,
+	// 홈은 homeDir 하나가 갖는다(app.go 가 부르는 그 함수다 — 사본이 아니라 같은 주인이다).
+	// 목표는 a.binDir 을 그대로 넘긴다: 지금 자리가 옛 자리로 찍히면 그 자체가 거짓이다.
+	//
+	// ★ **이 자리에 두는 이유** — 바로 아래 "이 채널이 계산할 수 있는 자리만" 문장이 이 줄의
+	// 정직성을 떠받친다(채널마다 후보가 갈리는 것이 이 축의 성질이다). 「바이너리 캐시」 줄 옆에
+	// 붙이면 그 문장과 30줄 떨어져 사람이 둘을 안 잇는다.
+	for _, lb := range legacyBinLeftovers(LegacyBinDirs(a.env, homeDir(a.env), a.binDir)) {
+		if lb.Err != "" {
+			// 0개와 '못 셌다'를 가른다 — 침묵은 '깨끗하다'로 읽힌다(훅 배너가 큐에 대해
+			// 같은 판정을 한다: hook_banner_legacy_test.go 의 "못 셌다" 축).
+			fmt.Fprintf(out, "  ! 옛 바이너리 자리 %s — 세다 걸렸다: %s\n", lb.Dir, clip(lb.Err, 200))
+			continue
+		}
+		fmt.Fprintf(out, "  ! 옛 바이너리 자리 %s — fd %d개 · %s"+
+			"(아무도 안 쓴다. 지우려면 사람이 지운다)\n", lb.Dir, lb.Files, humanBytes(lb.Bytes))
+	}
 	// ★ **이 목록이 못 보는 범위를 함께 찍는다.** 빼면 "0건"이 '깨끗하다'로 읽히는데,
 	// 그것은 안 잰 축을 잰 척하는 것이다(§13). 이 문장이 그 축의 유일한 파수꾼이다.
-	fmt.Fprintln(out, "  옛 자리 탐색은 이 채널이 계산할 수 있는 자리만이다 — "+
-		"다른 채널(훅·MCP 는 CLAUDE_PLUGIN_DATA)의 자리는 여기서 안 보인다.")
+	// ★ 이제 **두 부류**를 덮는다(아웃박스 큐 · 바이너리 자리). 둘 다 후보가 채널 환경에서
+	// 오므로 같은 한계를 갖고, 바이너리 쪽은 그 한계가 곧 "갈린 보고가 각자 옳다"의 근거다
+	// (env.go 의 LegacyBinDirs ★). 이름을 안 대면 그 근거가 화면에서 사라진다.
+	fmt.Fprintln(out, "  옛 자리 탐색(아웃박스 큐 · 바이너리 자리)은 이 채널이 계산할 수 있는 "+
+		"자리만이다 — 다른 채널(훅·MCP 는 CLAUDE_PLUGIN_DATA)의 자리는 여기서 안 보인다.")
 	if a.notice != "" {
 		fmt.Fprintf(out, "  ! %s\n", a.notice)
 	}
@@ -961,6 +1016,71 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	fmt.Fprintln(out, RenderHealth(h, true, a.cli.URL))
 	fmt.Fprintln(out, "  프로젝트별 git 도달성은 서버 표면에 없다 — 이 도구는 그 축을 재지 않았다.")
 	return 0
+}
+
+// legacyBinPrefix 는 **옛** 런처가 짓던 산출물의 이름 접두다.
+//
+// ★ **bincache.go 의 `binCachePrefix`("fd-")를 쓰지 않는다. 두 상수를 합치지 마라.**
+// 방향이 반대다 — 저쪽은 GC 가 **안 지울 것**을 넓히는 배제 조건이라(남의 파일일 수 있다)
+// 좁게 잡을수록 안전하고, 이쪽은 진단이 **말할 것**을 넓히는 포함 조건이라 좁게 잡으면
+// 침묵한다. 그리고 옛 런처가 짓던 이름은 접두가 없는 그냥 `fd` 다(개정 전 bin/fd 의
+// `bin="$state/bin/fd"`). "fd-" 로 세면 이 줄이 존재하는 유일한 이유인 그 두 파일이
+// **정확히 0개**로 세어진다(2026-08-07 실측 잔존이 둘 다 이름 `fd` 다).
+// exe.go 가 자리 축에서 같은 함정을 같은 근거로 피했다.
+const legacyBinPrefix = "fd"
+
+// legacyBin 은 옛 바이너리 자리 하나에 남은 것이다. **읽기만 한다.**
+type legacyBin struct {
+	Dir   string
+	Files int
+	Bytes int64
+	Err   string // 셀 수 없었던 사유. 0개와 '못 쟀다'를 가르는 자리다
+}
+
+// legacyBinLeftovers 는 후보 자리들을 stat 해서 **남은 것이 있는 자리만** 낸다.
+//
+// ★ **판정이 여기 없다.** 자리를 고르는 일은 LegacyBinDirs 가, 크기 문구는 humanBytes 가,
+// 출력은 runDoctor 가 한다. 여기가 하는 것은 세기뿐이다.
+//
+// ★ 빈 자리·없는 자리는 **안 낸다.** 후보가 셋이라 매 실행마다 세 줄이 뜨면 그것은 진단이
+// 아니라 배경 소음이고, 소음이 된 줄은 정작 참인 날 아무도 안 읽는다(LegacyLeftovers 가
+// 같은 판정을 같은 이유로 한다 — client.go 의 "빈 자리는 안 낸다").
+//
+// ★ **bincache.go 의 readBinCache 를 안 쓴다.** 그쪽 산출물은 GC 판정의 입력(경로·mtime)이라
+// 크기가 없다. 크기 축을 그쪽에 얹으면 GC 의 입력 구조체가 **진단 때문에** 넓어지는데,
+// GC 가 재는 축은 나이 하나다. 대신 여기에는 판정이 하나도 없어서 사본이 될 것도 없다.
+//
+// ★ 디렉토리는 안 센다(런처는 거기에 디렉토리를 안 짓는다). 재귀도 안 한다 — 남의 트리를
+// 훑어 크기를 부풀리면 사람이 지울 대상을 오판한다.
+func legacyBinLeftovers(dirs []string) []legacyBin {
+	var out []legacyBin
+	for _, dir := range dirs {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // 아예 없는 자리다. 이 머신이 그 판을 안 거쳤거나 사람이 이미 지웠다
+			}
+			out = append(out, legacyBin{Dir: dir, Err: err.Error()})
+			continue
+		}
+		lb := legacyBin{Dir: dir}
+		for _, e := range ents {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), legacyBinPrefix) {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue // 훑는 사이 사라졌다 — 사람이 지우는 중이다. 그것은 오류가 아니다
+			}
+			lb.Files++
+			lb.Bytes += info.Size()
+		}
+		if lb.Files == 0 {
+			continue
+		}
+		out = append(out, lb)
+	}
+	return out
 }
 
 // sessionID 는 이 실행이 붙을 세션 id 다.

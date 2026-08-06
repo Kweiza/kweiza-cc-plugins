@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -201,6 +202,72 @@ type selfUpdateStatus struct {
 	//
 	// **다시 재지면 비운다.** 지나간 고장을 현재형으로 말하면 화면이 반대 방향으로 거짓말한다.
 	Stalled string
+
+	// Uncovered 는 **보고는 있는데 이 감시가 구조적으로 못 덮는 갈래**다.
+	//
+	// ★ **Stalled 와 다른 축이다. 한 필드로 접지 마라.** Stalled 는 "지금 못 잰다"는 일시
+	// 고장이고(다시 재지면 비운다), 이것은 재고 있는데도 **영영 안 바뀔 자리**를 재고 있다는
+	// 사실이다 — 고장이 아니라 성질이라 회복이 없다. 처방도 갈린다: 전자는 "왜 못 재는지
+	// 고쳐라", 후자는 "이 갱신은 사람이 재기동해야 한다"다.
+	//
+	// 런처(bin/fd)가 짓는 이름에는 소스 트리가 박혀 있고 그 경로에는 플러그인 버전이
+	// 들어간다(bincache.go 의 상한 주석이 같은 사실을 센다) — 버전이 오르면 새 세션은
+	// **다른 이름**을 짓고 이 자리는 아무도 안 덮는다. 그때 Decide 는 영원히 "그대로다"이고,
+	// 그것을 watching=true 만으로 말하면 침묵보다 나쁜 **틀린 안심**이다(containerVerdict 가
+	// 감시를 아예 안 켜는 이유와 같은 모양).
+	//
+	// **2026-08-06 A/B 실측.** 옛 방식(고정 이름)은 같은 자리가 새 inode 로 덮여 30초 안에
+	// 자기 갱신이 돌았고, 지문 이름에서는 0.11.0 빌드 뒤 75초가 지나도 0.10.0 파일의
+	// inode·mtime 이 불변이고 /healthz 는 `watching=true` 뿐이었다.
+	//
+	// **그래도 감시를 끄지는 않는다.** 같은 소스 트리의 재빌드(개발 워크트리·`git pull`)는
+	// 여전히 이 자리를 `mv -f` 로 덮어 사슬이 정상으로 돈다 — watching=false 는 과보고다.
+	//
+	// ★★ **트리거 복원을 재판했고 기각했다(2026-08-07). 다시 열려면 아래를 먼저 뒤집어라.**
+	//
+	// 이 필드는 못 덮는 갈래를 **말하기만** 한다. 말하는 대신 **덮는** 쪽 — 트리거를
+	// `w.exePath` 한 자리에서 "내 후계자인 `fd-*`" 로 넓히는 쪽 — 을 이번에 실제로 따졌다.
+	// 후보는 둘이었고 **둘 다 같은 자리에서 걸린다: 후계자를 알아보는 단서가 경로 모양뿐이다.**
+	//
+	//   (가) 지금 exe 의 키에서 **버전 부분만 다른** 이름. 키를 해독해야 하는데 bincache.go 가
+	//        "키를 해독하지 않는다 — 역함수를 Go 에 두면 규칙이 두 벌이 된다"고 이미 판정했다.
+	//        해독해도 **"어느 성분이 버전인가"** 를 알아야 하고, 그것이 곧 경로 모양 추측이다.
+	//   (나) CLAUDE_PLUGIN_ROOT 의 형제 버전 디렉토리에서 키를 짓기. env.go 의 LegacyOutboxDirs
+	//        가 `~/.claude/plugins/data/*/flightdeck` 를 glob 하지 않기로 하며 못 박은 금지에
+	//        **그대로 걸린다**("그 경로에는 플러그인 버전과 마켓 이름이 들어간다 · 추측해 박으면
+	//        마켓 이름이 바뀌는 날 조용히 빗나간다", 설계 §13). 게다가 키를 Go 에서 **짓게** 되어
+	//        접음 규칙의 둘째 사본이 생긴다 — (가)가 피하려던 바로 그것이다. 그리고 이 프로세스가
+	//        쥔 CLAUDE_PLUGIN_ROOT 가 옳다는 보장도 없다: 2026-08-07 실측, 이 머신에서 살아 있는
+	//        flightdeck 프로세스 12개 중 **2개가 `…/flightdeck/0.2.6`** 을 쥐고 있고 **그
+	//        디렉토리는 이미 없다**(최고령 2.66일). 형제를 세려는 자리가 그 프로세스에는 없다.
+	//
+	// 해독 없는 우회 — 후보의 **소스 절대경로를 바이너리에서 사후 대조** — 도 쟀다. 2026-08-07
+	// 실측: 기본 빌드에는 소스 절대경로가 114곳 박혀 있고 `go build -trimpath` 한 줄이면 **0곳**
+	// 이다. 즉 트리거를 컴파일러 산출물 위에 세우는 것이고, 사라질 때의 모양이 **침묵**이다 —
+	// 이 필드가 없애려는 상태 그 자체다. 대조에 성공해도 "형제 = 성분 하나만 다르다"는 규칙이
+	// 여전히 필요한데, 이 머신의 워크트리 **14벌**이 각자 `…/worktrees/<이름>/plugins/flightdeck/
+	// server` 라 서로에 대해 정확히 그 규칙을 만족한다 — 앞 라운드가 없앤 교차 오염이 자기 갱신
+	// 경로로 되살아난다(그 라운드가 기각한 "bin/ 안 최신 mtime 감시"와 같은 도착지다).
+	//
+	// ★ **mtime 최신은 최신 버전이 아니다.** 어느 후보 규칙을 쓰든 최종 선택은 mtime 인데, 옛
+	// CLAUDE_PLUGIN_ROOT 를 쥔 세션이 훅을 한 번 돌리면 **옛 키가 새 mtime** 을 얻는다(위 0.2.6
+	// 프로세스가 그 배치로 2.66일 살아 있다). 그러면 갱신 방향이 뒤집혀 서버가 옛 판으로
+	// 내려가고, 새 세션이 새 키를 다시 지으면 또 올라간다 — 회차마다 드레인+재기동이 도는
+	// **깜빡임**이다. 지금의 침묵보다 명백히 나쁘다.
+	//
+	// ★ **검증은 이 실수를 못 거른다.** verifyWithSelfcheck 는 `fd selfcheck ok build=` 한 줄을
+	// 보는데 **어느 브랜치의 fd 든** 그 줄을 낸다. 즉 후보 선정 규칙이 유일한 방어선이고,
+	// 위에서 본 대로 그 규칙이 전부 추측이다.
+	//
+	// 남는 결론: **버전이 올라도 살아남는 계보 식별자가 이 시스템 어디에도 없다.** 버전은 경로에
+	// 있고 그 경로가 곧 키이며, 설계는 경로 모양을 되짚는 것을 금지한다. 그러니 이것은 트리거
+	// (여기)에서 풀 문제가 아니라 **런처 쪽에 버전과 무관한 플러그인 정체를 새로 만드는 설계
+	// 변경**이다. 그 변경이 오기 전까지는 이 필드가 답이고 처방은 사람의 재기동이다 — 안 잰 축을
+	// 잰 척하지 않는다(설계 §13). 여기서 안 잰 축은 "어느 파일이 내 후계자인가"다.
+	//
+	// 그래서 트리거는 여전히 `w.exePath` **한 자리**다. 그 사실을 시험이 잠근다
+	// (selfwatch_test.go 의 "감시기는 제 자리 말고 아무것도 안 잰다").
+	Uncovered string
 }
 
 // selfWatcher 는 실행 파일 교체를 감시하고, 검증을 거쳐 스스로 재기동한다.
@@ -276,8 +343,37 @@ func detectContainer() (bool, string) {
 	return containerVerdict(dockerErr == nil, dataErr == nil)
 }
 
+// osExecutable 은 os.Executable 이다. **변수인 이유는 하나뿐이라 여기 적어 둔다** —
+// 런처의 FD_PRINT_BIN 이 그랬듯, 시험용 이음매는 사유가 붙어야 다음 사람이 그것을
+// "그냥 주입 자리"로 넓히지 않는다.
+//
+// 아래 Uncovered 축의 전부는 "이 실행 파일이 런처가 짓는 자리 안인가" 하나인데,
+// **시험 바이너리는 그 조건을 원리적으로 못 만든다**: BinCacheDir 은 항상 `<자리>/bin` 을
+// 내고 시험 바이너리는 go-build 임시 자리(`/tmp/go-buildNNN/bNNN/…`)에서 돈다. 가짜 HOME 을
+// 어떻게 줘도 filepath.Dir(진짜 exe) 가 그 자리가 되지 않고, 심볼릭 링크로도 못 맞춘다 —
+// 리눅스의 os.Executable 은 /proc/self/exe 라 링크를 이미 다 푼 값을 준다. 그래서
+// **조립(runServe → newServeWatcher)이 감시기에 자리를 실제로 먹이는지**를 재려면
+// 이 한 축만 시험이 흔들 수 있어야 한다(selfwatch_wiring_test.go).
+//
+// ★ **binDir 쪽은 이음매로 안 뺀다.** 그쪽은 이미 인자라 시험이 그냥 준다 — 그리고 그것을
+// 이음매로 빼면 정작 재려던 것(조립이 BinCacheDir 의 답을 넘기는가)이 시험에서 사라진다.
+var osExecutable = os.Executable
+
 // newSelfWatcher 는 감시기를 만든다. **기준값을 여기서 정한다.**
-func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
+//
+// ★ **이 감시가 실제로 뜨는 범위는 좁다.** 신호는 `w.exePath` **한 자리**의 교체뿐인데,
+// 런처(bin/fd)가 바이너리 이름에 소스 트리를 박으므로 플러그인 **버전이 오르는 갱신은 이
+// 파일을 안 건드리고 다른 이름을 짓는다.** 즉 설치본에서 이 축은 안 뜬다 — 뜨는 것은 소스
+// 경로가 그대로인 채 파일이 다시 지어지는 경우(워크트리 서버·`git pull` 뒤 재빌드)뿐이다.
+// 코드만 읽고 "돈다"고 믿지 않게 여기 적어 둔다. 설계 §7 이 같은 말을 한다.
+//
+// ★ **그 범위를 넓히는 시도는 이미 재판받았다** — selfUpdateStatus.Uncovered 의 ★★ 에 기각
+// 사유와 실측이 있다. 여기서 다시 열기 전에 그쪽을 먼저 읽어라(판정은 한 자리에 산다).
+//
+// binDir 은 그 사실을 **화면까지 보내려고** 받는다(selfUpdateStatus.Uncovered). 자리 계산의
+// 주인은 BinCacheDir 하나이므로 여기서 다시 조립하지 않고 **받은 것과 견주기만** 한다.
+// 빈 문자열이면 견줄 것이 없다는 뜻이라 그 갈래를 안 낸다 — 모르면 침묵한다(설계 §13).
+func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 	w := &selfWatcher{
 		log: log, dbPath: dbPath, interval: defaultSelfWatchInterval,
 		stat: exeIDOfPath, verify: verifyWithSelfcheck, execSelf: execSelf,
@@ -290,7 +386,7 @@ func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
 		w.reason = why
 		return w
 	}
-	exe, err := os.Executable()
+	exe, err := osExecutable()
 	if err != nil {
 		w.reason = fmt.Sprintf("실행 파일 자리를 못 읽었다: %v", err)
 		return w
@@ -310,11 +406,54 @@ func newSelfWatcher(log *slog.Logger, dbPath string) *selfWatcher {
 		w.reason = fmt.Sprintf("실행 파일을 못 쟀다: %v", err)
 		return w
 	}
+
+	// ★ 런처가 소스 지문으로 이름 붙인 자리에서 도는가. 그렇다면 같은 소스의 재빌드는
+	// `mv -f` 가 이 파일을 덮어 감지되지만, **플러그인 버전이 오르면 키가 바뀌어** 새 세션이
+	// 다른 파일을 짓고 이 자리는 영영 안 바뀐다. 그 갈래를 말로 남긴다.
+	//
+	// ★ **파일 이름 규칙을 여기서 재구현하지 않는다 — 부모 디렉토리만 견준다.** 이름에
+	// 소스 트리를 접어 넣는 키의 유일한 주인은 런처이고, 그 사본을 여기 두면 한쪽만 고칠 때
+	// 조용히 어긋난다(ExeLines 가 같은 자리에서 같은 결정을 했다).
+	//
+	// ★ **자리 판정을 여기서 새로 구현하지 않는다 — exe.go 의 sameDirAs 하나가 답한다.**
+	// 정확히 그 사고가 이 줄을 낳았다: 같은 라운드에 exe.go 는 문자열 비교를 버렸는데 이쪽은
+	// 그 버린 비교를 복제한 채로 남아, 한 화면 안에서 doctor 는 "같은 자리"라 하고 /healthz 는
+	// "다른 자리"라 했다. 그 뒤 후속 하나가 **감싸는 세 조각**(Clean · 문자열 지름길 · inode
+	// 비교)까지 마저 그쪽으로 옮겼다 — 여기 남은 것은 호출 한 줄이다. 못 알아보는 것이 예외가
+	// 아니라 **기본값**인 이유(푼 경로 ↔ 안 푼 경로)와 어떤 홈이 그 모양인지는 sameDir 주석에
+	// 한 벌만 있다. 이쪽 화면의 실측만 여기 적는다 — 2026-08-07 A/B 재현: 링크한 가짜 홈에서
+	// 런처로 띄우면 문자열 판정은 `/healthz` 가 `{"watching": true}` 뿐이고(침묵이야말로 이
+	// 필드가 없애려던 상태다) inode 판정은 uncovered 를 낸다.
+	//
+	// ★ **파일 이름 규칙을 여기서 재구현하지 않는다 — 부모 디렉토리만 견준다.** 이름에
+	// 소스 트리를 접어 넣는 키의 유일한 주인은 런처이고, 그 사본을 여기 두면 한쪽만 고칠 때
+	// 조용히 어긋난다(ExeLines 가 같은 자리에서 같은 결정을 했다).
+	//
+	// 비용은 기동 때 한 번이고, 그것도 문자열이 갈렸을 때만 stat 이다(sameDirAs 의 계약).
+	// 이 생성자는 이미 detectContainer 의 os.Stat 두 번과 w.stat("/proc/self/exe") 를 부른다.
+	//
+	// `(deleted)` 표식은 안 뗀다: 그 접미는 basename 에만 붙어 filepath.Dir 이 안 흔들린다.
+	//
+	// ★ **`d != ""` 가드는 장식이 아니다.** `filepath.Clean("")` 은 `"."` 이라, 가드를 지우면
+	// 자리를 **모르는** 상태에서 프로세스의 **cwd** 와 견주게 된다 — cwd 가 마침 그 자리인
+	// 배치에서 "런처 자리다"라고 답하고, 그것이 §13 이 금지한 모양(안 잰 축을 잰 척)이다.
+	// 지우는 뮤테이션이 초록이던 것을 확인하고 selfwatch_test.go 가 t.Chdir 로 그 배치를
+	// 만들어 잠갔다 — 그 전까지 이 갈래를 지킨 것은 가드가 아니라 **우연**이었다.
+	if d := strings.TrimSpace(binDir); d != "" && sameDirAs(filepath.Dir(exe), d) {
+		w.status.Uncovered = "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd) — " +
+			"같은 소스의 재빌드는 이 자리를 덮어 감지되지만, 플러그인 **버전이 오르면 다른 이름**이 지어져 " +
+			"이 자리는 아무도 안 덮는다. 그 갱신은 사람이 서버를 재기동해야 한다"
+	}
+
 	w.watching = true
 	return w
 }
 
 // Status 는 /healthz 가 실을 값이다. 동시 호출된다.
+//
+// Uncovered 는 여기서 따로 실을 것이 없다 — 기동 때 한 번 정해져 status 에 박히므로
+// 값 복사에 그대로 따라온다. Watching·Reason 만 밖에 사는 것은 그 둘이 status 가 아니라
+// 감시기 자신의 필드이기 때문이다.
 func (w *selfWatcher) Status() selfUpdateStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -369,8 +508,15 @@ func (w *selfWatcher) Run(ctx context.Context, drain func()) {
 		w.log.Info("자기 재기동 감시를 안 켠다", "reason", clip(w.reason, 200))
 		return
 	}
-	w.log.Info("자기 재기동 감시 시작",
-		"exe", clip(w.exePath, 200), "interval", w.interval.String())
+	// ★ 못 덮는 갈래는 **기동 로그에도** 싣는다. "왜 갱신했는데 안 바뀌냐"를 뒤지는 사람이
+	// 먼저 여는 것이 서버 로그이고, 그 줄이 `exe=…` 만 말하면 여기서 답이 끊긴다(실측 A/B 에서
+	// 지문 방식은 로그에 한 줄도 안 남겼다). 기동 때 한 번뿐이라 배경이 되지 않는다 —
+	// 티커마다 같은 줄을 쌓지 않으려고 noteStall 이 사유로 접는 것과 같은 규율의 반대편이다.
+	attrs := []any{"exe", clip(w.exePath, 200), "interval", w.interval.String()}
+	if s := strings.TrimSpace(w.Status().Uncovered); s != "" {
+		attrs = append(attrs, "uncovered", clip(s, 300))
+	}
+	w.log.Info("자기 재기동 감시 시작", attrs...)
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 	for {
