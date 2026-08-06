@@ -2,6 +2,11 @@ package store
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -246,5 +251,76 @@ func TestReadLedgerSnapshotsKeepRawTimestampString(t *testing.T) {
 	if len(sn.ComputedAt) != len("2006-01-02T15:04:05.000000Z") {
 		t.Fatalf("computed_at 이 폭 고정이 아니다(%q, %d자) — DB 원문을 그대로 실어야 한다",
 			sn.ComputedAt, len(sn.ComputedAt))
+	}
+}
+
+// 원장 열기는 스키마를 바꾸지 않는다. store.Open 은 반드시 migrate 를 돌고
+// 그 앞에서 VACUUM INTO 를 뜨는데, 백업이 그 계기가 되면 안 된다.
+func TestOpenLedgerDoesNotMigrateOrBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fd.db")
+
+	// 먼저 정상 Open 으로 스키마를 올린다.
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s, err := OpenWithLogger(path, quiet)
+	if err != nil {
+		t.Fatalf("초기 Open 실패: %v", err)
+	}
+	seed(t, s, "p")
+	linkJudgment(t, s, "p", model.JudgmentDecision, "i1")
+	if err := s.Close(); err != nil {
+		t.Fatalf("닫기 실패: %v", err)
+	}
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+
+	ls, err := OpenLedger(context.Background(), path, quiet)
+	if err != nil {
+		t.Fatalf("OpenLedger 실패: %v", err)
+	}
+	d, err := ls.ReadLedger(context.Background())
+	if err != nil {
+		t.Fatalf("ReadLedger 실패: %v", err)
+	}
+	if len(d.Judgments) != 1 {
+		t.Fatalf("판단이 %d건 — 1건을 기대한다", len(d.Judgments))
+	}
+	if err := ls.Close(); err != nil {
+		t.Fatalf("원장 핸들 닫기 실패: %v", err)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat 실패: %v", err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("DB 파일이 바뀌었다: %d/%v → %d/%v",
+			before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+	// 새 .bak 이 뜨지 않았는지 본다.
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("디렉토리 훑기 실패: %v", err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), ".bak-") {
+			t.Errorf("원장 열기가 백업 파일을 만들었다: %s", e.Name())
+		}
+	}
+}
+
+// 없는 파일은 만들지 않고 거절한다. sql.Open 은 파일을 만들기 때문에,
+// 부재를 확인 안 하면 백업이 빈 DB 를 하나 만들어 놓고 "0건 백업했다"고 말한다.
+func TestOpenLedgerRejectsMissingFile(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	path := filepath.Join(t.TempDir(), "없다.db")
+	if _, err := OpenLedger(context.Background(), path, quiet); err == nil {
+		t.Fatal("없는 파일을 열었다 — 부재는 오류여야 한다")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Error("없는 파일을 만들어 버렸다")
 	}
 }

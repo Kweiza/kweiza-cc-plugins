@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"net/url"
 )
 
 // 판단 원장 내보내기 — `fd export --judgments` 의 저장 계층.
@@ -175,4 +177,68 @@ func ptrOf(ns sql.NullString) *string {
 	}
 	v := ns.String
 	return &v
+}
+
+// ledgerDSN 은 원장 읽기 전용 접속 문자열이다. 기본 dsn() 과 두 곳이 다르다.
+//
+//	_txlock=deferred      기본은 immediate 다. 읽기 스냅숏만 잡고 서버 쓰기를 안 막는다.
+//	                      deferred 의 알려진 위험(읽기 뒤 쓰기 승격이 SQLITE_BUSY 로 즉시
+//	                      실패하고 busy_timeout 이 안 듣는다)은 원장이 쓰기를 하지 않으므로
+//	                      발생할 자리가 없다.
+//	journal_mode 를 안 건다  그것이 이 DSN 에서 파일을 바꿀 수 있는 유일한 pragma 다.
+//	                      이미 WAL 인 파일은 되읽기가 그대로 wal 을 내므로 verifyPragmas 는 통과한다.
+func ledgerDSN(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Set("_txlock", "deferred")
+	return "file:" + path + "?" + q.Encode()
+}
+
+// OpenLedger 는 원장을 읽기 위해 DB 를 연다. **스키마를 바꾸지 않는다.**
+//
+// ★ store.Open 을 쓰지 않는 이유. 그것은 verifyPragmas 다음에 반드시 s.migrate 를 돌고,
+// 판정에 따라 증분을 적용하며 그 앞에서 VACUUM INTO 백업을 뜬다. 즉 낡은 DB 를 만나면
+// **백업하기 전에 스키마를 바꾼다.** 백업이 그 계기가 되면 안 된다.
+//
+// ★ mode=ro 를 쓰지 않는 이유. 서버가 죽은 채 -wal 이 남아 있으면 읽기 전용 연결은
+// WAL 복구를 못 해 **열기 자체가 실패한다.** 원장 내보내기는 정확히 그 상황에서 돌아야 한다.
+// "이행이 필요하면 거절"이 mode=ro 보다 강하다 — 애초에 바꿀 수 있는 상태로 안 들어간다.
+//
+// 없는 파일에는 오류를 낸다. sql.Open 은 파일을 **만들기** 때문에, 부재를 확인 안 하고 열면
+// 내보내기가 빈 DB 를 하나 만들어 놓고 "0건 내보냈다"고 말한다(ProbeMigration 과 같은 판단).
+func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	plan, err := ProbeMigration(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("원장을 읽기 전에 DB 상태를 재지 못했다(path=%q): %w", clip(path, 200), err)
+	}
+	if plan.Action != MigrateNone {
+		// Reason 은 PlanMigration 이 항상 채운다 — 새 문구를 지어내지 않는다.
+		return nil, fmt.Errorf("이 바이너리로 열면 DB 가 바뀐다(%s) — 원장 내보내기를 거절한다: %s "+
+			"(먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)", plan.Action, plan.Reason)
+	}
+
+	db, err := sql.Open("sqlite", ledgerDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("원장용 sqlite 열기 실패(path=%q): %w", clip(path, 200), err)
+	}
+	// 읽기 한 갈래뿐이라 커넥션을 늘릴 이유가 없다. 트랜잭션이 커넥션 하나에 묶인다.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("원장용 sqlite 접속 실패(path=%q): %w", clip(path, 200), err)
+	}
+
+	s := &Store{db: db, path: path, log: log}
+	// DSN pragma 가 실제로 걸렸는지 되읽어 확인한다 — 드라이버는 모르는 pragma 를 조용히 무시한다.
+	if err := s.verifyPragmas(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
 }
