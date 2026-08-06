@@ -123,6 +123,21 @@ func TestReadHandlesLongLines(t *testing.T) {
 	if _, err := Write(files, dir); err != nil {
 		t.Fatalf("Write 실패: %v", err)
 	}
+
+	// ★ 픽스처가 실제로 64KB 상한을 넘는지 Read 보다 먼저 단정한다. 이 상수가 나중에
+	//   줄어들면(리팩터링 실수 등) 이 단정이 없으면 시험은 계속 초록인 채 8MB 버퍼
+	//   계약을 아무것도 안 본다 — Read 가 그냥 성공해 버리기 때문이다. 실제로 디스크에
+	//   쓰인 줄을 잰다(readLines 가 실제로 읽는 대상). Task 5 의
+	//   TestEncodeHandlesBodyOverScannerDefault 가 같은 단정을 쓴다.
+	written, err := os.ReadFile(filepath.Join(dir, judgmentsFile))
+	if err != nil {
+		t.Fatalf("쓰인 파일을 못 읽었다: %v", err)
+	}
+	first := strings.SplitN(string(written), "\n", 2)[0]
+	if len(first) < 64*1024 {
+		t.Fatalf("픽스처가 상한보다 작다(%dB) — 이 시험이 아무것도 안 본다", len(first))
+	}
+
 	got, _, err := Read(dir)
 	if err != nil {
 		t.Fatalf("긴 줄 되읽기 실패(bufio.Scanner 기본 상한 64KB 를 넘었는가): %v", err)
