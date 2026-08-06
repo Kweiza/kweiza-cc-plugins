@@ -13,17 +13,27 @@ const (
 	// 알아보는 데도 쓰인다(outguard.go).
 	FormatName = "fd-judgment-backup"
 	// FormatVersion 은 이 산출물 배치의 버전이다. 파일 이름이나 줄 구조가 바뀌면 올린다.
-	FormatVersion = 1
-	// ManifestName 은 매니페스트 파일 이름이다.
-	ManifestName = "manifest.json"
+	//
+	// 2: FK 폐포를 닫으며 machines·projects·sessions 셋이 늘었다. 버전 1 산출물로 복원하면
+	//    세션 걸린 판단(실측 85%)이 FK 위반으로 전부 롤백되므로, Read 가 그것을 거절하는 것이 맞다.
+	FormatVersion = 2
 
 	judgmentsFile = "judgments.jsonl"
 	linksFile     = "judgment_links.jsonl"
 	snapshotsFile = "snapshots.jsonl"
+	machinesFile  = "machines.jsonl"
+	projectsFile  = "projects.jsonl"
+	sessionsFile  = "sessions.jsonl"
+
+	// ManifestName 은 매니페스트 파일 이름이다.
+	ManifestName = "manifest.json"
 )
 
 // Counts 는 내보낸 행 수다.
 type Counts struct {
+	Machines  int `json:"machines"`
+	Projects  int `json:"projects"`
+	Sessions  int `json:"sessions"`
 	Judgments int `json:"judgments"`
 	Links     int `json:"judgment_links"`
 	Snapshots int `json:"snapshots"`
@@ -57,12 +67,27 @@ func Encode(d store.LedgerDump, schemaVersion int, exportedAt string) (map[strin
 		SchemaVersion: schemaVersion,
 		ExportedAt:    exportedAt,
 		Counts: Counts{
+			Machines:  len(d.Machines),
+			Projects:  len(d.Projects),
+			Sessions:  len(d.Sessions),
 			Judgments: len(d.Judgments),
 			Links:     len(d.Links),
 			Snapshots: len(d.Snapshots),
 		},
 	}
 
+	machines, err := encodeLines(len(d.Machines), func(i int) any { return d.Machines[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("머신 인코딩 실패: %w", err)
+	}
+	projects, err := encodeLines(len(d.Projects), func(i int) any { return d.Projects[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("프로젝트 인코딩 실패: %w", err)
+	}
+	sessions, err := encodeLines(len(d.Sessions), func(i int) any { return d.Sessions[i] })
+	if err != nil {
+		return nil, m, fmt.Errorf("세션 인코딩 실패: %w", err)
+	}
 	judgments, err := encodeLines(len(d.Judgments), func(i int) any { return d.Judgments[i] })
 	if err != nil {
 		return nil, m, fmt.Errorf("판단 인코딩 실패: %w", err)
@@ -84,6 +109,9 @@ func Encode(d store.LedgerDump, schemaVersion int, exportedAt string) (map[strin
 	manifest = append(manifest, '\n')
 
 	return map[string][]byte{
+		machinesFile:  machines,
+		projectsFile:  projects,
+		sessionsFile:  sessions,
 		judgmentsFile: judgments,
 		linksFile:     links,
 		snapshotsFile: snapshots,

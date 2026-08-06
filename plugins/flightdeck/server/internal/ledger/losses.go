@@ -1,5 +1,5 @@
-// Package ledger 는 판단 원장(judgment · judgment_link · snapshot)을 JSONL 로 내보내고
-// 되읽는다.
+// Package ledger 는 판단의 FK 폐포(machine · project · session · judgment · judgment_link ·
+// snapshot)를 JSONL 로 내보내고 되읽는다.
 //
 // ★ 이름이 "backup" 이 아닌 이유: internal/store 에서 backup·BackupSuffix·<db>.bak-* 는
 // 이미 마이그레이션 직전 VACUUM INTO 로 뜨는 DB 파일 사본을 뜻한다. 두 개념이 같은 낱말을
@@ -19,7 +19,8 @@ func Losses() []string {
 			"되읽기 때 자동으로 다시 채워진다. 손실 0이다",
 		"`rowid` — 복원 후 원본과 달라진다. 안정 식별자는 judgment.id 뿐이고 " +
 			"FTS 조인은 트리거가 같은 rowid 로 맞춘다",
-		"`project`·`session`·`machine` 표 — 무손실 복원의 FK 폐포에 필요하지만 원장 밖이다. " +
-			"되읽기는 이 셋이 이미 있는 DB 를 전제한다",
+		"폐포 밖 표 전부(`item`·`job`·`counter`·`event`·`landing_row` 등) — 원장은 판단의 FK 폐포 " +
+			"여섯 표만 담는다. `judgment_link.target_id` 는 FK 가 아니라(CHECK 만) 링크 자체는 " +
+			"복원되지만, 그것이 가리키는 항목은 복원된 DB 에 없다",
 	}
 }

@@ -48,14 +48,57 @@ type LedgerSnapshot struct {
 	ComputedAt  string  `json:"computed_at"`
 }
 
-// LedgerDump 는 한 순간의 세 표 전량이다.
+// LedgerMachine 은 machine 표 한 행의 원문이다. NULL 가능 컬럼이 없다.
+type LedgerMachine struct {
+	ID        string `json:"id"`
+	Hostname  string `json:"hostname"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+// LedgerProject 는 project 표 한 행의 원문이다.
+type LedgerProject struct {
+	ID            string  `json:"id"`
+	Path          string  `json:"path"`
+	RemoteURL     *string `json:"remote_url"`
+	DefaultBranch string  `json:"default_branch"`
+	Config        *string `json:"config"`
+	ConfigFromSHA *string `json:"config_from_sha"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+// LedgerSession 은 session 표 한 행의 원문이다.
+//
+// ★ 이 표가 원장에 있는 이유. session.id 는 서버 발급 ULID 라 같은 3중키로 다시 열어도
+// 새 값이 나온다 — project·machine 처럼 "이름을 다시 부르면 같은 것"이 아니다.
+// 판단의 85%(실측 973/1141)가 session_id 를 갖고, 복원이 한 트랜잭션이라 그 FK 가 하나만
+// 깨져도 판단 전체가 롤백된다.
+type LedgerSession struct {
+	ID          string  `json:"id"`
+	Project     string  `json:"project"`
+	MachineID   string  `json:"machine_id"`
+	Worktree    string  `json:"worktree"`
+	CCSessionID string  `json:"cc_session_id"`
+	Label       *string `json:"label"`
+	State       string  `json:"state"`
+	BlockedWhy  *string `json:"blocked_why"`
+	OpenedAt    string  `json:"opened_at"`
+}
+
+// LedgerDump 는 한 순간의 FK 폐포 전량이다.
+//
+// 여섯 표다. 앞 셋(machine·project·session)이 뒤 셋의 FK 대상이고, machine·project 는
+// 아무것도 참조하지 않는 leaf 라 폐포가 여기서 닫힌다.
 type LedgerDump struct {
+	Machines  []LedgerMachine
+	Projects  []LedgerProject
+	Sessions  []LedgerSession
 	Judgments []LedgerJudgment
 	Links     []LedgerLink
 	Snapshots []LedgerSnapshot
 }
 
-// ReadLedger 는 세 표를 **한 트랜잭션 안에서** 전량 읽는다.
+// ReadLedger 는 여섯 표(FK 폐포 전량)를 **한 트랜잭션 안에서** 읽는다.
 //
 // ★ 왜 트랜잭션인가. 표를 따로 읽으면 그 사이 서버가 커밋한 판단의 **링크만** 산출물에
 // 들어간다(judgment 를 읽은 뒤 link 를 읽으므로). 그 링크가 가리키는 판단이 없으니
@@ -80,6 +123,15 @@ func (s *Store) ReadLedger(ctx context.Context) (LedgerDump, error) {
 	// 읽기만 하므로 언제나 롤백으로 끝낸다. 커밋할 것이 없다.
 	defer func() { _ = tx.Rollback() }()
 
+	if d.Machines, err = readLedgerMachines(ctx, tx); err != nil {
+		return d, err
+	}
+	if d.Projects, err = readLedgerProjects(ctx, tx); err != nil {
+		return d, err
+	}
+	if d.Sessions, err = readLedgerSessions(ctx, tx); err != nil {
+		return d, err
+	}
 	if d.Judgments, err = readLedgerJudgments(ctx, tx); err != nil {
 		return d, err
 	}
@@ -169,6 +221,78 @@ func readLedgerSnapshots(ctx context.Context, q dbtx) ([]LedgerSnapshot, error) 
 	return out, nil
 }
 
+// readLedgerMachines 는 머신 전량을 id 순으로 읽는다.
+func readLedgerMachines(ctx context.Context, q dbtx) ([]LedgerMachine, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+machineCols+` FROM machine ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 머신 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerMachine
+	for rows.Next() {
+		var m LedgerMachine
+		if err := rows.Scan(&m.ID, &m.Hostname, &m.FirstSeen, &m.LastSeen); err != nil {
+			return nil, fmt.Errorf("원장 머신 행 해석 실패: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 머신 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// readLedgerProjects 는 프로젝트 전량을 id 순으로 읽는다.
+func readLedgerProjects(ctx context.Context, q dbtx) ([]LedgerProject, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+projectCols+` FROM project ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 프로젝트 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerProject
+	for rows.Next() {
+		var p LedgerProject
+		var remote, config, fromSHA sql.NullString
+		if err := rows.Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch,
+			&config, &fromSHA, &p.CreatedAt); err != nil {
+			return nil, fmt.Errorf("원장 프로젝트 행 해석 실패: %w", err)
+		}
+		p.RemoteURL, p.Config, p.ConfigFromSHA = ptrOf(remote), ptrOf(config), ptrOf(fromSHA)
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 프로젝트 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// readLedgerSessions 는 세션 전량을 id 순으로 읽는다.
+func readLedgerSessions(ctx context.Context, q dbtx) ([]LedgerSession, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+sessionCols+` FROM session ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("원장 세션 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LedgerSession
+	for rows.Next() {
+		var x LedgerSession
+		var label, blockedWhy sql.NullString
+		if err := rows.Scan(&x.ID, &x.Project, &x.MachineID, &x.Worktree, &x.CCSessionID,
+			&label, &x.State, &blockedWhy, &x.OpenedAt); err != nil {
+			return nil, fmt.Errorf("원장 세션 행 해석 실패: %w", err)
+		}
+		x.Label, x.BlockedWhy = ptrOf(label), ptrOf(blockedWhy)
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("원장 세션 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
 // ptrOf 는 NULL 을 nil 로, 값을 포인터로 낸다.
 // str() 과 다르다 — str 은 NULL 을 "" 로 접어 둘을 구분 불가능하게 만든다.
 func ptrOf(ns sql.NullString) *string {
@@ -206,8 +330,9 @@ func ledgerDSN(path string) string {
 // UPDATE·DELETE 가 물리적으로 금지돼 있어, 잘못 넣은 행을 고치거나 지울 수 없다.
 // 그래서 중복 id 를 건너뛰지 않고 거절한다 — 조용히 넘어가면 무엇이 반쯤 들어갔는지 모른다.
 //
-// ★ project·session·machine 은 원장 밖이다. 이 셋이 이미 있는 DB 를 전제한다.
-// 없으면 FK 위반으로 트랜잭션 전체가 거절되고, 그 거절이 곧 "전제가 안 맞다"는 신호다.
+// ★ 폐포를 통째로 되쓴다. machine·project·session 이 판단보다 먼저 들어가고, 그 셋은
+// 아무것도 참조하지 않거나 서로만 참조하므로 여기서 닫힌다. 빈 DB 에 되쓰면 미리 심어 둘
+// 것이 하나도 없다 — 그것이 이 함수가 증명하는 "무손실"의 실제 의미다.
 func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 	return s.Tx(ctx, func(t *Tx) error {
 		// ★ supersedes 는 judgment 를 자기참조하고, 원장의 id 순서가 그 참조 순서와 같다는
@@ -215,6 +340,34 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		//   이 pragma 는 **이 트랜잭션에만** 걸리고 커밋 때 전부 검사된다.
 		if _, err := t.tx.ExecContext(t.ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 			return fmt.Errorf("FK 검사 미루기 실패: %w", err)
+		}
+		for _, m := range d.Machines {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO machine(id, hostname, first_seen, last_seen)
+				VALUES (?, ?, ?, ?)`,
+				m.ID, m.Hostname, m.FirstSeen, m.LastSeen); err != nil {
+				return fmt.Errorf("원장 머신 되쓰기 실패(id=%q): %w", clip(m.ID, 64), err)
+			}
+		}
+		for _, p := range d.Projects {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO project(id, path, remote_url, default_branch, config, config_from_sha, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				p.ID, p.Path, p.RemoteURL, p.DefaultBranch,
+				p.Config, p.ConfigFromSHA, p.CreatedAt); err != nil {
+				return fmt.Errorf("원장 프로젝트 되쓰기 실패(id=%q): %w", clip(p.ID, 64), err)
+			}
+		}
+		for _, x := range d.Sessions {
+			if _, err := t.tx.ExecContext(t.ctx, `
+				INSERT INTO session(id, project, machine_id, worktree, cc_session_id,
+				                    label, state, blocked_why, opened_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				x.ID, x.Project, x.MachineID, x.Worktree, x.CCSessionID,
+				x.Label, x.State, x.BlockedWhy, x.OpenedAt); err != nil {
+				return fmt.Errorf("원장 세션 되쓰기 실패(id=%q project=%q): %w",
+					clip(x.ID, 64), clip(x.Project, 64), err)
+			}
 		}
 		for _, j := range d.Judgments {
 			if _, err := t.tx.ExecContext(t.ctx, `
