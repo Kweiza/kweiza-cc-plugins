@@ -86,15 +86,33 @@ func portOf(addr string) string {
 // 빠져도(예: 컨테이너 판정을 안 넘겨도) 전 스위트가 초록이고, 어긋남은 운영에서만 보인다.
 // 정확히 그 모양이었다 — /healthz 는 "루프백은 통과한다"고 광고하는데 배선상 아무도
 // 통과하지 못했고, 아무 시험도 그것을 안 잡았다.
+//
+// ★ **콜백이 아니라 감시기를 받는다.** 앞 판은 `selfUpdate func() api.SelfUpdateStatus`
+// 를 받았는데, 그러면 시험이 넘길 수 있는 것이 `nil` 뿐이라 **콜백 안이 안 잠긴다** —
+// 2026-08-07 실측: runServe 의 그 클로저를 `api.SelfUpdateStatus{}` 로 바꿔도 전 패키지가
+// 초록이었다(self_update 가 통째로 영값이 되어 나가는 회귀가 조용히 통과한다).
+// 감시기를 받으면 콜백을 만드는 책임이 이 순수 함수로 들어와 시험이 왕복을 흔들 수 있고,
+// 호출부에서 축을 빠뜨리는 것은 **컴파일 에러**가 된다.
+//
+// ★ 이것으로 배선이 다 잠기는 것은 아니다 — 여기에 `nil` 을 명시로 넘기는 뮤테이션은
+// 여전히 통과한다. 조립을 밖으로 뺄수록 안 잠긴 자리가 한 칸씩 얕아질 뿐 사라지지는
+// 않는다(runServe 자신은 시험이 없다 — FD_TOKEN 도 같은 처지다). 여기서 멈추는 근거는
+// **실패 모양**이다: 토큰이 끊기면 인증이 통째로 열려 시끄럽게 드러나고, self_update 가
+// 끊기면 화면이 아무 말도 안 하는 **침묵**이라 이 축만 한 칸 더 뺐다.
 func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool,
-	selfUpdate func() api.SelfUpdateStatus) api.Options {
-	return api.Options{
+	watcher *selfWatcher) api.Options {
+	opt := api.Options{
 		Token:         token,
 		RatePerMinute: ratePerMinute,
 		Log:           log,
 		InContainer:   inContainer,
-		SelfUpdate:    selfUpdate,
 	}
+	// ★ nil 감시기면 콜백을 안 단다. api 쪽은 SelfUpdate 가 nil 이면 그 절을 통째로
+	// 빼므로(handlers_meta.go), "감시기가 없다"와 "감시기가 빈 값을 답한다"가 안 섞인다.
+	if watcher != nil {
+		opt.SelfUpdate = func() api.SelfUpdateStatus { return selfUpdateStatusOf(watcher.Status()) }
+	}
+	return opt
 }
 
 func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) api.Handler {
@@ -145,23 +163,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
 	watcher := newServeWatcher(log, env, home, path)
 	inContainer, _ := detectContainer()
-	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer,
-		func() api.SelfUpdateStatus {
-			st := watcher.Status()
-			out := api.SelfUpdateStatus{
-				Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
-				Uncovered: st.Uncovered,
-				From:      st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
-			}
-			// ★ LastAt 변환: cmd/fd 는 time.Time(제로값 = 시도 없음), api 는 *time.Time
-			// (nil = 시도 없음). IsZero() 로 가른다 — 값 그대로 &st.LastAt 을 넘기면
-			// "시도 없음"도 유효한 시각처럼 실린다.
-			if !st.LastAt.IsZero() {
-				at := st.LastAt
-				out.LastAt = &at
-			}
-			return out
-		}))
+	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -193,6 +195,38 @@ func newServeWatcher(log *slog.Logger, env func(string) (string, bool), home, db
 	// 붙인 자리에 있으면, 플러그인 버전이 오르는 갱신은 이 자리를 영영 안 덮는다.
 	binDir, _ := BinCacheDir(env, home)
 	return newSelfWatcher(log, dbPath, binDir)
+}
+
+// selfUpdateStatusOf 는 감시기의 상태를 API 표면의 모양으로 옮긴다. 순수 함수다.
+//
+// ★ **클로저 안에 있으면 이 변환이 통째로 뮤테이션 투명하다.** 2026-08-07 실측:
+// 클로저에서 `Uncovered: st.Uncovered` 한 줄을 지워도 `go test ./cmd/fd ./internal/api`
+// 가 둘 다 ok 였다. 조립(newServeWatcher)과 선 넘기(api.HealthzOf)와 화면(RenderHealth)은
+// 각자 잠겨 있었는데, **그 셋을 잇는 이 변환만** 아무 시험에도 안 걸렸다. 그러면 판정은
+// 살아 있고 값만 안 도착하는 상태가 되고, /healthz 는 다시 `watching=true` 하나만 낸다 —
+// 이 브랜치가 없앤 무증상 회귀 그대로다. 밖으로 뺀 이유가 그것 하나다(newServeWatcher ·
+// serveAPIOptions · serveWithWatcher 와 **같은 규율**).
+//
+// ★ LastAt 이 이 함수의 유일한 비자명 갈래다: cmd/fd 는 time.Time(제로값 = 시도 없음),
+// api 는 *time.Time(nil = 시도 없음)이다. IsZero() 로 가른다 — 값 그대로 &st.LastAt 을
+// 넘기면 "시도 없음"이 유효한 시각으로 실려 나가고, api 쪽 omitempty 는 nil 만 보므로
+// 그 거짓을 못 걸러낸다. 부재와 제로를 가르는 방어가 이 세 줄뿐이라는 뜻이다
+// (api.TestHealthzOmitsLastAtWhenNoAttemptEver 는 nil 을 직접 받아 omitempty 만 잰다).
+//
+// 필드를 걸러내지 않는다 — 이 선의 판정은 전부 상류(selfUpdateStatus)에 살고, 여기서
+// 다시 고르면 같은 판정이 두 벌이 된다. 그래서 시험도 "필드가 하나라도 안 실리면
+// 빨간불"로 짜여 있다(serve_test.go).
+func selfUpdateStatusOf(st selfUpdateStatus) api.SelfUpdateStatus {
+	out := api.SelfUpdateStatus{
+		Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
+		Uncovered: st.Uncovered,
+		From:      st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
+	}
+	if !st.LastAt.IsZero() {
+		at := st.LastAt
+		out.LastAt = &at
+	}
+	return out
 }
 
 // serveWithWatcher 는 REST 서버를 감시기와 함께 돌린다. `runServe` 가 이것을 부르는

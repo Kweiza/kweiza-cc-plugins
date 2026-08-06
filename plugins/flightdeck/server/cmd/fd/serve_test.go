@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -157,5 +158,180 @@ func TestServeDrainsHandlerBeforeExec(t *testing.T) {
 	}
 	if !drainedAtExec.Load() {
 		t.Fatal("exec 시점에 종료 통지가 아직 안 갔다 — 스트림이 매달린 채로 프로세스가 갈아치워진다")
+	}
+}
+
+// sameSelfUpdate 는 두 api.SelfUpdateStatus 가 같은가다.
+//
+// reflect.DeepEqual 을 안 쓴다 — time.Time 은 단조 시계 판독과 *Location 을 안에 들고
+// 있어 "같은 순간"인데 DeepEqual 이 거짓을 내는 배치가 있다. LastAt 만 nil 여부 + Equal
+// 로 보고, 나머지는 전부 비교 가능한 필드(bool·string)라 구조체 `==` 하나로 끝난다.
+// 이 모양이라 **필드가 늘어도 이 함수는 안 고쳐도 된다**(== 가 새 필드를 자동으로 센다).
+func sameSelfUpdate(a, b api.SelfUpdateStatus) bool {
+	if (a.LastAt == nil) != (b.LastAt == nil) {
+		return false
+	}
+	if a.LastAt != nil && !a.LastAt.Equal(*b.LastAt) {
+		return false
+	}
+	a.LastAt, b.LastAt = nil, nil
+	return a == b
+}
+
+// TestSelfUpdateStatusOfCarriesEachFieldSeparately 는 cmd/fd → internal/api 매핑을 잠근다.
+//
+// ★ **이 선이 안 잠겨 있었다.** 2026-08-07 실측: 클로저에서 `Uncovered: st.Uncovered`
+// 한 줄을 지워도 `go test ./cmd/fd ./internal/api` 가 둘 다 ok 였다. 순수 판정
+// (newSelfWatcher)·조립(newServeWatcher)·선 넘기(api.HealthzOf)·화면(RenderHealth)이
+// 각자 잠긴 채로 **그 넷을 잇는 변환만** 투명했다. 그 상태에서 /healthz 는 다시
+// watching=true 하나만 내고, 화면은 이 브랜치 이전과 정확히 같아진다 — 회귀가 무증상이다.
+//
+// ★ **필드별로 가른다.** 한 갈래가 전 필드를 한꺼번에 단정하면 다음에 필드가 늘어도
+// 그 갈래는 초록인 채로 남는다(늘어난 필드를 아무도 안 넣으니 단정도 안 는다).
+//
+// ★ 갈래마다 **출력 전체**를 단정한다. 해당 필드 하나만 보면 `Uncovered: st.Stalled`
+// 같은 붙여넣기 오염이 통과한다 — 값은 도착하는데 엉뚱한 키로 도착하고, 그 둘은
+// 처방이 정반대다(handlers_meta.go 의 "한 필드로 접지 마라"와 같은 축).
+//
+// ★ 표 끝의 덮개 검사가 selfUpdateStatus 에 필드가 늘면 이 시험을 **먼저** 빨간불로
+// 만든다. 그것이 없으면 "필드별 갈래"라는 규율이 다음 사람에게 안 전달된다.
+func TestSelfUpdateStatusOfCarriesEachFieldSeparately(t *testing.T) {
+	at := time.Date(2026, 8, 7, 2, 9, 20, 0, time.UTC)
+
+	cases := []struct {
+		name  string
+		field string // selfUpdateStatus 의 필드 이름 — ★ 덮개는 이 값으로 센다
+		in    selfUpdateStatus
+		want  api.SelfUpdateStatus
+	}{
+		{
+			name: "아무 일도 없으면 아무것도 안 나간다", // 영값 갈래(field 없음)
+			in:   selfUpdateStatus{},
+			want: api.SelfUpdateStatus{},
+		},
+		{
+			name:  "보고 있다",
+			field: "Watching",
+			in:    selfUpdateStatus{Watching: true},
+			want:  api.SelfUpdateStatus{Watching: true},
+		},
+		{
+			name:  "왜 안 보는지",
+			field: "Reason",
+			in:    selfUpdateStatus{Reason: "이 서버는 컨테이너다(/.dockerenv)"},
+			want:  api.SelfUpdateStatus{Reason: "이 서버는 컨테이너다(/.dockerenv)"},
+		},
+		{
+			// ★ 시간 변환의 값 갈래 — time.Time 이 *time.Time 으로 건너간다.
+			name:  "시도한 시각",
+			field: "LastAt",
+			in:    selfUpdateStatus{Watching: true, LastAt: at},
+			want:  api.SelfUpdateStatus{Watching: true, LastAt: &at},
+		},
+		{
+			// ★ 시간 변환의 영값 갈래. 이것이 nil 이 아니면 api 의 omitempty 가 안 걸려
+			// "시도가 있었는데 시각이 1년 1월 1일"이라는 응답이 나간다. 부재와 제로는 다른 말이다.
+			name:  "시도가 없었으면 시각은 부재다",
+			field: "LastAt",
+			in:    selfUpdateStatus{Watching: true},
+			want:  api.SelfUpdateStatus{Watching: true}, // LastAt == nil
+		},
+		{
+			name:  "어디서",
+			field: "From",
+			in:    selfUpdateStatus{From: "07e5df4"},
+			want:  api.SelfUpdateStatus{From: "07e5df4"},
+		},
+		{
+			name:  "어디로",
+			field: "To",
+			in:    selfUpdateStatus{To: "1d044b2"},
+			want:  api.SelfUpdateStatus{To: "1d044b2"},
+		},
+		{
+			name:  "결과",
+			field: "Outcome",
+			in:    selfUpdateStatus{Outcome: "refused"},
+			want:  api.SelfUpdateStatus{Outcome: "refused"},
+		},
+		{
+			name:  "전문",
+			field: "Detail",
+			in:    selfUpdateStatus{Detail: "selfcheck exit 1 — 증분 계획이 거절된다"},
+			want:  api.SelfUpdateStatus{Detail: "selfcheck exit 1 — 증분 계획이 거절된다"},
+		},
+		{
+			// 일시 고장. Uncovered 와 **다른 키**로 도착해야 한다.
+			name:  "지금 못 잰다",
+			field: "Stalled",
+			in:    selfUpdateStatus{Watching: true, Stalled: "실행 파일을 못 쟀다: no such file or directory"},
+			want:  api.SelfUpdateStatus{Watching: true, Stalled: "실행 파일을 못 쟀다: no such file or directory"},
+		},
+		{
+			// ★ 이 브랜치가 침묵을 깨려고 새로 만든 축이다. 여기서 조용히 떨어지면
+			// /healthz 는 watching=true 만 내고 화면은 이 브랜치 이전과 같아진다.
+			name:  "구조적으로 못 덮는 갈래",
+			field: "Uncovered",
+			in:    selfUpdateStatus{Watching: true, Uncovered: "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd)"},
+			want:  api.SelfUpdateStatus{Watching: true, Uncovered: "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd)"},
+		},
+	}
+
+	covered := map[string]bool{}
+	for _, c := range cases {
+		if c.field != "" {
+			covered[c.field] = true
+		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := selfUpdateStatusOf(c.in); !sameSelfUpdate(got, c.want) {
+				t.Fatalf("변환이 갈렸다\n입력: %+v\n나온 것: %+v\n나와야 할 것: %+v", c.in, got, c.want)
+			}
+		})
+	}
+
+	// ★ 덮개 검사. selfUpdateStatus 에 필드가 늘면 매핑보다 **이 시험이 먼저** 빨간불이 된다.
+	typ := reflect.TypeOf(selfUpdateStatus{})
+	for i := 0; i < typ.NumField(); i++ {
+		if name := typ.Field(i).Name; !covered[name] {
+			t.Fatalf("selfUpdateStatus.%s 를 재는 갈래가 없다 — "+
+				"필드를 늘렸으면 selfUpdateStatusOf 와 이 표에 **둘 다** 실어라", name)
+		}
+	}
+}
+
+// TestSelfUpdateStatusOfLosesNoFieldAcrossTheLine 은 양쪽 타입의 **필드 집합**이 같은가다.
+//
+// ★ 위 표는 cmd/fd 쪽에 필드가 느는 것을 잡는다. 반대 방향은 못 잡는다 — api 쪽에만
+// 필드가 늘면 표는 그 필드를 모르고, 매핑은 그 자리를 영값으로 둔 채 전부 초록이다.
+// 이 선이 존재하는 이유가 정확히 "cmd/fd 의 판정을 api 로 **다 옮긴다**"라서, 이름이
+// 갈리는 것 자체가 결함이다.
+//
+// 타입은 안 본다 — LastAt 은 time.Time ↔ *time.Time 으로 **일부러** 갈려 있다(부재를
+// 표현할 수 있어야 해서). 이 시험이 붙드는 것은 이름 집합 하나다.
+//
+// 이 시험이 울리면 할 일은 둘 중 하나다: 새 필드를 selfUpdateStatusOf 에 싣거나,
+// 안 싣는 것이 판정이면 **그 사유를 여기 예외로 적어라**. 조용히 지우지 마라.
+func TestSelfUpdateStatusOfLosesNoFieldAcrossTheLine(t *testing.T) {
+	names := func(v any) map[string]bool {
+		typ := reflect.TypeOf(v)
+		out := map[string]bool{}
+		for i := 0; i < typ.NumField(); i++ {
+			out[typ.Field(i).Name] = true
+		}
+		return out
+	}
+	src := names(selfUpdateStatus{})
+	dst := names(api.SelfUpdateStatus{})
+
+	for name := range src {
+		if !dst[name] {
+			t.Fatalf("selfUpdateStatus.%s 가 api.SelfUpdateStatus 에 없다 — 이 축은 선을 못 넘는다", name)
+		}
+	}
+	for name := range dst {
+		if !src[name] {
+			t.Fatalf("api.SelfUpdateStatus.%s 에 대응하는 cmd/fd 필드가 없다 — "+
+				"이 키는 영원히 영값으로 나간다(읽는 쪽은 그것을 사실로 읽는다)", name)
+		}
 	}
 }

@@ -371,6 +371,128 @@ func BinCacheDir(get func(string) (string, bool), home string) (dir, source stri
 	return dir, source
 }
 
+// LegacyBinDirs 는 **옛 런처가 바이너리를 짓던 자리**들이다. 순수 함수다.
+//
+// 소비자는 하나이고 하는 일도 하나다 — `fd doctor` 가 이 자리들을 **stat 해서 남은 것을
+// 말한다**(cmds.go 의 「옛 바이너리 자리」 줄). 옮기지도, 지우지도, 거기서 exec 하지도 않는다.
+//
+// ★ **왜 이제 와서 만드나 — 안 지운다는 판정은 그대로다.** 자리를 고정 자리로 옮길 때 옛 자리
+// 두 벌을 일부러 안 지웠다(이관은 복사한 mtime 이 따라와 **필요한 재빌드를 억제하고**, 삭제
+// 기구는 "잃어도 다시 만들면 되는 것에 재생 기구를 만들지 않는다"는 §11 에 걸린다). 그 판정은
+// 지금도 옳다. 틀렸던 것은 그 옆에 적은 한 문장이다 — §7 이 처음 "그 사실은 doctor 가 말로
+// 찍는다"고 적었는데 **거짓이었다.** ExeLines 의 "런처가 짓는 자리 밖" 줄은 **지금 도는
+// 프로세스**를 재고(exe.go 가 자기 머리에 그렇게 적었다), 아무도 안 도는 자리의 **파일**은 어느
+// 화면에도 안 떴다. 2026-08-07 이 머신 실측: `~/.local/state/flightdeck/bin/fd` 22,144,360 바이트
+// + `${CLAUDE_PLUGIN_DATA}/flightdeck/bin/fd` 22,049,451 바이트 = 44.2MB(42.2MiB)가 남아 있는데
+// `fd doctor` 는 그 둘을 한 글자도 안 말했다. **말하는 것과 지우는 것은 다른 축이다.**
+//
+// ★ **이것은 "자리의 주인은 BinCacheDir 하나"를 안 깬다.** 깨는 것은 *같은 질문에* 두 번
+// 답하는 사본인데, 이 목록이 답하는 질문은 다르다 — BinCacheDir 은 "지금 어디에 짓나",
+// 이쪽은 "예전에 어디에 지었나"다. 증거는 **동기화 방향**이다: 자리가 또 옮겨지는 날 사본이라면
+// 따라가야 하지만 이 목록은 옛 항목을 **그대로 들고 있어야** 한다. LegacyOutboxDirs 가
+// OutboxPath 에 대해 갖는 관계와 같고, 그래서 새 규칙이 아니다.
+//
+// ★ 그래서 **두 갈래의 조립 규칙이 일부러 다르다.**
+//   - 옛 사다리(CLAUDE_PLUGIN_DATA·XDG_STATE_HOME·~/.local/state)는 **얼어붙은 과거**라 여기
+//     박는다. 지금 사는 ResolveStateDir 에 물어보면 그쪽 사다리가 움직이는 날 과거가 함께
+//     움직인다 — 과거는 안 움직인다. (그 함수는 응답 캐시용으로 여전히 살아 있어 움직일 수 있다.)
+//   - 고정 자리(`~/.cache/flightdeck/bin`)는 과거가 아니라 **지금 자리의 형제**다. FD_STATE_DIR
+//     를 새로 켠 사용자에게는 그 자리가 버려지고 pruneBinCache 도 더는 안 훑어 keep(3)벌
+//     ≈66MB 가 주인을 잃는다. 그래서 후보에 넣되 **규칙을 베끼지 않는다** — 주인에게
+//     "FD_STATE_DIR 가 없다면 어디냐"를 묻는다(아래 envWithout). 베끼면 그때야말로 사본이다.
+//     (형제 LegacyOutboxDirs 는 같은 자리에서 `~/.flightdeck/outbox` 를 손으로 조립한다.
+//     따라 하지 않았다 — 그쪽도 물어보는 쪽이 맞지만 이 조각의 담당이 아니다.)
+//
+// ★ **MachineIDPath 가 거절한 "채택 순서가 채널마다 갈린다"에 안 걸린다.** 그 결함이 서려면
+// 목록에서 **하나를 골라 답으로 삼아야** 한다 — 채널마다 목록이 다르니 고른 것도 달라지고,
+// 그러면 한 머신이 정체를 두 개 갖는다. 여기는 **아무것도 안 고른다.** 셋을 다 찍고, 못 보는
+// 자리에는 아무 말도 안 한다(LegacyOutboxDirs 도 같은 자리를 '전부 재생'으로 빠져나갔다).
+// 채널마다 줄이 달라지는 것은 상태의 갈림이 아니라 **시야의 차이**이고, 그 시야는 바로 아래
+// 줄이 화면에 적는다(cmds.go 의 「옛 자리 탐색은 이 채널이 계산할 수 있는 자리만이다」).
+// 축 ②로 말하면: 갈린 두 보고가 **각자 제 시점의 참**이라 응답 캐시와 같은 자리에 선다.
+//
+// ★ **"읽기 전용이라 괜찮다"는 이 축의 논거가 아니다 — 정직하게 갈라 적는다.** 읽기 전용은
+// *값*을 낮출 뿐 *기구*를 없애지 않는다: 목록이 틀렸을 때 치르는 것이 '남의 판단을 사용자
+// 이름으로 전송'이 아니라 '거짓 줄 하나'라는 뜻이지, 채택이 갈리는 문제 자체에는 답하지
+// 않는다. 그 축의 답은 위의 "아무것도 안 고른다"다. 읽기 전용이 실제로 답하는 것은 **다음**
+// 항목(tmp)이고, 거기서도 절반만 답한다.
+//
+// ★ **임시 디렉토리는 후보에 없다.** 옛 런처는 HOME 이 없으면 `${HOME:-/tmp}/.local/state/…`
+// 로 떨어져 `/tmp/.local/state/flightdeck/bin` 에 실제로 지었다(개정 전 bin/fd). 그래도 안 넣는다.
+//
+//	⑴ 이 줄은 읽기만 하지만 **나르는 처방은 사람의 `rm`** 이다. `/tmp` 는 부모가
+//	   world-writable 이라 아무나 그 경로를 먼저 만들 수 있고, 그러면 doctor 가 남이 심어 둔
+//	   자리를 가리키며 "지우려면 사람이 지운다"를 찍는다. 개수·크기도 심은 쪽이 정한다.
+//	   LegacyOutboxDirs 의 3번 기록과 **같은 축**이되 그쪽보다 가볍다 — 그쪽은 심어진 줄이
+//	   사용자 토큰으로 전송되고 회수가 불가능했다. 여기서 잃는 최악은 사람이 남의 쓰레기를
+//	   지우는 것이다. 가벼운데도 안 넣는 이유가 ⑵ 다.
+//	⑵ **얻는 것이 가설이다.** 그 갈래는 HOME 없이 fd 가 돈 머신에서만 생기는데 이 제품의
+//	   채널 셋(훅·MCP·셸)은 전부 HOME 이 있다. 구체적 위험과 가설적 이득을 견주면 뺀다.
+//	   실제로 그 배치가 생기는 날(데몬·컨테이너 진입점) 넣되, 그때는 **디렉토리 소유자 검사를
+//	   함께 단다** — 넣는 것만으로는 다시 안 된다는 것이 저쪽 기록의 요점이다.
+//	⑶ 환경변수에서 온 값이 우연히 `/tmp` 아래일 수는 있다(`CLAUDE_PLUGIN_DATA=/tmp/x`).
+//	   그것은 거르지 않는다 — 그 둘은 **사용자 자신의 프로세스만** 세팅하는 축이라 종류가
+//	   다르다(LegacyOutboxDirs 가 같은 판정을 같은 이유로 한다). 우리가 손으로 박는 tmp 만 뺀다.
+//
+// ★ 목표 자리는 뺀다 — 지금 쓰는 자리를 "옛 자리"로 찍으면 곧바로 거짓이다.
+// 그리고 이 목록이 비거나 그 자리들이 다 비어 있으면 doctor 는 **아무 줄도 안 낸다**
+// (판정은 cmds.go 에 있다). 「옛 바이너리 자리 0건」 같은 줄을 안 만드는 이유는 그것이
+// 매 실행마다 뜨는 잡음이고, 이 축은 몇 달에 한 번 참이기 때문이다.
+func LegacyBinDirs(get func(string) (string, bool), home, target string) []string {
+	var out []string
+	tgt := filepath.Clean(target)
+	add := func(p string) {
+		if strings.TrimSpace(p) == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		if p == tgt {
+			return // 지금 쓰는 자리다. 옛 자리가 아니다
+		}
+		for _, x := range out {
+			if x == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	if v, ok := get("CLAUDE_PLUGIN_DATA"); ok && strings.TrimSpace(v) != "" {
+		add(filepath.Join(filepath.Clean(strings.TrimSpace(v)), "flightdeck", "bin"))
+	}
+	if v, ok := get("XDG_STATE_HOME"); ok && strings.TrimSpace(v) != "" {
+		add(filepath.Join(filepath.Clean(strings.TrimSpace(v)), "flightdeck", "bin"))
+	}
+	if strings.TrimSpace(home) != "" {
+		// ★ HOME 이 없으면 이 줄을 안 낸다 — 옛 런처의 `${HOME:-/tmp}` 폴백은 위 tmp ★ 가
+		//   판정한 그대로 따라가지 않는다.
+		add(filepath.Join(home, ".local", "state", "flightdeck", "bin"))
+	}
+	// 고정 자리 자신. **주인에게 묻는다** — 위 ★ 의 둘째 항목.
+	if fixed, _ := BinCacheDir(envWithout(get, "FD_STATE_DIR"), home); fixed != "" {
+		add(fixed)
+	}
+	return out
+}
+
+// envWithout 은 키 하나를 **미설정으로 가린** 환경 조회다. 순수 함수다.
+//
+// 자리 규칙을 베끼는 대신 주인에게 "그 축이 없었다면 어디냐"를 물을 수 있게 하는 이음매다.
+//
+// ★ 값을 빈 문자열로 주는 것이 아니라 **ok=false** 로 준다 — 다만 **이 선택은 지금 거동을
+// 안 바꾼다.** 유일한 소비자인 BinCacheDir 이 `ok && TrimSpace(v) != ""` 로 둘을 같게 접기
+// 때문이고(계약 ⑵), 그래서 `return "", true` 로 바꾸는 뮤테이션은 시험이 못 잡는다(실제로
+// 돌려 확인했다 — bincache.go 의 `keep < 0` 가드와 같은 부류다). 그런데도 ok=false 인 이유는
+// 이 함수의 이름이 약속하는 것이 "가린다"이지 "빈 값을 준다"가 아니어서다: 소비자가 늘거나
+// 저쪽이 언젠가 빈 값을 미설정과 다르게 다루는 날, 접음에 기댄 쪽만 조용히 갈린다.
+func envWithout(get func(string) (string, bool), key string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		if k == key {
+			return "", false
+		}
+		return get(k)
+	}
+}
+
 // MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도, 그리고
 // **어느 채널에서 불러도** 같아야 한다.
 //
@@ -564,6 +686,35 @@ func clip(s string, n int) string {
 		return s
 	}
 	return string(rs[:n]) + "…"
+}
+
+// humanBytes 는 크기를 한 마디로 낸다. 순수 함수다.
+//
+// humanAge 와 **같은 이유로 여기 모은다** — 아래 주석 그대로, 문구가 시험이 단정하는 소비자
+// 좌표계라 여러 자리에서 각자 포맷하면 갈라진다.
+//
+// ★ **10^6 이다(MiB 가 아니다).** 설계 §7 이 이 축의 실측을 적어 둔 자가 그것이라
+// (`22.1MB` + `22.0MB`) 두 화면이 같은 파일에 같은 숫자를 말한다. `du -h` 는 2^20 이라 같은
+// 파일을 `21M` 로 내므로 **단위를 이름으로 적는다** — 숫자만 찍으면 사람이 두 자를 견주다
+// "파일이 두 개인가"로 읽는다.
+//
+// ★ 1MB 미만도 답을 낸다. 이 축의 실물은 22MB 지만, 크기가 작다는 것 자체가 판정에 쓰인다 —
+// 옛 자리에 22MB 가 아니라 몇 바이트가 남아 있으면 그것은 버려진 산출물이 아니라
+// **깨진 빌드의 잔해**(런처의 `mv` 가 실패한 자리)이고, 사람이 할 일이 다르다.
+func humanBytes(n int64) string {
+	switch {
+	case n < 0:
+		// ★ 실물에서 안 온다(os.FileInfo.Size 는 음수를 안 낸다). 그래도 갈래를 두는 이유는
+		// 아래 나눗셈이 음수를 `-0.0MB` 로 내서 **0 과 구별이 안 되기** 때문이다 — 값이
+		// 이상할 때 그 사실이 화면에 남아야 한다.
+		return fmt.Sprintf("%d바이트(음수다)", n)
+	case n < 1_000:
+		return fmt.Sprintf("%d바이트", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fKB", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%.1fMB", float64(n)/1e6)
+	}
 }
 
 // humanAge 는 경과를 한국어 한 마디로 낸다. 순수 함수다.

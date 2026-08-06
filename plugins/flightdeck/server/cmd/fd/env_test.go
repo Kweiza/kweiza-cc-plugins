@@ -458,6 +458,182 @@ func TestLegacyOutboxDirsDeduplicates(t *testing.T) {
 	}
 }
 
+// 옛 **바이너리** 자리 목록. doctor 가 이 자리들을 stat 해서 남은 것을 말한다.
+//
+// ★ 이 목록은 자리의 주인(BinCacheDir)과 **경쟁하지 않는다.** 답하는 질문이 다르다 —
+// 저쪽은 "지금 어디에 짓나", 이쪽은 "예전에 어디에 지었나". 그래서 자리가 또 옮겨지는 날
+// 사본이라면 따라가야 하지만 이 목록은 옛 항목을 **그대로 들고 있어야** 한다.
+// LegacyOutboxDirs 가 OutboxPath 에 대해 갖는 관계와 같다.
+//
+// ★ **채택이 없다는 것이 이 표가 지키는 핵심**이다. MachineIDPath 가 "후보 목록에서
+// 물려받으면 채택 순서가 채널마다 갈린다"로 거절한 그 결함은 목록에서 **하나를 골라
+// 답으로 삼을 때** 선다. 여기는 셋을 다 낸다 — 그래서 채널마다 줄이 달라지는 것은 상태의
+// 갈림이 아니라 시야의 차이이고, 그 시야는 doctor 가 화면에 적는다.
+func TestLegacyBinDirsCoversTheOldLadderAndTheAbandonedFixedPlace(t *testing.T) {
+	const home = "/h"
+	fixed := filepath.Join(home, ".cache", "flightdeck", "bin")
+	cases := []struct {
+		name   string
+		env    map[string]string
+		home   string
+		target string
+		want   []string
+	}{
+		{
+			// 훅·MCP 채널과 셸 채널이 각자 남긴 자리 + 옛 런처의 마지막 사다리 칸.
+			name:   "옛 사다리 셋을 다 낸다",
+			env:    map[string]string{"CLAUDE_PLUGIN_DATA": "/plugin/data", "XDG_STATE_HOME": "/xdg/state"},
+			home:   home,
+			target: fixed,
+			want: []string{
+				filepath.Join("/plugin/data", "flightdeck", "bin"),
+				filepath.Join("/xdg/state", "flightdeck", "bin"),
+				filepath.Join(home, ".local", "state", "flightdeck", "bin"),
+			},
+		},
+		{
+			// 이 머신의 실제 모양이다(2026-08-07 실측: 두 환경변수가 다 미설정인 셸).
+			name:   "채널 환경이 없으면 홈 갈래 하나",
+			env:    map[string]string{},
+			home:   home,
+			target: fixed,
+			want:   []string{filepath.Join(home, ".local", "state", "flightdeck", "bin")},
+		},
+		{
+			// ★ FD_STATE_DIR 를 **새로 켠** 사용자. 고정 자리가 통째로 버려지는데
+			//   pruneBinCache 도 더는 그 자리를 안 훑어 keep(3)벌 ≈66MB 가 주인을 잃는다.
+			name:   "FD_STATE_DIR 를 켜면 고정 자리도 옛 자리가 된다",
+			env:    map[string]string{"FD_STATE_DIR": "/explicit"},
+			home:   home,
+			target: filepath.Join("/explicit", "bin"),
+			want: []string{
+				filepath.Join(home, ".local", "state", "flightdeck", "bin"),
+				fixed,
+			},
+		},
+		{
+			// ★ HOME 이 없으면 홈 갈래도 고정 자리도 안 낸다. 옛 런처는 그 조건에서
+			//   `${HOME:-/tmp}/.local/state/…` 로 실제로 지었지만 따라가지 않는다(표 밖 ①).
+			name:   "HOME 이 없으면 채널 자리만",
+			env:    map[string]string{"CLAUDE_PLUGIN_DATA": "/plugin/data"},
+			home:   "",
+			target: "",
+			want:   []string{filepath.Join("/plugin/data", "flightdeck", "bin")},
+		},
+		{
+			name:   "같은 자리를 두 축이 가리켜도 한 번만",
+			env:    map[string]string{"CLAUDE_PLUGIN_DATA": "/same", "XDG_STATE_HOME": "/same"},
+			home:   "",
+			target: "",
+			want:   []string{filepath.Join("/same", "flightdeck", "bin")},
+		},
+		{
+			// 지금 쓰는 자리를 "옛 자리"로 찍으면 그 줄은 그 자리에서 곧바로 거짓이다.
+			name:   "목표와 같은 자리는 뺀다",
+			env:    map[string]string{"XDG_STATE_HOME": "/xdg/state"},
+			home:   "",
+			target: filepath.Join("/xdg/state", "flightdeck", "bin"),
+			want:   nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := LegacyBinDirs(envOf(c.env), c.home, c.target)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("옛 바이너리 자리 목록이\n  %v\n여야 하는데\n  %v\n다", c.want, got)
+			}
+		})
+	}
+}
+
+// ★ 고정 자리 갈래는 규칙을 **베끼지 않고 주인에게 묻는다.**
+//
+// 이 단정이 리터럴이 아니라 BinCacheDir 의 답인 것이 요점이다 — 손으로 조립한 사본은
+// 오늘은 같은 값을 내지만 자리가 다시 옮겨지는 날 조용히 갈린다. 그때 이 시험이 걸린다.
+// 옛 사다리 셋은 반대로 리터럴이 맞다: 그쪽은 **얼어붙은 과거**라 지금 사는 함수를 따라가면
+// 안 된다. 두 갈래의 규칙이 다른 이유가 이것이고, 위 표가 그쪽을 리터럴로 잠근다.
+func TestLegacyBinDirsAsksTheOwnerForTheAbandonedFixedPlace(t *testing.T) {
+	const home = "/h"
+	owner, src := BinCacheDir(envOf(map[string]string{}), home)
+	if owner == "" {
+		t.Fatalf("대조 전제가 깨졌다 — 주인이 자리를 안 냈다(%s)", src)
+	}
+	got := LegacyBinDirs(envOf(map[string]string{"FD_STATE_DIR": "/explicit"}), home,
+		filepath.Join("/explicit", "bin"))
+	for _, d := range got {
+		if d == owner {
+			return
+		}
+	}
+	t.Fatalf("FD_STATE_DIR 를 켰는데 주인이 답한 고정 자리(%s)가 후보에 없다 — "+
+		"그 자리에 남은 keep(3)벌 ≈66MB 를 아무도 말하지 않게 된다: %v", owner, got)
+}
+
+// 옛 바이너리 자리 목록은 임시 디렉토리를 **절대** 후보로 얹지 않는다.
+//
+// ★ 옛 런처는 HOME 이 없으면 `${HOME:-/tmp}/.local/state/flightdeck/bin` 에 **실제로 지었다**
+// (개정 전 bin/fd). 그러니 이것은 "그 자리에 없다"가 아니라 **일부러 안 본다**는 판정이다.
+// 이 줄이 읽기만 한다고 안전한 것이 아니다 — 나르는 처방이 사람의 `rm` 이고, `/tmp` 는
+// 부모가 world-writable 이라 남이 그 경로를 먼저 만들어 둘 수 있다. 그러면 doctor 가 남의
+// 자리를 가리키며 "지우려면 사람이 지운다"를 찍고, 개수·크기도 심은 쪽이 정한다.
+// LegacyOutboxDirs 의 3번 기록과 같은 축이고, 얻는 쪽(HOME 없이 fd 가 돈 머신)은 이 제품의
+// 채널 셋(훅·MCP·셸)이 전부 HOME 을 가져 가설이다.
+func TestLegacyBinDirsNeverScansTempDir(t *testing.T) {
+	tmp := filepath.Clean(os.TempDir())
+	// HOME 이 없는 갈래 — 옛 런처가 tmp 로 떨어지던 바로 그 조건이다.
+	if got := LegacyBinDirs(envOf(map[string]string{}), "", ""); len(got) != 0 {
+		t.Fatalf("HOME 도 채널 환경도 없는데 후보를 냈다: %v", got)
+	}
+	// 채널 환경만 있는 갈래에서도 tmp 가 섞이지 않는다.
+	got := LegacyBinDirs(envOf(map[string]string{
+		"CLAUDE_PLUGIN_DATA": "/plugin/data",
+		"XDG_STATE_HOME":     "/xdg/state",
+	}), "", "")
+	if len(got) == 0 {
+		t.Fatal("대조가 깨졌다 — 채널 환경을 줬는데 후보가 0개다")
+	}
+	for _, d := range got {
+		if filepath.Clean(d) == tmp || strings.HasPrefix(filepath.Clean(d), tmp+string(filepath.Separator)) {
+			t.Fatalf("후보에 임시 디렉토리 아래 %q 가 들어 있다 — 남이 심어 둔 자리를 "+
+				"doctor 가 '사람이 지워라'로 가리키게 된다: %v", d, got)
+		}
+	}
+}
+
+// 크기 문구는 **10^6 기준이고 단위를 이름으로 적는다.**
+//
+// ★ 설계 §7 이 이 축의 실측을 적어 둔 자가 10^6 이라(22.1MB · 22.0MB) 두 화면이 같은 파일에
+// 같은 숫자를 말한다. `du -h` 는 2^20 이라 같은 파일을 `21M` 로 내는데, 단위 없이 숫자만
+// 찍으면 사람이 두 자를 견주다 "파일이 두 개인가"로 읽는다.
+//
+// ★ 1MB 미만 갈래가 표에 있는 이유: 옛 자리에 22MB 가 아니라 몇 바이트가 남아 있으면
+// 그것은 버려진 산출물이 아니라 **깨진 빌드의 잔해**(런처의 `mv` 가 실패한 자리)이고,
+// 사람이 할 일이 다르다. 전부 "0.0MB" 로 접히면 그 구별이 사라진다.
+func TestHumanBytesUsesDecimalMegabytesAndNamesTheUnit(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int64
+		want string
+	}{
+		{"0", 0, "0바이트"},
+		{"작은 잔해", 12, "12바이트"},
+		{"KB 경계", 1_000, "1.0KB"},
+		{"MB 경계", 1_000_000, "1.0MB"},
+		// 2026-08-07 이 머신 실측 잔존 두 벌. 2^20 이면 21.1·21.0 이 된다.
+		{"실측 잔존 ①", 22_144_360, "22.1MB"},
+		{"실측 잔존 ②", 22_049_451, "22.0MB"},
+		// 실물에서 안 오지만 0 과 뭉개지면 안 된다(-0.0MB 가 된다).
+		{"음수", -1, "-1바이트(음수다)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := humanBytes(c.in); got != c.want {
+				t.Fatalf("humanBytes(%d) = %q, %q 를 기대했다", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // TestRevParseCoordsKeepsTheArgumentOrder 는 두 값이 뒤바뀌지 않음을 못 박는다.
 //
 // ★ 이 순수 함수가 따로 있는 이유가 이 시험이다. 호출부에서 줄 번호로 집으면 인자를

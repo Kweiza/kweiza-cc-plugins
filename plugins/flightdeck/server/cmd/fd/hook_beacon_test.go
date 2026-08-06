@@ -9,6 +9,8 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -427,4 +429,118 @@ func TestABeaconFromAnotherWorktreeIsNotOurs(t *testing.T) {
 	if !strings.Contains(out, "다른 워크트리") {
 		t.Fatalf("워크트리 불일치가 화면에 안 나온다:\n%s", out)
 	}
+}
+
+// ★★ **비콘 가지치기를 훅이 정말 부르는가 — 그리고 어느 훅에서 부르는가.**
+//
+// 형제인 `a.pruneBinCache()` 는 앞 라운드에 잠겼는데 바로 위 `a.pruneWindows()` 한 줄만
+// 안 잠겨 있었다: 그 줄을 지워도 cmd/fd 가 통째로 초록이었다(앞 라운드 실측). 앞 브랜치가
+// 만든 결함이 아니라 선재 결함인데, 이제 옆에 잠긴 형제가 있어 비대칭이 선명하다.
+//
+// 안 잠기면 무엇이 사는가. pruneWindows 는 반환값이 없고 사유를 Debug 로만 남긴다 —
+// 그것이 정한 바다(청소가 세션 시작을 막으면 안 된다). 그래서 호출이 리베이스에서 떨어져
+// 나가도 화면·로그·종료코드 어디에도 신호가 없고, ~/.flightdeck/windows/ 에는 창이 죽을
+// 때마다 파일이 하나씩 상한 없이 남는다. doctor 는 이 디렉토리의 **자리와 사유**만 찍지
+// 항목 수를 안 찍으므로, 침묵으로 사는 회귀다.
+//
+// ★ **부르는가만 재지 않고 자리도 잰다.** 부르는가만 재면 runHook 머리에 한 줄 넣는 판이
+// 초록이 되는데, 그것은 매 프롬프트(2초)·매 턴 끝(3초)마다 디렉토리를 훑는 것이다.
+// 왜 안 되는지의 판정은 hook.go 의 pruneWindows 머리말에 있다 — 여기서 다시 적지 않는다.
+// 표의 false 행 다섯이 그 판을 빨간불로 만든다.
+//
+// ★ 이 표가 **일부러 안 재는 것**: "남의 머신 비콘은 안 건드린다" · "못 읽는 파일은 안
+// 지운다" · "죽은 것만 지운다"는 window.Prune 자신의 계약이고 internal/window/find_test.go
+// 가 이미 세 갈래로 잠갔다. 여기서 또 재면 한 판정이 두 화면에 산다. 이 표의 좌표는
+// **훅 이음매** 하나다 — 살아 있는 창을 함께 심는 것만 예외인데, 그것 없이는 alive 자리에
+// `func(int) bool { return false }` 를 넘기는 배선(=디렉토리를 통째로 비운다)도 초록이기
+// 때문이다. 그 배선의 손해는 되돌릴 수 없다(window.Prune 머리말).
+//
+// ★ 진짜 홈을 안 건드린다: 하네스가 FD_STATE_DIR 를 못박으므로 비콘 자리는 `h.state/windows`
+// 다. 그 전제를 결과보다 **먼저** 단정한다 — 이 시험은 지우는 쪽이라, 자리가 어긋나면
+// 개발자의 살아 있는 창 비콘을 날리고도 초록일 수 있다.
+func TestOnlySessionStartHookPrunesWindowBeacons(t *testing.T) {
+	cases := []struct {
+		event  string
+		prunes bool
+	}{
+		{"session-start", true},
+		{"user-prompt", false},
+		{"post-tool", false},
+		{"pre-compact", false},
+		{"stop", false},
+		{"session-end", false},
+	}
+	for _, c := range cases {
+		t.Run(c.event, func(t *testing.T) {
+			h := newHarness(t)
+			cwd := t.TempDir()
+
+			app := newApp(envOf(h.env), quietLogger(), cwd, strings.NewReader(""))
+			if app.beaconDir == "" {
+				t.Fatal("대조 전제가 깨졌다 — App.beaconDir 가 비었다")
+			}
+			if !strings.HasPrefix(app.beaconDir, h.state) {
+				t.Fatalf("비콘 디렉토리가 하네스 밖이다(%s) — 이 시험은 지우는 쪽이라 "+
+					"사용자의 진짜 창 비콘을 날린다", app.beaconDir)
+			}
+
+			// ★ Started 를 일부러 **틱이 아닌 문자열**로 둔다. window.StartedOf 는 /proc 의
+			// 22번 필드라 언제나 숫자이므로, 이러면 심은 둘의 파일 이름이 findWindow 가
+			// 조립하는 이름과 절대 안 겹친다. 겹치면 훅이 이 비콘으로 표류 수리를 시작하고
+			// (rekey · SaveIdentity), 그러면 이 시험이 재는 것이 가지치기가 아니게 된다.
+			dead := window.Key{MachineID: app.machine, ClaudePID: freePID(t), Started: "틱이아니다"}
+			live := window.Key{MachineID: app.machine, ClaudePID: os.Getpid(), Started: "틱이아니다"}
+			for _, k := range []window.Key{dead, live} {
+				if _, err := window.Plant(app.beaconDir, k, app.proj.Worktree, "cc-딴창", time.Now()); err != nil {
+					t.Fatalf("비콘 심기 실패(pid %d): %v", k.ClaudePID, err)
+				}
+				if _, err := os.Stat(filepath.Join(app.beaconDir, k.FileName())); err != nil {
+					t.Fatalf("대조 전제가 깨졌다 — 심은 비콘이 자리에 없다(%s): %v", k.FileName(), err)
+				}
+			}
+
+			if code, out := h.run(sessionStartPayload("cc-session-uuid-1", cwd), "hook", c.event); code != 0 {
+				t.Fatalf("%s 훅 종료코드 %d:\n%s", c.event, code, out)
+			}
+
+			_, err := os.Stat(filepath.Join(app.beaconDir, dead.FileName()))
+			switch {
+			case c.prunes && err == nil:
+				t.Errorf("죽은 창(pid %d)의 비콘이 남았다 — 훅이 가지치기를 안 불렀다. "+
+					"그 한 줄이 없으면 %s 에 파일이 상한 없이 쌓이고, 실패를 Debug 로만 남기는 "+
+					"설계라 어느 화면에도 신호가 안 뜬다", dead.ClaudePID, app.beaconDir)
+			case !c.prunes && err != nil:
+				t.Errorf("%s 훅이 죽은 창의 비콘을 지웠다 — 가지치기는 session-start 의 일이다. "+
+					"이 이벤트는 훨씬 자주 돌거나 예산이 훨씬 작다(hooks.json 의 타임아웃·async 표시). "+
+					"왜 session-start 뿐인지는 hook.go 의 pruneWindows 머리말에 있다", c.event)
+			}
+			if _, err := os.Stat(filepath.Join(app.beaconDir, live.FileName())); err != nil {
+				t.Errorf("살아 있는 창(pid %d)의 비콘이 사라졌다 — 청소가 아니라 파괴다. "+
+					"그 창은 다음 /clear 에서 표류를 못 고치고, 잃었다는 신호도 없다: %v",
+					live.ClaudePID, err)
+			}
+		})
+	}
+}
+
+// freePID 는 프로세스 표에 없는 pid 하나다. pid_max 위는 커널이 ESRCH 로 답한다.
+//
+// ★ 짧게 살다 죽은 자식의 pid 를 안 쓴다 — 거둔 pid 는 커널이 되쓸 수 있어서, 그 판은
+// 아주 가끔 "죽은 창인데 살아 있다"로 빨간불이 난다. 재현이 안 되는 빨간불은 그 시험을
+// 아무도 안 믿게 만든다.
+//
+// ★ internal/window/proc_linux_test.go 에 같은 이름의 헬퍼가 있다. 부르지 못한다 —
+// 시험 헬퍼는 패키지 밖으로 안 나가고, 이 네 줄을 위해 window 에 시험 전용 API 를
+// 뚫지는 않는다. 같은 상수(pid_max)를 읽으므로 두 사본이 갈릴 여지는 없다.
+func freePID(t *testing.T) int {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/sys/kernel/pid_max")
+	if err != nil {
+		t.Fatalf("pid_max 를 못 읽었다: %v", err)
+	}
+	max, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("pid_max 가 수가 아니다(%q): %v", raw, err)
+	}
+	return max + 1
 }
