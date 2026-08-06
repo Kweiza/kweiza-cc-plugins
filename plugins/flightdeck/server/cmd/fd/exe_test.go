@@ -24,7 +24,13 @@ func TestExeLinesPlainPath(t *testing.T) {
 	}
 }
 
-// ★ 이 갈래가 이 함수의 존재 이유다 — 실제 프로세스로는 못 만든다.
+// ★ 이 갈래는 **방어**다 — 지금 실물에서는 안 뜬다.
+//
+// 예전 이 자리에는 "이 갈래가 이 함수의 존재 이유다"라고 적혀 있었는데, 그것이 거짓이라
+// 낮춘다. 실제 프로세스로 못 만드는 이유가 "그런 프로세스가 없어서"가 아니라 **os.Executable 이
+// 표식을 떼고 주기 때문**이다(exe.go 의 deletedSuffix ★, 2026-08-07 실측). 그래서 이 시험이
+// 잠그는 것은 "표식이 들어오면 경로에서 떼고 뜻을 낸다"이지 "실물 doctor 에 이 줄이 뜬다"가
+// 아니다 — 후자를 재는 시험은 이 파일 끝의 doctor 배선 시험이고, 그쪽은 자리 축만 본다.
 func TestExeLinesReplacedBinaryIsAnnounced(t *testing.T) {
 	got := ExeLines(testBinDir+"/fd-%2fhome%2fu%2fsrc"+deletedSuffix, nil, testBinDir)
 	if len(got) != 2 {
@@ -122,9 +128,10 @@ func TestExeLinesOnlyTrimsTheSuffix(t *testing.T) {
 
 // ★ 이 갈래가 이행 창의 유일한 증상이다.
 //
-// 자리를 옮겨도 이미 exec 된 프로세스는 옛 inode 를 끝까지 물고, 옛 런처를 가진 세션은
-// 옛 자리를 계속 갱신한다. 그러면 `(deleted)` 축은 침묵한다 — 이 줄이 없으면 옛 자리를
-// 도는 프로세스가 자기가 옛 자리에 있다는 것을 **어느 축으로도 못 말한다**.
+// 자리를 옮겨도 이미 exec 된 프로세스는 옛 inode 를 끝까지 문다. 그 창에서 `(deleted)` 축은
+// **언제나** 침묵한다 — 옛 런처를 가진 세션이 옛 자리를 계속 갱신하면 커널이 표식조차 안 붙이고,
+// 붙이더라도 doctor 가 부르는 os.Executable 이 떼고 준다(exe.go 의 deletedSuffix ★). 즉 이 줄이
+// 없으면 옛 자리를 도는 프로세스가 자기가 옛 자리에 있다는 것을 **어느 축으로도 못 말한다**.
 func TestExeLinesAnnouncesStaleLocation(t *testing.T) {
 	const old = "/home/u/.local/state/flightdeck/bin/fd"
 	cases := []struct {
@@ -244,6 +251,62 @@ func TestExeLinesAnnouncesStaleLocation(t *testing.T) {
 				if !strings.Contains(stale, "런처") {
 					t.Fatalf("처방에 조건이 없다 — 어느 경우에 재기동이 답인지가 없다: %q", stale)
 				}
+			}
+		})
+	}
+}
+
+// fd doctor 는 **바이너리 캐시 자리**를 찍고, 그 자리를 ExeLines 에 **실제로 먹인다**.
+//
+// ★ **위 갈래들은 ExeLines 를 직접 부른다.** 그 함수가 무엇을 내는지는 잠겨 있었는데
+// **doctor 가 그 함수에 무엇을 넘기는가**는 아무도 안 쟀다. 2026-08-07 변이 실측: cmds.go 의
+// 셋째 인자를 `""` 로 바꿔도, 「바이너리 캐시」 분기를 통째로 지워도 전 패키지가 초록이었다.
+// 순수 판정을 아무리 잠가도 그것을 제품에 잇는 **스위치**가 안 잠기면, 이 브랜치의 헤드라인
+// 수정이 제품에서 조용히 꺼진 채로 관문이 열린다. 두 줄의 존재 이유가 이행 창에서 **옛 자리를
+// 도는 프로세스가 스스로 그것을 말하게 하는 것**이라, 배선이 끊긴 것을 관문이 봐야 한다.
+//
+// ★ **자리 밖 갈래는 여기서 항상 열린다.** 시험 바이너리는 go-build 캐시(`/tmp/go-buildNNN`)
+// 에서 돌고 하네스의 `<state>/bin` 은 만들어지지도 않아 sameDir 이 false 다. 그래서 이 시험은
+// 자리 축을 **켜 둔 채로** 배선만 흔든다 — 셋째 인자가 끊기면 ExeLines 가 그 갈래를 안 내는
+// 것이 계약이라 줄이 통째로 사라진다.
+//
+// ★ **「자리 없음」 갈래는 여기서 안 잰다.** env 맵에서 HOME 을 빼면 homeDir(app.go)이
+// os.UserHomeDir() 로 떨어지는데 그것은 **프로세스 환경**이라 시험이 못 바꾼다 — 즉 시험이
+// 사용자의 진짜 홈을 겨눈다(harness_test.go 의 unpinnedEnv ★ 가 적어 둔 바로 그 사고다).
+// 그 갈래의 주인은 순수 함수 층인 env_test.go 의 HOME 부재 시험이다.
+func TestDoctorReportsBinCacheDirAndFeedsItToExeLines(t *testing.T) {
+	h := newHarness(t)
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 종료코드 %d:\n%s", code, out)
+	}
+	want, src := BinCacheDir(envOf(h.env), h.home)
+	if want == "" {
+		t.Fatalf("대조 전제가 깨졌다 — 하네스 환경에서 자리가 안 나왔다(%s)", src)
+	}
+	// ★ 값과 사유를 **한 줄로** 단정한다(머신 축과 같은 규율 — 따로 찾으면 이웃 줄이 같은
+	// 낱말을 갖고 있어 통째로 없어도 통과하는 단정이 된다). 자리 문자열까지 박는 것도 같은
+	// 이유다: 아무 자리나 넘겨도 통과하면 "넘긴다"만 재고 "무엇을"은 안 재는 것이다.
+	cases := []struct {
+		name string
+		line string
+		why  string
+	}{
+		{
+			name: "자리를 사유와 함께 찍는다",
+			line: "  바이너리 캐시 " + want + " (" + src + ")",
+			why:  "이 줄이 없으면 응답 캐시와 갈린 사실 자체가 화면에서 사라진다(cmds.go 의 ★)",
+		},
+		{
+			name: "그 자리를 ExeLines 에 먹인다",
+			line: "**런처가 짓는 자리 밖**이다(" + want + ")",
+			why:  `셋째 인자가 "" 로 끊기면 자리 축이 제품에서 조용히 꺼진다`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(out, tc.line) {
+				t.Errorf("doctor 출력에 %q 가 없다 — %s:\n%s", tc.line, tc.why, out)
 			}
 		})
 	}

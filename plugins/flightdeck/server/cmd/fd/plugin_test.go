@@ -300,19 +300,37 @@ func TestLauncherBuildsAndRuns(t *testing.T) {
 // ★ 값이 사는 자리는 여기와 런처 **둘뿐**이고, 그것은 피할 수 없다(이음매의 양쪽 끝이다).
 // 바꿀 거면 두 자리를 같이 바꿔라 — 한쪽만 고치면 아래 시험들이 이음매를 못 타고 빌드 경로로
 // 내려가 "소스를 못 찾았다"로 죽는다(실측: 실제로 그렇게 죽어 있었다).
+//
+// ★ **"이 값에만 열린다"를 재는 것은 TestLauncherSeamOpensOnlyForItsToken 이다.** 위 문단은
+// 한동안 산문뿐이었다 — 아래 시험들이 언제나 정확한 토큰을 주는 탓에 **조여지는 방향**만
+// 잠겨 있었고, `= "__fd_addr__"` 를 `-n` 으로 되돌리는 **느슨해지는 방향**은 패키지 전체가
+// 초록이었다(뮤테이션으로 확인). 금지를 두 번 선언하고 아무도 안 재는 것이 이 파일이
+// 다른 자리에서 결함으로 못박은 축이다.
 const seamToken = "__fd_addr__"
 
 // runLauncher 는 런처를 **완전히 통제된 환경**으로 부른다. env 는 통째로 쓰인다.
 //
 // stdout·stderr 를 안 합친다. 훅 계약과 MCP 프레임이 stdout 을 쓰므로 "stdout 이 0바이트"가
 // 그 자체로 단정 대상이고, CombinedOutput 은 그 축을 지운다.
+//
+// cwd 는 시험 프로세스의 것(= 소스 트리)을 물려받는다. 상대경로가 **어디에 걸리는지**가
+// 곧 단정인 자리만 runLauncherIn 으로 cwd 를 통제한다 — TestLauncherRefusesRelativeStateDir.
 func runLauncher(t *testing.T, env map[string]string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	return runLauncherIn(t, "", env, args...)
+}
+
+// runLauncherIn 은 runLauncher 에 cwd 하나만 더한다(빈 값이면 물려받는다).
+// 호출 방식(절대경로 bash · sealedEnv · stdout/stderr 분리)이 두 자리에 갈리면 그 차이가
+// 그대로 시험의 사각이 되므로, 실물은 여기 **하나**다.
+func runLauncherIn(t *testing.T, dir string, env map[string]string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	script := filepath.Join(pluginRoot(t), "bin", "fd")
 	// 절대경로 bash 로 띄운다 — shebang 의 /usr/bin/env 도 PATH 를 타는데, 여기서는
 	// PATH 를 비운 채로 부르는 갈래가 있다.
 	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
 	cmd.Env = sealedEnv(t, env)
+	cmd.Dir = dir
 	var o, e bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &o, &e
 	if err := cmd.Run(); err != nil {
@@ -517,10 +535,21 @@ func TestLauncherAddressSplitsBySource(t *testing.T) {
 // 찍고 · ExeLines 가 재기동해도 안 없어지는 "자리 밖" 거짓 경보를 낸다). 셋 다 이 브랜치가
 // 새로 만든 소비부라, 잠자던 불일치에 이빨을 단 것도 이 브랜치다.
 //
-// ★ **상대경로 갈래는 일부러 표에 없다.** 거기서 둘은 갈리고, 그것이 **의도된 비대칭**이다:
-// 런처는 상대 FD_STATE_DIR 를 거부하고(안내 + exit 0, `bin=` 을 안 찍는다) BinCacheDir 은
-// `state/bin` 을 낸다. 자리에 **쓰는 것은 런처뿐**이라 Go 쪽 관문은 무의미하고, 런처가 거부하면
-// 바이너리가 없어 Go 가 뜨지도 않는다. 표에 넣으면 launcherBin 이 `bin=` 을 못 받아 죽는다.
+// ★ **상대경로 갈래는 일부러 표에 없다 — 다만 둘이 갈려서가 아니다.** 이 자리에는 한때
+// "런처는 거부하고 BinCacheDir 은 `state/bin` 을 낸다, 그것이 **의도된 비대칭**이다"라고
+// 적혀 있었다. **지금은 양쪽 다 거부한다**(env.go 의 계약 ⑷). 그 문장이 세워 둔 근거 둘이
+// 실측으로 무너졌다: ⑴ 자리에 **쓰는 것이 런처뿐이 아니다** — pruneBinCache 가 거기서
+// 지운다(상대 FD_STATE_DIR 로 훅을 돌리면 cwd 기준 자리의 남의 `fd-*` 가 실제로 사라졌다),
+// ⑵ "런처가 거부하면 바이너리가 없어 Go 가 뜨지도 않는다"는 컨테이너 이미지
+// (`/usr/local/bin/fd`)·`go run`·손빌드에서 안 선다 — 그 배치는 ExeLines 주석이 이미 1급으로
+// 인정한 것이다. 관문이 없던 동안 `fd doctor` 는 `바이너리 캐시 relpath/bin` 을 사실처럼 찍었다.
+//
+// 그래도 표에서 빼는 이유는 이제 **좌표계**다: 이 표가 견주는 것은 런처의 `bin=` 과 Go 의
+// 자리인데 상대경로에서는 **양쪽 다 자리를 안 내므로 견줄 값이 없다**(launcherBin 이 `bin=` 을
+// 못 받아 죽는다). 두 절반은 각자 자기 자리에서 잠긴다 — 런처는 아래
+// TestLauncherRefusesRelativeStateDir, Go 는 env_test.go 의 TestBinCacheDirRefusesRelativePlaces.
+// 배제는 사각이 아니라 자리 이동이다. 다만 **"둘이 같은 답을 낸다"는 것 자체는 아직 아무도
+// 안 견준다** — 지금은 두 시험이 각자 "안 낸다"를 따로 말할 뿐이다(후속).
 func TestLauncherAndBinCacheDirAgree(t *testing.T) {
 	home := t.TempDir()
 
@@ -575,6 +604,84 @@ func TestLauncherAndBinCacheDirAgree(t *testing.T) {
 	// 대조 자체가 자리를 만들면 안 된다 — 이음매는 아무것도 안 짓는다.
 	assertEmptyOrAbsent(t, filepath.Join(home, ".cache"),
 		"FD_STATE_DIR 대조가 무언가를 지었다")
+}
+
+// 이름 상한은 **바이트로 잰다** — 글자로 재면 한글 경로에서 관문이 통째로 헛돈다.
+//
+// ★ 이 시험이 잠그는 것은 240 이라는 숫자가 아니라 **셈법**이다. 숫자는 런처의 것이고
+// (`.$$` 여유까지 그쪽이 계산한다) 여기서 다시 적으면 판정이 두 자리에 산다. 재는 것은
+// "한글이 든 깊은 소스에서 관문이 정말 열리는가" 하나다.
+//
+// ★ 이 갈래는 여기가 생기기 전까지 커버가 **0** 이었다(뮤테이션으로 확인: bin/fd 의
+// `nbytes="$(LC_ALL=C; printf %s "${#name}")"` 를 맨 `${#name}` 으로 바꿔도 cmd/fd 가 통째로
+// 초록이다). 커버 0 인 갈래는 "서브셸 하나 아끼자"는 다음 편집 한 줄에 조용히 무너진다 —
+// 그리고 `LC_ALL=C printf …`(접두 대입)는 bash 에서 `${#name}` **확장 시점의** 로케일을
+// 안 바꾸므로 그 편집은 고쳐 보이면서 안 고쳐진다(실측: `fd-`+`가`×150 이 서브셸 판 453 ·
+// 접두 대입 판 153). 무너졌을 때 사람이 보는 것은 이 관문이 준비한 네 줄이 아니라
+// `go build` 의 원문 ENAMETOOLONG 이고, 훅은 프롬프트마다 도니까 **프롬프트마다** 본다.
+//
+// ★★ **LC_ALL 을 반드시 준다 — 지우면 이 시험이 공허해진다.** sealedEnv 는 map 만 환경으로
+// 쓴다(os.Environ 을 안 섞는다). 로케일을 안 주면 런처의 bash 가 C 로케일로 돌고, 거기서는
+// `${#name}` 이 **어차피 바이트**라 두 셈법이 안 갈린다 — 실측: `env -i` 에서 `가`×3 의
+// `${#s}` 가 **9** 다. 같은 환경에 위 뮤테이션을 걸어 런처를 직접 불러 보면 관문이 그대로
+// 열려(= 시험은 초록) 아무것도 안 잡고, LC_ALL=C.UTF-8 을 주면 `bin=` 이 찍혀 빨간불이 된다.
+// 그 로케일이 없는 머신에서 **조용히** 공허해지는 대신 프로브로 확인하고 밝히며 건너뛴다.
+func TestLauncherNameCapCountsBytesNotRunes(t *testing.T) {
+	const utf8Locale = "C.UTF-8"
+
+	// 프로브 — 이 머신의 bash 가 그 로케일에서 정말 **글자로** 세는지 본다.
+	probe := exec.Command("/bin/bash", "-c", `s=가가가; printf %s "${#s}"`)
+	probe.Env = []string{"LC_ALL=" + utf8Locale}
+	if out, err := probe.Output(); err != nil || string(out) != "3" {
+		t.Skipf("이 머신의 bash 가 %s 에서 글자로 안 센다(%q, %v) — 두 셈법이 안 갈려 대조가 공허하다",
+			utf8Locale, out, err)
+	}
+
+	home := t.TempDir()
+
+	// 한글 90자 + `/server` → 98자 / 278바이트. 런처가 접으면 105자 / 285바이트다.
+	// **바이트로 재면 240 을 넘어 관문이 열리고, 글자로 재면 안 열린다** — 그 갈림이 이 시험이다.
+	// (접는 방식은 런처의 것이라 여기서 다시 구현하지 않는다. 필요한 것은 두 셈법이
+	//  240 을 사이에 두고 갈리는 길이 하나뿐이다.)
+	deep := "/" + strings.Repeat("가", 90)
+	stdout, stderr, code := runLauncher(t, map[string]string{
+		"PATH": "", "HOME": home,
+		"LC_ALL":             utf8Locale,
+		"CLAUDE_PLUGIN_ROOT": deep,
+		// 관문이 안 열리면 이음매가 `bin=` 을 찍는다 — 그것이 이 시험의 빨간불이다.
+		"FD_PRINT_BIN": seamToken,
+	}, "status")
+
+	if code != 0 {
+		t.Fatalf("종료코드가 %d 다 — 0 이어야 한다(훅이 세션을 막으면 안 된다):\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout 에 %d바이트를 썼다 — 그 자리는 훅 계약과 MCP 프레임의 것이다: %q",
+			len(stdout), stdout)
+	}
+	if strings.Contains(stderr, "bin=") {
+		t.Fatalf("한글 %d자(%d바이트) 소스인데 상한 갈래가 안 열렸다 — 글자로 세고 있다.\n"+
+			"이러면 관문을 통과한 뒤 go build 가 ENAMETOOLONG 으로 죽고, 사람이 보는 사유는\n"+
+			"이 관문이 준비한 네 줄이 아니라 go 의 원문이다 — 그것도 프롬프트마다:\n%s",
+			len([]rune(deep)), len(deep), stderr)
+	}
+	mustContain(t, "상한 갈래의 안내", stderr,
+		"소스 경로가 너무 깊어",
+		"더 얕은 자리에 두고",
+	)
+
+	// 대조군 — 짧은 소스는 **같은 로케일에서** 그대로 자리를 낸다.
+	// 없으면 이 시험은 "런처가 늘 거절한다"로도 통과한다.
+	if got := launcherBin(t, map[string]string{
+		"PATH": "", "HOME": home,
+		"LC_ALL":             utf8Locale,
+		"CLAUDE_PLUGIN_ROOT": "/opt/flightdeck",
+	}); got == "" {
+		t.Fatal("대조군이 자리를 안 냈다")
+	}
+
+	// 상한 갈래도 이음매도 **아무것도 안 짓는다.**
+	assertEmptyOrAbsent(t, filepath.Join(home, ".cache"), "상한 갈래 시험이 무언가를 지었다")
 }
 
 // HOME 도 FD_STATE_DIR 도 없으면 **짓지 않는다.**
@@ -633,6 +740,120 @@ func TestLauncherRefusesWithoutHome(t *testing.T) {
 	after, _ := filepath.Glob(filepath.Join(legacyTmp, "*"))
 	if strings.Join(after, "\n") != strings.Join(before, "\n") {
 		t.Fatalf("옛 /tmp 사다리가 되살아났다(%s):\n  전: %v\n  후: %v", legacyTmp, before, after)
+	}
+}
+
+// 이음매는 **정확한 토큰에만** 열린다 — `-n` 으로 되돌리는 회귀를 여기서 막는다.
+//
+// ★ 위 시험들은 언제나 seamToken 을 준다. 그래서 **조여지는 방향**(토큰 값이 바뀐다)은
+// 셋이 즉시 잡지만, **느슨해지는 방향**은 아무도 안 쟀다 — 실측: bin/fd 의
+// `[ "${FD_PRINT_BIN:-}" = "__fd_addr__" ]` 를 `[ -n … ]` 으로 바꿔도 cmd/fd 가 통째로 초록이다.
+// 런처 주석과 seamToken 주석이 둘 다 산문으로 「-n 으로 되돌리지 마라」를 적어 뒀는데
+// 그 금지를 재는 단정이 0개였다. 「없는 대조를 있다고 약속하는 주석」은 이 커밋이
+// BinCacheDir 축에서 이미 결함으로 못박은 것이고, 이음매 토큰이 같은 상황이었다.
+//
+// 느슨해지면 셸 프로필·CI 에 남은 디버그용 `export FD_PRINT_BIN=1` 하나로 훅 6개와 MCP
+// stdio 서버가 전부 `bin=` 한 줄만 stderr 에 찍고 exit 0 으로 끝난다(실측: hook session-start ·
+// mcp · doctor · status 넷 다 code=0 / stdout 0바이트). 종료코드가 0 이라 그 무력화는
+// **아무 신호도 안 낸다** — `fd doctor` 마저 여기서 먼저 끝나 진단으로 갈 실이 없다.
+//
+// 이음매를 안 타므로 빌드도 안 돌고 `-short` 에서도 밀리초다.
+func TestLauncherSeamOpensOnlyForItsToken(t *testing.T) {
+	cases := []string{
+		"1", "true", // 디버그용 export 가 실제로 남기는 값들
+		seamToken + "x", "x" + seamToken, " " + seamToken, // 부분 일치로도 안 열린다
+		// ★ 빈 값은 `-n` 판에서도 안 열린다 — 이 갈래가 잠그는 것은 회귀가 아니라
+		//   「값을 준 빈 문자열은 미설정과 같다」는 `${FD_PRINT_BIN:-}` 의 읽는 법이다.
+		"",
+	}
+	for _, v := range cases {
+		t.Run("FD_PRINT_BIN="+v, func(t *testing.T) {
+			state := t.TempDir()
+			stdout, stderr, code := runLauncher(t, map[string]string{
+				"PATH": "", "HOME": t.TempDir(), "FD_STATE_DIR": state,
+				"FD_PRINT_BIN": v,
+			}, "status")
+
+			if strings.Contains(stderr, "bin=") {
+				t.Fatalf("FD_PRINT_BIN=%q 에 이음매가 열렸다 — 이것은 토큰이 아니다:\n%s\n"+
+					"아무 값에나 열리면 디버그용 export 하나로 훅 6개와 MCP 서버가 전부\n"+
+					"조용한 no-op 이 되고, 종료코드 0 이라 아무 신호도 안 난다.", v, stderr)
+			}
+			// 이음매를 안 탔으면 **정상 갈래로 그대로 내려가야** 한다 — PATH 를 비웠으니
+			// 여기서 Go 부재 안내가 나온다. 이 대조가 없으면 "런처가 그냥 죽었다"로도 통과한다.
+			mustContain(t, "정상 갈래의 안내", stderr,
+				"Go 툴체인이 없어",
+				"조정 기능 없이 그대로 진행된다",
+			)
+			if code != 0 {
+				t.Fatalf("종료코드가 %d 다 — 0 이어야 한다(훅이 세션을 막으면 안 된다):\n%s", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout 에 %d바이트를 썼다 — 그 자리는 훅 계약과 MCP 프레임의 것이다: %q",
+					len(stdout), stdout)
+			}
+			assertEmptyOrAbsent(t, filepath.Join(state, "bin"),
+				"토큰이 아닌 값으로 부른 런처가 무언가를 지었다")
+		})
+	}
+}
+
+// 자리가 **상대경로면 짓지 않는다.**
+//
+// 빌드는 `(cd "$src" && go build -o "$tmp")` 안에서 돈다 — 상대 산출물은 **플러그인 소스
+// 트리 아래**로 떨어지고, 뒤이은 `mv` 도 정리용 `rm -f` 도 원래 cwd 기준이라 둘 다 빗나간다
+// (실측: 22MB 고아가 훅마다, 곧 프롬프트마다 하나씩 쌓인다. 이름에 `.$$` 가 붙어 호출마다
+// 새것이 생기고, GC 는 BinCacheDir 자리만 훑으므로 그 자리를 영영 모른다. 종료코드는 0 이라
+// 아무도 안 멈춘다). 자리가 없다고 **말하는** 쪽이 조용히 새는 쪽보다 낫다.
+//
+// ★ **런처 절반을 재는 곳은 여기 하나뿐이다.** TestLauncherAndBinCacheDirAgree 의 대조표는
+// 이 갈래를 뺐다 — 상대경로에서는 **양쪽 다** 자리를 안 내서 견줄 값이 없고(그 주석을 본다),
+// launcherBin 이 `bin=` 을 못 받아 죽는다. 그 배제가 곧 사각이었다: 런처의 거부 네 줄을
+// 통째로 지워도 패키지 시험이 전부 초록이었다(뮤테이션으로 확인).
+//
+// Go 절반의 주인은 여기가 아니다 — env_test.go 의 TestBinCacheDirRefusesRelativePlaces 다.
+// 여기서 BinCacheDir 을 함께 부르지 않는 이유는 그것이 같은 판정의 둘째 화면이 되기 때문이고,
+// 이 라운드의 blocker 가 정확히 그 사고였다.
+func TestLauncherRefusesRelativeStateDir(t *testing.T) {
+	for _, seam := range []bool{false, true} {
+		what := "평범한 호출"
+		// ★ PATH 는 **비운다 — 진짜 것으로 되돌리지 마라.** 거부가 사라지면 이 갈래는
+		//   `go build` 까지 내려가고, 그 산출물 22MB 가 cwd 아래에 고아로 떨어진다(실측).
+		//   Go 가 없으면 거기 못 가고, 그때 나오는 안내가 "Go 툴체인이 없어"로 갈리므로
+		//   회귀는 아래 mustContain 이 그대로 잡는다.
+		env := map[string]string{
+			"PATH": "", "HOME": t.TempDir(), "FD_STATE_DIR": "state",
+		}
+		if seam {
+			// 이음매도 거부를 **우회하면 안 된다** — 자리 판정 뒤에 찍히므로 여기선 안 찍힌다.
+			env["FD_PRINT_BIN"] = seamToken
+			what = "FD_PRINT_BIN 이음매"
+		}
+
+		// cwd 를 통제한다 — 상대경로가 **어디에 걸리는지**가 이 시험의 단정이고,
+		// 물려받으면 그 "어디"가 시험이 도는 소스 트리가 된다.
+		cwd := t.TempDir()
+		stdout, stderr, code := runLauncherIn(t, cwd, env, "status")
+
+		if code != 0 {
+			t.Fatalf("%s: 종료코드가 %d 다 — 0 이어야 한다(훅이 세션을 막으면 안 된다):\n%s",
+				what, code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("%s: stdout 에 %d바이트를 썼다: %q", what, len(stdout), stdout)
+		}
+		mustContain(t, what+"의 안내", stderr,
+			"상대경로다",
+			"조정 기능 없이 세션은 계속된다",
+		)
+		if strings.Contains(stderr, "bin=") {
+			t.Fatalf("%s: 자리가 상대경로인데 자리를 냈다:\n%s", what, stderr)
+		}
+		// HOME 으로 조용히 떨어져도 안 된다 — 거부는 **거부**지 폴백이 아니다.
+		assertEmptyOrAbsent(t, filepath.Join(env["HOME"], ".cache"),
+			what+": 상대 FD_STATE_DIR 를 거부하는 대신 HOME 갈래로 떨어졌다")
+		assertEmptyOrAbsent(t, cwd,
+			what+": 상대 FD_STATE_DIR 로 부른 런처가 cwd 에 무언가를 남겼다")
 	}
 }
 

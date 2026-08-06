@@ -306,6 +306,12 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	// pruneWindows 와 **실패 모양도 같게** 둔다: 반환값이 없고 사유는 Debug 로만 남는다.
 	// 캐시가 안 잘린 것에 대해 사용자가 지금 할 수 있는 일이 없고, 세션 시작을 막을
 	// 이유는 더더욱 없다(이 훅의 존재 이유는 조정이지 청소가 아니다).
+	//
+	// ★ **이 한 줄을 지우지 마라 — 그리고 지우면 빨간불이 난다.** 실패가 Debug 로만 남는
+	// 위 설계 때문에 이 호출이 사라져도 화면·로그·종료코드 어디에도 신호가 없다(한동안
+	// 실제로 전 시험이 초록이었다). 그래서 이 이음매만 파일시스템 좌표계로 따로 잠갔다 —
+	// bincache_test.go 의 TestSessionStartHookPrunesBinCache 가 훅을 실제로 돌리고 심어 둔
+	// 옛 항목이 사라졌는지를 본다. 형제인 위 pruneWindows 는 아직 그 대우를 못 받았다.
 	a.pruneBinCache()
 
 	v, boardBanner, berr := a.Board(ctx, in.SessionID)

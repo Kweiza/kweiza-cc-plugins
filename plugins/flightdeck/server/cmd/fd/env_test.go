@@ -205,6 +205,9 @@ func TestOutboxPathSaysWhenItWillNotSurviveReboot(t *testing.T) {
 // OutboxPath·ConfigPath)과 갈리는 유일한 갈래다. world-writable 부모에 실행 파일을 놓으면
 // 남이 심어 둔 것을 내가 exec 하게 된다(LegacyOutboxDirs 가 tmp 를 뺀 것과 같은 축이고,
 // 실행 파일은 그쪽보다 무겁다). 그래서 값을 안 내는 쪽을 골랐고, 대신 사유는 **반드시** 낸다.
+//
+// ★ 계약의 넷째 조항(⑷ 절대경로가 아니면 자리를 안 낸다)은 **아래 형제 시험**이 잠근다 —
+// 이 표는 값마다 자리를 견주는 표라 '자리를 안 낸다'를 넣으면 HOME 없음 갈래와 섞인다.
 func TestBinCacheDir(t *testing.T) {
 	home := "/h"
 	fixed := filepath.Join(home, ".cache", "flightdeck", "bin")
@@ -292,6 +295,63 @@ func TestBinCacheDir(t *testing.T) {
 	}
 	if strings.Contains(filepath.Base(got), "fd-") {
 		t.Fatalf("키 규칙이 Go 로 새어 나왔다: %q", got)
+	}
+}
+
+// 계약의 **넷째 조항**(⑷ 절대경로가 아니면 자리를 안 낸다)을 잠근다.
+//
+// ★ 위 표와 왜 갈라 두는가. 저 표는 "이 값에 이 자리를 낸다"를 재는데 여기서 재는 것은
+// **자리를 안 내는 것**이라, 같은 표에 넣으면 `want: ""` 한 줄이 'HOME 이 없다' 갈래와
+// 구분이 안 된다(사유가 갈리는 것이 이 갈래의 전부다).
+//
+// ★ 이 조항은 한동안 **런처에만** 있었다(bin/fd 의 case 문). 그동안 Go 는 `relpath/bin`·
+// `~/x/bin` 을 자리로 답했고, 그 값이 그대로 화면까지 갔다 — `바이너리 캐시 relpath/bin
+// (FD_STATE_DIR (명시 지정))`. 런처가 categorically 거절하는 자리를 사실처럼 찍은 것이다.
+// 표에 절대경로만 있어서 갈래 자체가 한 번도 안 평가됐다.
+//
+// ★ 사유가 **축을 이름으로 말하는지**까지 잰다. "상대경로다"만으로는 FD_STATE_DIR 를
+// 고쳐야 하는지 HOME 을 고쳐야 하는지 모르고, 이 함수의 사유는 값이 없을 때 사람에게
+// 남는 유일한 것이다(doctor 가 값 자리에 사유를 찍는다 — cmds.go 의 「바이너리 캐시 없음」).
+func TestBinCacheDirRefusesRelativePlaces(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     map[string]string
+		home    string
+		wantSrc string // 사유가 반드시 이름으로 말해야 하는 축
+	}{
+		// 틸드·변수를 안 펴는 env 주입에서 실제로 오는 값들이다(런처는 셸이 펴 주지만,
+		// hooks.json·systemd·컨테이너 env 는 안 편다).
+		{"맨 상대경로", map[string]string{"FD_STATE_DIR": "relpath"}, "/h", "FD_STATE_DIR"},
+		{"안 펴진 틸드", map[string]string{"FD_STATE_DIR": "~/x"}, "/h", "FD_STATE_DIR"},
+		{"안 펴진 변수", map[string]string{"FD_STATE_DIR": "$HOME/x"}, "/h", "FD_STATE_DIR"},
+		{"점 상대경로", map[string]string{"FD_STATE_DIR": "./x"}, "/h", "FD_STATE_DIR"},
+		{"부모 상대경로", map[string]string{"FD_STATE_DIR": ".."}, "/h", "FD_STATE_DIR"},
+		{"공백을 뗀 뒤에도 상대경로", map[string]string{"FD_STATE_DIR": "  rel  "}, "/h", "FD_STATE_DIR"},
+		// HOME 갈래에도 같은 관문이 선다 — 런처의 case 문도 binroot 하나만 본다.
+		{"HOME 이 상대경로", map[string]string{}, "relhome", "HOME"},
+		{"HOME 이 안 펴진 틸드", map[string]string{}, "~", "HOME"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, src := BinCacheDir(envOf(c.env), c.home)
+			if dir != "" {
+				t.Fatalf("상대경로에 자리를 냈다: %q (%s)\n"+
+					"런처는 이 자리에 안 짓는다 — doctor 가 영영 안 생길 자리를 찍고,\n"+
+					"pruneBinCache 가 프로세스 cwd 기준으로 남의 fd-* 를 지운다", dir, src)
+			}
+			if !strings.Contains(src, c.wantSrc) {
+				t.Fatalf("사유가 어느 축을 고쳐야 하는지 안 말한다(%q 가 없다): %q", c.wantSrc, src)
+			}
+			if !strings.Contains(src, "절대경로") {
+				t.Fatalf("사유가 '왜 안 냈는지'를 안 말한다: %q", src)
+			}
+		})
+	}
+
+	// 대조 전제 — 절대경로에서는 **그대로 자리를 낸다.** 이 줄이 없으면 위 단정은
+	// "이 함수가 늘 빈 문자열을 낸다"로도 통과한다.
+	if dir, src := BinCacheDir(envOf(map[string]string{"FD_STATE_DIR": "/x"}), "/h"); dir != filepath.Join("/x", "bin") {
+		t.Fatalf("대조가 깨졌다 — 절대경로인데 자리를 %q 로 냈다(%s)", dir, src)
 	}
 }
 

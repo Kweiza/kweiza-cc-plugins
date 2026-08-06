@@ -138,8 +138,13 @@ func TestPruneBinCache(t *testing.T) {
 			want: []string{p("fd-a")},
 		},
 		{
-			// 음수를 그대로 인덱스 비교에 쓰면 '전부 유지'로 조용히 뒤집힌다.
-			name:    "음수 keep 은 0 으로 본다",
+			// ★ 여기서 거는 계약은 **답**이다 — "음수 keep 은 keep 0 과 같은 답(전부 삭제)".
+			//    위 갈래의 `keep 0 이면 self 만 남는다` 와 짝이다. 구현 쪽 가드
+			//    (bincache.go 의 `if keep < 0`)를 잠그지는 **못한다**: 지금 비교가 `i < keep`
+			//    라 가드를 지워도 답이 같아서 이 줄이 초록이다(뮤테이션으로 확인했다).
+			//    앞서 여기 적혀 있던 "'전부 유지'로 뒤집힌다"는 방향이 거꾸로였다 —
+			//    음수가 가는 쪽은 전부 유지가 아니라 전부 삭제다.
+			name:    "음수 keep 은 keep 0 과 같은 답을 낸다(전부 삭제)",
 			entries: []BinEntry{binAt(dir, "fd-a", 0)},
 			keep:    -1, self: "",
 			want: []string{p("fd-a")},
@@ -248,5 +253,75 @@ func TestReadBinCacheTreatsMissingDirAsEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("없는 디렉토리에서 항목이 나왔다: %v", got)
+	}
+}
+
+// ★ 훅이 이 GC 를 **실제로 부르는가.** 좌표계는 파일시스템이다.
+//
+// 위 시험들은 판정(PruneBinCache)과 어댑터(readBinCache)를 잠그지만, 그 둘이 아무 데서도
+// 안 불려도 전부 초록이다 — 단위 시험은 소비자가 그 값을 쓰는지를 원리적으로 못 본다.
+// 실제로 hook.go 의 `a.pruneBinCache()` **한 줄만** 지우면 cmd/fd 가 통째로 초록이었다.
+// 그 줄이 리베이스에서 떨어져 나가면 22MB×N 이 상한 없이 다시 쌓이고(이 파일 머리말),
+// 실패를 Debug 로만 남기는 설계라 화면에도 로그에도 아무 신호가 없다. doctor 도 자리와
+// 사유만 찍지 항목 수·용량은 안 찍으므로, 침묵으로 사는 회귀다.
+//
+// ★ **형제에게는 선례가 없다.** 바로 위 줄인 `a.pruneWindows()`(hook.go)도 훅 경로에서
+// 아무도 안 잰다 — 저장소 전체에 window.Prune 을 훅 너머로 단정하는 시험이 없다. 즉 이
+// 시험은 선례를 따른 것이 아니라 **이 부류의 첫 자리**다. 여기 먼저 두는 이유는 bincache.go
+// 가 파일 하나째로 그 한 줄을 위해 존재하기 때문이고, 형제 쪽은 후속으로 남긴다.
+//
+// ★ 진짜 홈을 안 건드린다: 하네스가 FD_STATE_DIR·HOME 을 가짜로 못박으므로 binDir 은
+// `h.state/bin` 이다. 그 전제를 결과보다 **먼저** 단정한다 — 안 그러면 자리가 어긋나
+// 아무것도 안 지워진 초록과 "GC 가 돌았다"가 구분이 안 된다.
+func TestSessionStartHookPrunesBinCache(t *testing.T) {
+	h := newHarness(t)
+	cwd := t.TempDir()
+
+	binDir := filepath.Join(h.state, "bin")
+	if got, src := BinCacheDir(envOf(h.env), h.home); got != binDir {
+		t.Fatalf("대조 전제가 깨졌다 — BinCacheDir=%q(%s), 심는 자리는 %q", got, src, binDir)
+	}
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("가짜 바이너리 캐시를 못 만들었다: %v", err)
+	}
+
+	// 옛것 → 새것. keep=3 이므로 앞의 둘이 대상이다.
+	base := time.Now().Add(-24 * time.Hour)
+	old := []string{"fd-a", "fd-b"}
+	fresh := []string{"fd-c", "fd-d", "fd-e"}
+	for i, name := range append(append([]string{}, old...), fresh...) {
+		p := filepath.Join(binDir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+			t.Fatalf("심기 실패(%s): %v", name, err)
+		}
+		mt := base.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatalf("mtime 설정 실패(%s): %v", name, err)
+		}
+	}
+	// 접두가 아닌 것 둘 — 옛 이름(`fd`)과 남의 파일. 이 GC 는 청소지 파괴가 아니다.
+	// 훅을 거쳐도 그 판정이 그대로 서는지를 여기서 함께 잰다.
+	others := []string{"fd", "남의파일"}
+	for _, name := range others {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("심기 실패(%s): %v", name, err)
+		}
+	}
+
+	if code, out := h.run(sessionStartPayload("cc-session-uuid-1", cwd), "hook", "session-start"); code != 0 {
+		t.Fatalf("SessionStart 훅 종료코드 %d:\n%s", code, out)
+	}
+
+	for _, name := range old {
+		if _, err := os.Stat(filepath.Join(binDir, name)); err == nil {
+			t.Errorf("%s 가 남았다 — 훅이 GC 를 안 불렀다(keep=%d). "+
+				"그 한 줄이 없으면 22MB×N 이 상한 없이 쌓이고 아무 신호도 안 난다",
+				name, binCacheKeep)
+		}
+	}
+	for _, name := range append(append([]string{}, fresh...), others...) {
+		if _, err := os.Stat(filepath.Join(binDir, name)); err != nil {
+			t.Errorf("%s 가 사라졌다 — 청소가 아니라 파괴다: %v", name, err)
+		}
 	}
 }
