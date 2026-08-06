@@ -54,6 +54,7 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           옛 도구 산출물을 옮긴다. **기본값은 예행**이고
                                           --apply 가 있어야 쓴다. 원본은 읽기만 한다
   fd export --to-legacy --out <디렉토리>   옛 형식으로 되쓴다(완전 왕복은 아니다 — 출력이 목록을 낸다)
+  fd export --judgments --out <디렉토리>   판단 원장을 JSONL 로 낸다. **DB 전량**이라 --project 를 안 받는다
 
 환경: FD_URL(기본 http://127.0.0.1:7420) · FD_TOKEN · FD_PROJECT · FD_STATE_DIR · FD_LOG
 `
