@@ -1019,6 +1019,21 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	}
 	// ★ 옛 채널 자리에 남은 것. 대기는 다음 재생이 **보내서** 비우고, 격리는 그 자리에 남는다
 	// (보관소는 제 큐 옆에 남는 것이 설계다 — '어디서 온 것인가'가 사라지면 안 된다).
+	// ★ **잠금 없이 지나간 횟수.** 이 수를 낼 자리가 없다는 것이 그 자체로 결함이었다:
+	// fail-open 은 "오늘과 같은 동작으로 떨어진다"라 나빠지지는 않지만, **얼마나 자주
+	// 일어나는지**를 아무도 못 보는 상태로 두면 "잠금을 넣었다"가 거짓 안심이 된다
+	// (설계 §9). 경고는 stderr 로만 갔고 doctor 는 파일만 읽으므로 물을 자리가 구조적으로
+	// 없었다. 잰 축과 **못 잰 축**을 함께 낸다 — 0 회가 '안전하다'로 읽히면 안 된다.
+	if fo, err := a.cli.Outbox.FailOpens(); err != nil {
+		fmt.Fprintf(out, "  ! 잠금 실패 기록을 못 읽었다: %v\n", err)
+	} else if len(fo) > 0 {
+		fmt.Fprintf(out, "  ! 잠금 없이 지나간 %d회 (마지막 %s · %s)\n",
+			len(fo), fo[len(fo)-1].At.Format(time.RFC3339), clip(fo[len(fo)-1].Reason, 120))
+	} else {
+		fmt.Fprintln(out, "  잠금 없이 지나간 0회")
+	}
+	fmt.Fprintln(out, "    이 수는 잠금을 **못 잡은** 것만이다 — NFS 처럼 flock 이 조용히 "+
+		"안 걸리는 자리는 잡았다고 나오고 여기 안 잡힌다(설계 §13).")
 	//
 	// ★ 격리 쪽은 고정 자리와 **같은 축으로** 가른다. 이 자리를 빼면 처방이 이 머신에 안
 	// 닿는다 — 실측(2026-08-06): 이 머신의 격리는 `~/.local/state/flightdeck/outbox` 의

@@ -180,7 +180,41 @@ func IdempotencyKey(session string, body []byte) string {
 const (
 	pendingName  = "pending.jsonl"
 	rejectedName = "rejected.jsonl"
+	// failOpenName 은 **잠금 없이 지나간 사건**의 기록이다.
+	//
+	// ★ 왜 파일인가. 이 사건은 오래 `o.warn` 으로만 흘렀고 그 로거는 stderr 로 간다.
+	// `fd doctor` 는 파일만 읽는다 — 로그를 읽는 줄이 하나도 없다. 그리고 이 경로의 주
+	// 사용자인 훅은 설계가 "정의상 조용히 죽는다"고 적어 둔 것이다. 그래서 "얼마나 자주
+	// fail-open 하나"를 물을 자리가 **구조적으로** 없었고, 그 상태로 두면 "잠금을 넣었다"가
+	// 거짓 안심이 된다(설계 §9).
+	failOpenName = "failopen.jsonl"
 )
+
+// FailOpenEvent 는 잠금 없이 지나간 사건 하나다.
+type FailOpenEvent struct {
+	At     time.Time `json:"at"`
+	Op     string    `json:"op"`     // 어느 갈래인가 — "append" | "settle"
+	Reason string    `json:"reason"` // 왜 못 잡았나. **항상 채운다**
+}
+
+// FailOpenReason 은 잠금 없이 지나간 사유다. 순수 함수다.
+//
+// ★ **빈 문자열이면 기록하지 않는다.** 잠금 기구가 없는 플랫폼에서는 모든 호출이
+// fail-open 인데, 그것은 사건이 아니라 **상수**다. 사건으로 세면 `fd` 호출마다 한 줄씩
+// 파일이 자라고 그 수는 "얼마나 자주 경합하나"를 하나도 안 말한다. 그 사실은 doctor 가
+// 한 번 말할 것이지 계수기가 셀 것이 아니다(설계 §13 — 안 잰 축을 잰 척하지 않는다).
+//
+// ★ 예산 초과와 기구 실패를 **가른다.** 뭉치면 처방이 갈린다: 예산 초과는 "경합이 세다"라
+// 큐를 쪼개야 하고, 기구 실패는 "자리를 못 열었다"라 권한·경로 문제다.
+func FailOpenReason(supported bool, err error) string {
+	if !supported {
+		return "" // 기구가 없다. 사건이 아니라 상수다
+	}
+	if err != nil {
+		return "잠금 기구가 실패했다: " + clip(err.Error(), 200)
+	}
+	return "예산 안에 못 잡았다 — 큐가 깊거나 세션이 몰렸다"
+}
 
 // Outbox 는 디렉토리 하나의 대기열이다. 파일 하나에 JSONL 로 쌓는다.
 //
@@ -239,6 +273,67 @@ func (o *Outbox) Source() string { return o.source }
 // 같은 축의 같은 자산이고, 격리는 제 큐 옆에 남아야 '어디서 온 것인가'가 안 사라진다.
 func (o *Outbox) pendingPath() string  { return filepath.Join(o.dir, pendingName) }
 func (o *Outbox) rejectedPath() string { return filepath.Join(o.dir, rejectedName) }
+func (o *Outbox) failOpenPath() string { return filepath.Join(o.dir, failOpenName) }
+
+// recordFailOpen 은 잠금 없이 지나간 사건 하나를 남긴다.
+//
+// ★ **잠그지 않는다. 잠글 수도 없다** — 여기는 잠금을 못 잡아서 온 자리다.
+// 그리고 잠글 이유도 없다: 격리 파일과 성질이 반대라, 겹친 프로세스 둘이 각자 못 잡았으면
+// 그것은 **두 사건**이다. 여기서 중복을 제거하면 세려던 것을 지운다. O_APPEND 가
+// 정확히 맞는 원시 연산이다.
+//
+// ★ **실패해도 호출자를 안 막는다.** 이 함수는 관측이고, 관측이 아웃박스 경로를 깨면
+// 재생성 불가한 자산을 계수기 때문에 잃는다. 다만 조용히 넘어가지도 않는다 — 경고로 낸다.
+func (o *Outbox) recordFailOpen(op string, supported bool, lockErr error) {
+	reason := FailOpenReason(supported, lockErr)
+	if reason == "" {
+		return
+	}
+	buf, err := json.Marshal(FailOpenEvent{At: o.stamp(), Op: op, Reason: reason})
+	if err == nil {
+		// ★ 자리를 먼저 만든다. 여기가 큐보다 먼저 도는 갈래가 있다 — 잠금을 못 잡은 첫
+		// 호출이 아직 아무것도 안 쓴 큐일 수 있고, 그러면 디렉토리가 없어 ENOENT 로
+		// **조용히** 실패한다(경고 로거는 대개 안 꽂혀 있다). appendLocked·quarantine 이
+		// 같은 이유로 같은 줄을 갖고 있다.
+		err = os.MkdirAll(o.dir, 0o755)
+	}
+	if err == nil {
+		var f *os.File
+		f, err = os.OpenFile(o.failOpenPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, err = f.Write(append(buf, '\n'))
+			f.Close()
+		}
+	}
+	if err != nil {
+		o.warn("잠금 실패를 기록하지 못했다 — 이 사건은 어디에도 안 남는다",
+			"dir", o.dir, "op", op, "error", err.Error())
+	}
+}
+
+// FailOpens 는 이 큐에서 잠금 없이 지나간 사건 전부다. 파일이 없으면 빈 목록이다.
+func (o *Outbox) FailOpens() ([]FailOpenEvent, error) {
+	b, err := os.ReadFile(o.failOpenPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("잠금 실패 기록을 못 읽었다: %w", err)
+	}
+	var out []FailOpenEvent
+	for i, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var e FailOpenEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			// 읽은 데까지와 함께 올린다 — 이 파일도 조용히 버리지 않는다(설계 §9).
+			return out, fmt.Errorf("잠금 실패 기록 %d번째 줄 해석 실패: %w", i+1, err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
 
 // stamp 는 지금이다. 시계가 안 꽂혔어도 값을 낸다.
 func (o *Outbox) stamp() time.Time {
@@ -269,6 +364,8 @@ func (o *Outbox) Append(e OutboxEntry) error {
 	}
 	o.warn("큐 잠금 없이 쌓는다 — 재생과 겹치면 이 판단이 사라질 수 있다",
 		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
+	// ★ 경고만으로는 아무도 안 센다 — 그 로거는 stderr 로 가고 doctor 는 파일만 읽는다.
+	o.recordFailOpen("append", queueLockSupported, err)
 	return o.appendLocked(e)
 }
 
@@ -398,6 +495,7 @@ func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int
 	// 잠금 없이도 다시 읽고 빼는 쪽이 창을 훨씬 좁힌다(오늘보다 나쁘지 않다).
 	o.warn("큐 잠금 없이 재생 결과를 반영한다 — 겹친 재생이 있으면 판단이 사라질 수 있다",
 		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
+	o.recordFailOpen("settle", queueLockSupported, err)
 	// ★ 한 줄로 쓰지 마라(`return remaining, merge()`). Go 는 반환값들의 평가 순서를
 	// 규정하지 않아서, merge 가 갱신하는 remaining 을 그 전에 읽을지 후에 읽을지가 미정이다.
 	merr := merge()
