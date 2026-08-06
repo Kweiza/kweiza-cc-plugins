@@ -41,9 +41,12 @@ var migration003 string
 //go:embed migrations/004_pick_bundle.sql
 var migrationPickBundle string
 
+//go:embed migrations/005_footprint_absolute_backfill.sql
+var migrationFootprintPurge string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -68,6 +71,7 @@ var migrations = []Migration{
 	{To: 2, Name: "멱등 기록을 DB 로", SQL: migration002},
 	{To: 3, Name: "랜딩 순서 큐", SQL: migration003},
 	{To: 4, Name: "pick_eval 이 묶음을 담는다", SQL: migrationPickBundle},
+	{To: 5, Name: "절대경로 발자국을 지운다", SQL: migrationFootprintPurge},
 }
 
 // timeLayout 은 저장용 시각 표기다.

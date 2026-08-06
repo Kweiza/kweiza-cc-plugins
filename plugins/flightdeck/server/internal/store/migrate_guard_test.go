@@ -124,7 +124,17 @@ type exemption struct {
 // ★ 여기 오르는 것은 **그 증분에 한정**된다. 조작 단위 허용이 아니라 증분 단위 허용이다 —
 // "DELETE FROM 은 이제 괜찮다" 가 아니라 "005 의 DELETE FROM 은 이런 이유로 괜찮다" 여야
 // 다음 증분이 같은 판정을 다시 받는다.
-var destructiveExempt = map[int]exemption{}
+var destructiveExempt = map[int]exemption{
+	// 005 · 절대경로 발자국 삭제.
+	5: {
+		ops: []op{opDeleteFrom},
+		why: "footprint 는 D(파생) 계층이고 참조하는 표가 없다. 지우는 행은 judge.comparablePath 가 " +
+			"이미 처방 축에서 배제한 절대경로뿐이며, 그 좌표계로는 관문(Beat·Pick)이 쓰는 " +
+			"session.worktree 기준으로 상대화할 수 있는 행이 0건이라 살릴 방법 자체가 없다. " +
+			"판올림 전 VACUUM INTO 백업이 자동으로 뜨고 RollbackHint 가 복구 절차를 낸다. " +
+			"근거 전문은 005 머리말과 설계 §7 에 있다.",
+	},
+}
 
 // neverExempt 는 예외로도 못 여는 조작이다. 데이터가 아니라 **구조**가 사라지는 것들이다.
 //
