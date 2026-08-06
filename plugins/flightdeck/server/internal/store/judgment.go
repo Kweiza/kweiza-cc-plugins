@@ -410,3 +410,53 @@ func (s *Store) GetSnapshot(ctx context.Context, project, key string) (model.Sna
 	}
 	return sn, nil
 }
+
+// snapshotCols 는 스냅숏 조회의 컬럼 목록이다.
+//
+// judgmentCols 와 같은 이유로 상수다 — 목록을 손으로 다시 적으면 순서가 어긋나는 순간
+// Scan 이 조용히 엉뚱한 값을 채운다(전부 문자열이라 타입 오류도 안 난다).
+const snapshotCols = `project, key, value, method, evidence, input_digest, computed_at`
+
+// ListSnapshots 는 프로젝트의 스냅숏 전부를 키 순으로 낸다.
+//
+// 수는 사람이 넣은 만큼이라 페이징이 없다. 없는 프로젝트는 오류가 아니라 빈 목록이다 —
+// GetSnapshot 과 달리 "아직 없다"와 "그런 프로젝트가 없다"를 가를 필요가 없다.
+func (s *Store) ListSnapshots(ctx context.Context, project string) ([]model.Snapshot, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+snapshotCols+` FROM snapshot WHERE project = ? ORDER BY key`, project)
+	if err != nil {
+		return nil, fmt.Errorf("스냅숏 목록 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+
+	var out []model.Snapshot
+	for rows.Next() {
+		sn, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("스냅숏 목록 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// scanSnapshot 은 snapshotCols 순서의 한 행을 읽는다.
+// scanJudgment 과 같은 면(*sql.Row 와 *sql.Rows 둘 다)을 받는다.
+func scanSnapshot(sc interface{ Scan(...any) error }) (model.Snapshot, error) {
+	var sn model.Snapshot
+	var evidence, digest sql.NullString
+	var method, at string
+	if err := sc.Scan(&sn.Project, &sn.Key, &sn.Value, &method, &evidence, &digest, &at); err != nil {
+		return sn, fmt.Errorf("스냅숏 행 해석 실패: %w", err)
+	}
+	sn.Method = model.SnapshotMethod(method)
+	sn.Evidence, sn.InputDigest = str(evidence), str(digest)
+	var err error
+	if sn.ComputedAt, err = parseTime(at); err != nil {
+		return sn, err
+	}
+	return sn, nil
+}
