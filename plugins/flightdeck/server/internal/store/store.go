@@ -723,6 +723,23 @@ func fmtTime(t time.Time) string { return t.UTC().Format(timeLayout) }
 // 재개 판정이 정확히 그 비교다.
 func nowStamp() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
 
+// atStamp 는 **받은** 시각을 같은 해상도로 맞춘다. 영값이면 지금이다.
+//
+// nowStamp 의 짝이고, 이유도 같다. 시각을 주입받는 쓰기가 그 값을 구조체에 담아
+// 돌려줄 때 반드시 이걸 거친다 — 서비스의 시계는 `time.Now().UTC()` 라 나노초를 담고
+// 있는데 행은 마이크로초로 저장되므로(timeLayout), 받은 값을 그대로 돌려주면
+// "방금 만든 것"과 "다시 읽은 것"이 미세하게 갈린다. 그 어긋남은 두 값을 비교하는
+// 자리에서만 드러나고 그때는 이미 원인에서 멀다.
+//
+// ★ Beat·Touch 는 아직 안 거친다. 그 둘은 받은 시각을 구조체로 돌려주지 않아 같은
+// 비교가 생기지 않는다 — 돌려주게 되는 날 이 함수를 거쳐야 한다.
+func atStamp(at time.Time) time.Time {
+	if at.IsZero() {
+		return nowStamp()
+	}
+	return at.UTC().Truncate(time.Microsecond)
+}
+
 func parseTime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil

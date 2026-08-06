@@ -88,8 +88,11 @@ func newLaneFixture(t *testing.T) *laneFixture {
 	//
 	// ★ 신호 둘은 **픽스처가 직접 찍은 값**이다(전에는 세션 열기의 mcp 비트가
 	//   대기자 쪽을 대신했다). 넷이 전부 다른 값인 것이 이 픽스처의 계약이다.
-	//   대기 경과는 여전히 실시계라 화면에서 안 맞는다 —
-	//   후속 `fd-lane-timestamps-ignore-injected-clock`.
+	//
+	// ★ 대기·획득도 이제 이 시계로 찍힌다(store 가 시각을 주입받는다). 전에는 저장층이
+	//   실시계를 찍어 화면과 갈렸고, 그래서 그 두 축은 한 번도 검증된 적이 없었다.
+	//   다만 점유자의 두 값은 **구조적으로 같다** — 줄 서기와 취득이 같은 트랜잭션이다.
+	//   값이 갈리는 경로는 TestLanePanelSplitsWaitingFromHeld 가 따로 세운다.
 	clk.advance(2 * time.Minute)
 	return &laneFixture{fixture: f, clk: clk, holder: holder, waiter: waiter}
 }
@@ -111,33 +114,85 @@ func TestLanePanelDrawsEveryRowWithItsAxes(t *testing.T) {
 	mustContain(t, html, lf.holder, "점유자 세션이 줄 표에 없다")
 	mustContain(t, html, lf.waiter, "대기자 세션이 줄 표에 없다 — 줄은 전부 내야 한다")
 
-	// ★★ 여기 있던 분 단위 단정 넷 중 둘은 **거짓 초록이었다.**
+	// ★ 다섯을 전부 **레인 절 안에서** 잰다. 페이지 전체에 걸었다가 섹션 ①의 신호 배지가
+	// 레인의 대기 경과인 척한 사고가 이 파일에서 실제로 났다(사연은 아래 laneSectionOf 에 있다).
 	//
-	// `mustContain(html, "10분 전")`(점유자 대기 경과)와 짝인 `"10분"`(획득 경과)은
-	// 레인 표가 아니라 **섹션 ①의 카드**가 내던 값이었다(`mcp 10분 전` 배지).
-	// 실측으로 확인했다: 레인 절 안의 값은 `4시간 3분 전` 이고 `10분 전` 은 그 절에 없다.
+	// ★ 대기와 획득은 **칸의 표시까지** 못박는다. 이 픽스처에서 점유자의 두 값은 둘 다 10분이다 —
+	// 줄 서기와 취득이 같은 트랜잭션(service.Land)이라 구조적으로 같은 시각이고, 값만으로는 두 칸을
+	// 못 가른다. 그냥 `"10분 전"` 하나를 걸면 대기 칸이 두 단정을 다 만족시켜 **획득 축은 여전히
+	// 미검증으로 남는다** — 이 항목이 고친 결함이 정확히 "그 축이 한 번도 검증된 적이 없다"이다.
+	// 템플릿이 획득 칸만 <b> 로 감싸므로 그것을 근거로 가른다.
 	//
-	// 원인은 형식이 아니라 **시계 어긋남**이다. `internal/store/landing.go` 가
-	// `EnqueuedAt`·`AcquiredAt` 을 `nowStamp()`(실시계)로 찍어 주입된 시계를 안 쓰는데,
-	// 페이지는 픽스처 시계로 그린다. 운영에서는 양쪽 다 실시계라 **영향이 없고**,
-	// 시험에서만 갈린다 — 그래서 이 두 축은 지금까지 한 번도 검증된 적이 없다.
-	//
-	// ★ 픽스처에 선점을 넣어 ①의 카드를 되살리는 방식으로 통과시키지 마라.
-	//   그것은 거짓 초록을 그대로 복원하는 것이다. 후속 항목:
-	//   `fd-lane-timestamps-ignore-injected-clock`.
-	//
-	// 그때까지, 검증 가능한 축은 **레인 절 안에서** 본다. 그리고 신호 나이(4분)는
-	// 서비스 시계로 찍히므로 지금도 참이다 — 대기 경과를 신호 칸에 찍는 오류는 이것이 잡는다.
+	// 두 값이 **서로 다른 시각**이 되는 경로(대기하다 나중에 취득)는 값으로 갈리므로
+	// TestLanePanelSplitsWaitingFromHeld 가 따로 본다. 이 시험은 같은 값일 때의 칸 배치를 지킨다.
 	lane := laneSectionOf(t, html)
-	mustContain(t, lane, "4분 전", "점유자의 마지막 신호 나이(4분)가 없다 — 대기 경과를 그 칸에 찍은 것이다")
-	mustContain(t, lane, "2분 전", "대기자의 마지막 신호 나이(2분)가 없다 — 대기 경과(7분)가 아니다. 그 둘이 같은 값이면 이 단정은 아무것도 안 지킨다")
-	if strings.Contains(lane, "10분 전") {
-		t.Fatal("레인 절이 10분 전을 찍는다 — 위 결함이 고쳐졌다는 뜻이다. " +
-			"이 갈래를 지우고 분 단위 단정 넷을 되살려라(fd-lane-timestamps-ignore-injected-clock)")
-	}
+	mustContain(t, lane, "<td>10분 전</td>",
+		"점유자의 대기 경과(10분)가 레인 절에 없다 — 줄 행 시각이 주입된 시계를 안 쓰면 이 칸이 실시계로 벌어진다")
+	mustContain(t, lane, "<b>10분 전</b>",
+		"점유자의 획득 경과(10분)가 없다 — 이 칸은 resource_hold.acquired_at 이라 대기 경과와 다른 표에서 온다")
+	mustContain(t, lane, "<td>4분 전</td>",
+		"점유자의 마지막 신호 나이(4분)가 없다 — 대기 경과를 그 칸에 찍은 것이다")
+	mustContain(t, lane, "<td>7분 전</td>",
+		"대기자의 대기 경과(7분)가 없다 — 점유자보다 3분 늦게 줄을 섰는데 그 차이가 화면에 없다")
+	mustContain(t, lane, "<td>2분 전</td>",
+		"대기자의 마지막 신호 나이(2분)가 없다 — 대기 경과(7분)가 아니다. 그 둘이 같은 값이면 이 단정은 아무것도 안 지킨다")
 
 	// 점유자와 대기자가 화면에서 구분돼야 한다. 안 그러면 "누가 지금 쥐고 있나"를 못 읽는다.
 	mustContain(t, html, "lane-holder", "점유자 행이 표시로 구분되지 않는다")
+}
+
+// TestLanePanelSplitsWaitingFromHeld 는 대기 경과와 획득 경과가 **서로 다른 시각에서**
+// 오는지 본다. 형제 시험의 픽스처는 둘이 같은 값이라(줄 서기와 취득이 같은 트랜잭션이다)
+// 표시 자리로만 갈랐다 — 여기서는 값으로 가른다.
+//
+// 이 경로가 운영의 보통 경로다: 남이 쥐고 있는 동안 줄에 서 있다가 나중에 차례를 받는다.
+// 그때 두 숫자는 **반드시 달라야 한다**. 같게 나오면 화면이 한 시각을 두 칸에 찍고 있는
+// 것이고, 그러면 "얼마나 기다렸나"와 "얼마나 쥐고 있나"라는 서로 다른 판정 근거가
+// 하나로 뭉개진다 — 회수 판정이 정확히 그 둘을 갈라 본다.
+func TestLanePanelSplitsWaitingFromHeld(t *testing.T) {
+	clk := newClock(time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC))
+	f := newFixture(t, withClock(clk.now)).withRepo("feat")
+	ctx := context.Background()
+
+	first := f.openSession("cc-first", "먼저").ID
+	if _, err := f.svc.Land(ctx, service.LandInput{Project: testProject, SessionID: first}); err != nil {
+		t.Fatalf("선행 세션 줄 서기 실패: %v", err)
+	}
+
+	// 3분 뒤 뒷사람이 줄에 선다 — 이 순간이 대기 경과의 기준이다.
+	clk.advance(3 * time.Minute)
+	later := f.openSession("cc-later", "나중").ID
+	if _, err := f.svc.Land(ctx, service.LandInput{Project: testProject, SessionID: later}); err != nil {
+		t.Fatalf("후행 세션 줄 서기 실패: %v", err)
+	}
+
+	// 다시 4분 뒤 앞사람이 빠지고, 뒷사람이 **그때** 차례를 받는다(지연 부여 — 차례를 미는
+	// 주체는 다음 호출이다). 여기서 획득 시각이 대기 시작보다 7분 늦게 찍힌다.
+	clk.advance(4 * time.Minute)
+	if _, err := f.svc.LandLeave(ctx, service.LandLeaveInput{
+		Project: testProject, SessionID: first, Detail: "자리를 넘긴다"}); err != nil {
+		t.Fatalf("선행 세션 이탈 실패: %v", err)
+	}
+	got, err := f.svc.Land(ctx, service.LandInput{Project: testProject, SessionID: later})
+	if err != nil {
+		t.Fatalf("후행 세션 취득 실패: %v", err)
+	}
+	if got.State != "turn" {
+		t.Fatalf("후행 세션이 %q 다 — 앞이 빠졌으므로 차례여야 한다. 이 전제가 깨지면 아래 두 숫자는 아무것도 안 잰다", got.State)
+	}
+
+	// 렌더 시점을 다시 3분 민다(12:10). 뒷사람은 12:03 에 줄을 서서 12:07 에 받았으므로
+	// 대기 = 7분, 획득 = 3분이다. **두 숫자가 달라야 한다** — 이 픽스처의 존재 이유다.
+	clk.advance(3 * time.Minute)
+	code, html := f.get("?project=" + testProject)
+	if code != 200 {
+		t.Fatalf("화면이 %d 다", code)
+	}
+	lane := laneSectionOf(t, html)
+	mustContain(t, lane, "<td>7분 전</td>",
+		"대기 경과(7분)가 없다 — 차례를 받은 시각으로 덮였다면 여기가 3분으로 찍힌다")
+	mustContain(t, lane, "<b>3분 전</b>",
+		"획득 경과(3분)가 없다 — 줄 선 시각을 획득 칸에 찍었다면 여기가 7분으로 찍힌다")
 }
 
 // TestLanePanelOffersReclaimPerRow 는 회수 대상이 **레인이 아니라 줄 행**임을 화면이

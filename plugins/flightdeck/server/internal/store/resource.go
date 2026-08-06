@@ -83,7 +83,12 @@ func (e *ResourceHeldError) Error() string {
 // 위반 판별을 드라이버의 오류 코드로 하지 않는 이유: 삽입이 실패한 뒤 **살아 있는 점유자를
 // 실제로 조회해** 있으면 ResourceHeldError, 없으면 원래 오류를 그대로 올린다.
 // 어느 쪽이든 점유자를 조회해야 오류에 실을 수 있으므로 드라이버 내부에 기대는 대가가 순이익이 아니다.
-func (t *Tx) AcquireResource(project, resource string, h Holder) (model.ResourceHold, error) {
+//
+// ★ 획득 시각을 **받는다**(Beat·Touch·EnqueueLanding 과 같은 문법 — 영값이면 지금. atStamp).
+// 이 값이 곧 레인 절의 **획득 경과**이고, 스스로 실시계를 찍으면 주입된 시계로 그리는
+// 화면과 갈려 그 칸이 통째로 거짓이 된다. 대기 경과와 **다른 표에서 오는 축이라**
+// landing.go 만 고쳐서는 절반만 참이 된다(fd-lane-timestamps-ignore-injected-clock).
+func (t *Tx) AcquireResource(project, resource string, h Holder, at time.Time) (model.ResourceHold, error) {
 	if project == "" || resource == "" {
 		return model.ResourceHold{}, fmt.Errorf("자원 좌표가 비었다(project=%q resource=%q)",
 			clip(project, 64), clip(resource, 64))
@@ -91,11 +96,11 @@ func (t *Tx) AcquireResource(project, resource string, h Holder) (model.Resource
 	if err := ValidateHolder(h); err != nil {
 		return model.ResourceHold{}, err
 	}
-	now := nowStamp()
+	at = atStamp(at)
 	res, err := t.tx.ExecContext(t.ctx, `
 		INSERT INTO resource_hold(project, resource, session_id, job_id, acquired_at, released_at, force_reason)
 		VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
-		project, resource, nullStr(h.SessionID), nullStr(h.JobID), fmtTime(now))
+		project, resource, nullStr(h.SessionID), nullStr(h.JobID), fmtTime(at))
 	if err != nil {
 		held, qErr := heldBy(t.ctx, t.tx, project, resource)
 		if qErr == nil {
@@ -127,16 +132,19 @@ func (t *Tx) AcquireResource(project, resource string, h Holder) (model.Resource
 	}
 	return model.ResourceHold{
 		ID: id, Project: project, Resource: resource,
-		SessionID: h.SessionID, JobID: h.JobID, AcquiredAt: now,
+		SessionID: h.SessionID, JobID: h.JobID, AcquiredAt: at,
 	}, nil
 }
 
 // AcquireResource 는 단발 트랜잭션으로 감싼 것이다.
-func (s *Store) AcquireResource(ctx context.Context, project, resource string, h Holder) (model.ResourceHold, error) {
+//
+// ★ 짝도 at 을 **통과시킨다**(Beat·Touch 가 선례다). 여기서만 삼키면 "Tx 로 잡으면 주입한
+// 시계, Store 로 잡으면 실시계"가 되고, 그 비대칭은 시각이 틀어질 때까지 안 보인다.
+func (s *Store) AcquireResource(ctx context.Context, project, resource string, h Holder, at time.Time) (model.ResourceHold, error) {
 	var out model.ResourceHold
 	err := s.Tx(ctx, func(t *Tx) error {
 		var e error
-		out, e = t.AcquireResource(project, resource, h)
+		out, e = t.AcquireResource(project, resource, h, at)
 		return e
 	})
 	return out, err

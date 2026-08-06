@@ -167,7 +167,7 @@ func TestFinishIsOneCallForJudgmentFollowupCloseAndRelease(t *testing.T) {
 
 	// 이 세션이 자원을 쥔 상태로 시작한다(반납이 마무리의 네 번째 몫이다).
 	if _, err := st.AcquireResource(ctx(), "p", "staging",
-		store.Holder{SessionID: me.Session.ID}); err != nil {
+		store.Holder{SessionID: me.Session.ID}, time.Time{}); err != nil {
 		t.Fatalf("자원 점유 준비 실패: %v", err)
 	}
 
