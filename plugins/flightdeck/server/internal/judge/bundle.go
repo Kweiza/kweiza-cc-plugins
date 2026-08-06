@@ -151,10 +151,31 @@ type Bundle struct {
 	Dependents int
 	// Oldest 는 가장 오래된 구성원의 생성 시각이다.
 	Oldest time.Time
+	// Starved 는 이 묶음의 최고령이 StarvationAge 를 넘겼다는 사실이다.
+	//
+	// EligibleInput.Now 가 zero 면 **언제나 false** 다 — 판정을 안 돌린 것과
+	// "안 굶었다"가 같은 값으로 접히지만, 여기서는 그 접힘이 안전한 쪽이다
+	// (안 굶은 것으로 보면 기존 순서가 그대로 산다).
+	Starved bool
 	// Reason 은 네 키의 **실제 값**이다. 감추면 "왜 하필 이 브랜치 이름인가"에
 	// 답할 수 없고, 답 못 하는 자동 선택은 두 번째 세션부터 무시된다.
 	Reason string
 }
+
+// StarvationAge 는 묶음 크기를 이기기 시작하는 나이다.
+//
+// ★ 임의의 값이 아니다. 리드타임 실측(kweiza-cc-plugins · done 81건 · created→closed)이
+// 정한다:
+//
+//	중앙값 3.4h · 평균 6.7h · p90 16.3h · 최대 42.2h
+//
+// 24h 는 p90(16.3h) 바깥이라 **정상 작업이 안 걸린다.** 이 값을 p90 아래로 내리면
+// 평시 항목이 줄줄이 기아로 판정돼 묶음 기능이 사실상 죽는다 — 그때는 기아 축이
+// 예외가 아니라 새 기본값이 되고, 이 상수를 넣은 이유가 사라진다.
+//
+// "하루가 지나도 아무도 안 집었다"가 사람에게 설명 가능한 문장이라는 것도 값의
+// 일부다. 원장이 낸 순위를 사람이 못 읽으면 두 번째 세션부터 무시된다.
+const StarvationAge = 24 * time.Hour
 
 // EligibleBundle 은 Eligible 위에 얹는다.
 //
@@ -212,7 +233,17 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 
 	bundles := make([]Bundle, 0, len(fit))
 	for _, lead := range fit {
-		bundles = append(bundles, bundleAround(lead, fit, absorbable, sib))
+		b := bundleAround(lead, fit, absorbable, sib)
+		// 기아 판정은 여기서만 한다 — bundleAround 는 시각을 안 받는 순수 조립이다.
+		// Now 가 zero 면 안 돌린다(EligibleInput.Now 주석 참고).
+		if !in.Now.IsZero() {
+			if age := in.Now.Sub(b.Oldest); age >= StarvationAge {
+				b.Starved = true
+				b.Reason += fmt.Sprintf(" · ★기아 %s 경과(임계 %s) — 묶음 크기보다 먼저 본다",
+					age.Round(time.Minute), StarvationAge)
+			}
+		}
+		bundles = append(bundles, b)
 	}
 	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
 
@@ -339,9 +370,37 @@ func sortedCands(m map[string]Candidate) []Candidate {
 //
 // ★ ②가 없으면 이 기능이 **발화하지 않는다.** 실측에서 열린 16건 전부 의존자 0이라
 // ①이 상수이고, 그 상태에서 ③이 실질 1차 키가 되는데 최고령이 단독이었다(설계 §0.2).
+// ★★ ①과 ② 사이에 **기아**가 들어간다. 그 이유는 위 ②의 근거가 그대로 뒤집힌
+// 자리이기 때문이다 — ①이 상수라 ②가 실질 1차 키가 되는데, 묶음은
+// (형제 판단 ∨ 같은 선행)으로만 서므로(LinkOf) **형제가 없는 항목은 묶음 크기가
+// 영구히 1**이다. ③(최고령)은 ②가 동점일 때만 발화하니 구제가 안 된다.
+//
+// 실측(kweiza-cc-plugins · 판단 01KZAW342JAC6EAW8C31RCXXK0):
+//
+//	열린 26건의 의존자 = {0: 26}
+//	7.5h 이상 묵은 17건 — 전부 형제 0(단독)
+//	6.5h 이하 8건       — 전부 형제 있음      ← 경계가 하나뿐이다
+//
+// 그리고 followups 로 만든 항목은 같은 판단에 FK 로 걸려 **자동으로 서로 형제**라,
+// 새 유입이 들어올 때마다 기존 단독 전부를 추월한다. 큐가 FIFO 로 보이면서 실제로는
+// LIFO 로 돈다(store/item.go 가 ORDER BY created_at 으로 정확히 주는데도 그렇다 —
+// 그 순서를 이 함수가 덮는다).
+//
+// ★ 기아 영역 **안에서는 ②를 안 본다.** 다시 넣으면 굶은 단독이 굶은 묶음에 밀리는,
+// 똑같은 함정이 그 안에서 재현된다. 예외 상태에서 방어 가능한 규칙은
+// "가장 오래 굶은 것부터" 하나뿐이다.
 func lessBundle(a, b Bundle) bool {
 	if a.Dependents != b.Dependents {
 		return a.Dependents > b.Dependents
+	}
+	if a.Starved != b.Starved {
+		return a.Starved
+	}
+	if a.Starved { // 둘 다 굶었다 — 묶음 크기를 건너뛰고 최고령순으로만 푼다
+		if !a.Oldest.Equal(b.Oldest) {
+			return a.Oldest.Before(b.Oldest)
+		}
+		return a.Lead.Item.ID < b.Lead.Item.ID
 	}
 	if len(a.Members) != len(b.Members) {
 		return len(a.Members) > len(b.Members)

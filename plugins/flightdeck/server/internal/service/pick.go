@@ -775,6 +775,10 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	sib, sibRead := s.siblingIndex(ctx, proj.ID, cands)
 	best, rejected := judge.EligibleBundle(judge.EligibleInput{
 		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
+		// Now 는 기아 축(judge.StarvationAge)에만 쓴다. 주입된 시계를 그대로 넘긴다 —
+		// 여기서 time.Now() 를 부르면 시험이 가짜 시계를 밀어도 이 축만 실시계로
+		// 판정한다(fd-lane-timestamps-ignore-injected-clock 이 고발한 그 모양이다).
+		Now: now,
 	}, sib)
 
 	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
