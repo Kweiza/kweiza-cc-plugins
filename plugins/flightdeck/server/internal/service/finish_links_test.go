@@ -141,6 +141,52 @@ func TestFinishRefusesAFollowupThatBelongsToSomeoneElse(t *testing.T) {
 	}
 }
 
+// TestFinishRefusesWithUnobservedEligibilityWhenClaimIsUnreadable 는
+// **observed bool 배선을 잠그는 유일한 통합 시험이다.**
+//
+// ★ 리뷰 실측: classifyFollowups 안에서 `eligible, _ := s.sessionSpawnedOpen(...)` 로
+// 바꾸고 observed 를 true 로 하드코딩해도 이 시험 전에는 전 스위트가 초록이었다 —
+// TestRefuseIneligibleFollowupSaysWhichOfTheThreeReasons 는 refuseIneligibleFollowup 을
+// 순수 함수로 직접 불러 문구 세 갈래를 잠그지만, **classifyFollowups 가 sessionSpawnedOpen 의
+// observed 를 실제로 실어 나르는지는** 그 시험도 다른 통합 시험도 안 본다(다른 통합 시험은
+// 전부 claimed() 를 먼저 해서 observed=true 갈래만 밟는다). Task 2 가 이 bool 을 따로 만든
+// 이유(관측 실패와 "만든 것이 없다"를 가르는 것)가 이 시험이 없으면 무방비였다.
+//
+// ★ observed=false 로 떨어지는 길: 이 항목을 claim 한 적이 없으면 sessionSpawnedOpen 이
+// GetClaim 에서 오류를 받아 (nil, false) 를 낸다 — 아래에서 claimed() 를 일부러 안 부르는
+// 것이 이 시험의 핵심이다(다른 모든 통합 시험은 claimed() 를 부른다).
+func TestFinishRefusesWithUnobservedEligibilityWhenClaimIsUnreadable(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+	addItem(t, s, "p", "batch7", nil, nil) // ★ claimed() 를 안 부른다 — 선점 기록이 없어야 한다
+	addItemAs(t, s, "p", other.Session.ID, "someone-elses")
+
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "본문",
+		Followups: []FollowupInput{{ID: "someone-elses", Title: "제목", Body: "본문"}},
+	})
+	if err == nil {
+		t.Fatalf("선점 기록이 없는 항목을 마무리하는데 통과했다")
+	}
+	if !strings.Contains(err.Error(), "못 읽어 자격을 판정할 수 없다") {
+		t.Fatalf("관측 실패 갈래가 아닌 다른 사유로 거절했다:\n%s", err.Error())
+	}
+	// ★ 다른 갈래의 Reason 문구가 안 섞이는 것도 함께 단정한다 — 그래야 갈래가 진짜로
+	//   갈렸다는 것이 잠긴다. ("이을 수 있는 것은" 은 여기서 못 쓴다 — refuseIneligibleFollowup
+	//   의 Guidance 첫 줄에도 고정으로 박혀 있어 사유 갈래와 무관하게 늘 참이다. 위
+	//   TestFinishRefusesAFollowupThatBelongsToSomeoneElse 의 주석이 같은 함정을 적어 뒀다.)
+	if strings.Contains(err.Error(), "하나도 없다") {
+		t.Fatalf("관측 실패 갈래인데 '만든 것이 없다' 갈래의 문구도 섞여 나온다 — 갈래가 실제로는 안 갈렸다:\n%s",
+			err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 아무것도 안 써야 한다", n)
+	}
+}
+
 // TestFinishRefusesAFollowupThatIsAlreadyClosed 는 닫힌 항목을 못 잇게 한다.
 //
 // 닫힌 것을 이으면 판단이 "이 작업이 낳은 후속"이라고 말하는 대상이 이미 끝난 일이 된다.
