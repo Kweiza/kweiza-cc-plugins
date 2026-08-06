@@ -287,6 +287,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/items/next", s.handleNextItem)
 	mux.HandleFunc("POST /api/v1/items", s.handleAddItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/claim", s.handleClaimItem)
+	mux.HandleFunc("POST /api/v1/items/{id}/claim/release", s.handleReclaimClaim)
 	mux.HandleFunc("POST /api/v1/items/{id}/finish", s.handleFinishItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/move", s.handleMoveItem)
 

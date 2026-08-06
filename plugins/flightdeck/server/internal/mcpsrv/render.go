@@ -283,6 +283,14 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 		foot = append(foot, fmt.Sprintf("창 밖 선점 · %s %s · %s · 파생 안 읽음",
 			ShortID(ov.Session.ID), strings.Join(ov.Claims, ", "), act))
 	}
+	// ★ 회수 손잡이는 창 밖 선점이 **있을 때만** 낸다(상시 점등은 판별력 0 — 설계 §4).
+	// 표시만으로는 재고가 안 돈다: 실측(2026-08-07)에서 무신호 9~24.5h 세션 4곳이
+	// 12건(잔량의 최대 27%)을 쥐고 있었는데, 진단 줄만 있고 처방이 없어 아무도 안 풀었다.
+	// 자동 만료는 생존 오판 실측 2회로 기각된 설계다(schema.sql) — 판정은 사람이 한다.
+	if len(v.OutsideClaims) > 0 {
+		foot = append(foot, "  위 선점은 자동으로 안 풀린다 — 죽었다고 판정한 사람이 푼다: "+
+			"fd claim release --item <id> --reason \"...\" (사유는 판단으로 원장에 남는다)")
+	}
 	// ★ 접은 것을 침묵하지 않는다. 그리고 **조율에서 빠진 게 아니라는 사실**을 함께 말한다 —
 	// 안 그러면 읽는 쪽이 "저 세션은 아무도 안 본다"로 잘못 읽는다.
 	if folded > 0 {

@@ -64,6 +64,18 @@ func TestRenderBoardKeepsClaimHoldersOutsideTheWindow(t *testing.T) {
 	mustHave(t, got, "it-stuck", "창 밖 선점자가 사라졌다 — 회수가 가장 필요한 카드가 창 때문에 안 보인다")
 	mustHave(t, got, "파생 안 읽음", "파생을 안 읽은 줄을 그렇다고 안 말하면 0값과 미관측이 뭉개진다")
 	mustHave(t, got, "○ 활동 없음", "mcp 뿐인 카드를 활동 있음으로 냈다 — 배지의 판별력이 0이 된다")
+	// ★ 회수 손잡이. 이 줄이 없으면 "창 밖 선점"은 진단만 있고 처방이 없는 표시다 —
+	//   실측(2026-08-07): 무신호 9~24.5h 세션 4곳이 12건을 쥔 채, 아무도 회수 표면을 몰랐다.
+	mustHave(t, got, "fd claim release", "죽은 선점을 어떻게 푸는지가 화면에 없다 — 표시만으로는 재고가 안 돈다")
+	mustHave(t, got, "자동으로 안 풀린다", "자동 만료가 없다는 사실을 안 말하면 사람이 기다리기만 한다")
+}
+
+// 창 밖 선점이 **없으면** 회수 안내도 없다 — 상시 점등된 안내는 판별력이 0이 된다(설계 §4).
+func TestRenderBoardHidesReclaimHintWithoutOutsideClaims(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	v := service.BoardView{At: now, Window: 2 * time.Hour}
+	got := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
+	mustMiss(t, got, "fd claim release", "회수할 것이 없는데 회수 안내가 상시 점등이다")
 }
 
 // 배지는 **유무**를 말하고 나이가 낡음을 말한다. 오래된 활동을 "없음"으로 접으면

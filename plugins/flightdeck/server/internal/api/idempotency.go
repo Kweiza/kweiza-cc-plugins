@@ -113,6 +113,12 @@ func JudgePersistIdempotency(method, path string) PersistVerdict {
 		return PersistVerdict{
 			Reason: "회수는 판단을 남기지만 중복이 원리적으로 안 생긴다 — 두 번째 호출은 그 줄 행이 " +
 				"이미 죽어서 거절된다. 메모리 표로 충분하다"}
+
+	case post && len(seg) == 6 && seg[0] == "api" && seg[1] == "v1" && seg[2] == "items" &&
+		seg[4] == "claim" && seg[5] == "release":
+		return PersistVerdict{
+			Reason: "선점 회수도 판단을 남기지만 중복이 원리적으로 안 생긴다 — 두 번째 호출은 " +
+				"살아 있는 선점이 없어서 거절된다. 메모리 표로 충분하다"}
 	}
 	return PersistVerdict{
 		Reason: "중복이 영구히 남지 않는 쓰기다(upsert 이거나 응답이 지금 상태다) — " +

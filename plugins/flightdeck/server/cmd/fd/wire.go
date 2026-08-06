@@ -149,6 +149,21 @@ type laneReleaseReq struct {
 	Reason  string `json:"reason"`
 }
 
+// claimReleasePath 는 선점 하나의 회수 표면이다. 레인 회수와 같은 판정으로
+// **세션이 아니라 항목 id 가 손잡이다** — 죽은 세션 명의로는 아무 호출도 못 한다.
+func claimReleasePath(itemID string) string {
+	return "/api/v1/items/" + urlPath(itemID) + "/claim/release"
+}
+
+// claimReleaseReq 는 선점 회수 본문이다. 필드 이름이 internal/api 의
+// claimReleaseRequest 와 어긋나면 서버가 조용히 0값을 받는다 — actor 가 빈 채 닿으면
+// 판단에 "행위자: 대시보드(사람)"가 영구히 박힌다(그 축은 이음매 시험이 잠근다).
+type claimReleaseReq struct {
+	Project string `json:"project"`
+	Actor   string `json:"actor,omitempty"`
+	Reason  string `json:"reason"`
+}
+
 // moveReq 는 POST /api/v1/items/{id}/move 의 본문이다.
 // 필드 이름이 internal/api 의 moveRequest 와 어긋나면 서버가 조용히 0값을 받는다.
 type moveReq struct {

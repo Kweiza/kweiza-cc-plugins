@@ -243,6 +243,8 @@ func TestJudgePersistIdempotency(t *testing.T) {
 		// 하나는 응답이 지금 상태라서, 하나는 두 번째 호출이 구조적으로 거절돼서다.
 		{http.MethodPost, "/api/v1/landing", false, "지금 내 차례인가"},
 		{http.MethodPost, "/api/v1/landing/rows/12/release", false, "중복이 원리적으로 안 생긴다"},
+		// 선점 회수 — 레인 회수와 같은 사유(두 번째 호출은 살아 있는 선점이 없어 거절).
+		{http.MethodPost, "/api/v1/items/t9-a/claim/release", false, "중복이 원리적으로 안 생긴다"},
 		// 표 밖: 경계는 구조로 잡는다(접두 문자열이면 아래가 통과한다).
 		{http.MethodPost, "/api/v1/landingX", false, "메모리 표로 충분"},
 		{http.MethodPost, "/api/v1/landing/rows/12", false, "메모리 표로 충분"},
