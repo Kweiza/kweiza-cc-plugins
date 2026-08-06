@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +36,179 @@ func TestWriteLeavesNoTempFiles(t *testing.T) {
 	}
 	if len(ents) != 7 {
 		t.Errorf("디렉토리에 %d개가 있다 — 7개를 기대한다", len(ents))
+	}
+}
+
+// gen2 는 sampleDump 와 **행 수가 다른** 둘째 세대다.
+//
+// ★ 행 수가 달라야 세대 혼합이 관측된다. 같은 수면 옛 파일과 새 파일이 구별되지 않아
+// 아래 시험들이 초록인 채로 아무것도 안 본다.
+func gen2() store.LedgerDump {
+	d := sampleDump()
+	d.Sessions = d.Sessions[:1] // 2 → 1
+	d.Judgments = append(d.Judgments, store.LedgerJudgment{
+		ID: "01C", Project: ptr("p"), SessionID: ptr("s1"),
+		At: "2026-08-06T00:00:09.000000Z", Kind: "decision", Body: "셋째",
+	})
+	return d
+}
+
+// 교체 도중 실패해도 **세대가 섞인 원장이 안 남는다**.
+//
+// ★ 이 시험이 겨냥하는 결함: Write 가 파일 단위로만 원자적이라, 같은 자리에 두 번째로
+// 내보내다 중간에 실패하면 앞 몇 파일은 새 세대, 뒤 몇 파일은 옛 세대가 됐다.
+// 매니페스트가 데이터 파일 셋보다 **먼저** 착지하는 순서(정렬상 4번째)라
+// manifest.counts 는 새 값인데 sessions.jsonl 은 옛 것이었고, Read 가 그대로 통과했다.
+// 그 원장으로 복원하면 새 판단이 가리키는 세션이 없어 defer_foreign_keys 커밋 검사에서
+// **판단 전량이 롤백된다** — 되읽기가 성공했다고 말한 뒤에.
+// 게다가 IsOurOutput 이 참이라 다음 실행이 --force 도 안 묻고 조용히 지나갔다.
+//
+// 같은 자리에 두 번 쓰는 것은 축복된 정상 경로다(outguard.go · migrate.go:183).
+func TestWriteCommitFailureLeavesNoMixedGeneration(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1차 — 정상 착지.
+	files1, m1, err := Encode(sampleDump(), 4, "2026-08-06T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	if _, err := Write(files1, dir); err != nil {
+		t.Fatalf("1차 Write 실패: %v", err)
+	}
+
+	// 교체를 실패시킨다 — 대상 이름 자리에 디렉토리를 세우면 os.Rename 이 EISDIR 로 죽는다.
+	// (실제 원인은 ENOSPC·EACCES·EXDEV 여도 같은 자리에서 같은 모양으로 실패한다.)
+	victim := filepath.Join(dir, projectsFile)
+	if err := os.Remove(victim); err != nil {
+		t.Fatalf("희생 파일 제거 실패: %v", err)
+	}
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatalf("희생 디렉토리 생성 실패: %v", err)
+	}
+
+	// 2차 — 교체 단에서 죽는다.
+	files2, m2, err := Encode(gen2(), 4, "2026-08-07T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	if m1.Counts.Sessions == m2.Counts.Sessions {
+		t.Fatalf("전제가 깨졌다 — 두 세대의 세션 수가 같다(%d) — 혼합이 관측되지 않는다", m1.Counts.Sessions)
+	}
+	_, err = Write(files2, dir)
+	if err == nil {
+		t.Fatal("교체가 실패해야 하는데 성공했다 — 이 시험이 아무것도 안 본다")
+	}
+
+	// ── 단정 ──
+	// (a) 사용자가 받는 문구가 "되쓸 자리가 반쯤 덮였다"를 담는다.
+	var werr *WriteError
+	if !errors.As(err, &werr) {
+		t.Fatalf("WriteError 가 아니다(자리 상태를 실어 오지 않는다): %v", err)
+	}
+	if werr.Verdict.Intact {
+		t.Errorf("교체 단 실패인데 '자리가 온전하다'고 판정했다: %+v", werr.Verdict)
+	}
+	if !strings.Contains(err.Error(), "반쯤 덮였다") {
+		t.Errorf("오류 문구가 되쓸 자리의 상태를 안 적는다: %v", err)
+	}
+
+	// (b) 이 자리는 더 이상 원장이 아니다 — 다음 실행이 조용히 지나가면 안 된다.
+	if IsOurOutput(dir) {
+		t.Error("세대가 섞인 자리를 여전히 자기 산출물로 알아본다 — 다음 실행이 --force 도 안 묻고 덮는다")
+	}
+
+	// (c) 되읽기가 이 자리를 유효한 원장으로 받아들이지 않는다.
+	if _, _, rerr := Read(dir); rerr == nil {
+		t.Error("세대가 섞인 자리를 유효한 원장으로 되읽었다 — 복원이 FK 로 판단 전량을 롤백시킨다")
+	}
+}
+
+// 준비 단에서 실패하면 되쓸 자리는 **한 글자도 안 바뀐다**.
+// 앞선 세대가 그대로 읽혀야 한다 — 실패한 재실행이 성한 백업을 잡아먹으면 안 된다.
+func TestWritePrepareFailureLeavesTargetIntact(t *testing.T) {
+	dir := t.TempDir()
+
+	want := sampleDump()
+	files1, wantM, err := Encode(want, 4, "2026-08-06T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	if _, err := Write(files1, dir); err != nil {
+		t.Fatalf("1차 Write 실패: %v", err)
+	}
+
+	// 준비 단(tmp 쓰기)에서 죽인다. 없는 하위 경로로 가는 이름 하나면 os.WriteFile 이
+	// ENOENT 로 실패한다 — 실제 원인은 ENOSPC 가 흔하지만 죽는 자리는 같다.
+	files2, _, err := Encode(gen2(), 4, "2026-08-07T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	files2["없는하위/x.jsonl"] = []byte("x\n")
+
+	if _, err := Write(files2, dir); err == nil {
+		t.Fatal("준비 단이 실패해야 하는데 성공했다 — 이 시험이 아무것도 안 본다")
+	} else {
+		var werr *WriteError
+		if !errors.As(err, &werr) {
+			t.Fatalf("WriteError 가 아니다: %v", err)
+		}
+		if !werr.Verdict.Intact {
+			t.Errorf("자리를 안 건드렸는데 '반쯤 덮였다'고 판정했다: %+v", werr.Verdict)
+		}
+	}
+
+	// 1차 세대가 온전히 그대로다.
+	got, gotM, err := Read(dir)
+	if err != nil {
+		t.Fatalf("1차 세대를 되읽지 못했다 — 실패한 2차가 자리를 건드렸다: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Errorf("1차 세대가 바뀌었다:\n원본 %+v\n되읽음 %+v", want, got)
+	}
+	if !reflect.DeepEqual(wantM, gotM) {
+		t.Errorf("1차 매니페스트가 바뀌었다:\n%+v\n%+v", wantM, gotM)
+	}
+	// 임시 파일이 안 남는다.
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("훑기 실패: %v", err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("실패한 쓰기가 임시 파일을 남겼다: %s", e.Name())
+		}
+	}
+}
+
+// 되읽기는 매니페스트의 건수를 **실제 행 수와 대조한다**.
+//
+// ★ 두 번째 방벽이다. 첫 방벽(교체 단의 무효화)이 프로세스 급사 등으로 못 돌았을 때,
+// 세대가 섞인 자리를 유효한 원장으로 받아들이면 안 된다. format·format_version 만 보면
+// 그것이 그대로 통과한다 — 실측으로 그랬다.
+func TestReadRejectsCountMismatch(t *testing.T) {
+	dir := t.TempDir()
+	files, _, err := Encode(sampleDump(), 4, "2026-08-06T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	if _, err := Write(files, dir); err != nil {
+		t.Fatalf("Write 실패: %v", err)
+	}
+	// 세션 파일만 옛 세대(1행)로 되돌린다 — manifest 는 2행이라고 적어 두고 있다.
+	old, _, err := Encode(gen2(), 4, "2026-08-06T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionsFile), old[sessionsFile], 0o600); err != nil {
+		t.Fatalf("세션 파일 바꿔치기 실패: %v", err)
+	}
+
+	_, _, err = Read(dir)
+	if err == nil {
+		t.Fatal("건수가 안 맞는 원장을 그대로 통과시켰다")
+	}
+	if !strings.Contains(err.Error(), "sessions") {
+		t.Errorf("어느 표가 안 맞는지 안 적는다: %v", err)
 	}
 }
 

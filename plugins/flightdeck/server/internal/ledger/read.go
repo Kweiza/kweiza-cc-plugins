@@ -56,6 +56,12 @@ func Read(dir string) (store.LedgerDump, Manifest, error) {
 	if d.Snapshots, err = readLines[store.LedgerSnapshot](dir, snapshotsFile); err != nil {
 		return d, m, err
 	}
+
+	// ★ 매니페스트가 적은 건수와 실제 행 수를 대조한다. 세대 혼합의 둘째 방벽이다 —
+	//   format·format_version 만 보면 앞 몇 파일만 새 세대인 자리가 그대로 통과한다.
+	if err := JudgeCounts(m.Counts, CountsOf(d)); err != nil {
+		return d, m, fmt.Errorf("%w (%s)", err, clip(dir, 200))
+	}
 	return d, m, nil
 }
 

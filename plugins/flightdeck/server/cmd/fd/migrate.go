@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -291,7 +292,15 @@ func (a *App) exportJudgments(ctx context.Context, dbFlag, outDir string, out io
 	}
 	names, err := ledger.Write(files, outDir)
 	if err != nil {
-		a.log.Error("원장 쓰기 실패", "route", clip(outDir, 200), "error", err.Error())
+		// ★ 사람이 읽는 줄은 오류 문구가 이미 담고 있다 — ledger.WriteError 가 되쓸 자리의
+		//   상태 판정(온전한가, 반쯤 덮였는가)을 실어 온다. 여기서 다시 판정하지 않는다.
+		//   로그에는 그 판정을 검색 가능한 필드로 눕힌다.
+		fields := []any{"route", clip(outDir, 200), "error", err.Error()}
+		var werr *ledger.WriteError
+		if errors.As(err, &werr) {
+			fields = append(fields, "out_state", werr.Verdict.Code, "out_intact", werr.Verdict.Intact)
+		}
+		a.log.Error("원장 쓰기 실패", fields...)
 		fmt.Fprintf(out, "원장 쓰기 실패: %s\n", err)
 		return 1
 	}
