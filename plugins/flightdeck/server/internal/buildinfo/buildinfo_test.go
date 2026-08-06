@@ -126,3 +126,128 @@ func TestSelfDoesNotPanic(t *testing.T) {
 		t.Fatal("Self 가 모른다면서 사유가 없다")
 	}
 }
+
+// ★ 이 시험이 주입 축의 본체다 — **실측(2026-08-06)이 이 갈래를 강제했다.**
+// 워크트리(부모 저장소 안)에서 빌드하면 go 는 부모의 HEAD 를 찍는다. 관측:
+// 워크트리 HEAD `5144c66` 위에서 빌드했는데 스탬프는 `3f7b497`(부모 main tip)이었다.
+// **부재가 아니라 그럴듯한 오답이라, 주입값이 있으면 그것이 이겨야 한다.**
+func TestResolvePrefersInjectedOverAWrongGitStamp(t *testing.T) {
+	// go 가 찍은 것 — 부모 HEAD 다. 값이 있고 Known 이라 그대로 두면 오답이 이긴다.
+	wrong := Of(bi("vcs.revision", "3f7b497952a7d92e8fbf66cbf95552cbc7790d03",
+		"vcs.time", "2026-08-06T07:09:34Z", "vcs.modified", "true"), true)
+	if !wrong.Known {
+		t.Fatal("전제가 깨졌다 — go 스탬프가 Known 이어야 이 갈래가 성립한다")
+	}
+
+	c := Resolve("6190af7d27d25d15390df31ddfd0b69366", "2026-08-06T11:40:00Z", wrong)
+
+	if !c.Known {
+		t.Fatalf("주입값이 있는데 모른다고 한다 — 사유 %q", c.Reason)
+	}
+	if c.Source != SourceFingerprint {
+		t.Fatalf("출처가 지문이 아니다: %q", c.Source)
+	}
+	if strings.HasPrefix(c.Revision, "3f7b497") {
+		t.Fatal("go 의 오답이 주입값을 이겼다 — 이 역전이 이 항목의 본체다")
+	}
+	if c.Revision != "6190af7d27d25d15390df31ddfd0b69366" || c.Time != "2026-08-06T11:40:00Z" {
+		t.Fatalf("주입값을 잘못 실었다: %+v", c)
+	}
+	// 지문은 작업 트리의 **내용**에서 나온다 — 부모 저장소의 더러움을 물려받지 않는다.
+	if c.Modified {
+		t.Fatal("지문 좌표가 go 의 vcs.modified 를 물려받았다")
+	}
+}
+
+// 주입이 없으면 go 스탬프가 그대로 간다 — 손빌드가 좌표를 잃지 않는다.
+func TestResolveFallsBackToTheGitStamp(t *testing.T) {
+	git := Of(bi("vcs.revision", "aaaaaaa1111", "vcs.time", "2026-08-04T00:00:00Z"), true)
+
+	for _, fp := range []string{"", "   ", "\n"} {
+		c := Resolve(fp, "", git)
+		if c.Source != SourceGit || c.Revision != "aaaaaaa1111" {
+			t.Fatalf("주입값 %q 일 때 go 스탬프로 안 떨어졌다: %+v", fp, c)
+		}
+	}
+}
+
+// 둘 다 없으면 — 주입도 안 됐고 VCS 스탬프도 없다 — 사유를 낸다. 빈칸은 "같다"로 읽힌다.
+func TestResolveWithNeitherStillSaysWhy(t *testing.T) {
+	c := Resolve("", "", Of(bi("GOARCH", "amd64"), true))
+	if c.Known {
+		t.Fatalf("아무 좌표도 없는데 Known 이다: %+v", c)
+	}
+	if strings.TrimSpace(Short(c)) == "" {
+		t.Fatal("사유가 비었다")
+	}
+}
+
+// ★ 지문을 sha 로 **오독하면 안 된다.** 둘은 뜻이 다르다 — sha 는 커밋을 가리키고
+// 지문은 소스 내용을 가리킨다. 화면에서 구별되지 않으면 사람은 `git show` 를 치러 간다.
+func TestShortMarksAFingerprintAsNotASha(t *testing.T) {
+	fp := Resolve("6190af7d27d25d15390df31ddfd0b69366", "2026-08-06T11:40:00Z", Coord{})
+	got := Short(fp)
+	if !strings.Contains(got, "src:") {
+		t.Fatalf("지문이 sha 처럼 보인다 — 표시에 출처가 없다: %q", got)
+	}
+	if !strings.Contains(got, "6190af7") {
+		t.Fatalf("지문 값을 안 냈다: %q", got)
+	}
+
+	git := Of(bi("vcs.revision", "07e5df4264f27a4b1bcac34b2dcd50cd76d51e2e"), true)
+	if strings.Contains(Short(git), "src:") {
+		t.Fatalf("git 좌표에 지문 표시가 붙었다: %q", Short(git))
+	}
+}
+
+// ★ 출처가 다르면 **대조 자체가 성립하지 않는다.** git sha 와 소스 지문은 같은 소스에서도
+// 절대 같은 값이 안 나온다 — 그대로 비교하면 배너가 **항상** 뜨고, 항상 뜨는 경고는 배경이 된다.
+func TestVintageBannerRefusesToCompareAcrossSources(t *testing.T) {
+	git := Of(bi("vcs.revision", "aaaaaaa1111"), true)
+	fp := Resolve("6190af7d27d25d15390df31ddfd0b69366", "", Coord{})
+
+	got := VintageBanner(fp, git)
+	if got == "" {
+		t.Fatal("출처가 어긋났는데 침묵했다 — 대조 불가는 그 자체가 정보다")
+	}
+	if strings.Contains(got, "판 나이가 다르다") {
+		t.Fatalf("비교할 수 없는 두 값을 비교했다고 말한다: %q", got)
+	}
+	if !strings.Contains(got, "출처") {
+		t.Fatalf("무엇이 어긋났는지 안 밝혔다: %q", got)
+	}
+
+	// 같은 출처끼리는 종전대로 — 같으면 침묵, 다르면 배너.
+	if got := VintageBanner(fp, fp); got != "" {
+		t.Fatalf("같은 지문인데 배너가 났다: %q", got)
+	}
+	other := Resolve("ffffffff0000000000000000000000000", "", Coord{})
+	if got := VintageBanner(fp, other); !strings.Contains(got, "판 나이가 다르다") {
+		t.Fatalf("지문끼리 다른데 판 나이 배너가 안 났다: %q", got)
+	}
+}
+
+// ★ 구 판 서버의 응답에는 `source` 키가 없다. 그 좌표는 정의상 go 스탬프다
+// (주입 축 이전 판에는 다른 출처가 존재하지 않았다). 빈 출처를 제3의 출처로 취급하면
+// 멀쩡한 대조가 "출처 어긋남"으로 죽는다.
+func TestEmptySourceCountsAsGit(t *testing.T) {
+	old := Coord{Known: true, Revision: "aaaaaaa1111"} // json 에 source 가 없던 판
+	now := Of(bi("vcs.revision", "aaaaaaa1111"), true)
+
+	if got := VintageBanner(now, old); got != "" {
+		t.Fatalf("같은 sha 인데 빈 출처 때문에 배너가 났다: %q", got)
+	}
+}
+
+// 부재 사유는 **가장 흔한 실제 원인**을 먼저 말해야 한다. 실측(2026-08-06):
+// 부재를 만드는 것은 워크트리가 아니라 `.git` 이 없는 소스 트리다 —
+// 플러그인 캐시와 컨테이너 빌드 컨텍스트가 그렇고, 그 둘이 사용자 전원의 경로다.
+// (워크트리는 오히려 스탬프가 **있다** — 부모 HEAD 라 틀릴 뿐이다.)
+func TestNoVCSReasonNamesTheRealCause(t *testing.T) {
+	got := Short(Of(bi("GOARCH", "amd64"), true))
+	for _, want := range []string{".git", "주입"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("사유가 %q 를 안 말한다: %q", want, got)
+		}
+	}
+}
