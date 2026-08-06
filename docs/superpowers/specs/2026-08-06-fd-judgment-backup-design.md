@@ -85,7 +85,12 @@ fd export --judgments --out <디렉토리>
 | `manifest.json` 이 우리 형식 | **통과** (갱신으로 본다) |
 | 그 밖에 파일이 있음 | `--force` 요구 (`ForceAllows` 의 `not-empty` 그대로) |
 | git 작업 트리 안 | **거절, `--force` 로도 안 됨** (기존 그대로) |
-| `.claude/` 존재(`has-legacy`) | **안 본다** — 레거시 트리 전용 판정이라 JSONL 넷에 의미가 없다 |
+| `.claude/` 존재(`has-legacy`) | `--force` 요구 — 원장을 살아 있는 레거시 트리에 쏟는 것은 실수일 공산이 크다 |
+
+> `has-legacy` 를 "안 본다"로 적었던 것을 구현에서 바꿨다. `JudgeOutTarget` 은
+> `git-worktree` → `has-legacy` → `not-empty` 순으로 **하나만** 낸다. `has-legacy` 를 특별히
+> 무시하려면 판정 함수를 갈라야 하는데, 그 갈래가 사는 값이 "레거시 트리에도 `--force` 없이
+> 쓴다"뿐이다 — 그건 사는 게 아니라 잃는 것이다.
 
 `git-worktree` 가드를 상속하는 이유: 그 취지는 "사용자 레포에 산출물을 쏟지 마라"이고
 2~3MB JSONL 넷에도 그대로 유효하다. ③에서 `journal.git` 작업본에 쓸 때 이 벽을 마주하지만,
@@ -244,20 +249,28 @@ deferred 의 알려진 위험(읽기 스냅숏 뒤 쓰기 승격이 `SQLITE_BUSY
 
 ```
 internal/store/backup.go     (새) ProbeMigration 게이트 + 마이그레이션 없는 deferred 열기
-                                  + 읽기 스냅숏 Tx + 전량 조회 3개 + raw DTO 3개
-internal/backup/export.go    (새) JSONL 인코딩 · manifest · tmp→rename 쓰기
-internal/backup/losses.go    (새) 안 덮는 것 목록 — 순수 함수
-internal/backup/restore.go   (새) 되읽기. CLI 에 안 붙인다
-internal/backup/outguard.go  (새) IsOurOutput — manifest 를 알아본다
+                                  + 읽기 스냅숏 Tx + 전량 조회 3개 + raw DTO 3개 + 되쓰기
+internal/ledger/export.go    (새) JSONL 인코딩 · manifest
+internal/ledger/write.go     (새) tmp→rename 쓰기
+internal/ledger/read.go      (새) 되읽기
+internal/ledger/losses.go    (새) 안 덮는 것 목록 — 순수 함수
+internal/ledger/outguard.go  (새) IsOurOutput — manifest 를 알아본다
+internal/store/judgment.go   snapshotCols + ListSnapshots 순삽입
+internal/web/query.go        snapshots 삭제 (store 로 올린다)
+internal/web/page.go         위 호출부 한 줄
 cmd/fd/migrate.go            runExport 에 --judgments 분기 (--to-legacy 분기 무변경)
 cmd/fd/main.go               usage 한 줄
 plugins/flightdeck/DESIGN.md §7 두 곳 + §9 한 줄
 ```
 
-`internal/backup/` 은 `internal/legacy/` 와 대칭이다 — 인코딩·파일 쓰기는 `store` 의 일이 아니다.
-출력 자리 가드는 `cmd/fd` 층에서 기존 `legacy.InspectOutTarget`/`ForceAllows` 를 그대로 부르고
-`backup.IsOurOutput` 만 더한다. 그래야 `backup → legacy` import 도, 같은 SQL 두 벌도 안 생긴다
-(같은 판정을 두 자리에 두는 것은 `cmds.go` 가 금지한 형태다).
+**패키지 이름이 `backup` 이 아니라 `ledger` 인 이유**: 이 저장소에서 `backup`·`BackupSuffix`·
+`<db>.bak-*` 는 이미 마이그레이션 직전 `VACUUM INTO` DB 파일 사본을 뜻한다. 두 개념이 같은
+낱말을 쓰면 오류 문구와 로그에서 섞인다. `journal` 도 안 쓴다 — `journal_mode` 와 grep 이 겹친다.
+
+`internal/ledger/` 는 `internal/legacy/` 와 대칭이다 — 인코딩·파일 쓰기는 `store` 의 일이 아니다.
+출력 자리 가드는 `cmd/fd` 층에서 기존 `legacy.InspectOutTarget`/`JudgeOutTarget`/`ForceAllows` 를
+그대로 부르고 `ledger.IsOurOutput` 만 더한다. 그래야 `ledger → legacy` import 도, 같은 SQL 두 벌도
+안 생긴다(같은 판정을 두 자리에 두는 것은 `cmds.go` 가 금지한 형태다).
 
 ### 전량 조회를 `store` 에 두는 이유
 
