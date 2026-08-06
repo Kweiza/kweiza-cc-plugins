@@ -191,7 +191,7 @@ func OpenWithLogger(path string, log *slog.Logger) (*Store, error) {
 	//   드라이버는 **모르는 pragma 이름을 조용히 무시한다**(실물로 확인: `_pragma=nonsense(1)` 이
 	//   오류 없이 열린다). 그래서 "DSN 에 적었다"는 것은 "걸렸다"의 근거가 못 된다.
 	//   foreign_keys 가 안 걸린 채로 도는 것은 FK 위반이 조용히 통과하는 최악의 경로다.
-	if err := s.verifyPragmas(context.Background()); err != nil {
+	if err := s.verifyPragmas(context.Background(), wantPragmas); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -216,27 +216,45 @@ func dsn(path string) string {
 	return "file:" + path + "?" + q.Encode()
 }
 
-// wantPragmas 는 되읽기로 확인할 pragma 와 기대값이다.
+// wantPragmas 는 기본 DSN(dsn)이 요청한 pragma 와 기대값이다.
 var wantPragmas = map[string]string{
 	"busy_timeout": "5000",
 	"foreign_keys": "1",
 	"journal_mode": "wal",
 }
 
-// CheckPragmas 는 되읽은 pragma 값들이 기대와 맞는지 판정한다.
+// ledgerWantPragmas 는 원장 DSN(ledgerDSN)이 요청한 pragma 와 기대값이다.
+//
+// ★ journal_mode 가 없는 것이 요점이다. ledgerDSN 은 그것을 **일부러 요청하지 않는다**
+// (파일을 바꿀 수 있는 유일한 pragma 라서다). 요청하지 않은 것을 되읽어 요구하면,
+// 롤백저널 DB 마다 원인과 무관한 진단이 나온다 —
+// "DSN pragma 가 실제로 걸리지 않았다: journal_mode=delete(기대 wal)".
+// 그 문구는 DSN 문법을 의심하라고 말하는데 DSN 은 애초에 결백하다. 거짓 진단이다.
+//
+// 이 갈래가 없던 동안은 ProbeMigration 이 두 줄 위에서 파일을 WAL 로 바꿔 준 덕에
+// 이 요구가 **우연히** 통과하고 있었다. 그 우연이 곧 결함이었다.
+var ledgerWantPragmas = map[string]string{
+	"busy_timeout": "5000",
+	"foreign_keys": "1",
+}
+
+// CheckPragmas 는 되읽은 pragma 값들이 기본 DSN 의 기대와 맞는지 판정한다.
+func CheckPragmas(got map[string]string) error { return CheckPragmasAgainst(wantPragmas, got) }
+
+// CheckPragmasAgainst 는 되읽은 pragma 값들이 want 와 맞는지 판정한다.
 //
 // 불리언이 아니라 **어느 pragma 가 무슨 값이었는지**를 담은 오류를 돌려준다 —
 // "안 걸렸다"만 알면 DSN 문법이 틀린 것인지 드라이버가 그 이름을 모르는 것인지 구분이 안 된다.
-func CheckPragmas(got map[string]string) error {
+func CheckPragmasAgainst(want, got map[string]string) error {
 	var bad []string
-	for name, want := range wantPragmas {
+	for name, w := range want {
 		g, ok := got[name]
 		if !ok {
-			bad = append(bad, fmt.Sprintf("%s=<읽지 못함>(기대 %s)", name, want))
+			bad = append(bad, fmt.Sprintf("%s=<읽지 못함>(기대 %s)", name, w))
 			continue
 		}
-		if !strings.EqualFold(g, want) {
-			bad = append(bad, fmt.Sprintf("%s=%s(기대 %s)", name, g, want))
+		if !strings.EqualFold(g, w) {
+			bad = append(bad, fmt.Sprintf("%s=%s(기대 %s)", name, g, w))
 		}
 	}
 	if len(bad) == 0 {
@@ -283,9 +301,14 @@ func readMigrationState(ctx context.Context, db *sql.DB) (hasTable bool, dbVersi
 	return hasTable, dbVersion, objects, nil
 }
 
-func (s *Store) verifyPragmas(ctx context.Context) error {
+// verifyPragmas 는 want 에 적힌 pragma 만 되읽어 확인한다.
+//
+// ★ want 를 인자로 받는다. DSN 갈래마다 요청한 pragma 가 다르기 때문이다 —
+// 요청하지 않은 pragma 를 확인하면 그 진단은 DSN 을 의심하라고 말하면서 거짓을 말한다
+// (ledgerWantPragmas 주석 참고).
+func (s *Store) verifyPragmas(ctx context.Context, want map[string]string) error {
 	got := map[string]string{}
-	for name := range wantPragmas {
+	for name := range want {
 		var v string
 		// pragma 이름은 상수 map 의 키라 주입 경로가 없다(사용자 입력이 닿지 않는다).
 		if err := s.db.QueryRowContext(ctx, "PRAGMA "+name).Scan(&v); err != nil {
@@ -293,7 +316,7 @@ func (s *Store) verifyPragmas(ctx context.Context) error {
 		}
 		got[name] = v
 	}
-	return CheckPragmas(got)
+	return CheckPragmasAgainst(want, got)
 }
 
 // Close 는 DB 를 닫는다.
@@ -710,6 +733,23 @@ func fmtTime(t time.Time) string { return t.UTC().Format(timeLayout) }
 // (UTC·마이크로초)이 달라서, "방금 만든 것"과 "다시 읽은 것"의 비교가 조용히 틀어진다.
 // 재개 판정이 정확히 그 비교다.
 func nowStamp() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+
+// atStamp 는 **받은** 시각을 같은 해상도로 맞춘다. 영값이면 지금이다.
+//
+// nowStamp 의 짝이고, 이유도 같다. 시각을 주입받는 쓰기가 그 값을 구조체에 담아
+// 돌려줄 때 반드시 이걸 거친다 — 서비스의 시계는 `time.Now().UTC()` 라 나노초를 담고
+// 있는데 행은 마이크로초로 저장되므로(timeLayout), 받은 값을 그대로 돌려주면
+// "방금 만든 것"과 "다시 읽은 것"이 미세하게 갈린다. 그 어긋남은 두 값을 비교하는
+// 자리에서만 드러나고 그때는 이미 원인에서 멀다.
+//
+// ★ Beat·Touch 는 아직 안 거친다. 그 둘은 받은 시각을 구조체로 돌려주지 않아 같은
+// 비교가 생기지 않는다 — 돌려주게 되는 날 이 함수를 거쳐야 한다.
+func atStamp(at time.Time) time.Time {
+	if at.IsZero() {
+		return nowStamp()
+	}
+	return at.UTC().Truncate(time.Microsecond)
+}
 
 func parseTime(s string) (time.Time, error) {
 	if s == "" {

@@ -731,7 +731,7 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 			"project", proj.ID, "error", err.Error())
 	}
 
-	sns, err := snapshots(ctx, st.DB(), proj.ID)
+	sns, err := st.ListSnapshots(ctx, proj.ID)
 	if err != nil {
 		pan.SnapErr = Clip(err.Error(), 400)
 		h.log.ErrorContext(ctx, "스냅숏 조회 실패", "project", proj.ID, "error", err.Error())
