@@ -67,6 +67,32 @@ func TestRenderHealthSaysTheWatcherIsStalled(t *testing.T) {
 	}
 }
 
+// ★ 보고는 있는데 **구조적으로 못 덮는** 갈래를 "보는 중"으로 접으면, 플러그인 버전이
+// 올라도 안 바뀌는 서버가 화면에서는 따라오는 것으로 보인다 — 침묵보다 나쁜 틀린 안심이다.
+// (2026-08-06 A/B 실측: 지문 이름에서는 75초 뒤에도 watching=true 뿐이었다.)
+func TestRenderHealthSaysTheWatcherCannotCoverVersionBumps(t *testing.T) {
+	var h healthzResponse
+	h.OK, h.APIVersion, h.DBOK = true, "1", true
+	h.SelfUpdate.Watching = true
+	h.SelfUpdate.Uncovered = "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd) — " +
+		"플러그인 **버전이 오르면 다른 이름**이 지어져 이 자리는 아무도 안 덮는다"
+
+	got := RenderHealth(h, true, "http://x:7420")
+	for _, want := range []string{"자동 갱신  **한 갈래를 못 덮는다**", "버전이 오르면"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q 가 화면에 없다:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "보는 중 — 아직 교체를 못 봤다") {
+		t.Fatalf("못 덮는 갈래를 '보는 중'으로 접었다:\n%s", got)
+	}
+	// ★ **막혔다와 같은 문구를 쓰면 안 된다.** 처방이 다르다 — 저쪽은 못 재는 원인을
+	// 고치는 것이고, 이쪽은 고칠 것이 없고 사람이 재기동한다.
+	if strings.Contains(got, "막혔다") {
+		t.Fatalf("못 덮는 갈래를 '막혔다'(일시 고장)로 접었다:\n%s", got)
+	}
+}
+
 // 막힌 사실과 지난 거절은 **둘 다** 참일 수 있다. 하나가 다른 하나를 지우면 안 된다.
 func TestRenderHealthShowsStallAndPastRefusalTogether(t *testing.T) {
 	var h healthzResponse

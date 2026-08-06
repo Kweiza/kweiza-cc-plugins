@@ -329,21 +329,29 @@ func TestOutboxReplayIsExactlyOnceAcrossProcessDeathAndRestart(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ③ 상태 파일은 ${CLAUDE_PLUGIN_ROOT} 아래가 **아니다** — 축은 재생성 가능성으로 갈린다
+// ③ 상태 파일은 ${CLAUDE_PLUGIN_ROOT} 아래가 **아니다** — 여기서 갈리는 축은 ①(재생성 가능한가)이다
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ${CLAUDE_PLUGIN_ROOT} 에는 플러그인 **버전이 들어간다**(설계 §13). 갱신되면 경로가
 // 바뀌고 옛 자리는 지워지므로, 거기 쌓인 것은 갱신 한 번에 사라진다.
 //
 // ★ 단정의 좌표계는 판정 함수가 아니라 **파일시스템에 실제로 생긴 파일**이다.
-// ResolveStateDir·OutboxPath 단위 시험은 "무엇을 고르는가"만 보고, 소비자(캐시·아웃박스)가
+// ResolveStateDir·OutboxPath 단위 시험은 "무엇을 고르는가"만 보고, 소비자(응답 캐시·아웃박스)가
 // 그 값을 실제로 쓰는지는 원리적으로 못 본다.
 //
 // ★ 두 소비자가 **서로 다른 자리로 간다**는 것이 이 시험이 지키는 둘째 축이다:
-//   - 캐시는 재생성 가능하니 CLAUDE_PLUGIN_DATA 아래(채널마다 갈려도 된다)
+//   - **응답 캐시**는 CLAUDE_PLUGIN_DATA 아래(채널마다 갈려도 된다)
 //   - 아웃박스는 재생성 불가한 판단을 담으니 고정 자리(OutboxPath)
 //
 // 예전에는 둘 다 plugin-data 아래라고 단정했는데, 그것이 이 항목이 없앤 결함이다.
+//
+// ★ **자리 판정의 전문은 여기가 아니다.** 전문은 env.go 의 OutboxPath 주석과 설계 §7 에
+// 있고, 축은 **둘**이다 — ① 재생성 가능한가 ② 갈린 사본이 각자 옳은가. 이 시험이 보는
+// 두 자산은 **①에서 이미 갈려서** ②가 발화하지 않을 뿐이다(그래서 이름이 Regenerability 다).
+// ①을 통과하고도 ②에서 탈락해 고정 자리로 간 것이 실재한다 — 런처의 **바이너리 캐시**
+// (env.go 의 BinCacheDir). 그러니 이 주석을 "재생성 가능하면 CLAUDE_PLUGIN_DATA 아래"로
+// 일반화해 읽지 마라. **이 시험은 그 자산을 보지 않는다** — 잠그는 것은 env_test.go 의
+// TestBinCacheDir 과 plugin_test.go 의 FD_PRINT_BIN 이음매 시험이다.
 func TestOfflineStateSplitsByRegenerabilityAndNeverLandsUnderPluginRoot(t *testing.T) {
 	withTimeBudget(t, degradeBudget)
 	h := newHarness(t)

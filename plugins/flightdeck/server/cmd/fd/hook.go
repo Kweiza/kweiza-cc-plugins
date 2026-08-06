@@ -295,7 +295,35 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 			a.log.Warn("창 비콘 갱신 실패", "error", werr.Error())
 		}
 	}
+	// ★ **이 한 줄을 지우지 마라 — 그리고 지우면 빨간불이 난다.** 아래 형제와 실패 모양이
+	// 같아서(반환값이 없고 사유는 Debug 로만 남는다 — pruneWindows 가 그렇게 정한 바다)
+	// 호출이 사라져도 화면·로그·종료코드 어디에도 신호가 없다. 한동안 실제로 이 한 줄을
+	// 지워도 cmd/fd 가 통째로 초록이었다. 그래서 이 이음매를 파일시스템 좌표계로 따로
+	// 잠갔다 — hook_beacon_test.go 의 TestOnlySessionStartHookPrunesWindowBeacons 가
+	// 죽은 창의 비콘을 심고 훅을 실제로 돌린다.
+	//
+	// 그 표는 **여섯 훅 이벤트를 다 돌려** session-start 에서만 지워지는 것까지 본다.
+	// 호출 여부만 재면 runHook 머리에 한 줄 넣는 판도 초록인데, 그 판이 왜 안 되는지는
+	// pruneWindows 머리말이 말한다 — 여기서 다시 적지 않는다.
 	a.pruneWindows()
+	// ★ 바이너리 캐시 GC 도 **같은 자리**다. 위 함수가 "훅에서만 한다 — SessionStart
+	// 타임아웃이 10초라 디렉토리 하나를 훑을 여유가 있고 MCP 는 도구 응답 지연에
+	// 민감하다"고 적어 둔 그 판정이 여기에 그대로 선다. 잴 것도 같은 모양이다 —
+	// 디렉토리 하나의 목록 + 파일 몇 개의 stat 이고, 내용은 안 읽으니 비콘 쪽보다 싸다.
+	// 이 GC 가 없으면 자리가 소스 트리마다 갈리므로(릴리스마다 키가 바뀐다) 22MB×N 이
+	// 무한히 쌓인다 — 상한을 가진 자리가 여기 하나뿐이다.
+	//
+	// pruneWindows 와 **실패 모양도 같게** 둔다: 반환값이 없고 사유는 Debug 로만 남는다.
+	// 캐시가 안 잘린 것에 대해 사용자가 지금 할 수 있는 일이 없고, 세션 시작을 막을
+	// 이유는 더더욱 없다(이 훅의 존재 이유는 조정이지 청소가 아니다).
+	//
+	// ★ **이 한 줄을 지우지 마라 — 그리고 지우면 빨간불이 난다.** 실패가 Debug 로만 남는
+	// 위 설계 때문에 이 호출이 사라져도 화면·로그·종료코드 어디에도 신호가 없다(한동안
+	// 실제로 전 시험이 초록이었다). 그래서 이 이음매만 파일시스템 좌표계로 따로 잠갔다 —
+	// bincache_test.go 의 TestSessionStartHookPrunesBinCache 가 훅을 실제로 돌리고 심어 둔
+	// 옛 항목이 사라졌는지를 본다. 형제인 위 pruneWindows 도 이제 같은 대우를 받는다
+	// (바로 위 주석이 그 자리를 가리킨다).
+	a.pruneBinCache()
 
 	v, boardBanner, berr := a.Board(ctx, in.SessionID)
 	if berr != nil {
@@ -352,6 +380,13 @@ func sameWorktree(x, y string) bool {
 // ★ **훅에서만 한다.** SessionStart 타임아웃이 10초(plugins/flightdeck/hooks/hooks.json)라
 // 디렉토리 하나를 훑을 여유가 있는 쪽이고, MCP 는 도구 응답 지연에 민감하다 —
 // 그 지연은 매 도구 호출마다 사람이 기다리는 시간이다.
+//
+// ★ 그리고 그 훅 중에서도 **session-start 하나다.** 같은 hooks.json 에서 async 가 아닌 것,
+// 곧 사람이 그 시간을 통째로 기다리는 것은 셋이다 — user-prompt 2초 · stop 3초 ·
+// session-start 10초. 앞의 둘은 예산이 가장 작으면서 매 프롬프트·매 턴 끝마다 돈다.
+// 나머지 셋(post-tool · pre-compact · session-end)은 async:true 라 예산 논거가 다르지만
+// post-tool 은 편집마다 돈다 — 횟수 쪽에서 걸린다. 그래서 "상한 없이 자라는 디렉토리를
+// 훑는다"를 감당하는 자리가 여섯 중 여기뿐이다. 여기가 먼저 눈에 띄어서가 아니다.
 func (a *App) pruneWindows() {
 	if a.beaconDir == "" {
 		return
