@@ -375,8 +375,14 @@ func TestWriteLedgerRestoresRowsVerbatim(t *testing.T) {
 	}
 }
 
-// 같은 id 를 두 번 넣으면 거절한다. judgment 는 트리거로 UPDATE·DELETE 가 금지돼 있어
-// 잘못 넣은 행을 고치거나 지울 수 없다 — 조용히 넘어가면 되돌릴 방법이 없다.
+// 같은 원장을 통째로 두 번 되쓰면 거절한다.
+//
+// ★ 이 시험이 실제로 잡는 지점: 되쓰기는 machine → project → session → judgment 순으로
+// 도는데, 두 번째 호출은 machine 부터 이미 dst 에 있는 id 라 **machine 표의 UNIQUE 에서
+// 가장 먼저 걸린다** — judgment.id 까지 내려가지 않는다. project·machine 도 원장에 실려
+// 있으므로 미리 만들지 않는다(TestWriteLedgerRestoresRowsVerbatim 참고).
+// "판단 자체의 중복만" 격리해서 보려면 TestWriteLedgerRejectsDuplicateJudgmentEvenWhenClosureExists 를 봐라 —
+// 이 시험은 그보다 넓은 축("중복 되쓰기는 전부 거절되고 부분 적용이 없다")을 지킨다.
 func TestWriteLedgerRejectsDuplicateID(t *testing.T) {
 	src := newStore(t)
 	ctx := context.Background()
@@ -397,6 +403,46 @@ func TestWriteLedgerRejectsDuplicateID(t *testing.T) {
 	}
 
 	// 실패한 되쓰기가 부분 적용으로 남지 않는지 본다.
+	after, err := dst.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("재확인 실패: %v", err)
+	}
+	if len(after.Judgments) != len(d.Judgments) {
+		t.Errorf("판단이 %d건으로 늘었다 — 한 트랜잭션이라 그대로여야 한다", len(after.Judgments))
+	}
+}
+
+// judgment 표 자체의 중복 거절을 격리해서 본다.
+//
+// TestWriteLedgerRejectsDuplicateID 는 원장 전체를 두 번 되쓰므로 machine 표(가장 먼저
+// 도는 표)의 UNIQUE 에서 먼저 걸려 judgment.id 까지 내려가지 않는다. 여기서는 폐포(machine·
+// project·session)를 dst 에 먼저 정상 되쓴 뒤, **판단만 담은** LedgerDump 를 다시 넘긴다 —
+// 그러면 FK 는 이미 만족돼 있으므로 이번에는 judgment.id 의 PK 위반에서만 걸린다.
+func TestWriteLedgerRejectsDuplicateJudgmentEvenWhenClosureExists(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p")
+	linkJudgment(t, src, "p", model.JudgmentDecision, "i1")
+	d, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, d); err != nil {
+		t.Fatalf("첫 되쓰기 실패: %v", err)
+	}
+
+	// 폐포는 이미 dst 에 있다 — 판단만 다시 넘겨 FK 를 건드리지 않고 judgment.id 만 겹치게 한다.
+	judgmentsOnly := LedgerDump{Judgments: d.Judgments}
+	err = dst.WriteLedger(ctx, judgmentsOnly)
+	if err == nil {
+		t.Fatal("같은 판단 id 를 두 번 되썼는데 통과했다 — judgment 는 UPDATE·DELETE 트리거로 금지돼 있어 되돌릴 수 없다")
+	}
+	if !strings.Contains(err.Error(), "judgment") {
+		t.Errorf("오류가 judgment 를 가리키지 않는다(격리가 안 됐다는 뜻) — %v", err)
+	}
+
 	after, err := dst.ReadLedger(ctx)
 	if err != nil {
 		t.Fatalf("재확인 실패: %v", err)
