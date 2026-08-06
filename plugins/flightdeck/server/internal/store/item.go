@@ -693,6 +693,27 @@ func (s *Store) GetClaim(ctx context.Context, project, itemID string) (model.Cla
 	return claimRow(ctx, s.db, project, itemID)
 }
 
+// LiveClaim 은 **지금 살아 있는** 선점을 낸다. 없거나 반납됐으면 NFLiveClaim 이다.
+//
+// GetClaim 과 갈라 둔 이유: claim 은 (project, item) 업서트 한 행이라 항목 id 가 선점
+// 인스턴스를 고정하지 못한다 — 반납·재선점이 같은 행을 덮는다. 회수처럼 **정체를
+// 트랜잭션 안에서 확정**해야 하는 자리는 이것을 쓴다. 밖에서 읽은 점유자는 커밋까지
+// 낡을 수 있고, 그 낡은 정체로 회수하면 산 세션의 선점을 끊으면서 원장에는 옛
+// 점유자가 영구히 남는다.
+func (t *Tx) LiveClaim(project, itemID string) (model.Claim, error) {
+	c, err := t.claimRow(project, itemID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return model.Claim{}, notFound(NFLiveClaim, project, itemID)
+		}
+		return model.Claim{}, err
+	}
+	if c.ReleasedAt != nil {
+		return model.Claim{}, notFound(NFLiveClaim, project, itemID)
+	}
+	return c, nil
+}
+
 // ReleaseClaim 은 자기 선점을 반납한다.
 //
 // **남의 선점은 반납할 수 없다.** 자동 회수 코드 경로가 존재하지 않고, 강제 회수는

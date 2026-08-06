@@ -772,7 +772,9 @@ func (a *App) runLaneRelease(ctx context.Context, args []string, out io.Writer) 
 // 표면이다. pick 이 steal_reason 을 거절하는 것과 한 쌍의 설계다.)
 func (a *App) runClaim(ctx context.Context, args []string, out io.Writer) int {
 	const help = "fd claim release --item <id> --reason \"...\"  — 죽은 세션의 선점 하나를 사람이 회수한다"
-	if len(args) == 0 {
+	// 선두가 플래그면 하위 명령을 빼먹은 것이다(runLane 과 같은 갈래) — 그대로 두면
+	// `fd claim --item x` 가 "모르는 하위 명령: --item" 이라는 엉뚱한 말을 한다.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		fmt.Fprintln(out, "claim 하위 명령을 줘라. 지금 있는 것은 release 하나다:")
 		fmt.Fprintln(out, "  "+help)
 		return 2
@@ -781,7 +783,7 @@ func (a *App) runClaim(ctx context.Context, args []string, out io.Writer) int {
 	case "release":
 		return a.runClaimRelease(ctx, args[1:], out)
 	default:
-		fmt.Fprintf(out, "모르는 claim 하위 명령이다: %q\n  %s\n", args[0], help)
+		fmt.Fprintf(out, "모르는 claim 하위 명령: %s\n  %s\n", clip(args[0], 40), help)
 		return 2
 	}
 }
