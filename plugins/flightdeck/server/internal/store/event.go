@@ -147,6 +147,79 @@ func (s *Store) ListSessionEvents(ctx context.Context, sessionID, kind string, s
 	return out, nil
 }
 
+// Reproduction 은 재생산율의 **원자료**다. 비율은 여기서 안 만든다.
+//
+// 0으로 나누는 갈래를 저장 계층에 두면 "마무리 0건"과 "R=0"이 같은 값으로 접힌다.
+// 호출자가 Finishes==0 을 보고 "못 쟀다"를 낸다.
+type Reproduction struct {
+	Finishes  int // 표본이 된 마무리 수(최근 N회)
+	Followups int // 그 마무리들이 실은 후속 합(item.finish payload 의 count)
+	Adds      int // 같은 구간의 독립 add 수
+}
+
+// QueueReproduction 은 최근 n회 마무리 기준 재생산율의 원자료다.
+//
+// ★ 왜 이 축이 있나. 실측(kweiza-cc-plugins · 이 원장): finish 88건이 followups 61건과
+// 독립 add 53건을 낳아 R=1.30 이다 — 사이클 1회(pickup→작업→finish)마다 큐가 +0.29 이고,
+// 그래서 **pickup 을 더 돌려서는 큐가 안 준다.** 큐를 줄이는 것은 pickup 이 아니라 finish 인데
+// 그 finish 가 평균 1.29건을 다시 넣는다. 세션이 그 사실을 마무리하는 자리에서 봐야 한다.
+//
+// ★ **창을 id 로 자른다.** at 은 마이크로초 해상도라(timeLayout) 한 턴에 몰린 이벤트가 같은
+// 값을 가질 수 있고, 그러면 경계에 걸친 add 가 창 안팎을 오간다. id 는 AUTOINCREMENT 라
+// 단조이고 유일하다.
+//
+// ★ **add 구간도 함께 자른다.** 마무리는 최근 n회만 세면서 add 는 전 기간을 세면 R 이 실제보다
+// 크게 나온다. AckReach 가 시각 절단 없이 전 기간을 누적해 겪은 것과 같은 부류다.
+func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (Reproduction, error) {
+	var out Reproduction
+	if n <= 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, payload FROM event
+		WHERE project = ? AND kind = 'item.finish'
+		ORDER BY id DESC LIMIT ?`, project, n)
+	if err != nil {
+		return out, fmt.Errorf("마무리 이벤트 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+
+	sinceID := int64(-1)
+	for rows.Next() {
+		var id int64
+		var payload string
+		if err := rows.Scan(&id, &payload); err != nil {
+			return Reproduction{}, fmt.Errorf("마무리 이벤트 행 해석 실패: %w", err)
+		}
+		out.Finishes++
+		if sinceID < 0 || id < sinceID {
+			sinceID = id
+		}
+		// payload 는 자유 JSON 이라 스키마가 없다. 못 읽으면 **0으로 접는다** —
+		// 이 축의 소비자는 "비면 안 센다"로 동작한다(eventItemID 와 같은 규율).
+		var p struct {
+			Count int `json:"count"`
+		}
+		if json.Unmarshal([]byte(payload), &p) == nil && p.Count > 0 {
+			out.Followups += p.Count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Reproduction{}, fmt.Errorf("마무리 이벤트 순회 실패: %w", err)
+	}
+	if out.Finishes == 0 {
+		return out, nil // 표본이 없다. 0값 그대로 — 호출자가 "못 쟀다"를 낸다
+	}
+
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM event
+		WHERE project = ? AND kind = 'item.add' AND id >= ?`,
+		project, sinceID).Scan(&out.Adds); err != nil {
+		return Reproduction{}, fmt.Errorf("추가 이벤트 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	return out, nil
+}
+
 // CountEvents 는 종류별 건수다. §10 의 지표(세션당 쓰기 호출 수 등)가 이걸로 나온다.
 func (s *Store) CountEvents(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int

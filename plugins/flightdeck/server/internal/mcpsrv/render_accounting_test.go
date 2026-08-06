@@ -233,14 +233,19 @@ func TestRenderFinishSeparatesNoHoldsFromUnread(t *testing.T) {
 	if !strings.Contains(zero, "쥔 항목은 이제 0건이다") {
 		t.Fatalf("진짜 0건을 안 말한다:\n%s", zero)
 	}
-	if strings.Contains(zero, "못 읽었다") {
+	// ★ **축을 지목해 단정한다.** 전역으로 "못 읽었다"만 찾으면 이 응답의 **다른** 미관측
+	// 축(큐 수지 등)이 걸려 거짓 빨간불이 난다 — 이 시험이 재는 것은 StillHeld 하나다.
+	// 실제로 그 일이 났다: 큐 수지 축이 들어오면서 여기가 깨졌고, 깨진 이유가 StillHeld 와
+	// 무관했다.
+	const heldUnread = "쥔 다른 항목이 있는지는 이 응답이 못 읽었다"
+	if strings.Contains(zero, heldUnread) {
 		t.Fatalf("진짜 0건을 미관측으로 접었다:\n%s", zero)
 	}
 
 	unread := RenderFinish(service.FinishResult{
 		Item: model.Item{ID: "lead", State: model.ItemDone}, StillHeld: nil,
 	})
-	if !strings.Contains(unread, "못 읽었다") {
+	if !strings.Contains(unread, heldUnread) {
 		t.Fatalf("미관측을 침묵으로 접었다:\n%s", unread)
 	}
 	if strings.Contains(unread, "쥔 항목은 이제 0건이다") {
