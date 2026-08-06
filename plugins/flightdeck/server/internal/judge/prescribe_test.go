@@ -287,13 +287,15 @@ func TestFoldPrescriptions(t *testing.T) {
 //
 // 순서만 단정하는 표 케이스로는 이 축이 원리적으로 안 보인다. 표는 전부 상한 아래에서
 // 돌아 lane-turn 이 목록 어디에 있든 초록이 나기 때문이다. 그런데 lane-turn 에게 접힘은
-// **영구 소실**이다: 접힌 처방도 호출자가 전부 발화 기록하고(PrescribeMax 주석),
-// suppressed 는 silent 외 모든 키를 무조건 누른다. 한 번 접히면 그 줄 행의 차례 통지는
-// 다시 안 뜨고, 그 세션은 레인을 안 쥔 채 남아 **뒤에 선 전원의 랜딩이 선다.**
-// 그리고 그 실패는 화면에 안 뜬다 — 원장에는 "정상적으로 접혔다"로만 남는다.
+// **한 턴 지연**이다(2026-08-06 개정 전에는 영구 소실이었다 — PrescribeMax 주석 참고.
+// 지금은 표시분만 발화 기록하므로 접힌 것이 다음 턴에 올라온다). 그 한 턴 동안 그 세션은
+// 레인을 안 쥔 채 남고 **뒤에 선 전원의 랜딩이 그만큼 선다** — 소실은 아니지만 **그 한 턴은
+// 남의 시간**이라 맨 앞이 여전히 값을 한다. 그리고 그 지연은 화면에 안 뜬다 —
+// 원장에는 "정상적으로 접혔다"로만 남는다.
 //
 // overlap 을 상한만큼 까는 것이 억지 상황이 아니다: 발화 55건 중 31건이 overlap 이고
-// 세션 7개에 몰렸다(PrescribeMax 주석의 실측). 한 턴 최대 발화는 6건이었다.
+// 세션 7개에 몰렸다(PrescribeMax 주석의 2026-08-04 기준선). 그 기준선 당시 한 턴 최대
+// 발화는 6건이었고, 2026-08-06 재측에서는 7건이다.
 func TestLaneTurnSurvivesFolding(t *testing.T) {
 	others := []LiveSession{
 		{ID: "01SESSIONA", Paths: []string{"cmd/fd/hook.go"}},
@@ -333,7 +335,7 @@ func TestLaneTurnSurvivesFolding(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지는 영구히 사라지고 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
+		t.Fatalf("overlap %d건에 밀려 lane-turn 이 접혔다 — 그 줄 행의 차례 통지가 한 턴 늦고 그동안 뒤 줄 전원이 선다(shown=%v, 접힘 %d)",
 			len(others), keys(shown), folded)
 	}
 	if shown[0].Key != "lane-turn:7" {
@@ -397,9 +399,9 @@ func TestAxisOrderIsLockedWhereverTwoAxesCanCoexist(t *testing.T) {
 				t.Fatalf("축 순서가 다르다:\n got %v\nwant %v", got, c.want)
 			}
 
-			// 순서가 정하는 것은 표시가 아니라 **버릴 것**이다. 상한을 넘는 만큼이 맨 뒤에서
-			// 떨어져야 하고, 여기서 떨어지는 것은 silent 다 — 접혀도 판단 뒤에 다시 뜨는
-			// 유일한 축이라(suppressed) 접힘이 영구 소실이 아닌 자리도 그것 하나뿐이다.
+			// 순서가 정하는 것은 표시가 아니라 **뒤로 미룰 것**이다. 상한을 넘는 만큼이 맨
+			// 뒤에서 떨어져야 하고, 여기서 떨어지는 것은 silent 다 — 판단 뒤 해제 규칙까지
+			// 가진 유일한 축이라(suppressed) 입력이 다시 안 생겨도 돌아오는 자리는 그것뿐이다.
 			if PrescribeMax >= len(c.want) {
 				return // 상한이 이 목록을 못 넘으면 접힘에 대해 말할 것이 없다
 			}

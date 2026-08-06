@@ -39,8 +39,12 @@ func TestPrescriptionsAreEmittedOnceAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("이벤트 조회 실패: %v", err)
 	}
-	if len(evs) != len(first.All) {
-		t.Fatalf("발화 기록 수가 다르다: events=%d, prescriptions=%d", len(evs), len(first.All))
+	// ★ 분모는 `Shown` 이다 — 원장에 남는 것이 그것뿐이기 때문이다(2026-08-06 개정).
+	//   `All` 로 비교하면 이 입력에 접힘이 없어 **우연히** 초록이고, 접힘이 생기는 순간
+	//   틀린 이유로 빨개진다.
+	if len(evs) != len(first.Shown) {
+		t.Fatalf("발화 기록 수가 표시분과 다르다: events=%d, shown=%d(all=%d)",
+			len(evs), len(first.Shown), len(first.All))
 	}
 	if !strings.Contains(evs[0].Payload, `"key"`) {
 		t.Fatalf("payload 에 key 가 없다: %s", evs[0].Payload)

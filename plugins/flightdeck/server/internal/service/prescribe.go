@@ -28,10 +28,15 @@ const (
 )
 
 // PrescribeResult 는 한 턴의 처방이다.
+//
+// ★ **원장에 남는 것은 Shown 뿐이다**(2026-08-06 개정. 아래 Prescriptions 의 기록 루프).
+// 세 필드가 서로 다른 것을 세므로 셋을 같은 뜻으로 읽으면 안 된다 — 특히 `All` 은
+// `POST /api/v1/sessions/{id}/prescriptions` 의 `all` 로 서버 밖에 나가는데 비시험
+// 소비자가 0건이라, 이 주석이 그 필드의 유일한 계약이다.
 type PrescribeResult struct {
-	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax)
-	Folded int                  `json:"folded"` // 요약으로 접힌 수
-	All    []judge.Prescription `json:"all"`    // 발화 기록된 전부
+	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax) — **이것만 event 에 남는다**
+	Folded int                  `json:"folded"` // 요약으로 접힌 수 — 원장에 안 남는다(아래 ★)
+	All    []judge.Prescription `json:"all"`    // 이번 턴에 판정된 전부(표시분 + 접힌 것). 기록되는 것은 Shown 뿐이다
 }
 
 // prescribePayload 는 event.payload 의 모양이다.
@@ -141,14 +146,23 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	// 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다) 나 `unclaimed` 면
 	// 그 사실을 아무도 못 듣는다.
 	//
-	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 앞의 셋은 기록되어 눌리므로 다음 턴엔
-	// 넷째가 첫 칸으로 올라온다. 즉 조건이 지속되는 동안 전부 결국 한 번씩 표시되고,
-	// 그 뒤에는 전부 눌린다. 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴 반복)이 아니라
-	// 한 턴에 읽을 양을 제한하는 본래 목적 그대로다.
+	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 표시된 셋만 눌리므로, **그 축의 입력이
+	// 다시 생기는 턴**에 넷째가 첫 칸으로 올라온다. 다만 그 조건이 전부는 아니다:
+	// 세션이 그 경로를 다시 안 만지면 안 올라온다(`TurnPaths` 는 `f.LastAt.After(since)` 로
+	// 뽑고 `since` 는 **마지막 발화 시각**이다). 그래서 **한 턴에 몰아친 outside 다발은
+	// 여전히 소실**이고, 그것은 이 개정이 아니라 상한 자체의 한계다(후속:
+	// fd-folded-outside-burst-still-lost). 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴
+	// 반복)과는 다르다 — 눌리는 것은 표시된 것뿐이다.
 	//
 	// ★ 재측(2026-08-06): 처방이 뜬 턴 129개 중 접힌 턴 **15개**(11.6%)이고 한 턴 최대는
 	// **7건**이다. 접혀서 사라지던 축은 overlap 11 · unclaimed 11 · silent 4 · outside 2 —
-	// 앞선 판의 "35턴 중 2개"는 lane-turn 이 축에 들어오기 전 값이었다.
+	// 앞선 판의 "35턴 중 2개"는 **표본이 4배가 되기 전** 값이다(lane-turn 은 원장에 전 기간
+	// 0건이라 그 축의 효과가 아니다. PrescribeMax 주석의 재측 문단).
+	//
+	// ★ **이 커밋 뒤로 접힘 빈도는 원장에서 못 잰다.** 표시분만 기록하므로 한 턴의 prescribe
+	// 이벤트 수가 구조적으로 PrescribeMax 를 못 넘고, `folded` 는 slog 와 화면 문구에만 남는다.
+	// 위 129/15 는 **마지막으로 잴 수 있었던 값**이고, 다시 재려면 folded 를 원장에 실어야
+	// 한다(후속: fd-folded-count-left-no-ledger-trace).
 	for _, p := range shown {
 		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID,
 			prescribePayload{Key: p.Key, Reason: p.Reason})
