@@ -256,6 +256,10 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
   해석 불가가 되는 결함을, 쓸 수 없게 만들어 막는다.
 - `item_dependents` — 삽입 시 유지되는 역인덱스. 기존 O(n²) 전수 grep(실측 51.7초)을 O(1) 로.
 - `claim` — **만료가 없다. 자동 반납이 없다. 자동 회수 코드 경로가 존재하지 않는다.**
+  죽은 선점을 푸는 길은 사람뿐이다: `fd claim release --item … --reason …`(= 대시보드 회수 폼,
+  같은 함수 `service.ReclaimClaim`). 실측(2026-08-07)으로 무신호 9~24.5h 세션 4곳이 12건
+  (잔량의 최대 27%)을 쥔 채 아무도 못 풀었다 — 자동 만료를 되살리는 답이 아니라(생존 오판 실측
+  2회) 사람의 회수 표면을 CLI 까지 늘린 것이 답이다. 회수는 judgment(decision) 하나를 남긴다.
 - `pick_eval` — 추천 1건과 **탈락 사유 전부**를 기록한다. 사유 분포가 질의 가능해진다.
   `picked` 는 묶음 **선두 하나**의 항목 id 다(적격 0건이면 NULL). 나머지 구성원은 증분
   `004_pick_bundle` 이 더한 `picked_with` 에 **JSON 문자열 배열**로 가고 **선두는 거기 안 들어간다.**
@@ -458,6 +462,7 @@ POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
+POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
 GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /sessions/{id}/prescriptions (세션 카드 파생 안 돎)

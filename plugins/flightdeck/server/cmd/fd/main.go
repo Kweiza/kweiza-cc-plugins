@@ -47,6 +47,7 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           랜딩 줄에 선다. 인자가 없으면 서거나 내 자리를 다시 묻는다.
                                           **내 차례가 아니면 종료코드 1** — "fd land && <랜딩>" 이 성립하게
   fd lane release --row <id> --reason …   물린 줄 행을 사람이 회수한다(사유는 판단으로 남는다)
+  fd claim release --item <id> --reason … 죽은 세션의 선점을 사람이 회수한다(항목은 open 으로 돌아간다)
   fd alloc <counter>                      원자 발번
   fd doctor                               이 머신과 서버의 축을 실제로 잰다
 
@@ -132,6 +133,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runLand(ctx, args[1:], stdout)
 	case "lane":
 		return app.runLane(ctx, args[1:], stdout)
+	case "claim":
+		return app.runClaim(ctx, args[1:], stdout)
 	case "alloc":
 		return app.runAlloc(ctx, args[1:], stdout)
 	case "setup":

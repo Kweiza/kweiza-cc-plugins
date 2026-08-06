@@ -186,43 +186,19 @@ func (h *handler) laneRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 // reclaim 은 선점을 회수한다. 회수 행위 자체가 judgment(decision) 으로 남는다(설계 §4).
+//
+// 로직은 service.ReclaimClaim 하나다 — CLI 의 `fd claim release` 와 **같은 함수**를
+// 부른다(레인 회수가 web·CLI 에서 ReleaseLaneRow 하나를 부르는 것과 같은 결선).
+// 점유자·선점 나이·마지막 신호를 판단에 남기는 일도 그 함수가 한다.
 func (h *handler) reclaim(w http.ResponseWriter, r *http.Request) {
 	in, ok := h.formInput(w, r, ActionReclaim)
 	if !ok {
 		return
 	}
-	st := h.svc.Store()
 	ctx := r.Context()
-
-	// 점유자를 원장에 함께 남긴다 — "누구의 것을 뺏었나"가 빠지면 회수 기록이
-	// 나중에 아무것도 말하지 못한다. 못 읽으면 그 사실을 그대로 적는다.
-	var holder string
-	if c, err := st.GetClaim(ctx, in.Project, in.Item); err == nil {
-		holder = c.SessionID
-	} else {
-		holder = "조회 실패: " + Clip(err.Error(), 200)
-	}
-
-	body := fmt.Sprintf("대시보드에서 선점을 회수했다.\n항목: %s\n점유자: %s\n사유: %s\n"+
-		"행위자: 대시보드(사람). 세션이 아니라 사람이 누른 것이므로 session_id 는 비어 있다.",
-		in.Item, holder, in.Reason)
-
-	err := st.Tx(ctx, func(t *store.Tx) error {
-		// 시도를 **먼저** 예약한다 — 롤백돼도 남는다. 끝에 두면 성공한 것만 세게 된다.
-		t.LogEvent("web.claim.reclaim", in.Project, "", map[string]any{
-			"item": in.Item, "holder": holder,
-		})
-		if err := t.ForceReleaseClaim(in.Project, in.Item, in.Reason); err != nil {
-			return err
-		}
-		_, err := t.AddJudgment(model.Judgment{
-			Project: in.Project, Kind: model.JudgmentDecision,
-			Title: "선점 회수: " + in.Item, Body: body,
-			Links: []model.JudgmentLink{{TargetKind: "item", TargetID: in.Item}},
-		})
-		return err
-	})
-	if err != nil {
+	// actor 는 빈 문자열로 준다 — 그 값이 판단 본문의 "행위자: 대시보드(사람)"를 고른다
+	// (레인 회수와 같은 갈래, service 쪽 actorLine 주석 참고).
+	if _, err := h.svc.ReclaimClaim(ctx, in.Project, in.Item, "", in.Reason); err != nil {
 		h.fail(w, r, "web.claim.reclaim", in, err)
 		return
 	}

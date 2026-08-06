@@ -168,6 +168,42 @@ func (s *server) handleClaimItem(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, res)
 }
 
+// claimReleaseRequest 는 POST /api/v1/items/{id}/claim/release 의 본문이다.
+//
+// session_id 가 **없다**(레인 회수와 같은 판정) — 세션 정체가 (machine, worktree,
+// cc_session_id) 라 죽은 세션 명의로는 아무 호출도 못 하고, 회수하는 사람은 대개
+// 그 세션이 아니다. 세션을 요구하는 순간 탈출구가 다시 막힌다.
+type claimReleaseRequest struct {
+	Project string `json:"project"`
+	Actor   string `json:"actor"`  // 누가 회수했나. 판단 본문에 그대로 남는다
+	Reason  string `json:"reason"` // 왜. **비면 service 가 거절한다**
+}
+
+// handleReclaimClaim 은 사람이 선점 하나를 회수한다.
+//
+// 로직의 정본은 service.ReclaimClaim — web 대시보드 폼·CLI `fd claim release` 와
+// **같은 함수**다. 자동 만료가 아니다: 사람이 신호 나이·발자국을 본 뒤 부르는 자리라
+// 사유가 필수이고, 회수 행위가 judgment(decision) 하나로 원장에 남는다.
+func (s *server) handleReclaimClaim(w http.ResponseWriter, r *http.Request) {
+	var req claimReleaseRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	res, err := s.svc.ReclaimClaim(r.Context(), req.Project,
+		strings.TrimSpace(r.PathValue("id")), req.Actor, req.Reason)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// 회수당한 세션을 액세스 로그의 좌표로 삼는다 — 요청 본문에는 그 세션이 없고,
+	// "누구의 선점이 끊겼나"가 이 한 줄에서 답해져야 한다.
+	infoFrom(r.Context()).setSession(res.Holder)
+	s.publish(r, "claim.reclaim", req.Project, res.Holder, map[string]any{
+		"item": clip(res.Item, 100), "actor": clip(req.Actor, 64),
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}
+
 type followupRequest struct {
 	ID     string       `json:"id"`
 	Title  string       `json:"title"`

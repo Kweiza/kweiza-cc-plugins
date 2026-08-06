@@ -41,6 +41,7 @@ func TestJudgeOfflineTable(t *testing.T) {
 		{CmdLandReport, OfflineRefuse, "남의 점유를 반납한다"},
 		{CmdLandLeave, OfflineRefuse, "남의 점유를 반납한다"},
 		{CmdLaneRelease, OfflineRefuse, "사람의 판단이라 재생 대상이 아니다"},
+		{CmdClaimRelease, OfflineRefuse, "사람의 판단이라 재생 대상이 아니다"},
 	}
 	for _, c := range cases {
 		t.Run(c.cmd, func(t *testing.T) {
@@ -87,7 +88,7 @@ func TestJudgeOfflineUnknownCommandRefusesAndSaysWhy(t *testing.T) {
 func TestJudgeOfflineAlwaysGivesReason(t *testing.T) {
 	for _, cmd := range []string{"note", "status", "beat", "pick", "open", "add",
 		"finish", "alloc", "board", "next", "doctor", "무엇이든",
-		CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease} {
+		CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease, CmdClaimRelease} {
 		if strings.TrimSpace(JudgeOffline(cmd).Reason) == "" {
 			t.Fatalf("%q 의 사유가 비었다", cmd)
 		}

@@ -60,6 +60,8 @@ const (
 	CmdLandLeave = "land leave"
 	// CmdLaneRelease 는 사람의 회수다.
 	CmdLaneRelease = "lane release"
+	// CmdClaimRelease 는 사람이 죽은 세션의 선점을 회수하는 것이다.
+	CmdClaimRelease = "claim release"
 )
 
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
@@ -119,6 +121,10 @@ func JudgeOffline(cmd string) OfflineVerdict {
 		return OfflineVerdict{OfflineRefuse,
 			"회수는 사람의 판단이라 재생 대상이 아니다 — 지금 무엇이 물려 있는지를 보고 내린 판정인데, " +
 				"재생 시점의 레인은 그 판정이 본 레인이 아니다"}
+	case CmdClaimRelease:
+		return OfflineVerdict{OfflineRefuse,
+			"선점 회수도 사람의 판단이라 재생 대상이 아니다 — 신호 나이를 보고 내린 판정인데, " +
+				"재생 시점에는 그 세션이 되살아나 일하고 있을 수 있다(생존 오판 실측 2회가 자동 회수를 기각한 그 축이다)"}
 
 	default:
 		return OfflineVerdict{OfflineRefuse,

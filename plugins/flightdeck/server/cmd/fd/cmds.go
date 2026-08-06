@@ -766,6 +766,83 @@ func (a *App) runLaneRelease(ctx context.Context, args []string, out io.Writer) 
 	return 0
 }
 
+// runClaim 은 `fd claim <하위명령>` 이다. 지금 있는 하위 명령은 release 하나다.
+//
+// (세션이 항목을 집는 것은 pick/MCP 의 일이라 여기 없다 — 이 명령군은 **사람의**
+// 표면이다. pick 이 steal_reason 을 거절하는 것과 한 쌍의 설계다.)
+func (a *App) runClaim(ctx context.Context, args []string, out io.Writer) int {
+	const help = "fd claim release --item <id> --reason \"...\"  — 죽은 세션의 선점 하나를 사람이 회수한다"
+	if len(args) == 0 {
+		fmt.Fprintln(out, "claim 하위 명령을 줘라. 지금 있는 것은 release 하나다:")
+		fmt.Fprintln(out, "  "+help)
+		return 2
+	}
+	switch args[0] {
+	case "release":
+		return a.runClaimRelease(ctx, args[1:], out)
+	default:
+		fmt.Fprintf(out, "모르는 claim 하위 명령이다: %q\n  %s\n", args[0], help)
+		return 2
+	}
+}
+
+// runClaimRelease 는 `fd claim release --item <id> --reason "..."` 다.
+//
+// ★ **죽은 선점의 유일한 CLI 탈출구다.** claim 에는 자동 만료가 없고(schema.sql —
+// 생존 오판 실측 2회로 의식적으로 기각), 세션 정체가 (machine, worktree, cc_session_id) 라
+// 죽은 세션 명의로는 아무 호출도 못 한다. 이 명령이 없으면 복구가 대시보드 폼 아니면
+// sqlite3 직접 UPDATE 인데 — 후자에는 판단이 한 줄도 안 남는다.
+//
+// ★ **세션을 요구하지 않는다**(레인 회수와 같은 판정) — 회수하는 사람은 대개
+// 그 세션이 아니고, 그 세션은 이미 죽었다.
+func (a *App) runClaimRelease(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("claim release")
+	item := fs.String("item", "", "회수할 항목 id(보드의 세션 카드·창 밖 선점 줄이 낸다)")
+	reason := fs.String("reason", "", "왜 회수하나 — 필수. 판단으로 원장에 남는다")
+	actor := fs.String("actor", "", "누가 회수하나(비면 이 셸의 좌표로 채운다)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	set := flagsSet(fs)
+	// 여기서 보는 것은 **플래그를 줬는가**뿐이다. 값이 성립하는지(사유가 비었나 ·
+	// 그 선점이 살아 있나)는 서버가 판정한다 — 사본을 여기 두면 두 벌이 표류한다.
+	if !set["item"] || !set["reason"] {
+		fmt.Fprintln(out, "회수 대상과 사유를 줘라: fd claim release --item <id> --reason \"...\"")
+		fmt.Fprintln(out, "잡힌 항목은 보드가 낸다. 사유 없는 회수는 나중에 되짚을 수 없다.")
+		return 2
+	}
+
+	a.cli.Flush(ctx)
+	user, _ := a.env("USER")
+	if strings.TrimSpace(user) == "" {
+		user, _ = a.env("LOGNAME")
+	}
+	res, err := a.cli.Write(ctx, CmdClaimRelease, claimReleasePath(*item), claimReleaseReq{
+		Project: a.proj.ID,
+		Actor:   laneActor(*actor, a.ccSessionID(""), user, a.host),
+		Reason:  *reason,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "회수하지 못했다: %v\n", err)
+		return 1
+	}
+	if !res.Sent {
+		fmt.Fprintf(out, "%s: %s\n", res.Mode, res.Reason)
+		return 1
+	}
+	var rr service.ClaimReclaimResult
+	if err := json.Unmarshal(res.Body, &rr); err != nil {
+		fmt.Fprintf(out, "회수는 됐으나 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "claim release · %s 의 선점을 회수했다(점유자였던 세션 %s)\n", rr.Item, rr.Holder)
+	fmt.Fprintln(out, "항목은 open 으로 돌아갔다 — 다음 pick 이 집을 수 있다.")
+	if rr.JudgmentID != "" {
+		fmt.Fprintf(out, "판단 %s 에 남겼다 — 무엇을 관측하고 회수했는지가 거기 있다.\n", rr.JudgmentID)
+	}
+	return 0
+}
+
 // runAlloc 은 `fd alloc <counter>` 다.
 func (a *App) runAlloc(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("alloc")
