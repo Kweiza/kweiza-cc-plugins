@@ -310,7 +310,10 @@ func ptrOf(ns sql.NullString) *string {
 //	                      실패하고 busy_timeout 이 안 듣는다)은 원장이 쓰기를 하지 않으므로
 //	                      발생할 자리가 없다.
 //	journal_mode 를 안 건다  그것이 이 DSN 에서 파일을 바꿀 수 있는 유일한 pragma 다.
-//	                      이미 WAL 인 파일은 되읽기가 그대로 wal 을 내므로 verifyPragmas 는 통과한다.
+//	                      대상은 롤백저널일 수 있다 — VACUUM INTO 로 뜬 <db>.bak-* 이 그 모드이고,
+//	                      그것이 바로 이 명령이 건져야 할 물건이다. 걸면 그 헤더를 영구히 고친다.
+//	                      되읽기 확인은 ledgerWantPragmas 로 한다(journal_mode 가 빠진 판) —
+//	                      요청하지도 않은 pragma 를 요구하면 롤백저널 DB 마다 거짓 진단이 난다.
 func ledgerDSN(path string) string {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(5000)")
@@ -416,7 +419,10 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 	if log == nil {
 		log = slog.Default()
 	}
-	plan, err := ProbeMigration(ctx, path)
+	// ★ ProbeMigration 이 아니라 원장 전용 갈래다. 그것은 기본 dsn() 을 쓰고 그 안의
+	//   journal_mode(WAL) 이 롤백저널 대상을 되돌릴 수 없이 바꾼다 — "거절한다"고
+	//   인쇄하는 실행조차 아카이브를 변조했다. 판정 로직은 한 벌 그대로다(probe.go 참고).
+	plan, err := probeMigrationLedger(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("원장을 읽기 전에 DB 상태를 재지 못했다(path=%q): %w", clip(path, 200), err)
 	}
@@ -441,7 +447,8 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 
 	s := &Store{db: db, path: path, log: log}
 	// DSN pragma 가 실제로 걸렸는지 되읽어 확인한다 — 드라이버는 모르는 pragma 를 조용히 무시한다.
-	if err := s.verifyPragmas(ctx); err != nil {
+	// ledgerDSN 이 요청한 것만 본다. journal_mode 는 요청하지 않았으므로 요구하지도 않는다.
+	if err := s.verifyPragmas(ctx, ledgerWantPragmas); err != nil {
 		db.Close()
 		return nil, err
 	}

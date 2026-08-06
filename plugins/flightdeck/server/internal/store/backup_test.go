@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"os"
@@ -255,8 +256,129 @@ func TestReadLedgerSnapshotsKeepRawTimestampString(t *testing.T) {
 	}
 }
 
+// journalHeaderOf 는 SQLite 파일 헤더의 18·19번째 바이트다 — 1 이면 롤백저널, 2 면 WAL.
+//
+// ★ size/ModTime 으로는 이 축이 안 보인다. journal_mode 전환은 파일 앞 20바이트만 고치므로
+// 크기가 안 변하고, 같은 초 안에서 끝나면 ModTime 도 흔들리지 않는다.
+// TestOpenLedgerDoesNotMigrateOrBackup 이 정확히 그 이유로 "대상을 안 바꾼다"를
+// 증명하지 못했다(픽스처가 이미 WAL 이라 전환이 무연산이었다).
+func journalHeaderOf(t *testing.T, path string) [2]byte {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("헤더를 읽을 파일을 열지 못했다(%s): %v", path, err)
+	}
+	defer f.Close()
+	var head [20]byte
+	if _, err := io.ReadFull(f, head[:]); err != nil {
+		t.Fatalf("헤더 20바이트를 읽지 못했다(%s): %v", path, err)
+	}
+	return [2]byte{head[18], head[19]}
+}
+
+// makeRollbackJournalDB 는 **롤백저널 모드**의 v4 DB 를 만든다.
+//
+// ★ 이것이 실제로 건져야 할 대상의 모양이다. migrate 직전 VACUUM INTO 로 뜨는
+// <db>.bak-* 산출물이 정확히 이 모드로 나온다(실측: 이 머신의 fd.db.bak-* 헤더가 1/1).
+func makeRollbackJournalDB(t *testing.T, path string, downgradeTo int) {
+	t.Helper()
+	s, err := OpenWithLogger(path, testLogger())
+	if err != nil {
+		t.Fatalf("픽스처 초기 Open 실패: %v", err)
+	}
+	seed(t, s, "p")
+	linkJudgment(t, s, "p", model.JudgmentDecision, "i1")
+	if downgradeTo > 0 {
+		if _, err := s.db.Exec(`DELETE FROM schema_version WHERE version > ?`, downgradeTo); err != nil {
+			t.Fatalf("픽스처 버전 되돌리기 실패: %v", err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("픽스처 닫기 실패: %v", err)
+	}
+
+	// WAL 을 걷어 롤백저널로 되돌린다. journal_mode 를 안 거는 DSN 으로 열어야
+	// 이 전환이 곧바로 되감기지 않는다.
+	raw, err := sql.Open("sqlite", ledgerDSN(path))
+	if err != nil {
+		t.Fatalf("픽스처 raw 열기 실패: %v", err)
+	}
+	var mode string
+	if err := raw.QueryRow(`PRAGMA journal_mode=delete`).Scan(&mode); err != nil {
+		t.Fatalf("픽스처 journal_mode 전환 실패: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("픽스처 raw 닫기 실패: %v", err)
+	}
+
+	// ── 전제 확인 ── 픽스처가 정말 롤백저널이어야 아래 단정이 의미를 갖는다.
+	if got := journalHeaderOf(t, path); got != [2]byte{1, 1} {
+		t.Fatalf("픽스처가 롤백저널이 아니다(헤더 %d/%d) — 이 시험이 아무것도 안 본다", got[0], got[1])
+	}
+}
+
+// 원장 열기는 **대상 파일의 저널 모드를 바꾸지 않는다** — 거절할 때도, 성공할 때도.
+//
+// ★ 이 시험이 겨냥하는 결함: OpenLedger 의 첫 줄인 ProbeMigration 이 기본 dsn() 을 써서
+// `journal_mode(WAL)` 을 걸었다. ledgerDSN 이 일부러 지운 유일한 쓰기 pragma 를 두 줄 위에서
+// 되살리는 것이라, "거절한다"고 인쇄하는 실행이 아카이브를 WAL 로 영구 변환했다.
+// 이 명령이 존재하는 이유가 "망가진 DB 에서 판단을 건진다"인데, 그 대상이 마지막 남은
+// 백업 하나뿐인 상황에서 오타 한 번이 그것을 고쳐 버린다.
+func TestOpenLedgerDoesNotRewriteJournalMode(t *testing.T) {
+	t.Run("거절 경로", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "fd.db")
+		makeRollbackJournalDB(t, path, BaseSchemaVersion)
+		before := journalHeaderOf(t, path)
+
+		s, err := OpenLedger(context.Background(), path, testLogger())
+		if err == nil {
+			s.Close()
+			t.Fatal("이행이 필요한 DB 를 열었다 — 거절해야 한다")
+		}
+		if !strings.Contains(err.Error(), "거절") {
+			t.Errorf("거절 문구가 아니다: %v", err)
+		}
+		if after := journalHeaderOf(t, path); after != before {
+			t.Errorf("거절하면서 대상을 바꿨다: 헤더 %d/%d → %d/%d",
+				before[0], before[1], after[0], after[1])
+		}
+	})
+
+	t.Run("성공 경로", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "fd.db")
+		makeRollbackJournalDB(t, path, 0)
+		before := journalHeaderOf(t, path)
+
+		s, err := OpenLedger(context.Background(), path, testLogger())
+		if err != nil {
+			t.Fatalf("롤백저널 DB 를 열지 못했다 — VACUUM INTO 산출물이 이 모드다: %v", err)
+		}
+		d, err := s.ReadLedger(context.Background())
+		if err != nil {
+			t.Fatalf("ReadLedger 실패: %v", err)
+		}
+		if len(d.Judgments) != 1 {
+			t.Fatalf("판단이 %d건 — 1건을 기대한다", len(d.Judgments))
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("닫기 실패: %v", err)
+		}
+		if after := journalHeaderOf(t, path); after != before {
+			t.Errorf("성공 경로가 대상을 바꿨다: 헤더 %d/%d → %d/%d",
+				before[0], before[1], after[0], after[1])
+		}
+	})
+}
+
 // 원장 열기는 스키마를 바꾸지 않는다. store.Open 은 반드시 migrate 를 돌고
 // 그 앞에서 VACUUM INTO 를 뜨는데, 백업이 그 계기가 되면 안 된다.
+//
+// ★ 이 시험은 "대상을 안 바꾼다"의 **일부만** 본다. 픽스처를 OpenWithLogger 로 만들어
+// 이미 WAL 인 파일을 재므로 journal_mode 전환이 무연산이 되고, 그래서 size/ModTime
+// 단정이 저절로 참이 된다 — 대상이 실제로 바뀌는 유일한 방식에 눈이 멀어 있다.
+// 그 축은 TestOpenLedgerDoesNotRewriteJournalMode 가 롤백저널 픽스처로 본다.
+// 여기서 픽스처 모드를 바꾸지 않는 이유: 이 시험의 대상은 "증분·백업이 안 도는가"이고
+// 그것은 WAL 인 정상 DB 에서 재는 것이 맞다.
 func TestOpenLedgerDoesNotMigrateOrBackup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fd.db")
