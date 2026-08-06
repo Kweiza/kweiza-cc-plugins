@@ -814,10 +814,35 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 여기였다 — 코드는 멀쩡하고 도는 판이 낡았을 뿐인데 그 사실이 어디에도 안 보였다.
 	// api_version 은 계약이 깨질 때만 오르므로 이 축을 못 나른다.
 	fmt.Fprintf(out, "  이 판 %s\n", buildinfo.Short(buildinfo.Self()))
-	for _, line := range ExeLines(os.Executable()) {
+	// ★ 스프레드 호출(`ExeLines(os.Executable())`)이 더 이상 안 된다 — **기대 자리**를 셋째
+	// 인자로 받기 때문이다. 그 자리를 여기서 다시 조립하지 않는다: a.binDir 은 newApp 이
+	// BinCacheDir 로 한 번만 채운 값이고, 판단이 두 자리에 살면 이 줄이 조용히 거짓 경보를
+	// 낸다(app.go 의 binDir 주석). 빈 문자열도 **그대로 넘긴다** — ExeLines 가 그때 자리
+	// 축을 안 내는 것이 계약이라 호출부가 가를 것이 없다.
+	exe, exeErr := os.Executable()
+	for _, line := range ExeLines(exe, exeErr, a.binDir) {
 		fmt.Fprintln(out, "  "+line)
 	}
-	fmt.Fprintf(out, "  상태 디렉토리 %s (%s)\n", a.sd.Path, a.sd.Source)
+	// ★ **한 줄이던 것을 둘로 가른다.** 예전에는 「상태 디렉토리」 한 줄이었는데 그 이름이
+	// 이제 두 자리를 뜻한다 — 응답 캐시는 여전히 채널 사다리(CLAUDE_PLUGIN_DATA·
+	// XDG_STATE_HOME)를 타고(값이 자기 시각을 달고 다녀 채널마다 갈려도 각자 옳다 —
+	// cache.go 의 CacheEntry.At), 바이너리 캐시는 채널 무관한 고정 자리로 떨어져 나갔다
+	// (exec 되고 나면 어느 판인지 안 말하고 답하므로 두 벌이 다르면 하나가 거짓이다).
+	// 한 줄로 두면 그 갈림 자체가 화면에서 사라진다 — 2026-08-06 에 두 자리의 빌드 시각이
+	// 55분 어긋나 한 응답의 서버 축과 렌더 축이 갈렸을 때, 이 줄을 본 사람은
+	// "상태 디렉토리는 맞는데?"에서 멈췄다. 축이 둘이면 줄도 둘이어야 한다.
+	fmt.Fprintf(out, "  응답 캐시 %s (%s)\n", a.sd.Path, a.sd.Source)
+	if a.binDir == "" {
+		// ★ 빈 자리를 %s 로 흘리면 「바이너리 캐시  (…)」가 되어 '못 읽었다'로 읽힌다.
+		// 여기는 **자리가 없는 것이 정상 판정인** 유일한 축이다(HOME 도 FD_STATE_DIR 도
+		// 없어 런처가 짓기를 거절한 상태). 값이 없으므로 답은 사유 쪽에 있다.
+		fmt.Fprintf(out, "  바이너리 캐시 없음 (%s)\n", a.binSrc)
+	} else {
+		// 파일 이름이 아니라 **디렉토리**를 찍는다 — 이름의 키 규칙(fd-<접은 소스 트리>)은
+		// 런처가 유일한 주인이라 여기서 해독하지 않는다. 지금 도는 파일이 무엇인지는
+		// 바로 위 '실행 파일' 줄이 이미 답했고, 둘을 견주는 일도 그 줄이 한다.
+		fmt.Fprintf(out, "  바이너리 캐시 %s (%s)\n", a.binDir, a.binSrc)
+	}
 	// 머신 id 는 세션 정체 3중키의 첫 축이다. **값만 찍으면 부족하고 읽은 자리를 함께 찍는다** —
 	// 이 축이 채널마다 갈려 한 세션이 카드 세 장으로 떴을 때, 값이 다르다는 것보다
 	// "어느 파일에서 왔나"가 원인에 이르는 열쇠였다(그 줄이 없어 /proc 을 뒤져야 했다).

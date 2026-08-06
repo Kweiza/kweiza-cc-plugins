@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,9 +82,12 @@ func (w *selfWatcher) tick(ctx context.Context, drain func()) Action {
 	return w.step(ctx, drain)
 }
 
+// binDir 에 "" 를 주는 것은 **못 덮는 갈래를 안 켠다**는 뜻이다(견줄 자리가 없다).
+// 그 축은 TestNewSelfWatcherNamesTheBranchItCannotCover 가 따로 잠근다 — 여기 섞으면
+// 감시 사슬 시험 전부가 Uncovered 문구에 매인다.
 func newTestWatcher(t *testing.T) *selfWatcher {
 	t.Helper()
-	w := newSelfWatcher(slog.New(slog.DiscardHandler), "/tmp/does-not-matter.db")
+	w := newSelfWatcher(slog.New(slog.DiscardHandler), "/tmp/does-not-matter.db", "")
 	w.start = id(10, 1000)
 	w.exePath = "/fake/fd"
 	return w
@@ -384,7 +388,7 @@ func TestWatcherReportsUnmeasurableEvenWithoutAnError(t *testing.T) {
 }
 
 func TestWatcherStatusSaysWatchingFalseWhenUnsupported(t *testing.T) {
-	w := newSelfWatcher(slog.New(slog.DiscardHandler), "/tmp/x.db")
+	w := newSelfWatcher(slog.New(slog.DiscardHandler), "/tmp/x.db", "")
 	w.watching = false
 	w.reason = "이 플랫폼은 자기 재기동을 지원하지 않는다"
 	st := w.Status()
@@ -393,5 +397,65 @@ func TestWatcherStatusSaysWatchingFalseWhenUnsupported(t *testing.T) {
 	}
 	if strings.TrimSpace(st.Reason) == "" {
 		t.Fatal("왜 안 보는지가 비었다 — 빈 상태는 '아직 갱신이 없었다'로 읽힌다")
+	}
+}
+
+// ★ **감시가 구조적으로 못 덮는 갈래에 이름이 붙어야 한다.**
+//
+// 런처가 바이너리 이름에 소스 트리를 박고 그 경로에는 플러그인 버전이 들어가므로, 그 자리에서
+// 도는 서버는 버전이 오르는 갱신을 **영영 못 본다** — Decide 가 영원히 "그대로다"를 낸다.
+// 그것을 watching=true 만으로 말하면 침묵보다 나쁜 틀린 안심이다.
+//
+// 견주는 것은 **부모 디렉토리뿐**이다. 이름 규칙(소스 경로를 접는 키)의 주인은 런처 하나라
+// 그 사본을 Go 쪽에 두지 않는다 — 그래서 이 시험도 이름은 한 번도 안 짓는다.
+func TestNewSelfWatcherNamesTheBranchItCannotCover(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("실행 파일 자리를 못 읽는다: %v", err)
+	}
+	log := slog.New(slog.DiscardHandler)
+	// 감시 자체가 안 켜지는 배치(컨테이너·비유닉스)에서는 이 축 앞에서 갈린다. 그때는
+	// watching=false 와 reason 이 이미 사실을 말하므로 여기서 잴 것이 없다.
+	if base := newSelfWatcher(log, "/tmp/does-not-matter.db", ""); !base.watching {
+		t.Skipf("이 배치는 감시를 아예 안 켠다(%s) — Uncovered 는 그 뒤의 축이다", base.reason)
+	}
+
+	cases := []struct {
+		name   string
+		binDir string
+		want   bool // Uncovered 가 차는가
+	}{
+		{"런처 자리에서 돈다 — 버전이 오르면 아무도 이 파일을 안 덮는다", filepath.Dir(exe), true},
+		{"끝 슬래시가 붙어도 같은 자리다(Clean 이 흡수한다)", filepath.Dir(exe) + "/", true},
+		{"다른 자리면 이름이 안 갈린다 — 침묵한다", t.TempDir(), false},
+		{"자리를 계산할 수 없다(HOME 도 FD_STATE_DIR 도 없다) — 침묵한다", "", false},
+		{"공백뿐인 값은 자리가 아니다", "   ", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newSelfWatcher(log, "/tmp/does-not-matter.db", c.binDir)
+			st := w.Status()
+			if got := strings.TrimSpace(st.Uncovered) != ""; got != c.want {
+				t.Fatalf("Uncovered 가 찼는가 = %v, 원한 것 %v (binDir=%q): %q", got, c.want, c.binDir, st.Uncovered)
+			}
+			// ★ **감시를 끄지 않는다.** 같은 소스 트리의 재빌드는 여전히 이 자리를 덮으므로
+			// watching=false 는 과보고다 — 그러면 도는 축까지 "안 본다"로 접힌다.
+			if !st.Watching {
+				t.Fatalf("못 덮는 갈래를 이유로 감시를 껐다: %+v", st)
+			}
+			// ★ **Stalled 로 새면 안 된다.** 저쪽은 회복되는 일시 고장이고 이쪽은 회복이 없다.
+			if strings.TrimSpace(st.Stalled) != "" {
+				t.Fatalf("못 덮는 갈래가 Stalled 로 접혔다: %+v", st)
+			}
+			if !c.want {
+				return
+			}
+			// 사람이 할 일이 문구에 있어야 한다 — 사유만 있고 처방이 없으면 화면이 답을 안 준다.
+			for _, want := range []string{"버전이 오르면", "재기동"} {
+				if !strings.Contains(st.Uncovered, want) {
+					t.Fatalf("%q 가 사유에 없다: %q", want, st.Uncovered)
+				}
+			}
+		})
 	}
 }

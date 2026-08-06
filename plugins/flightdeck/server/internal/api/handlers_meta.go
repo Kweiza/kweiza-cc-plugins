@@ -110,6 +110,15 @@ type SelfUpdateStatus struct {
 	// Watching=true 인데 이것이 차 있으면 "따라가는 중"이 아니라 "눈이 멀었다"다 —
 	// 그 둘을 안 가르면 지워진 바이너리를 감시하는 서버가 화면에서는 정상으로 보인다.
 	Stalled string `json:"stalled,omitempty"`
+
+	// ★ Uncovered 는 보고 있는데도 **구조적으로 못 덮는 갈래**다 — 감시하는 자리의 이름에
+	// 소스 트리가 박혀 있어, 플러그인 버전이 오르는 갱신은 다른 이름의 파일을 짓고 이 자리는
+	// 아무도 안 덮는다. 그 서버는 영원히 "그대로다"를 보며 옛 코드로 산다.
+	//
+	// **Stalled 와 한 필드로 접지 않는다.** Stalled 는 회복되는 고장이고 이것은 회복이 없는
+	// 성질이다 — 처방이 "왜 못 재는지 고쳐라" 대 "이 갱신은 사람이 재기동해야 한다"로 갈린다.
+	// 판정의 주인은 cmd/fd 의 selfUpdateStatus.Uncovered 이고 이 표면은 그것을 옮기기만 한다.
+	Uncovered string `json:"uncovered,omitempty"`
 }
 
 // AuthNotice 는 지금 인증 상태를 사람이 읽을 한 줄로 만든다. 순수 함수다.

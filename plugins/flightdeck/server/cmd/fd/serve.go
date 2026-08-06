@@ -143,14 +143,20 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	webH := web.New(svc, web.WithLogger(log))
 	// ★ watcher 를 buildHandler 보다 먼저 만든다 — api.Options.SelfUpdate 콜백이
 	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
-	watcher := newSelfWatcher(log, path)
+	//
+	// ★ 자리 계산의 주인은 BinCacheDir 하나다(app.go 의 binDir 주석) — 여기서 다시 조립하지
+	// 않는다. 감시기는 이 값을 **견주기만** 한다: 자기 실행 파일이 런처가 소스 지문으로 이름
+	// 붙인 자리에 있으면, 플러그인 버전이 오르는 갱신은 이 자리를 영영 안 덮는다.
+	binDir, _ := BinCacheDir(env, home)
+	watcher := newSelfWatcher(log, path, binDir)
 	inContainer, _ := detectContainer()
 	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer,
 		func() api.SelfUpdateStatus {
 			st := watcher.Status()
 			out := api.SelfUpdateStatus{
 				Watching: st.Watching, Reason: st.Reason, Stalled: st.Stalled,
-				From: st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
+				Uncovered: st.Uncovered,
+				From:      st.From, To: st.To, Outcome: st.Outcome, Detail: st.Detail,
 			}
 			// ★ LastAt 변환: cmd/fd 는 time.Time(제로값 = 시도 없음), api 는 *time.Time
 			// (nil = 시도 없음). IsZero() 로 가른다 — 값 그대로 &st.LastAt 을 넘기면

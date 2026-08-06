@@ -508,6 +508,38 @@ func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
 	}
 }
 
+// ★ **못 덮는 갈래도 선을 넘어야 한다.** 이것이 안 실리면 클라이언트는 watching=true 만
+// 보고 "따라가는 중"이라 찍는데, 그 서버는 플러그인 버전이 올라도 영영 안 바뀐다 —
+// 침묵이 아니라 **틀린 안심**이다. Stalled 와 **다른 키**인 것이 계약이다: 접으면
+// "지금 못 잰다"(회복된다)와 "영영 안 바뀔 자리를 잰다"(회복이 없다)가 같은 값이 된다.
+func TestHealthzCarriesTheUncoveredBranch(t *testing.T) {
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
+			Watching:  true,
+			Uncovered: "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd)",
+		})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if !strings.Contains(string(raw), `"uncovered":"이 실행 파일 이름에는`) {
+		t.Fatalf("못 덮는 갈래가 선을 안 넘었다: %s", raw)
+	}
+	// 두 축이 한 키로 접히지 않았는가 — stalled 는 안 찼으니 안 나가야 한다.
+	if strings.Contains(string(raw), `"stalled"`) {
+		t.Fatalf("못 덮는 갈래를 stalled 로 접었다: %s", raw)
+	}
+	// 덮는 배치에서는 안 나가야 한다. 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
+	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(quiet), `"uncovered"`) {
+		t.Fatalf("다 덮는데 uncovered 가 실렸다: %s", quiet)
+	}
+}
+
 // ★ 안 보고 있다는 사실이 '아직 갱신이 없었다'로 접히면 안 된다.
 // json.Marshal 을 거쳐 **실제 바이트**로 확인한다 — 구조체 필드만 보면 태그 오타를
 // 원리적으로 못 잡는다(Go 필드 값은 태그와 무관하게 그대로 있으므로).

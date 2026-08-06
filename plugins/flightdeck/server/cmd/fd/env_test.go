@@ -142,9 +142,13 @@ func TestCacheKeySeparatesDifferentQueries(t *testing.T) {
 // TestAllChannelsAgreeOnMachineID 와 같은 모양이다 — 산문이 아니라 이것이 규칙을 지킨다.
 //
 // 왜 상태 디렉토리가 아닌가: ResolveStateDir 은 CLAUDE_PLUGIN_DATA(훅·MCP 에만 있다)와
-// XDG_STATE_HOME|~/.local/state(사용자 셸)로 **일부러 갈리게** 만든 축이다. 캐시는
-// 재생성 가능하니 갈려도 되지만 아웃박스는 설계 §7 이 "재생성 불가한 유일한 자산"이라
-// 부른 것을 담는다.
+// XDG_STATE_HOME|~/.local/state(사용자 셸)로 **일부러 갈리게** 만든 축이다. **응답 캐시**는
+// 두 축(① 재생성 가능한가 ② 갈린 사본이 각자 옳은가)을 **둘 다 통과해서** 갈려도 되지만,
+// 아웃박스는 설계 §7 이 "재생성 불가한 유일한 자산"이라 부른 것을 담아 ①에서 탈락한다.
+// 축 목록의 전문은 env.go 의 OutboxPath 주석에 있다.
+//
+// ★ 여기서 "캐시"를 한 부류로 읽지 마라 — 런처의 **바이너리 캐시**는 ①을 통과하고도
+// ②에서 탈락해 고정 자리로 갔다(같은 파일의 TestBinCacheDir 이 그것을 잠근다).
 func TestOutboxPathIsChannelIndependent(t *testing.T) {
 	home := "/h"
 	envs := []map[string]string{
@@ -183,6 +187,111 @@ func TestOutboxPathSaysWhenItWillNotSurviveReboot(t *testing.T) {
 	_, src := OutboxPath(envOf(map[string]string{}), "")
 	if !strings.Contains(src, "임시") {
 		t.Errorf("임시 디렉토리 폴백인데 사유가 그것을 안 말한다: %q", src)
+	}
+}
+
+// 바이너리 캐시 자리도 **채널 환경과 무관해야 한다.** 그리고 HOME 이 없으면 **안 짓는다.**
+//
+// ★ 이 시험이 07:15 사고의 Go 쪽 회귀를 막는다. 같은 소스가 CLAUDE_PLUGIN_DATA 자리와
+// XDG_STATE_HOME 자리에 두 번 지어져 빌드 시각이 55분 어긋났고(16:10:44 ↔ 17:05:29),
+// 그 창에서 한 응답의 서버 축과 렌더 축이 서로 다른 판을 봤다. 셸 런처 쪽 절반은
+// plugin_test.go 가 잠근다 — FD_PRINT_BIN 이음매로 런처의 답을 받아 **이 함수의 답과
+// 디렉토리째 견주고**, 표 안의 FD_STATE_DIR 갈래(공백·끝 슬래시)까지 같은 env 로 통과시킨다.
+// ★ 그 대조가 없으면 "두 구현이 같은 답을 낸다"는 **아무도 안 재는 문장**이다 — 실제로
+// 한동안 그랬고, 그사이 둘은 공백 처리에서 갈려 있었다(런처는 `[ -n ]` 만 보고 값을 그대로
+// 썼고 이 함수는 TrimSpace 로 갈랐다). 잰 척하지 않으려면 대조가 실물로 있어야 한다.
+//
+// ★ HOME 이 없을 때 임시 디렉토리로 떨어지지 **않는** 것이 형제 셋(MachineIDPath·
+// OutboxPath·ConfigPath)과 갈리는 유일한 갈래다. world-writable 부모에 실행 파일을 놓으면
+// 남이 심어 둔 것을 내가 exec 하게 된다(LegacyOutboxDirs 가 tmp 를 뺀 것과 같은 축이고,
+// 실행 파일은 그쪽보다 무겁다). 그래서 값을 안 내는 쪽을 골랐고, 대신 사유는 **반드시** 낸다.
+func TestBinCacheDir(t *testing.T) {
+	home := "/h"
+	fixed := filepath.Join(home, ".cache", "flightdeck", "bin")
+	cases := []struct {
+		name    string
+		env     map[string]string
+		home    string
+		want    string
+		wantSrc string
+	}{
+		{"명시 지정이 이긴다",
+			map[string]string{"FD_STATE_DIR": "/explicit", "CLAUDE_PLUGIN_DATA": "/plugin/data"},
+			home, filepath.Join("/explicit", "bin"), "FD_STATE_DIR"},
+		{"환경이 없으면 홈 아래 고정 자리",
+			map[string]string{}, home, fixed, "~/.cache"},
+		{"훅·MCP 채널이 이기지 못한다",
+			map[string]string{"CLAUDE_PLUGIN_DATA": "/plugin/data"}, home, fixed, "~/.cache"},
+		{"사용자 셸 채널이 이기지 못한다",
+			map[string]string{"XDG_STATE_HOME": "/xdg/state"}, home, fixed, "~/.cache"},
+		{"둘 다 있어도 이기지 못한다",
+			map[string]string{"CLAUDE_PLUGIN_DATA": "/plugin/data", "XDG_STATE_HOME": "/xdg/state"},
+			home, fixed, "~/.cache"},
+		// ★ 아래 넷은 **FD_STATE_DIR 를 읽는 법**의 갈래다 — 계약 전문(⑴트림 ⑵트림 후 비면
+		//   미설정 ⑶끝 슬래시는 자리를 안 바꾼다)과 **갈렸을 때 무엇이 틀어지는지**는 env.go 의
+		//   BinCacheDir 주석 한 자리에 있다. 여기서 잠그는 것은 그 계약의 **Go 쪽 절반**이고,
+		//   나머지 절반(셸 런처)이 같은 답을 내는지는 plugin_test.go 가 런처를 실제로 돌려
+		//   견준다. 공백 갈래를 표 안에 두는 이유: 실제로 갈려 있던 것이 공백류뿐이었다.
+		{"앞뒤 공백은 값의 일부가 아니다",
+			map[string]string{"FD_STATE_DIR": " /x "}, home, filepath.Join("/x", "bin"), "FD_STATE_DIR"},
+		{"끝 슬래시는 자리를 안 바꾼다",
+			map[string]string{"FD_STATE_DIR": "/x/"}, home, filepath.Join("/x", "bin"), "FD_STATE_DIR"},
+		{"공백뿐인 값은 미설정과 같다",
+			map[string]string{"FD_STATE_DIR": "  "}, home, fixed, "~/.cache"},
+		{"빈 값도 미설정과 같다",
+			map[string]string{"FD_STATE_DIR": ""}, home, fixed, "~/.cache"},
+		// ★ 이 줄은 표 밖의 예외가 아니라 표 안의 판정이다 — 앞선 셋과 갈리는 자리라 더 그렇다.
+		{"HOME 이 없으면 자리를 안 낸다", map[string]string{}, "", "", "HOME"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, src := BinCacheDir(envOf(c.env), c.home)
+			if got != c.want {
+				t.Fatalf("자리가 %q 다, %q 를 기대했다 — 바이너리 자리가 채널의 함수가 되면\n"+
+					"같은 소스가 두 번 지어지고 둘 중 하나가 최신인 척하는 옛 코드가 된다", got, c.want)
+			}
+			if strings.TrimSpace(src) == "" {
+				t.Fatal("출처가 비었다 — '왜 여기냐'에 답할 자리가 없다")
+			}
+			if !strings.Contains(src, c.wantSrc) {
+				t.Fatalf("사유에 %q 가 없다: %q", c.wantSrc, src)
+			}
+		})
+	}
+
+	// (빈 값·공백뿐인 값은 **표 안으로 옮겼다** — 그 판정은 이제 런처와 맺은 계약의 한 갈래라
+	//  형제 갈래들과 같은 자리에서 읽혀야 한다. 여기 사본을 남기면 한쪽만 고치는 날 갈린다.)
+
+	// 표 밖 ①: HOME 이 없고 **채널 환경만** 있을 때도 자리를 안 낸다.
+	// 채널 환경이 폴백 자격을 얻는 순간, 이 함수가 닫은 55분 창이 그대로 다시 열린다.
+	for _, e := range []map[string]string{
+		{"CLAUDE_PLUGIN_DATA": "/plugin/data"},
+		{"XDG_STATE_HOME": "/xdg/state"},
+		{"CLAUDE_PLUGIN_DATA": "/plugin/data", "XDG_STATE_HOME": "/xdg/state"},
+	} {
+		if got, src := BinCacheDir(envOf(e), ""); got != "" {
+			t.Fatalf("HOME 이 없는데 채널 환경(%v)이 자리를 만들었다: %q (%s)", e, got, src)
+		}
+	}
+
+	// 표 밖 ②: HOME 이 없을 때 **임시 디렉토리로 떨어지지 않는다.** 형제 셋과 갈리는 자리라
+	// 못 박아 둔다 — 나중에 "일관성"을 이유로 tmp 폴백을 되살리면 여기서 걸린다.
+	dir, src := BinCacheDir(envOf(map[string]string{}), "")
+	if dir != "" {
+		t.Fatalf("HOME 이 없는데 자리를 냈다(%q) — world-writable 부모에 실행 파일을 놓는 길이다", dir)
+	}
+	if strings.Contains(src, filepath.Clean(os.TempDir())) || strings.Contains(src, "임시 디렉토리 —") {
+		t.Fatalf("사유가 임시 디렉토리를 자리로 약속한다: %q", src)
+	}
+
+	// 표 밖 ③: **파일 이름을 답하지 않는다.** 소스 트리를 접은 키의 주인은 셸 런처 하나뿐이고,
+	// 여기 사본을 두면 한쪽만 고칠 때 조용히 어긋난다(client.go newClient 주석의 규율).
+	got, _ := BinCacheDir(envOf(map[string]string{}), home)
+	if filepath.Base(got) != "bin" {
+		t.Fatalf("디렉토리가 아니라 %q 를 냈다 — 키 규칙은 런처가 유일하게 갖는다", got)
+	}
+	if strings.Contains(filepath.Base(got), "fd-") {
+		t.Fatalf("키 규칙이 Go 로 새어 나왔다: %q", got)
 	}
 }
 

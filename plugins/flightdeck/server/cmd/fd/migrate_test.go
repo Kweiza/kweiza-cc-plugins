@@ -267,12 +267,13 @@ func TestExportJudgmentsWritesFilesAndPrintsLosses(t *testing.T) {
 // 같은 자리에 두 번 내보내도 --force 가 필요 없다 — 자기 산출물을 알아본다.
 //
 // ★ rc==0 만 보면 "아무 일도 안 하고 그냥 통과시켰다"와 "실제로 다시 썼다"를
-//   구분하지 못한다. exported_at 축을 고른 이유: exportJudgments 가 실행마다
-//   nowStampString() 으로 새로 찍고 그 값이 manifest.json 에 실린다. 두 h.run
-//   호출 사이에는 DB 를 열고 ReadLedger 로 여섯 표를 읽고 파일 일곱 개를
-//   tmp→rename 으로 쓰는 실 I/O 가 끼어 있어(같은 프로세스 안에서 순차 실행되지만
-//   이 I/O 만으로 마이크로초 여러 개가 흐른다), nowStampString() 의 마이크로초
-//   해상도에서 두 값이 우연히 같을 실무적 여지가 없다.
+//
+//	구분하지 못한다. exported_at 축을 고른 이유: exportJudgments 가 실행마다
+//	nowStampString() 으로 새로 찍고 그 값이 manifest.json 에 실린다. 두 h.run
+//	호출 사이에는 DB 를 열고 ReadLedger 로 여섯 표를 읽고 파일 일곱 개를
+//	tmp→rename 으로 쓰는 실 I/O 가 끼어 있어(같은 프로세스 안에서 순차 실행되지만
+//	이 I/O 만으로 마이크로초 여러 개가 흐른다), nowStampString() 의 마이크로초
+//	해상도에서 두 값이 우연히 같을 실무적 여지가 없다.
 func TestExportJudgmentsRerunNeedsNoForce(t *testing.T) {
 	h := newHarness(t)
 	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")

@@ -44,7 +44,7 @@ var _ api.Handler = (*drainProbe)(nil)
 // 프로세스가 죽을 수 있다)을 못 본다 — 이 시험이 그 축을 덮는다.
 func TestServeWithWatcherJoinsWatcherBeforeReturning(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
-	w := newSelfWatcher(log, "/tmp/does-not-matter.db")
+	w := newSelfWatcher(log, "/tmp/does-not-matter.db", "")
 	w.watching = true
 	w.reason = ""
 	w.exePath = "/fake/fd"
@@ -97,7 +97,7 @@ func TestServeWithWatcherJoinsWatcherBeforeReturning(t *testing.T) {
 // 낸다 — "재기동이 필요하다"는 신호가 정확히 그 실패 경우에 안 나온다.
 func TestServeWithWatcherReturnsFailWhenExecFails(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
-	w := newSelfWatcher(log, "/tmp/does-not-matter.db")
+	w := newSelfWatcher(log, "/tmp/does-not-matter.db", "")
 	w.watching = true
 	w.reason = ""
 	w.exePath = "/fake/fd"
@@ -129,7 +129,7 @@ func TestServeWithWatcherReturnsFailWhenExecFails(t *testing.T) {
 // 이 시험이 `serve.go` 의 옛 "우아한 마무리가 아니다" 주석을 실제로 뒤집는 자리다.
 func TestServeDrainsHandlerBeforeExec(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
-	w := newSelfWatcher(log, "/tmp/does-not-matter.db")
+	w := newSelfWatcher(log, "/tmp/does-not-matter.db", "")
 	w.watching = true
 	w.reason = ""
 	w.exePath = "/fake/fd"
