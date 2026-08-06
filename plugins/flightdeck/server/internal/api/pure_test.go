@@ -390,6 +390,46 @@ func TestAuthNoticeKeepsTheDisabledCaseDistinct(t *testing.T) {
 	}
 }
 
+// 도달-0 갈래는 **재는 법까지** 줘야 한다.
+//
+// ★ 이 문장을 읽은 사람이 할 가장 자연스러운 확인이 루프백에서 /healthz 를 쳐 보는
+// 것인데, 그 요청은 인증 게이트 앞에서 되돌아 나가 관측을 안 남긴다. 절차를 안 주면
+// **확인하려는 시도가 언제나 "아직 없다"를 확증한다** — 멀쩡한 서버를 결함으로 읽는다.
+func TestAuthNoticeTellsHowToMeasureReach(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: false})
+	if !strings.Contains(n, "/healthz") {
+		t.Fatalf("재는 법이 없다 — 이 값이 /healthz 로는 안 움직인다는 사실이 어디에도 안 나온다: %q", n)
+	}
+	if !strings.Contains(n, "API 요청") {
+		t.Fatalf("무엇을 하면 재지는지가 없다: %q", n)
+	}
+	// 사유를 아는 갈래(컨테이너)는 제 사유를 말한다 — 절차로 덮으면 진단이 흐려진다.
+	c := AuthNotice(true, LoopbackReach{Configured: true, Observed: false, InContainer: true})
+	if !strings.Contains(c, "컨테이너") {
+		t.Fatalf("사유를 아는 갈래가 사유를 잃었다: %q", c)
+	}
+}
+
+// 면제가 **닿는** 서버가 내는 401 처방도 거짓을 말하면 안 된다.
+//
+// ★ 이 갈래만 오래 "그 **설정**을 알린다"로 남아 있었다 — 인접 갈래 둘은 관측 어법인데.
+// 그리고 이 문구를 읽는 사람은 **방금 401 을 맞았다.** 루프백에서 왔다면 원인은 면제가
+// 아니라 토큰 값이다(JudgeAuth 는 헤더가 있으면 먼저 대조하고 불일치는 루프백이어도
+// 거절한다 — auth.go 의 순서 계약). 면제의 범위를 안 적으면 그 사람이 자기가 방금 받은
+// 401 을 설명하지 못하고, 그것이 2026-08-05 사고에서 세션이 배선을 안 의심한 이유다.
+func TestUnauthorizedGuidanceScopesTheExemptionWhenLoopbackReaches(t *testing.T) {
+	g := UnauthorizedGuidance(LoopbackReach{Configured: true, Observed: true})
+	if strings.Contains(g, "설정을 알린다") {
+		t.Fatalf("관측 축인데 설정을 알린다고 말한다 — 인접 갈래 둘과 어법이 갈린다: %q", g)
+	}
+	if !strings.Contains(g, "틀린 토큰은 루프백이어도 거절한다") {
+		t.Fatalf("면제의 범위가 없다 — 401 을 맞은 루프백 클라이언트가 자기 401 을 설명할 수 없다: %q", g)
+	}
+	if !strings.Contains(g, "Bearer") {
+		t.Fatalf("거짓을 지우면서 처방까지 지웠다: %q", g)
+	}
+}
+
 // loopback_open 은 **관측**이고, 설정값은 따로 남는다.
 //
 // 둘을 한 필드에 접으면 "왜 안 닿는가"를 물을 수 없다 — 설정이 꺼진 것인지

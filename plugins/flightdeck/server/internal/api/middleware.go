@@ -114,6 +114,19 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /healthz 는 게이트 앞에 둔다. 배너 훅이 "서버가 살아 있나 · 인증이 켜져 있나"를
 		// 묻는 유일한 창인데, 그것을 인증 뒤에 두면 토큰 오설정 시 아무것도 알 수 없다.
+		//
+		// ★ 이 줄은 **두 번째 하중을 진다.** 아래 도달 관측보다 위에 있어서 /healthz 요청은
+		// loopbackSeen 에 안 들어간다 — 그리고 그 순서를 뒤집으면 **모든 컨테이너 배포가
+		// 기동 30초 안에 loopback_open:true 가 된다.** 이미지의 HEALTHCHECK 가 컨테이너
+		// **안에서** `fd doctor` 를 30초마다 돌리고(server/Dockerfile · compose.yaml),
+		// `fd doctor` 가 치는 것은 /healthz 하나뿐이며(cmd/fd/cmds.go 의 a.cli.Healthz —
+		// REST 에 진단 엔드포인트가 없어서다), 컨테이너 안에서 서버를 치면 그것이 루프백이다.
+		// 그러면 면제를 받는 클라이언트가 0인데 "닿는다"를 내게 된다 — 이 축이 존재하는
+		// 이유인 바로 그 거짓 광고이고, notice·guidance 의 컨테이너 갈래는 도달 불가가 된다.
+		//
+		// 대가는 **/healthz 로는 도달을 못 잰다**는 것이다. 그 함정은 없애는 대신 알린다 —
+		// 도달-0 갈래의 notice 가 재는 법을 같이 준다(handlers_meta.go 의 AuthNotice).
+		// 잠그는 시험: TestHealthzItselfDoesNotCountAsLoopbackReach.
 		if r.URL.Path == "/healthz" {
 			next.ServeHTTP(w, r)
 			return
