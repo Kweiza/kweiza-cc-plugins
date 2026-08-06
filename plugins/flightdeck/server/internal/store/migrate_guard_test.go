@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -35,31 +36,126 @@ import (
 //
 // ★ DROP INDEX 는 여기 없다. 데이터가 사라지지 않고 다시 만들면 되는 조작이라
 // §7 의 셋 어디에도 안 들어간다. 헛걸림이 늘면 이런 시험은 결국 꺼진다.
-func destructiveOps(sql string) []string {
+// ★ 반환은 사람이 읽는 라벨이 아니라 **op 상수**다. 예외 표가 라벨 문자열에 결합돼 있으면
+// 라벨을 한 글자만 고쳐도 예외가 조용히 안 맞게 되고, 그때 방어가 사라진 것을 아무도 모른다.
+// 라벨은 String() 으로 내려 표시 전용이 된다.
+type op int
+
+const (
+	opDropTable op = iota
+	opDropColumn
+	opRename
+	opDeleteFrom
+	opUpdateSet
+	opInsertSelect
+)
+
+// String 은 표시 전용이다. **어떤 판정의 축도 아니다** — 축이 되는 순간 위 ★ 가 무너진다.
+func (o op) String() string {
+	switch o {
+	case opDropTable:
+		return "DROP TABLE (표 삭제)"
+	case opDropColumn:
+		return "DROP COLUMN (컬럼 삭제)"
+	case opRename:
+		return "RENAME (표·컬럼 개명 — 표 재작성 관용구의 자취)"
+	case opDeleteFrom:
+		return "DELETE FROM (행 삭제)"
+	case opUpdateSet:
+		return "UPDATE … SET (데이터 이행)"
+	case opInsertSelect:
+		return "INSERT … SELECT (데이터 이행)"
+	}
+	return fmt.Sprintf("op(%d) — 이름 없는 조작. 상수를 늘렸으면 String 도 늘려라", int(o))
+}
+
+func destructiveOps(sql string) []op {
 	s := strings.ToUpper(stripSQLComments(sql))
 
 	// ★ UPDATE 를 낱말 하나로 찾으면 안 된다. 이 스키마의 외래 키는 `ON UPDATE NO ACTION`
 	// 을 쓰고, 그러면 **제약을 적은 증분이 전부 데이터 이행으로 걸린다.**
 	// 그래서 `UPDATE <표> SET` 모양일 때만 센다.
 	checks := []struct {
-		op string
+		op op
 		re *regexp.Regexp
 	}{
-		{"DROP TABLE (표 삭제)", regexp.MustCompile(`\bDROP\s+TABLE\b`)},
-		{"DROP COLUMN (컬럼 삭제)", regexp.MustCompile(`\bDROP\s+COLUMN\b`)},
-		{"RENAME (표·컬럼 개명 — 표 재작성 관용구의 자취)", regexp.MustCompile(`\bRENAME\s+(TO|COLUMN)\b`)},
-		{"DELETE FROM (행 삭제)", regexp.MustCompile(`\bDELETE\s+FROM\b`)},
-		{"UPDATE … SET (데이터 이행)", regexp.MustCompile(`\bUPDATE\s+[A-Z_][A-Z0-9_]*\s+SET\b`)},
-		{"INSERT … SELECT (데이터 이행)", regexp.MustCompile(`\bINSERT\s+INTO\b[\s\S]*?\bSELECT\b`)},
+		{opDropTable, regexp.MustCompile(`\bDROP\s+TABLE\b`)},
+		{opDropColumn, regexp.MustCompile(`\bDROP\s+COLUMN\b`)},
+		{opRename, regexp.MustCompile(`\bRENAME\s+(TO|COLUMN)\b`)},
+		{opDeleteFrom, regexp.MustCompile(`\bDELETE\s+FROM\b`)},
+		{opUpdateSet, regexp.MustCompile(`\bUPDATE\s+[A-Z_][A-Z0-9_]*\s+SET\b`)},
+		{opInsertSelect, regexp.MustCompile(`\bINSERT\s+INTO\b[\s\S]*?\bSELECT\b`)},
 	}
 
-	var found []string
+	var found []op
 	for _, c := range checks {
 		if c.re.MatchString(s) {
 			found = append(found, c.op)
 		}
 	}
 	return found
+}
+
+// opLabels 는 표시용 라벨을 낸다. 오류 메시지 전용이다.
+func opLabels(ops []op) []string {
+	out := make([]string, 0, len(ops))
+	for _, o := range ops {
+		out = append(out, o.String())
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 예외
+// ─────────────────────────────────────────────────────────────────────────────
+
+// exemption 은 증분 하나가 여는 예외다.
+//
+// ★ 사유가 값의 일부다. 위 시험(TestBundledMigrationsAreAdditive)의 갈래 (b) 는
+// "그 증분이 **왜** 되돌릴 수 있는지를 적고 예외로 둔다" 이지 "예외 목록에 올린다" 가 아니다.
+// 사유를 선택 항목으로 두면 목록은 자라고 근거는 안 자란다.
+type exemption struct {
+	ops []op
+	why string
+}
+
+// destructiveExempt 는 증분 번호 → 그 증분이 여는 예외다.
+//
+// ★ 여기 오르는 것은 **그 증분에 한정**된다. 조작 단위 허용이 아니라 증분 단위 허용이다 —
+// "DELETE FROM 은 이제 괜찮다" 가 아니라 "005 의 DELETE FROM 은 이런 이유로 괜찮다" 여야
+// 다음 증분이 같은 판정을 다시 받는다.
+var destructiveExempt = map[int]exemption{}
+
+// neverExempt 는 예외로도 못 여는 조작이다. 데이터가 아니라 **구조**가 사라지는 것들이다.
+//
+// ★ 이 목록이 필요한 이유는 실측이다. 이 파일의 옛 주석은 "영구 표가 사라지는 쪽은 다른
+// 시험이 본다 — TestFreshInstallAndUpgradeProduceTheSameSchema 와 TestDeclaredTablesMatchDesign"
+// 이라고 적어 뒀는데, 증분에 `DROP TABLE` 을 넣어 실제로 돌려 보니 **둘 다 통과했다.**
+// 전자는 신규 설치와 판올림이 양쪽 다 그 증분을 돌아 스키마가 똑같이 줄기 때문이고,
+// 후자는 증분 텍스트의 CREATE TABLE 만 세기 때문이다. 즉 그 안전망은 없었다.
+// 없는 안전망을 믿는 대신 여기서 막는다.
+var neverExempt = []op{opDropTable, opDropColumn, opRename}
+
+// exemptReason 은 증분 to 가 조작 o 를 써도 되는지와 그 사유를 낸다. 순수 함수다.
+//
+// ★ 표를 인자로 받는다. 전역을 직접 읽으면 이 판정을 시험할 때 전역을 바꿔치기해야 하고,
+// 그렇게 얽힌 시험은 실행 순서에 따라 빨개진다.
+func exemptReason(table map[int]exemption, to int, o op) (why string, ok bool) {
+	for _, banned := range neverExempt {
+		if o == banned {
+			return "", false
+		}
+	}
+	ex, found := table[to]
+	if !found || strings.TrimSpace(ex.why) == "" {
+		return "", false
+	}
+	for _, allowed := range ex.ops {
+		if o == allowed {
+			return ex.why, true
+		}
+	}
+	return "", false
 }
 
 // stripSQLComments 는 `--` 줄 주석과 `/* */` 블록 주석을 걷어낸다. 순수 함수다.
@@ -151,19 +247,107 @@ func TestBundledMigrationsAreAdditive(t *testing.T) {
 		if strings.TrimSpace(m.SQL) == "" {
 			t.Fatalf("전제가 깨졌다 — 증분 %d(%s) 의 SQL 이 비었다(//go:embed 확인)", m.To, m.Name)
 		}
-		if ops := destructiveOps(m.SQL); len(ops) > 0 {
-			t.Errorf("증분 %d(%s) 에 파괴적 조작이 있다: %s\n\n"+
+		// 예외에 오른 조작은 사유와 함께 통과시킨다. 나머지는 그대로 만료 통지다.
+		var unexcused []op
+		for _, o := range destructiveOps(m.SQL) {
+			if _, ok := exemptReason(destructiveExempt, m.To, o); ok {
+				continue
+			}
+			unexcused = append(unexcused, o)
+		}
+		if len(unexcused) > 0 {
+			t.Errorf("증분 %d(%s) 에 예외 없는 파괴적 조작이 있다: %s\n\n"+
 				"이것은 시험의 결함이 아니라 **판단의 만료 통지**다.\n"+
 				"설계 §7 과 store.go 의 마이그레이션 절은 적용을 fd serve 기동 경로(store.Open)\n"+
-				"안에 남겨 두기로 했고, 그 근거는 \"증분이 한 단이고 순수 가산이라 실질 위험이 낮다\"\n"+
+				"안에 남겨 두기로 했고, 그 근거는 \"증분이 순수 가산이라 실질 위험이 낮다\"\n"+
 				"였다. 파괴적 증분이 들어온 지금 그 근거가 사라졌다.\n\n"+
 				"둘 중 하나를 하고 그 근거를 §7 과 store.go 주석에 함께 적어라:\n"+
 				"  (a) 적용을 기동에서 분리한다 — fd migrate [--to N] / fd migrate --rollback.\n"+
-				"      §7 이 이 순간을 위해 미리 이름 붙여 둔 처방이다.\n"+
-				"  (b) 이 증분이 왜 되돌릴 수 있는지를 적고 이 시험의 예외로 둔다.\n"+
-				"      (트리거 본문의 DELETE FROM 처럼 실제로 안전한 경우가 있다)\n\n"+
+				"      §7 이 이 순간을 위해 미리 이름 붙여 둔 처방이다. 그 명령은 아직 없다.\n"+
+				"  (b) 이 증분이 왜 되돌릴 수 있는지를 destructiveExempt 에 **사유와 함께** 올린다.\n"+
+				"      사유가 비면 예외로 안 쳐 준다. neverExempt 에 오른 조작은 (b) 로도 못 연다.\n\n"+
 				"어느 쪽이든 **문서와 코드를 갈린 채로 두지 마라.**",
-				m.To, m.Name, strings.Join(ops, ", "))
+				m.To, m.Name, strings.Join(opLabels(unexcused), ", "))
+		}
+	}
+}
+
+// 예외 기제 자체를 시험한다.
+//
+// ★ 이 시험이 없으면 기제의 분기가 **한 번도 안 돈다.** 지금 예외에 오른 증분은 하나뿐이고
+// 그 하나는 금지 목록에 안 걸리므로, 거절 경로는 시험이 직접 돌지 않으면 영영 안 돈다 —
+// 그러면 "막는다고 적혀 있는데 실은 안 막는" 상태가 조용히 생긴다.
+//
+// ★ 표를 **인자로 받는다.** 전역 destructiveExempt 를 시험이 바꿔치기하면 그 시험은
+// 다른 시험과 순서로 얽히고, 얽힌 시험은 언젠가 이유 없이 빨개진다.
+func TestExemptionMechanism(t *testing.T) {
+	ok5 := map[int]exemption{5: {ops: []op{opDeleteFrom}, why: "되돌릴 수 있고 읽는 쪽이 이미 배제한 행이다"}}
+
+	cases := []struct {
+		name   string
+		table  map[int]exemption
+		to     int
+		o      op
+		wantOK bool
+	}{
+		{"등록된 조작은 통과한다", ok5, 5, opDeleteFrom, true},
+		{"등록 안 된 조작은 못 지나간다", ok5, 5, opUpdateSet, false},
+		{"다른 증분으로 새지 않는다", ok5, 6, opDeleteFrom, false},
+		{"표에 없는 증분은 예외가 없다", map[int]exemption{}, 5, opDeleteFrom, false},
+
+		// ★ 사유가 없으면 예외가 아니다. 예외를 여는 값은 "허용 목록에 있다" 가 아니라
+		//   "왜 안전한지가 적혀 있다" 다 — 근거 없는 예외는 다음 사람이 판정할 수 없다.
+		{"사유가 비면 예외가 아니다",
+			map[int]exemption{5: {ops: []op{opDeleteFrom}, why: ""}}, 5, opDeleteFrom, false},
+		{"사유가 공백뿐이어도 예외가 아니다",
+			map[int]exemption{5: {ops: []op{opDeleteFrom}, why: "   \n\t"}}, 5, opDeleteFrom, false},
+
+		// ★ 예외로도 못 여는 것들. 데이터가 아니라 **구조**가 사라지는 조작이다.
+		{"DROP TABLE 은 예외에 올려도 거절한다",
+			map[int]exemption{5: {ops: []op{opDropTable}, why: "사유는 있다"}}, 5, opDropTable, false},
+		{"DROP COLUMN 은 예외에 올려도 거절한다",
+			map[int]exemption{5: {ops: []op{opDropColumn}, why: "사유는 있다"}}, 5, opDropColumn, false},
+		{"RENAME 은 예외에 올려도 거절한다",
+			map[int]exemption{5: {ops: []op{opRename}, why: "사유는 있다"}}, 5, opRename, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			why, ok := exemptReason(c.table, c.to, c.o)
+			if ok != c.wantOK {
+				t.Fatalf("예외 판정이 %v 여야 하는데 %v 다 (증분 %d, 조작 %s, 사유 %q)",
+					c.wantOK, ok, c.to, c.o, why)
+			}
+			if ok && strings.TrimSpace(why) == "" {
+				t.Fatalf("통과시키면서 사유가 비었다 — 사유 없는 예외는 이 기제가 막으라고 있는 바로 그것이다 (증분 %d, 조작 %s)",
+					c.to, c.o)
+			}
+			if !ok && why != "" {
+				t.Fatalf("거절하면서 사유를 냈다 %q — 거절의 사유를 통과의 사유 자리로 흘리면 호출부가 둘을 못 가른다", why)
+			}
+		})
+	}
+}
+
+// neverExempt 에 오른 것이 destructiveOps 가 실제로 찾는 조작인지 확인한다.
+//
+// ★ 이 대조가 없으면 금지 목록이 **없는 조작을 금지**할 수 있다. 그러면 목록은 있는데
+// 아무것도 안 막고, 그 사실은 아무 데도 안 보인다.
+func TestNeverExemptOpsAreActuallyDetected(t *testing.T) {
+	samples := map[op]string{
+		opDropTable:  "DROP TABLE t;",
+		opDropColumn: "ALTER TABLE t DROP COLUMN b;",
+		opRename:     "ALTER TABLE t RENAME TO t_old;",
+	}
+	for _, banned := range neverExempt {
+		sql, has := samples[banned]
+		if !has {
+			t.Fatalf("금지 목록의 %s 에 대응하는 표본이 이 시험에 없다 — 목록을 늘렸으면 표본도 늘려라", banned)
+		}
+		found := destructiveOps(sql)
+		if len(found) == 0 {
+			t.Fatalf("금지 목록에 %s 가 있는데 destructiveOps 가 %q 에서 아무것도 못 찾는다 — 금지 목록이 없는 조작을 막고 있다",
+				banned, sql)
 		}
 	}
 }
