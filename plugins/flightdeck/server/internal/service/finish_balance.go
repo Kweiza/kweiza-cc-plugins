@@ -1,0 +1,109 @@
+package service
+
+import (
+	"context"
+	"time"
+
+	"github.com/kweiza/flightdeck/internal/judge"
+	"github.com/kweiza/flightdeck/internal/store"
+)
+
+// ReproWindow 는 재생산율을 재는 표본 크기다 — 최근 이만큼의 마무리를 본다.
+//
+// ★ 고정 상수이고 **응답에 그 수를 적는다.** "최근 20회 기준"이 없으면 전 기간 누적과
+// 구분되지 않는다. AckReach 가 시각 절단 없이 프로젝트 전 역사를 누적해 겪은 것과 같은
+// 실패다(fd-ack-reach-needs-time-window).
+//
+// 20 인 이유: 실측에서 시간당 마무리가 1~11건이라 20 은 대략 반나절~하루의 창이다.
+// 더 짧으면 한 세션의 묶음 마무리 하나가 지표를 통째로 흔들고, 더 길면 방금 바뀐
+// 거동이 안 보인다.
+const ReproWindow = 20
+
+// QueueBalance 는 "이 마무리가 큐를 늘렸나 줄였나"에 답하는 값이다.
+//
+// ★ 왜 이것이 있나. 실측(kweiza-cc-plugins · event 원장): finish 88건이 followups 61건
+// (0.69/finish)과 독립 add 53건(0.60/finish)을 낳아 **R = 1.30** 이다. 사이클 1회
+// (pickup→작업→finish)마다 큐가 +0.29 이고, 88사이클 × 0.29 ≈ +25 가 실제 잔량과 맞는다.
+// 즉 **pickup 을 더 돌려서는 큐가 안 준다** — 줄이는 것은 finish 인데 그 finish 가 평균
+// 1.29건을 다시 넣는다.
+//
+// 그런데 유입을 **막는** 것은 답이 아니다. 묵은 항목의 전제를 재검증했더니 전부 살아 있는
+// 결함이었다 — 진짜 결함을 항목화하지 말라고 하면 그 결함이 유실된다. 그래서 관문이 아니라
+// 계기를 만든다. 판단은 사람이 한다.
+type QueueBalance struct {
+	Closed int `json:"closed"` // 이 호출이 닫은 항목(항상 1)
+	Added  int `json:"added"`  // 이 호출이 만든 후속
+	Open   int `json:"open"`   // 이 마무리 **직후** 열린 항목 수
+	// Starved 는 judge.StarvationAge 를 넘긴 열린 항목 수다. Oldest 는 그중 최고령의 나이.
+	Starved int           `json:"starved"`
+	Oldest  time.Duration `json:"oldest"`
+	// Repro 는 최근 ReproWindow 회 마무리의 원자료다. **비율을 여기 담지 않는다** —
+	// Finishes==0(못 쟀다)과 R=0 이 같은 값으로 접히면 안 되고, 그 구분은 렌더가 한다.
+	Repro       store.Reproduction `json:"repro"`
+	ReproWindow int                `json:"repro_window"`
+}
+
+// 큐 수지 — "이 마무리가 큐를 늘렸나 줄였나"를 그 자리에서 낸다.
+//
+// ★ 이 파일이 finish.go 와 따로 있는 이유는 finish_followups.go 와 같다: finish.go 는
+// 지금 열린 항목 넷의 자리라(fd-finish-discards-committed-work-on-aux-read ·
+// fd-note-beat-masquerades-as-mcp · fd-finish-cannot-link-an-existing-item-as-followup ·
+// fd-item-body-immutable-is-undocumented) 새 함수를 그 안에 넣으면 남의 헝크와 부딪힌다.
+// finish.go 에는 호출 한 줄만 남는다.
+
+// queueBalance 는 이 마무리 **직후**의 큐 수지다. 못 읽으면 nil 이다.
+//
+// ★ **오류를 올리지 않는다.** 이 자리에 오기까지 트랜잭션은 이미 커밋됐다 — 판단이 저장되고
+// 후속이 등록되고 항목이 닫혔다. 표시용 값 하나 때문에 오류를 올리면 "판단은 저장됐는데
+// 오류가 났다"는 응답이 나가고 세션이 같은 finish 를 다시 부른다. 그 부류가
+// fd-finish-discards-committed-work-on-aux-read 가 고발한 결함이고, 여기서 새로 만들지 않는다.
+//
+// nil 과 0을 가른다: nil = 못 읽었다, 채워진 값 = 읽었다. 0으로 접으면 조회가 실패한 응답이
+// "큐가 안 늘었다"를 단정한다.
+func (s *Service) queueBalance(ctx context.Context, project string, added int, now time.Time) *QueueBalance {
+	open, err := s.st.ListOpen(ctx, project)
+	if err != nil {
+		s.log.WarnContext(ctx, "마무리 뒤 큐 수지 조회 실패 — 응답은 그 축을 안 낸다",
+			"project", clip(project, 64), "error", err.Error())
+		return nil
+	}
+
+	b := &QueueBalance{Closed: 1, Added: added, Open: len(open), ReproWindow: ReproWindow}
+	for _, it := range open {
+		if it.CreatedAt.IsZero() {
+			continue // 관측을 못 한 것은 안 센다
+		}
+		age := now.Sub(it.CreatedAt)
+		if age > b.Oldest {
+			b.Oldest = age
+		}
+		if age >= judge.StarvationAge {
+			b.Starved++
+		}
+	}
+
+	// ★ 재생산율은 **따로 실패한다.** 큐 상태는 읽었는데 원장 집계만 실패한 경우,
+	// 그 하나 때문에 나머지를 버리면 세션은 굶은 항목 수도 못 본다. Repro.Finishes 가
+	// 0으로 남고 렌더가 "R 을 못 쟀다"를 말한다.
+	if r, rerr := s.st.QueueReproduction(ctx, project, ReproWindow); rerr != nil {
+		s.log.WarnContext(ctx, "재생산율 집계 실패 — 응답은 그 절만 뺀다",
+			"project", clip(project, 64), "error", rerr.Error())
+	} else {
+		b.Repro = r
+	}
+	return b
+}
+
+// Rate 는 이 표본의 재생산율이다. 두 번째 값이 false 면 **못 쟀다**(표본 0).
+//
+// ★ 저장 계층이 아니라 여기서 나눈다. store 는 원자료만 낸다 — 0으로 나누는 갈래를
+// 저장 계층에 두면 "마무리 0건"과 "R=0"이 같은 값으로 접힌다.
+func (b QueueBalance) Rate() (float64, bool) {
+	if b.Repro.Finishes == 0 {
+		return 0, false
+	}
+	return float64(b.Repro.Followups+b.Repro.Adds) / float64(b.Repro.Finishes), true
+}
+
+// Delta 는 이 호출이 큐에 더한 순증이다. 음수면 큐를 줄였다.
+func (b QueueBalance) Delta() int { return b.Added - b.Closed }

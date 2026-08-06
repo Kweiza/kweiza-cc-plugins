@@ -1382,7 +1382,50 @@ func RenderFinish(r service.FinishResult) string {
 	} else {
 		b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
 	}
+	b.WriteString(finishBalanceLines(r.QueueBalance))
 	return b.String()
+}
+
+// finishBalanceLines 는 "이 마무리가 큐를 늘렸나 줄였나"를 낸다.
+//
+// ★ 왜 이 자리에 있나. 실측(kweiza-cc-plugins · event 원장) R=1.30 — 사이클 1회
+// (pickup→작업→finish)마다 큐가 +0.29 다. **pickup 을 더 돌려서는 큐가 안 준다.**
+// 그런데 세션은 자기가 큐에 무엇을 했는지 볼 방법이 없었다: 보드는 총량만 내고
+// 그것도 다음 세션이 본다. 측정을 그 자리에 놓으면 판단은 사람이 한다 — 이 저장소가
+// 추천 강제를 기각하고 실측을 남긴 것과 같은 형태다(fd-recommend-path-barely-used).
+//
+// ★ **거절하지 않는다.** R 이 높다고 finish 를 막으면 세션은 followups 를 안 실어
+// 우회하고, 그러면 판단과 후속의 FK 가 끊긴다 — 그것이 이 도구가 가장 비싸게 산 자산이다.
+func finishBalanceLines(b *service.QueueBalance) string {
+	// nil 은 "수지 0"이 아니다. 침묵하면 조회가 실패한 응답이 "큐가 안 늘었다"를 단정한다.
+	if b == nil {
+		return "큐 수지는 이 응답이 못 읽었다 — 이 마무리가 큐를 늘렸는지 줄였는지 모른다.\n"
+	}
+	var s strings.Builder
+	fmt.Fprintf(&s, "큐 수지: 이 마무리가 닫음 %d · 만듦 %d → %+d\n", b.Closed, b.Added, b.Delta())
+
+	// 굶은 것이 0건이면 그 절을 뺀다 — 상시 점등된 경고는 판별력이 0이 된다.
+	if b.Starved > 0 {
+		fmt.Fprintf(&s, "  열린 %d건 · %s 넘게 안 집힌 것 %d건(최고령 %s)\n",
+			b.Open, FormatAge(judge.StarvationAge), b.Starved, FormatAge(b.Oldest))
+	} else if b.Oldest > 0 {
+		fmt.Fprintf(&s, "  열린 %d건(최고령 %s)\n", b.Open, FormatAge(b.Oldest))
+	} else {
+		fmt.Fprintf(&s, "  열린 %d건\n", b.Open)
+	}
+
+	// 표본 0을 R=0.00 으로 찍으면 "큐가 안 는다"로 읽힌다. 못 잰 것은 못 잤다고 적는다.
+	rate, ok := b.Rate()
+	if !ok {
+		s.WriteString("  R 은 못 쟀다(최근 마무리 표본 0) — 큐가 느는지 주는지 이 응답은 모른다.\n")
+		return s.String()
+	}
+	verdict := "큐가 준다면 R<1 이어야 한다"
+	if rate < 1 {
+		verdict = "큐가 줄고 있다"
+	}
+	fmt.Fprintf(&s, "  최근 %d회 마무리 기준 R=%.2f — %s\n", b.ReproWindow, rate, verdict)
+	return s.String()
 }
 
 // RenderAlloc 은 발번 결과다. 순수 함수다.

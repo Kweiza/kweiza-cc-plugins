@@ -84,6 +84,15 @@ type FinishResult struct {
 	// 없음"을 단정한다 — 이 프로젝트가 반복해서 닫아 온 실패 모양 그대로다.
 	StillHeld *[]string `json:"still_held,omitempty"`
 
+	// QueueBalance 는 이 마무리가 큐에 한 일과, 그 직후 큐가 어떤 상태인가다.
+	//
+	// ★ **포인터다** — StillHeld 와 같은 계약이다. nil 은 "수지 0"이 아니라
+	// "이 응답이 그 축을 못 읽었다"이고, 0으로 접으면 조회가 실패한 응답이
+	// "큐가 안 늘었다"를 단정한다.
+	// 타입·상수는 finish_balance.go 에 있다 — 이 파일의 import 블록을 안 늘리려는 것이다
+	// (finish_followups.go 가 갈라진 것과 같은 이유).
+	QueueBalance *QueueBalance `json:"queue_balance,omitempty"`
+
 	Derived
 }
 
@@ -358,6 +367,10 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		}
 		out.StillHeld = &rest
 	}
+
+	// ★ 큐 수지도 **커밋 뒤에** 읽는다 — 방금 만든 후속이 열린 목록에 들어와야
+	// "이 마무리 직후의 큐"가 된다. 실패하면 nil 이고, 렌더가 "못 읽었다"를 말한다.
+	out.QueueBalance = s.queueBalance(ctx, in.Project, len(out.Followups), now)
 
 	item, err := s.st.GetItem(ctx, in.Project, in.ItemID)
 	if err != nil {
