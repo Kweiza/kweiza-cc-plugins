@@ -2257,21 +2257,24 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 | 처방 | 상태 | 실제 |
 |---|---|---|
-| 판단을 DB 밖으로 내보내기 | 있음 | `fd export --judgments` 가 `judgment`+`judgment_link`+`snapshot` 전량을 JSONL 로 낸다. 손으로 부른다 |
+| 판단을 DB 밖으로 내보내기 | 있음 | `fd export --judgments` 가 FK 폐포 여섯 표(`judgment`·`judgment_link`·`snapshot`·`session`·`project`·`machine`) 전량을 JSONL 로 낸다. 손으로 부른다 |
 | 매시간 자동 실행 | **없음** | 주기 작업 자리가 없다. 티커는 SSE 하트비트와 `selfwatch` 둘뿐이고, 컨테이너에 cron 이 없으며 `compose.yaml` 은 서비스가 하나다 |
 | DB 와 다른 볼륨 | **없음** | `compose.yaml` 이 "DB 와 백업을 같은 볼륨에 두는 것은 Tier A 의 한계다 — 백업 잡이 생기는 시점에 별도 볼륨으로 가른다"로 접어 뒀다 |
 | 6시간 `VACUUM INTO` | **없음** | `VACUUM INTO` 는 있지만 마이그레이션 직전 1회다(`Store.backup`). 정기 작업이 아니다 |
 
-**실측 (2026-08-06).** `judgment` 984행 · `judgment_link` 1,413행 · `snapshot` 12행이
+**실측 (2026-08-06).** `judgment` 1,157행 · `judgment_link` 1,734행 · `snapshot` 12행 ·
+`session` 302행 · `project` 8행 · `machine` 8행이
 `fd.db` 하나에 있다. 이틀 전 관측은 330행이었다 — **사흘에 3배**다.
 `~/.flightdeck` 에 `journal.git` 도 `logs/` 도 없고, `.bak` 계열 4개 38MB 가 정리 코드 없이
 쌓여 있으며 그중 하나(`fd.db.before-purge-aaron`)는 `BackupSuffix` 가 만들 수 없는 이름이다 —
 **사람이 손으로 만들었다.**
 
 **이 내보내기가 안 덮는 것.** 아웃박스에 갇힌 판단은 안 잡힌다(이 머신에 실제로 1건).
-그리고 무손실 복원의 FK 폐포는 `machine`·`project`·`session` 까지 여섯 표인데 원장은 셋만
-담는다 — 되읽기는 나머지 셋이 있는 DB 를 전제한다. 코드가 `ledger.Losses()` 로 이 목록을
-열거하고 시험이 그것을 문다.
+무손실 복원의 FK 폐포는 여섯 표이고 **원장은 그것을 통째로 담는다** — 빈 DB 에 되쓰면
+미리 심어 둘 것이 하나도 없다. 대신 폐포 **밖** 표(`item`·`job`·`counter`·`event`·`landing_queue` 등)는
+안 담으므로, 복원된 DB 에서 `judgment_link` 가 가리키는 항목은 없다(링크 자체는 복원된다 —
+`target_id` 는 FK 가 아니라 CHECK 뿐이다). 코드가 `ledger.Losses()` 로 이 목록을 열거하고
+시험이 그것을 문다.
 
 **`grep -rn "journal" server/ --include=*.go` 를 근거로 쓰지 마라.** 그 grep 은 지금 9건을
 내는데 전부 SQLite `journal_mode(WAL)` 이다. 판단 저널과 무관하다.
@@ -2295,8 +2298,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **다만 그 문장의 대상은 좁다.** `judgment`+`snapshot` 만으로는 복원이 안 된다 —
 `judgment.project → project`, `judgment.session_id → session`, `session → machine`,
 `snapshot.project → project`, `judgment.supersedes → judgment` 가 전부 FK 이고
-`foreign_keys=1` 이 항상 걸린다. 구현된 `fd export --judgments` 는 `judgment_link` 를 포함해
-셋을 담고, `machine`·`project`·`session` 이 있는 DB 를 복원 전제로 삼는다.
+`foreign_keys=1` 이 항상 걸린다. 그리고 **`session.id` 는 서버 발급 ULID 라 새 DB 에서 재현할 수
+없다** — `project`·`machine` 은 사람과 클라이언트가 정한 이름이라 다시 부를 수 있지만 세션은 아니고,
+판단의 85%가 그것을 가리킨다. 그래서 구현된 `fd export --judgments` 는 **폐포 여섯 표를 통째로 담는다.**
 그리고 형식은 마크다운이 아니라 **JSONL 하나**다.
 ```
 
