@@ -3,10 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kweiza/flightdeck/internal/ledger"
 )
 
 // 이관 CLI 의 소비자 좌표계는 **stdout 과 파일시스템**이다.
@@ -262,6 +265,14 @@ func TestExportJudgmentsWritesFilesAndPrintsLosses(t *testing.T) {
 }
 
 // 같은 자리에 두 번 내보내도 --force 가 필요 없다 — 자기 산출물을 알아본다.
+//
+// ★ rc==0 만 보면 "아무 일도 안 하고 그냥 통과시켰다"와 "실제로 다시 썼다"를
+//   구분하지 못한다. exported_at 축을 고른 이유: exportJudgments 가 실행마다
+//   nowStampString() 으로 새로 찍고 그 값이 manifest.json 에 실린다. 두 h.run
+//   호출 사이에는 DB 를 열고 ReadLedger 로 여섯 표를 읽고 파일 일곱 개를
+//   tmp→rename 으로 쓰는 실 I/O 가 끼어 있어(같은 프로세스 안에서 순차 실행되지만
+//   이 I/O 만으로 마이크로초 여러 개가 흐른다), nowStampString() 의 마이크로초
+//   해상도에서 두 값이 우연히 같을 실무적 여지가 없다.
 func TestExportJudgmentsRerunNeedsNoForce(t *testing.T) {
 	h := newHarness(t)
 	rc, out := h.run("", "note", "--kind", "decision", "--body", "판단")
@@ -275,10 +286,32 @@ func TestExportJudgmentsRerunNeedsNoForce(t *testing.T) {
 	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
 		t.Fatalf("첫 내보내기 실패: %s", out)
 	}
+	first := readManifestExportedAt(t, outDir)
+
 	rc, out = h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
 	if rc != 0 {
 		t.Fatalf("두 번째 내보내기가 거절됐다 — 자기 산출물을 알아봐야 한다(rc=%d): %s", rc, out)
 	}
+	second := readManifestExportedAt(t, outDir)
+	if second == first {
+		t.Fatalf("두 번째 실행이 산출물을 실제로 갱신하지 않았다 — manifest.json 의 exported_at 이 그대로다: %s", first)
+	}
+}
+
+// readManifestExportedAt 은 dir/manifest.json 을 읽어 exported_at 을 낸다.
+// TestExportJudgmentsRerunNeedsNoForce 가 "재실행이 rc==0 만 내고 실제로는
+// 아무것도 다시 쓰지 않는다" 회귀를 잡는 유일한 좌표계다.
+func readManifestExportedAt(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest.json 을 못 읽었다: %v", err)
+	}
+	var m ledger.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("manifest.json 파싱 실패: %v", err)
+	}
+	return m.ExportedAt
 }
 
 // 내보내기는 DB 를 안 건드린다.
