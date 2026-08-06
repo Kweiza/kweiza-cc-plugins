@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 후속 관문 — `finish` 가 후속을 바닥에 떨어뜨리는 것을 한 번은 붙잡는다.
@@ -240,10 +242,22 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 		canLink[id] = true
 	}
 	for i, f := range in.Followups {
-		switch {
-		case canLink[f.ID]:
+		if canLink[f.ID] {
 			plan.Link = append(plan.Link, f.ID)
-		case s.itemExists(ctx, in.Project, f.ID):
+			continue
+		}
+		exists, itemObserved := s.itemExists(ctx, in.Project, f.ID)
+		switch {
+		case !itemObserved:
+			// ★ **fail-closed 다 — 아래 있음/없음 갈래와 반대 방향.** sessionSpawnedOpen 의
+			// observed 와 같은 이유다: 여기서 "없다"로 접어 만들기로 보내면, 그 id 가 실은
+			// 남의 항목이었을 때 판단 링크가 tx 안에서 그 항목을 그대로 가리킨다(finish.go 가
+			// AddItem 보다 먼저 링크를 짠다 — 아직은. Task 3 현재). 그 링크는 판단과 함께
+			// 커밋되어 **되돌릴 수 없다.** 반대로 여기서 거절하면 트랜잭션 전이라 아무것도
+			// 안 쓴다 — title·body 누락 거절과 같은 자리·같은 성격이고, 그 후속만 빼면
+			// 그대로 되부를 수 있다. 비대칭이 fail-closed 를 요구한다.
+			return followupPlan{}, refuseUnreadableFollowupExistence(i+1, f.ID)
+		case exists:
 			return followupPlan{}, refuseIneligibleFollowup(i+1, f.ID, in.ItemID, eligible, observed)
 		default:
 			plan.Create = append(plan.Create, followupCreate{Index: i + 1, Item: f})
@@ -252,15 +266,29 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 	return plan, nil
 }
 
-// itemExists 는 그 id 의 항목이 지금 있는지다.
+// itemExists 는 그 id 의 항목이 지금 있는지와, 그 판정을 실제로 관측했는지다.
 //
-// ★ **조회가 실패하면 "없다"로 접는다.** 이 판정은 갈래를 고르는 참고값이고, 정본 판정은
-// 트랜잭션 안의 INSERT 가 내는 *store.ConflictError 다 — store 패키지 머리가 못박은 규율
-// ("제약을 미리 흉내 내 판정하지 않는다")을 이 계층도 따른다. 없다고 접어 만들러 가면
-// 최악의 경우 tx 가 중복을 잡아 그 후속만 건너뛴다(판단은 산다).
-func (s *Service) itemExists(ctx context.Context, project, id string) bool {
+// ★ **개정 — 원래 이 함수는 모든 조회 실패를 "없다"로 접었다.** 그러면 그 id 는 '만들기'로
+// 분류되는데, 판단 링크는 아직 in.Followups 전수로 짜이므로(Task 4 전까지는) 조회가 DB 오류
+// 등으로 실패했을 뿐인 **남의 항목에 링크가 그대로 걸린다**(리뷰 실측: 링크 1건). 같은 파일의
+// sessionSpawnedOpen 은 관측 실패를 observed=false 로 나르는데 이 함수만 반대 방향으로
+// fail-open 이었던 것이 그 안전 축을 되열었다.
+//
+// ★ **store.ErrNotFound 만 "없다"로 접는다.** 그 밖의 오류(DB 접속 실패 등)는 "있는지 모른다"
+// 로 나르고, classifyFollowups 가 그것을 거절로 접는다 — 정본 판정이 트랜잭션 안의 INSERT 가
+// 내는 *store.ConflictError 라는 것(store 패키지 머리의 "제약을 미리 흉내 내 판정하지 않는다"
+// 규율)은 안 바뀐다. 여기서 가르는 것은 그 판정 이전에, **거절할지 만들러 보낼지를 고르는
+// 참고값 자체를 못 읽었을 때** 어느 쪽으로 접느냐다.
+func (s *Service) itemExists(ctx context.Context, project, id string) (exists, observed bool) {
 	_, err := s.st.GetItem(ctx, project, id)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, true
+	case errors.Is(err, store.ErrNotFound):
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // refuseIneligibleFollowup 은 "이미 있는데 이을 자격이 없는" 후속을 거절한다.
@@ -289,6 +317,21 @@ func refuseIneligibleFollowup(nth int, id, itemID string, eligible []string, obs
 
 내용이 다르면 다른 id 로 add 해서 이번 followups 에 실어라.
 그 항목에 판단만 걸고 싶으면 note(kind='handoff', item_id=<그 항목>) 를 쓴다.`,
+	}
+}
+
+// refuseUnreadableFollowupExistence 는 "그 id 의 항목이 있는지조차 못 읽은" 후속을 거절한다.
+//
+// ★ itemExists 의 fail-closed 갈래가 여기로 온다 — 왜 fail-closed 인지는 그 함수 주석에
+// 있다. 요약: 여기서 "없다"로 접으면 남의 항목에 거짓 링크가 tx 안에서 커밋돼 되돌릴 수
+// 없고, 거절은 트랜잭션 전이라 그 후속만 빼고 그대로 되부를 수 있다 — 비대칭이 명확하다.
+func refuseUnreadableFollowupExistence(nth int, id string) *RefusedError {
+	return &RefusedError{
+		What: "finish",
+		Reason: fmt.Sprintf("%d번째 후속(%s)은 그 id 의 항목이 있는지 못 읽어 자격을 판정할 수 없다",
+			nth, clip(id, 64)),
+		Guidance: "원장 조회가 실패했다 — 잠시 뒤 같은 followups 로 다시 불러라. " +
+			"계속 이 사유로 거절되면 원장 조회 자체가 막혔다는 뜻이니 그 자리에서 알려라.",
 	}
 }
 
