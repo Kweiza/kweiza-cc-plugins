@@ -157,12 +157,22 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			return FinishResult{}, refused
 		}
 	}
+	// ★ 같은 호출에 같은 후속 id 가 두 번 실리면 여기서 끊는다. 링크는 dedupeLinks 가
+	//   살리지만, 두 번째 AddItem 은 **자기 트랜잭션의 첫 INSERT** 때문에 중복 흡수로 빠져
+	//   "남이 만든 것이라 건너뛰었다"는 거짓 사유가 응답에 나간다.
+	seen := make(map[string]bool, len(in.Followups))
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason:   fmt.Sprintf("%d번째 후속: %v", i+1, err),
 				Guidance: "후속 항목 id 도 브랜치 이름으로 그대로 쓰인다."}
 		}
+		if seen[f.ID] {
+			return FinishResult{}, &RefusedError{What: "finish",
+				Reason:   fmt.Sprintf("%d번째 후속(%s)이 같은 호출에 두 번 실렸다", i+1, clip(f.ID, 64)),
+				Guidance: "같은 항목을 두 번 만들 수도, 두 번 이을 수도 없다 — 한 번만 실어라."}
+		}
+		seen[f.ID] = true
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i+1, clip(f.ID, 64)),
@@ -196,13 +206,16 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		})
 
 		// ① 판단 — 가장 먼저 저장한다. 이것이 원리적으로 파생 불가한 유일한 자산이다.
+		//
+		// ★ dedupeLinks 를 지난다. judgment_link 의 PK 가 (판단·종류·대상)이라 겹치면
+		//   이 INSERT 가 실패하고 **그 판단이 통째로 사라진다** — 사유는 그 함수 주석에 있다.
 		links := append([]model.JudgmentLink{{TargetKind: "item", TargetID: in.ItemID}}, in.Links...)
 		for _, f := range in.Followups {
 			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: f.ID})
 		}
 		j, err := t.AddJudgment(model.Judgment{
 			Project: in.Project, SessionID: in.SessionID, At: now,
-			Kind: model.JudgmentHandoff, Title: in.Title, Body: in.Body, Links: links,
+			Kind: model.JudgmentHandoff, Title: in.Title, Body: in.Body, Links: dedupeLinks(links),
 		})
 		if err != nil {
 			return err
