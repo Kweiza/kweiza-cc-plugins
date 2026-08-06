@@ -1335,21 +1335,43 @@ func RenderFinish(r service.FinishResult) string {
 	}
 	fmt.Fprintf(&b, "판단 %s 저장 (%s · %d자)\n",
 		r.Judgment.ID, r.Judgment.Kind, len([]rune(r.Judgment.Body)))
+	// ★ "FK 로" 라고 쓰지 않는다. judgment_link.target_id 에는 REFERENCES 가 없고
+	//   (schema.sql:265), **그 부재가 이 변경의 존재 이유다** — 표면이 반대로 말하면
+	//   이 브랜치가 없앤 거짓말 하나를 같은 응답에서 되살린다.
 	if len(r.Followups) > 0 {
 		ids := make([]string, 0, len(r.Followups))
 		for _, f := range r.Followups {
 			ids = append(ids, f.ID)
 		}
-		fmt.Fprintf(&b, "후속 %d건 등록: %s (판단과 FK 로 이어졌다)\n", len(ids), strings.Join(ids, ", "))
-	} else {
+		fmt.Fprintf(&b, "후속 %d건 등록: %s (판단에 이어졌다)\n", len(ids), strings.Join(ids, ", "))
+	}
+	// ★ 이은 것은 **따로** 낸다. 등록과 한 줄에 담으면 "후속 2건 등록"이라고 말하는데
+	// 큐에는 1건만 늘어, 세션이 자기가 큐에 무엇을 했는지 못 본다.
+	if len(r.LinkedFollowups) > 0 {
+		fmt.Fprintf(&b, "기존 항목 %d건을 후속으로 **이었다**: %s (새로 만들지 않았다)\n",
+			len(r.LinkedFollowups), strings.Join(r.LinkedFollowups, ", "))
+		// ★ 실어 보낸 제목·본문을 **버렸다고 말한다.** 여기서 침묵하면 "적게 하고 서버가
+		// 버린다"가 된다 — 설계 §3 이 이 변경으로 없애기로 한 바로 그 모양이다.
+		// 오늘까지 스키마가 title·body 를 필수로 받아 왔으므로(tools.go) 세션은
+		// 관성으로 싣고, 잇기는 그것을 안 읽는다(store 에 항목 본문 갱신이 없다).
+		// 그리고 이 변경 전에는 같은 입력이 "안 넣었다"로 시끄럽게 나왔다 —
+		// 여기서 침묵하면 신호가 조용해지는 쪽으로 퇴행한다.
+		b.WriteString("  함께 실어 보낸 제목·본문은 **안 썼다** — 그 항목의 것을 안 덮는다" +
+			"(다른 세션이 그 본문을 근거로 계획을 세운다). 내용이 다르면 다른 id 로 add 해라.\n")
+	}
+	// ★ 0건 문구는 **등록과 잇기가 둘 다 0**일 때만 뜬다. 등록만 보면 잇기만 한 마무리에서
+	// "지금 add 로 넣어라"가 떠서 방금 이은 것을 부정한다.
+	if len(r.Followups) == 0 && len(r.LinkedFollowups) == 0 {
 		b.WriteString("후속 0건 — 이번에 나온 후속이 정말 없다면 그대로 두고, 있다면 지금 add 로 넣어라.\n")
 	}
-	// ★ 건너뛴 후속은 **반드시 낸다.** 안 내면 세션이 "후속 N건 등록"만 보고 떠나는데,
-	// 그 id 의 항목은 남이 만든 다른 것이다 — 흡수가 조용한 거짓이 된다.
+	// ★ 건너뛴 후속은 **반드시 낸다.** 사유는 둘로 갈렸다(만들 대상이 그 사이 생겼다 ·
+	// 이을 대상이 사라졌다) — 화면은 무엇이 안 들어갔는지를 이름으로 말하고,
+	// 왜인지는 원장(item.followup_skipped)이 갖는다. 한쪽 사유를 화면에 박으면
+	// 다른 쪽에서 거짓이 된다.
 	if len(r.SkippedFollowups) > 0 {
-		fmt.Fprintf(&b, "후속 %d건은 **안 넣었다** — 같은 id 가 이미 있다: %s\n",
+		fmt.Fprintf(&b, "후속 %d건은 **안 넣었다**: %s\n",
 			len(r.SkippedFollowups), strings.Join(r.SkippedFollowups, ", "))
-		b.WriteString("  그 id 의 항목은 남이 만든 것일 수 있다. 내용이 다르면 다른 id 로 add 해라.\n")
+		b.WriteString("  그 사이 그 id 의 항목이 생겼거나, 이을 대상이 사라졌다 — 사유는 원장에 있다.\n")
 	}
 	if len(r.Released) > 0 {
 		fmt.Fprintf(&b, "자원 반납: %s\n", strings.Join(r.Released, ", "))

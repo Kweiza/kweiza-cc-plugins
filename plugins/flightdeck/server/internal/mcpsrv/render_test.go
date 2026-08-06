@@ -1216,10 +1216,90 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 	}
 }
 
+// TestRenderFinishSaysWhatItLinkedInsteadOfCreated 는 "만들었다"와 "이었다"를 화면에서 가른다.
+//
+// 같은 줄에 담으면 응답이 "후속 2건 등록"이라고 말하는데 큐에는 1건만 는다 — 세션이
+// 자기가 큐에 무엇을 했는지 못 본다(그 축이 finishBalanceLines 의 존재 이유다).
+//
+// ★ 단정은 **문장을 통째로** 한다. id 만 찾으면(`"spun-off-axis"` 가 어딘가 있는가) 두 줄을
+//
+//	합쳐 "후속 2건 등록: brand-new, spun-off-axis" 를 찍어도 초록이다 — 이 주석이 막겠다고
+//	적은 바로 그 거짓말이 통과한다(사보타주 실측으로 확인했다). 그리고 맨 `"이었다"` 는 꼬리줄
+//	"…한 트랜잭션이었다"(render.go:1383)에 걸려 잇기 줄이 아예 없어도 참이니 쓰지 않는다.
+//
+// ★ `"안 썼다"` 가 이 화면의 **정직성 관문**이다. 오늘까지 followupSchema 가 id·title·body 를
+//
+//	셋 다 필수로 받았으므로(tools.go:67) 돌고 있는 세션은 예외 없이 셋을 다 싣는다.
+//	잇기 갈래는 그 title·body 를 읽지도 저장하지도 않는다 — followupPlan.Link 가 []string 이고,
+//	store 에 항목 본문을 고치는 메서드가 아예 없다(store/item.go 전수). 게다가 이 변경
+//	**전에는** 같은 입력이 "후속 N건은 안 넣었다"로 시끄럽게 나왔다(render.go:1349).
+//	화면이 여기서 침묵하면 그 신호가 조용해지는 쪽으로 퇴행하고, 세션은 자기가 적어 보낸
+//	본문이 어딘가 반영됐다고 믿고 떠난다 — 설계 §3 이 이름 붙인 "조용한 거짓"이다.
+func TestRenderFinishSaysWhatItLinkedInsteadOfCreated(t *testing.T) {
+	out := RenderFinish(service.FinishResult{
+		Item:            model.Item{ID: "batch7", State: model.ItemDone},
+		Judgment:        model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+		Followups:       []model.Item{{ID: "brand-new"}},
+		LinkedFollowups: []string{"spun-off-axis"},
+	})
+	for _, want := range []string{
+		"후속 1건 등록: brand-new",
+		"기존 항목 1건을 후속으로 **이었다**: spun-off-axis",
+		"안 썼다",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("화면에 %q 가 없다:\n%s", want, out)
+		}
+	}
+	// 합쳐진 줄은 개수가 거짓이 된다 — 그것이 이 시험이 잠그는 회귀다.
+	for _, banned := range []string{"후속 2건 등록", "후속 0건"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("화면에 %q 가 떴다:\n%s", banned, out)
+		}
+	}
+	// ★ 이 브랜치의 존재 이유가 "judgment_link.target_id 에 FK 가 없다"이다(schema.sql:265).
+	//   같은 화면이 "FK 로 이어졌다"고 말하면 우리가 없앤 거짓말 하나를 우리가 되살린다.
+	if strings.Contains(out, "FK") {
+		t.Fatalf("화면이 아직 'FK 로 이어졌다'고 말한다 — judgment_link.target_id 에는 FK 가 없다(schema.sql:265):\n%s", out)
+	}
+}
+
+// TestRenderFinishSaysZeroOnlyWhenNothingWasCreatedOrLinked 는 0건 문구의 조건을 잠근다.
+//
+// len(Followups)==0 만 보면 잇기만 한 마무리에서 "지금 add 로 넣어라"가 떠서 방금 이은 것을
+// 부정한다.
+func TestRenderFinishSaysZeroOnlyWhenNothingWasCreatedOrLinked(t *testing.T) {
+	linkedOnly := RenderFinish(service.FinishResult{
+		Item:            model.Item{ID: "batch7", State: model.ItemDone},
+		Judgment:        model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+		LinkedFollowups: []string{"spun-off-axis"},
+	})
+	if strings.Contains(linkedOnly, "후속 0건") {
+		t.Fatalf("잇기만 한 마무리에 '후속 0건' 이 떴다:\n%s", linkedOnly)
+	}
+	// 0건 줄이 사라진 것만으로는 부족하다 — 잇기를 "등록"으로 찍어도 그 단정은 참이다.
+	if strings.Contains(linkedOnly, "건 등록") {
+		t.Fatalf("잇기만 했는데 '등록' 이 떴다(만든 적 없다):\n%s", linkedOnly)
+	}
+	if !strings.Contains(linkedOnly, "기존 항목 1건을 후속으로") {
+		t.Fatalf("잇기 줄이 없다:\n%s", linkedOnly)
+	}
+	none := RenderFinish(service.FinishResult{
+		Item:     model.Item{ID: "batch7", State: model.ItemDone},
+		Judgment: model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+	})
+	if !strings.Contains(none, "후속 0건") {
+		t.Fatalf("정말 0건인데 그 줄이 없다:\n%s", none)
+	}
+}
+
 // 건너뛴 후속은 **화면에 나온다.** 응답 구조체에만 있으면 세션은 못 본다.
 //
 // ★ 이 줄이 없으면 finish 의 흡수가 조용한 거짓이 된다 — "후속 1건 등록"만 보고
-// 세션이 떠나는데, 실제로 그 id 의 항목은 남이 만든 다른 것이다.
+// 세션이 떠나는데, 실제로 그 id 로는 아무것도 안 들어갔다.
+//
+// ★ 사유를 화면 첫 줄에 박지 않는 이유: 건너뜀 갈래가 둘이다(만들 대상이 tx 사이에 생겼다 ·
+// 이을 대상이 tx 사이에 사라졌다). 한쪽을 첫 줄에 박으면 다른 쪽에서 거짓이 된다.
 func TestRenderFinishSaysWhichFollowupsWereSkipped(t *testing.T) {
 	out := RenderFinish(service.FinishResult{
 		Item:             model.Item{ID: "batch7", State: model.ItemDone},
@@ -1227,9 +1307,14 @@ func TestRenderFinishSaysWhichFollowupsWereSkipped(t *testing.T) {
 		Followups:        []model.Item{{ID: "batch8"}},
 		SkippedFollowups: []string{"taken-id"},
 	})
-	for _, want := range []string{"taken-id", "이미 있"} {
+	// ★ 셋을 다 단정한다. 이름과 "안 넣었다"는 **첫 줄 하나에** 있어서, 둘만 보면
+	//   사유를 실은 둘째 줄이 통째로 사라져도 초록이다 — 그 사유를 잠그는 다른 시험이
+	//   화면에 없으므로, 그 순간 이 축에 남는 것은 이름 하나뿐이 된다.
+	//   "사유는 원장에 있다"는 갈래가 몇 개로 늘든 안 늙는 조각이라 여기 고정한다.
+	for _, want := range []string{"taken-id", "안 넣었다", "사유는 원장에 있다"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("건너뛴 후속 화면에 %q 가 없다 — 세션은 안 들어간 것을 들어간 줄 안다:\n%s", want, out)
+			t.Fatalf("건너뛴 후속 화면에 %q 가 없다 — 세션은 안 들어간 것을 들어간 줄 알거나, "+
+				"왜 안 들어갔는지 물을 자리를 못 찾는다:\n%s", want, out)
 		}
 	}
 }
