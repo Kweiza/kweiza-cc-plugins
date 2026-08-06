@@ -16,7 +16,7 @@ finish(
   outcome: "done",          // 또는 "dropped" — 그때는 close_reason 이 필수다
   title:   "<한 줄>",
   body:    "<아래 넷>",
-  followups: [ { id, title, body, paths } ]   // 이번에 나온 후속
+  followups: [ { id, title, body, paths } ]   // 새 후속. **이미 있는 항목은 id 만** — 잇는다
 )
 ```
 
@@ -34,7 +34,7 @@ git log 와 diff 가 이미 아는 것(무엇을 고쳤나)은 적지 마라.
 
 ## 후속은 같은 호출에 넣는다
 
-`followups` 로 넣으면 판단과 후속이 FK 로 이어진다. 나중에 따로 넣으면 그 연결이 없다.
+`followups` 로 넣으면 판단과 후속이 판단 링크로 이어진다. 나중에 따로 넣으면 그 연결이 없다.
 다음 세션의 `pick` 이 그 판단을 항목과 함께 낸다.
 
 ## 마지막에 세션을 닫는다
