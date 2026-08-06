@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -18,20 +17,10 @@ import (
 	"github.com/kweiza/flightdeck/internal/window"
 )
 
-// sessionStartPayload 는 SessionStart 훅 stdin 한 벌이다.
-// /clear 는 **같은 창에 새 session_id** 로 온다 — 그것이 이 시험이 흉내내는 것 전부다.
-func sessionStartPayload(cc, cwd string) string {
-	raw, err := json.Marshal(map[string]string{
-		"session_id":      cc,
-		"cwd":             cwd,
-		"hook_event_name": "SessionStart",
-		"source":          "clear",
-	})
-	if err != nil {
-		panic(err)
-	}
-	return string(raw)
-}
+// ★ sessionStartPayload 는 여기 없다 — hook_test.go 에 있다. 이 파일이 리눅스 전용이라
+// 여기 두면 그 헬퍼도 리눅스 전용이 되고, 실제로 bincache_test.go(무태그)가 그것을 부르는
+// 순간 리눅스 시험은 초록인데 `GOOS=darwin go vet` 만 빨간불이 났다. 훅 stdin 한 벌은
+// 플랫폼 축과 아무 상관이 없으므로 무태그 자리에 산다.
 
 // cardsFor 는 이 (machine, worktree) 의 카드를 **서버가 실제로 갖게 된 것**에서 센다.
 //

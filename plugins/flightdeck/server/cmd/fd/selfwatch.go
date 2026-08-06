@@ -298,6 +298,22 @@ func detectContainer() (bool, string) {
 	return containerVerdict(dockerErr == nil, dataErr == nil)
 }
 
+// osExecutable 은 os.Executable 이다. **변수인 이유는 하나뿐이라 여기 적어 둔다** —
+// 런처의 FD_PRINT_BIN 이 그랬듯, 시험용 이음매는 사유가 붙어야 다음 사람이 그것을
+// "그냥 주입 자리"로 넓히지 않는다.
+//
+// 아래 Uncovered 축의 전부는 "이 실행 파일이 런처가 짓는 자리 안인가" 하나인데,
+// **시험 바이너리는 그 조건을 원리적으로 못 만든다**: BinCacheDir 은 항상 `<자리>/bin` 을
+// 내고 시험 바이너리는 go-build 임시 자리(`/tmp/go-buildNNN/bNNN/…`)에서 돈다. 가짜 HOME 을
+// 어떻게 줘도 filepath.Dir(진짜 exe) 가 그 자리가 되지 않고, 심볼릭 링크로도 못 맞춘다 —
+// 리눅스의 os.Executable 은 /proc/self/exe 라 링크를 이미 다 푼 값을 준다. 그래서
+// **조립(runServe → newServeWatcher)이 감시기에 자리를 실제로 먹이는지**를 재려면
+// 이 한 축만 시험이 흔들 수 있어야 한다(selfwatch_wiring_test.go).
+//
+// ★ **binDir 쪽은 이음매로 안 뺀다.** 그쪽은 이미 인자라 시험이 그냥 준다 — 그리고 그것을
+// 이음매로 빼면 정작 재려던 것(조립이 BinCacheDir 의 답을 넘기는가)이 시험에서 사라진다.
+var osExecutable = os.Executable
+
 // newSelfWatcher 는 감시기를 만든다. **기준값을 여기서 정한다.**
 //
 // ★ **이 감시가 실제로 뜨는 범위는 좁다.** 신호는 `w.exePath` **한 자리**의 교체뿐인데,
@@ -322,7 +338,7 @@ func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 		w.reason = why
 		return w
 	}
-	exe, err := os.Executable()
+	exe, err := osExecutable()
 	if err != nil {
 		w.reason = fmt.Sprintf("실행 파일 자리를 못 읽었다: %v", err)
 		return w
@@ -349,15 +365,36 @@ func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 	//
 	// ★ **파일 이름 규칙을 여기서 재구현하지 않는다 — 부모 디렉토리만 견준다.** 이름에
 	// 소스 트리를 접어 넣는 키의 유일한 주인은 런처이고, 그 사본을 여기 두면 한쪽만 고칠 때
-	// 조용히 어긋난다(ExeLines 가 같은 자리에서 같은 결정을 했다). `(deleted)` 표식은 안 뗀다:
-	// 그 접미는 basename 에만 붙어 filepath.Dir 이 안 흔들린다.
+	// 조용히 어긋난다(ExeLines 가 같은 자리에서 같은 결정을 했다).
 	//
-	// ★ 심볼릭 링크는 안 푼다(EvalSymlinks 는 파일시스템을 두드린다). 못 알아본 경우의 결과가
-	// **침묵**이라 그 값을 여기서 치를 수 있다 — 안 잰 것을 잰 척하는 쪽이 더 비싸다.
-	if d := strings.TrimSpace(binDir); d != "" && filepath.Dir(exe) == filepath.Clean(d) {
-		w.status.Uncovered = "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd) — " +
-			"같은 소스의 재빌드는 이 자리를 덮어 감지되지만, 플러그인 **버전이 오르면 다른 이름**이 지어져 " +
-			"이 자리는 아무도 안 덮는다. 그 갱신은 사람이 서버를 재기동해야 한다"
+	// ★ 심볼릭 링크는 **푸는 대신 inode 로 견준다(exe.go 의 sameDir).** 예전 이 자리에는
+	// "링크는 안 푼다 — 못 알아본 결과가 침묵이라 그 값을 치를 수 있다"라고 적혀 있었다.
+	// **그 값 계산이 틀렸다.** 못 알아보는 것이 예외가 아니라 **기본값**이다: 리눅스의
+	// os.Executable 은 `/proc/self/exe` 라 **완전히 푼 경로**를 주고 binDir 은 HOME 을 그대로
+	// 이어 붙인 **안 푼 경로**라, 문자열로만 견주면 링크가 하나라도 끼는 순간 **항상** 어긋난다.
+	// 그런 홈은 흔하다 — `~/.cache` 를 큰 디스크로 옮긴 구성 · `/home -> /var/home` 이 기본인
+	// 배포판 · NFS 홈. 그 머신들에서는 이 필드가 통째로 침묵하고, 침묵이야말로 이 필드가
+	// 없애려던 상태다(2026-08-07 A/B 재현: 링크한 가짜 홈에서 런처로 띄우면 문자열 판정은
+	// `/healthz` 가 `{"watching": true}` 뿐이고 inode 판정은 uncovered 를 낸다).
+	//
+	// ★ **판정을 여기서 새로 구현하지 않는다 — ExeLines 가 쓰는 그 함수를 그대로 부른다.**
+	// 정확히 그 사고가 이 줄을 낳았다: 같은 라운드에 exe.go 는 문자열 비교를 버렸는데 이쪽은
+	// 그 버린 비교를 복제한 채로 남아, 한 화면 안에서 doctor 는 "같은 자리"라 하고 /healthz 는
+	// "다른 자리"라 했다. **같은 질문의 답은 한 자리에서만 산다**(client.go 의 newClient 규율).
+	//
+	// 비용은 없다. sameDir 는 EvalSymlinks 가 아니라 os.SameFile 이라 판마다 방향이 안 갈리고
+	// (darwin 의 os.Executable 은 반대로 **안 푼** 경로를 준다), 문자열이 **이미 갈렸을 때만**
+	// stat 을 친다 — 기동 때 한 번이고 이 생성자는 이미 detectContainer 의 os.Stat 두 번과
+	// w.stat("/proc/self/exe") 를 부른다. 실패하면 false 라 거짓 양성이 안 생긴다.
+	//
+	// `(deleted)` 표식은 안 뗀다: 그 접미는 basename 에만 붙어 filepath.Dir 이 안 흔들린다.
+	if d := strings.TrimSpace(binDir); d != "" {
+		d = filepath.Clean(d)
+		if dir := filepath.Dir(exe); dir == d || sameDir(dir, d) {
+			w.status.Uncovered = "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd) — " +
+				"같은 소스의 재빌드는 이 자리를 덮어 감지되지만, 플러그인 **버전이 오르면 다른 이름**이 지어져 " +
+				"이 자리는 아무도 안 덮는다. 그 갱신은 사람이 서버를 재기동해야 한다"
+		}
 	}
 
 	w.watching = true

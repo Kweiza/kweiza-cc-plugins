@@ -13,6 +13,34 @@ import (
 // 이것이 깨지면 세션이 안 뜬다. 그래서 단정은 "함수가 오류를 안 냈다"가 아니라
 // "종료코드가 0 이고 stdout 이 훅 계약을 만족한다"이다.
 
+// sessionStartPayload 는 SessionStart 훅 stdin 한 벌이다.
+// /clear 는 **같은 창에 새 session_id** 로 온다 — `source:"clear"` 가 흉내내는 것이 그것이다.
+//
+// ★ 이 헬퍼가 **무태그 파일에** 사는 이유. 원래 자리는 hook_beacon_test.go 였는데 그 파일은
+// `//go:build linux` 다(비콘이 window.StartedOf 를 쓰고 그 함수가 리눅스 밖에서
+// ErrUnsupported 를 낸다). 소비자가 비콘뿐일 때는 그것으로 족했지만, 이번에 무태그인
+// bincache_test.go 가 이 헬퍼를 부르면서 **리눅스 시험은 전부 초록인데
+// `GOOS=darwin GOARCH=arm64 go vet` 만 `undefined: sessionStartPayload` 로 터졌다.**
+// 훅 stdin 한 벌은 플랫폼 축과 무관하므로 판정 자리를 여기로 옮긴다 —
+// 리눅스 전용은 비콘 **단정**이지 훅을 **부르는 법**이 아니다.
+//
+// ★ 왜 사본을 안 만들었나. 이 파일 안에도 같은 모양의 JSON 리터럴이 몇 개 있어서
+// "무태그 쪽은 인라인이 관례"라고 볼 여지가 있었지만, 그 리터럴들은 각자 자기 시험이
+// 겨누는 필드만 담은 **다른 입력**이다. 반면 bincache 쪽이 필요한 것은 비콘 시험이 쓰는
+// 것과 **같은 한 벌**이라, 거기에 사본을 두면 훅 계약이 바뀔 때 갈릴 두 화면이 생긴다.
+func sessionStartPayload(cc, cwd string) string {
+	raw, err := json.Marshal(map[string]string{
+		"session_id":      cc,
+		"cwd":             cwd,
+		"hook_event_name": "SessionStart",
+		"source":          "clear",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
 // ★ 어떤 입력에도 종료코드 0. 이 표가 이 파일의 존재 이유다.
 func TestHooksAreFailOpenForEveryInput(t *testing.T) {
 	h := newHarness(t)

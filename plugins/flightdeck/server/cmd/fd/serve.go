@@ -143,12 +143,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	webH := web.New(svc, web.WithLogger(log))
 	// ★ watcher 를 buildHandler 보다 먼저 만든다 — api.Options.SelfUpdate 콜백이
 	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
-	//
-	// ★ 자리 계산의 주인은 BinCacheDir 하나다(app.go 의 binDir 주석) — 여기서 다시 조립하지
-	// 않는다. 감시기는 이 값을 **견주기만** 한다: 자기 실행 파일이 런처가 소스 지문으로 이름
-	// 붙인 자리에 있으면, 플러그인 버전이 오르는 갱신은 이 자리를 영영 안 덮는다.
-	binDir, _ := BinCacheDir(env, home)
-	watcher := newSelfWatcher(log, path, binDir)
+	watcher := newServeWatcher(log, env, home, path)
 	inContainer, _ := detectContainer()
 	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer,
 		func() api.SelfUpdateStatus {
@@ -175,6 +170,29 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 		"api_version", service.APIVersion, "auth_required", token != "")
 
 	return serveWithWatcher(ctx, *addr, handler, log, watcher)
+}
+
+// newServeWatcher 는 runServe 의 감시기 조립이다. 두 줄짜리인데도 **밖으로 뺀 이유는
+// 시험이다.**
+//
+// ★ 조립부 안에 있으면 `binDir` 을 통째로 `""` 로 바꿔도 전 패키지가 초록이다(2026-08-07
+// 뮤테이션 실측: `go test ./cmd/fd ./internal/api` 둘 다 ok). 그러면 self_update.uncovered
+// 축은 **순수 판정(newSelfWatcher)·렌더(RenderHealth)·선(HealthzOf)이 다 잠긴 채 스위치만
+// 안 잠긴** 상태가 된다 — 이 브랜치가 고친 회귀(버전이 오르는 갱신을 서버가 영영 못 본다)가
+// 리팩터링 한 번에 조용히 돌아오고, DESIGN.md §7 이 "그 갈래는 /healthz 의
+// self_update.uncovered 가 말한다"고 한 약속만 남는다. serveAPIOptions 를 순수로 뽑은 것,
+// serveWithWatcher 를 runServe 에서 뺀 것과 **같은 규율**이다(위 두 주석).
+//
+// runServe 가 통째로 뮤테이션 투명한 것 자체는 이 브랜치가 만든 성질이 아니다(예: FD_TOKEN
+// 을 끊어도 초록이다). 그래도 이 한 자리를 특별 취급하는 이유는 **실패 모양**이다 — 인증이
+// 끊기면 표면이 시끄럽게 열리지만, 이쪽이 끊기면 실패가 구조적으로 **침묵**이고 이 필드의
+// 존재 이유가 정확히 그 침묵을 깨는 것이다.
+func newServeWatcher(log *slog.Logger, env func(string) (string, bool), home, dbPath string) *selfWatcher {
+	// ★ 자리 계산의 주인은 BinCacheDir 하나다(app.go 의 binDir 주석) — 여기서 다시 조립하지
+	// 않는다. 감시기는 이 값을 **견주기만** 한다: 자기 실행 파일이 런처가 소스 지문으로 이름
+	// 붙인 자리에 있으면, 플러그인 버전이 오르는 갱신은 이 자리를 영영 안 덮는다.
+	binDir, _ := BinCacheDir(env, home)
+	return newSelfWatcher(log, dbPath, binDir)
 }
 
 // serveWithWatcher 는 REST 서버를 감시기와 함께 돌린다. `runServe` 가 이것을 부르는

@@ -316,23 +316,59 @@ func LegacyOutboxDirs(get func(string) (string, bool), home, target string) []st
 //	⑶ 트림한 값 + `/bin`. 끝 슬래시는 자리를 안 바꾼다(Clean·Join 이 흡수하고, 런처가 그 답에
 //	   맞춰 벗긴다). 그 이상의 정규화는 안 한다 — `/x/./y` 부류는 견주는 쪽이 filepath.Dir 로
 //	   같이 Clean 하므로 실측상 안 갈린다.
+//	⑷ **절대경로가 아니면 자리를 안 낸다.** 앞 셋은 값을 *읽는* 법이고 이것만 답을 *내는*
+//	   법인데, 그래도 같은 계약의 조항인 이유는 런처가 `case "$binroot" in "" | /*)` 로 그
+//	   자리에 짓기를 **통째로 거절**하기 때문이다(bin/fd 의 상대경로 관문 — 상대경로면 빌드가
+//	   `(cd "$src" && go build)` 안에서 돌아 산출물이 소스 트리로 떨어지고 뒤이은 mv 도 rm 도
+//	   원래 cwd 기준이라 둘 다 빗나간다). FD_STATE_DIR 갈래뿐 아니라 **HOME 갈래에도** 건다 —
+//	   런처의 case 문도 binroot 하나만 보지 어느 가지에서 왔는지는 안 보기 때문이다.
 //
 // 갈리면 **셋이 동시에** 틀어진다(실측: 꼬리 공백 하나로 셋 다 났다). ⑴ pruneBinCache 가 없는
 // 디렉토리를 훑어 GC 가 영영 안 돌고(22MB×N 이 상한 없이 쌓인다 — 이 GC 의 존재 이유가 무효가
 // 된다), ⑵ doctor 가 없는 자리를 "바이너리 캐시"로 찍고, ⑶ ExeLines 가 제자리에 있는 프로세스에
 // **재기동해도 안 없어지는** "자리 밖" 거짓 경보를 낸다. 셋 다 이 브랜치가 새로 만든 소비부라,
-// 잠자던 불일치에 이빨을 단 것도 이 브랜치다. Go 쪽 갈래는 env_test.go 의 표가 잠그고, 런처가
-// **같은 답**을 내는지는 plugin_test.go 가 런처를 실제로 돌려 이 함수의 답과 디렉토리째 견준다.
+// 잠자던 불일치에 이빨을 단 것도 이 브랜치다. Go 쪽 갈래는 env_test.go 의 표가 잠그고(⑷ 는 그
+// 표의 형제 시험 TestBinCacheDirRefusesRelativePlaces 가 잠근다), 런처가 **같은 답**을 내는지는
+// plugin_test.go 가 런처를 실제로 돌려 이 함수의 답과 디렉토리째 견준다.
+//
+// ★ **⑷ 는 한동안 런처에만 있었다** — 그래서 "한 계약"이라 적어 두고 규칙이 셋인 척했다.
+// 안 보였던 이유는 형제 넷(MachineIDPath·ConfigPath·OutboxPath·window.Dir)이 상대경로를 그대로
+// 쓰기 때문이다. 그쪽은 **자기가 짓는** 자리라 cwd 기준으로 실제로 생겨서 돌지만, 이 함수만은
+// 자리를 만들지 않고 **런처가 만든 자리를 서술**한다 — 서술 대상이 "안 짓는다"고 답하는 값에
+// 자리를 말하면 그것은 방침이 아니라 **거짓**이다. "Go 는 그 자리에 안 쓰니 관문이 무의미하다"도
+// 안 선다: 안 쓰는 것이 아니라 pruneBinCache 가 거기서 **지운다.**
+//
+// 그 거짓의 모양은 위 셋과 다르다(위는 자리가 **어긋나는** 것, 여기는 자리가 **영영 안 생기는**
+// 것이다). 실측한 대로 적어 둔다: doctor 가 `바이너리 캐시 relpath/bin (FD_STATE_DIR (명시 지정))`
+// 을 사실처럼 찍고, ExeLines 가 "런처(bin/fd)로 뜬 프로세스라면 재기동해라"를 처방하는데 그
+// 구성에서는 런처로 뜬 프로세스가 **존재할 수 없어** 조건이 영영 안 맞고, pruneBinCache 가
+// 프로세스 **cwd 기준**으로 훑어 남의 `fd-*` 를 실제로 지운다(재현: `FD_STATE_DIR=..` 로 훅을
+// 돌리니 `<cwd>/../bin` 의 fd-a·fd-b 가 지워졌다). 배포된 배선은 전부 런처를 먼저 거치므로
+// (`${CLAUDE_PLUGIN_ROOT}/bin/fd`) 거기서 이미 막히지만, fd 를 직접 배선하면 셋 다 산다.
 func BinCacheDir(get func(string) (string, bool), home string) (dir, source string) {
-	if v, ok := get("FD_STATE_DIR"); ok && strings.TrimSpace(v) != "" {
-		return filepath.Join(filepath.Clean(strings.TrimSpace(v)), "bin"), "FD_STATE_DIR (명시 지정)"
-	}
-	if strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".cache", "flightdeck", "bin"),
+	// why 는 ⑷ 관문에 걸렸을 때 쓸 사유다. 축마다 **고칠 것이 다르므로**(FD_STATE_DIR 를
+	// 고치는 것과 HOME 을 고치는 것) 관문 한 자리에서 "상대경로다"만 말하면 사람이 무엇을
+	// 만져야 하는지 모른다. 판정(IsAbs)은 아래 한 자리에 있고, 여기서 나르는 것은 문구뿐이다.
+	var why string
+	v, ok := get("FD_STATE_DIR")
+	switch {
+	case ok && strings.TrimSpace(v) != "":
+		dir, source = filepath.Join(filepath.Clean(strings.TrimSpace(v)), "bin"), "FD_STATE_DIR (명시 지정)"
+		why = "FD_STATE_DIR 가 절대경로가 아니다(" + strings.TrimSpace(v) + ")"
+	case strings.TrimSpace(home) != "":
+		dir, source = filepath.Join(home, ".cache", "flightdeck", "bin"),
 			"~/.cache/flightdeck — 채널 환경과 무관한 고정 자리"
+		why = "HOME 이 절대경로가 아니다(" + strings.TrimSpace(home) + ")"
+	default:
+		return "", "자리 없음 — HOME 도 FD_STATE_DIR 도 없다. " +
+			"공용 임시 디렉토리에는 실행 파일을 안 짓는다(남이 심은 것을 exec 하게 된다)"
 	}
-	return "", "자리 없음 — HOME 도 FD_STATE_DIR 도 없다. " +
-		"공용 임시 디렉토리에는 실행 파일을 안 짓는다(남이 심은 것을 exec 하게 된다)"
+	// ⑷ — 두 갈래가 **한 자리에서** 걸린다. 런처의 case 문도 어느 가지에서 왔는지를 안 보고
+	// binroot 하나만 본다. `~/x`·`$HOME/x` 는 틸드·변수를 안 펴는 env 주입에서 실제로 온다.
+	if !filepath.IsAbs(dir) {
+		return "", "자리 없음 — " + why + ". 런처도 이 자리에는 안 짓는다(bin/fd 의 상대경로 관문)"
+	}
+	return dir, source
 }
 
 // MachineID 는 이 머신의 안정 id 다. 세션 정체 3중키의 첫 축이라 재기동해도, 그리고

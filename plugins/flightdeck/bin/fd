@@ -48,7 +48,8 @@ src="$plugin_root/server"
 # ★ **FD_STATE_DIR 는 Go 쪽 BinCacheDir(env.go)과 한 계약이다** — 값 규칙이 두 구현에 산다.
 #   피할 수 없다: 런처는 Go 를 못 부르고(Go 가 없어도 돌아야 한다) Go 는 런처보다 늦게 뜬다.
 #   그래서 규칙을 여기 한 문단에 적어 둔다 — ⑴ 앞뒤 공백을 접고 ⑵ 접고 나서 비면 **미설정
-#   취급**(HOME 갈래로 내려간다) ⑶ 끝 슬래시를 벗기고 `/bin` 을 붙인다.
+#   취급**(HOME 갈래로 내려간다) ⑶ 끝 슬래시를 벗기고 `/bin` 을 붙이고 ⑷ 그 결과가
+#   절대경로가 아니면 **자리를 안 낸다**(아래 case 문. Go 는 `filepath.IsAbs` 로 같은 답을 낸다).
 #   ⑴⑵ 가 Go 의 `strings.TrimSpace(v) != ""` 이고, ⑶ 이 Go 의 `filepath.Clean`+`Join` 이다.
 #   안 맞추면 꼬리 공백 하나(또는 CRLF 로 편집된 env 파일의 `\r`)가 둘을 갈라 놓는다 —
 #   런처는 `/x /bin` 에 22MB 를 짓고 Go 는 `/x/bin` 을 본다. 그러면 이 브랜치가 새로 만든

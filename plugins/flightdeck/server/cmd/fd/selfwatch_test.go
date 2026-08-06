@@ -420,6 +420,21 @@ func TestNewSelfWatcherNamesTheBranchItCannotCover(t *testing.T) {
 		t.Skipf("이 배치는 감시를 아예 안 켠다(%s) — Uncovered 는 그 뒤의 축이다", base.reason)
 	}
 
+	// ★ **한 자리를 두 이름으로 부른 경우.** 이 갈래가 없어서 문자열 비교가 통째로 통과했고,
+	// 그동안 실물에서는 이 축이 **항상** 침묵했다 — 리눅스의 os.Executable 은 /proc/self/exe 라
+	// 링크를 다 푼 경로를 주고 binDir 은 HOME 을 그대로 이어 붙인 안 푼 경로다. `~/.cache` 를
+	// 큰 디스크로 옮긴 머신 · `/home -> /var/home` 배포판 · NFS 홈이 전부 그 모양이다.
+	// exe.go 의 심볼릭 링크 ★ 와 **같은 축이고, 그래서 같은 함수(sameDir)가 답해야 한다.**
+	sameAlias := filepath.Join(t.TempDir(), "same")
+	otherDir := t.TempDir()
+	otherAlias := filepath.Join(t.TempDir(), "other")
+	if err := os.Symlink(filepath.Dir(exe), sameAlias); err != nil {
+		t.Skipf("심볼릭 링크를 못 만든다: %v", err)
+	}
+	if err := os.Symlink(otherDir, otherAlias); err != nil {
+		t.Skipf("심볼릭 링크를 못 만든다: %v", err)
+	}
+
 	cases := []struct {
 		name   string
 		binDir string
@@ -427,7 +442,10 @@ func TestNewSelfWatcherNamesTheBranchItCannotCover(t *testing.T) {
 	}{
 		{"런처 자리에서 돈다 — 버전이 오르면 아무도 이 파일을 안 덮는다", filepath.Dir(exe), true},
 		{"끝 슬래시가 붙어도 같은 자리다(Clean 이 흡수한다)", filepath.Dir(exe) + "/", true},
-		{"다른 자리면 이름이 안 갈린다 — 침묵한다", t.TempDir(), false},
+		{"심볼릭 링크로 부른 같은 자리 — 문자열이 갈려도 inode 로 알아본다", sameAlias, true},
+		{"다른 자리면 이름이 안 갈린다 — 침묵한다", otherDir, false},
+		// ★ 위 갈래의 대조. inode 비교가 "링크면 무조건 같다"로 무너지면 여기가 빨간불이다.
+		{"심볼릭 링크라도 가리키는 곳이 다르면 다른 자리다", otherAlias, false},
 		{"자리를 계산할 수 없다(HOME 도 FD_STATE_DIR 도 없다) — 침묵한다", "", false},
 		{"공백뿐인 값은 자리가 아니다", "   ", false},
 	}
