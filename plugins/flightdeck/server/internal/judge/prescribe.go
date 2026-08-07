@@ -120,6 +120,22 @@ type PrescribeInput struct {
 	// Claims 와 합치지 않는다 — 합치면 outside 처방이 이미 닫힌 항목의 선언 경로를 기준으로
 	// 돌게 되고, 끝낸 항목이 살아 있는 항목처럼 남의 겹침 판정에 계속 끼어든다.
 	Closed []ClaimView
+	// SiblingClaims 는 **같은 대화의 다른 카드**가 지금 쥐고 있는 항목 id 다.
+	//
+	// ★ 왜 별도 축인가. 정체가 3중키(machine·worktree·cc)라 `git worktree add` 로 트리를
+	// 옮기면 정의상 새 카드가 난다 — 그리고 그 갈림은 설계다(DESIGN §3). 그런데 선점은
+	// MCP 가 쓰고(프로세스 기동 시 워크트리가 고정된다) 발자국은 훅이 쓴다(매 이벤트 cwd 로
+	// 다시 푼다). 그래서 **선점은 카드 A 에, 발자국은 카드 B 에** 쌓인다. `pick` 응답 자신이
+	// 워크트리 생성을 지시하고 선점이 그보다 먼저 오므로, 규율대로 일한 세션은 전부 이 배치다.
+	// 실측(2026-08-06, unclaimed 처방 80건 전수): 카드 단위로 선점을 쥔 채 발화 0건,
+	// 대화 단위로는 10건. 그 열 번이 이 축이 없어서 난 거짓 양성이다.
+	//
+	// ★ **경로를 일부러 안 싣는다. Claims 와 합치지도 않는다.** 합치면 outside 처방이
+	// 형제의 선언 경로를 기준으로 돌기 시작한다 — 실측상 그 순간 11카드에 선언 경로 밖
+	// 발자국 82개(한 카드 최대 45)가 켜지는데, 전 기간 outside 발화 총계가 22건이다.
+	// 4배가 한 판에 쏟아진다. 타입이 []string 인 것 자체가 그 결정을 못박는다(Closed 를
+	// Claims 와 안 합친 것과 같은 논거이고, 이쪽은 근거가 실측이다).
+	SiblingClaims []string
 	// TurnPaths 는 마지막 처방 이후 새로 만진 경로다(처방이 없었으면 세션 시작 이후).
 	TurnPaths []string
 	// Others 는 살아 있는 세션 목록이다. 자기 자신이 섞여 있어도 이 함수가 뺀다 —
@@ -128,7 +144,12 @@ type PrescribeInput struct {
 	// ★ "자기 자신"은 **카드 id 가 아니라 대화**다. 정체가 3중키라 한 대화가 카드 여러 장이
 	// 될 수 있고, 카드 id 만 빼면 나머지 형제 카드가 남의 세션처럼 보인다(sameConversation).
 	Others []LiveSession
-	// SelfCC 는 이 세션이 속한 대화의 cc id 다. 형제 카드를 가려내는 데만 쓴다.
+	// SelfCC 는 이 세션이 속한 대화의 cc id 다.
+	//
+	// ★ 겹침 축에서는 형제 카드를 **가려내는** 데 쓴다(남이 아니므로 조율 처방을 안 낸다).
+	// 선점 축에서는 반대로 형제가 쥔 것을 **끌어오는** 근거다 — 그 결과가 SiblingClaims 다.
+	// 즉 이 값은 배제자이기도 하고 판정의 근거이기도 하다. 앞선 판은 "가려내는 데만 쓴다"고
+	// 적었는데, 그 문장이 참인 동안 선점 축의 거짓 양성이 살아 있었다.
 	SelfCC string
 	// LastJudgment 는 이 세션의 마지막 판단 시각이다.
 	// **판단이 하나도 없으면 호출자가 세션 시작 시각을 넣는다** — 제로값이면 기준이 없어 안 뜬다.
@@ -349,10 +370,14 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 //
 // ★ 이 조건은 흔하다. 세션당 1회로 눌러 잡지 않으면 편집마다 떠서 §4 의 실패가 된다.
 //
-// ★ **"선점 0건"이 셋을 뭉갠다.** 한 번도 안 집었다(처방이 맞다) · 집고 일하는 중
-// (Claims 가 막는다) · **방금 제대로 끝냈다**(처방이 틀리다). finish 가 선점을 반납하므로
-// 셋째가 첫째와 똑같이 보이고, 그래서 성실하게 마무리한 세션이 잔소리를 듣는다.
-// uncoveredByClosed 가 그 셋째만 갈라낸다.
+// ★ **"선점 0건"이 넷을 뭉갠다.** 한 번도 안 집었다(처방이 맞다) · 집고 일하는 중
+// (Claims 가 막는다) · **방금 제대로 끝냈다**(처방이 틀리다) · **형제 카드가 쥐고 있다**
+// (처방이 틀리다). finish 가 선점을 반납하므로 셋째가 첫째와 똑같이 보이고, 그래서
+// 성실하게 마무리한 세션이 잔소리를 듣는다. uncoveredByClosed 가 그 셋째만 갈라낸다.
+//
+// 넷째는 2026-08-07 에 이름이 붙었다 — 그전까지 이 목록은 셋이었다. 규율이 지시하는
+// `git worktree add` 가 카드를 가르고 선점은 갈리기 전 카드에 남는데, 그 상태가
+// "한 번도 안 집었다"와 글자 그대로 똑같이 보였다. SiblingClaims 가 그 넷째를 갈라낸다.
 //
 // ★ **문구는 판정이 실제로 든 근거만 댄다(2026-08-06 개정).** 앞선 판은 `in.TurnPaths` 의
 // 앞 3개를 그대로 실었다 — 덮였는지 안 덮였는지를 안 보고. 그래서 판정이 옳은 발화에서도
@@ -365,7 +390,8 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // 처방의 값어치는 "틀리지 않는다"가 아니라 **"고칠 자리를 가리킨다"** 이고, 맞는 처방이
 // 틀린 증거를 들고 오면 그 다음부터 처방 전체가 안 읽힌다(설계 §4 의 상시 점등과 같은 종착).
 func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
-	if len(in.Claims) > 0 || len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
+	if len(in.Claims) > 0 || len(in.SiblingClaims) > 0 ||
+		len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
 		return Prescription{}, false
 	}
 	uncovered, grounded := uncoveredByClosed(in)

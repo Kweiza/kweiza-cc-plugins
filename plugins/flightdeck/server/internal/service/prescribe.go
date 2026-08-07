@@ -77,6 +77,18 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		in.Claims = append(in.Claims, judge.ClaimView{ItemID: it.ID, Paths: it.Paths})
 	}
 
+	// 같은 대화의 **다른 카드**가 쥔 선점. 규율이 지시하는 `git worktree add` 가 카드를
+	// 가르고 선점은 갈리기 전 카드에 남으므로, 이 축이 없으면 워크트리에서 일하는 세션이
+	// 매 턴 "선점 0건"으로 보인다(2026-08-06 실측: 대화 단위로는 10건이 그 상태였다).
+	//
+	// ★ GetItem 을 **안 부른다.** 이 축은 항목 id 만 나르고 선언 경로를 안 싣는다 —
+	// 실으면 outside 가 형제의 경로를 기준으로 돌기 시작한다(judge 쪽 SiblingClaims 주석).
+	// 덤으로 턴당 질의가 형제 항목 수만큼 늘지 않는다.
+	if in.SiblingClaims, err = s.st.SiblingClaimedItems(
+		ctx, sess.Project, sess.MachineID, sess.CCSessionID, sessionID); err != nil {
+		return PrescribeResult{}, err
+	}
+
 	// 이 구간에 반납한 항목 — "한 번도 안 집었다"와 "방금 제대로 끝냈다"를 가르는 축이다.
 	// **TurnPaths 와 같은 since 를 쓴다.** 두 창이 갈리면 "이번 턴에 만진 경로"와
 	// "이번 턴에 끝낸 항목"이 서로 다른 구간을 가리키게 되고, 그 어긋남은 화면에 안 뜬다.
@@ -84,7 +96,16 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	if err != nil {
 		return PrescribeResult{}, err
 	}
-	for _, id := range released {
+	// **형제 카드의 반납도 같은 축이다.** finish 는 MCP 로 가고(카드 A) 처방은 훅에서
+	// 뜬다(카드 B). 이것이 없으면 규율대로 마무리한 그 순간 카드 B 가 "한 번도 안 집었다"와
+	// 똑같이 보인다 — 카드 단위에서 Closed 축이 이미 고친 결함이 대화 단위에 그대로 남는다.
+	// 같은 since 를 쓰는 이유도 위와 같다.
+	siblingReleased, err := s.st.SiblingReleasedItems(
+		ctx, sess.Project, sess.MachineID, sess.CCSessionID, sessionID, since)
+	if err != nil {
+		return PrescribeResult{}, err
+	}
+	for _, id := range append(append([]string{}, released...), siblingReleased...) {
 		it, err := s.st.GetItem(ctx, sess.Project, id)
 		if err != nil {
 			s.log.WarnContext(ctx, "처방: 반납 항목을 못 읽었다",
