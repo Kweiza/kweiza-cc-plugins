@@ -62,7 +62,7 @@ func followupSchema() map[string]any {
 			"title":  str("한 줄 제목. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
 			"body":   str("무엇을 해야 하는가. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
 			"paths":  strArr("이 항목이 건드릴 경로"),
-			"labels": strArr("표시 전용 꼬리표"),
+			"labels": strArr("표시 전용 꼬리표. 'tickler' 만 굶김 축에서 빠진다"),
 			"after":  afterSchema(),
 		}, "id"),
 	}
@@ -114,7 +114,7 @@ var tools = []Tool{
 			"title":  str("한 줄 제목"),
 			"body":   str("무엇을 해야 하는가. 비면 거절한다"),
 			"paths":  strArr("이 항목이 건드릴 경로(겹침 판정의 축)"),
-			"labels": strArr("표시 전용 꼬리표. 어떤 배제 판정에도 안 쓴다"),
+			"labels": strArr("표시 전용 꼬리표. 배제 판정에 안 쓴다 — 'tickler' 하나만 굶김 축(집계·기아 가중)에서 빠진다"),
 			"after":  afterSchema(),
 		}, "id", "title", "body"),
 	},

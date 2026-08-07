@@ -635,6 +635,11 @@ func queueAgeClause(v service.BoardView) string {
 		if it.CreatedAt.IsZero() {
 			continue
 		}
+		// 티클러는 굶김 축(최고령·굶은 건수)에서 뺀다 — 기한까지 늙는 것이 정상이라
+		// 넣으면 이 절이 상시 점등돼 판별력이 0이 된다(§4). 건수에는 그대로 든다.
+		if judge.IsTickler(it.Labels) {
+			continue
+		}
 		if age := v.At.Sub(it.CreatedAt); age > oldest {
 			oldest = age
 		}
@@ -661,6 +666,11 @@ func queueItemAge(at time.Time, it model.Item) string {
 		return "나이?"
 	}
 	age := at.Sub(it.CreatedAt)
+	// 티클러는 ★ 를 안 단다 — 대신 그 사실을 이름으로 낸다. 표식 없는 긴 나이가
+	// "잊힌 항목"으로 읽히면, 굶김 축에서 뺀 것이 침묵으로 바뀐다.
+	if judge.IsTickler(it.Labels) {
+		return FormatAge(age) + "·티클러"
+	}
 	if age >= judge.StarvationAge {
 		return "★" + FormatAge(age)
 	}
@@ -1354,6 +1364,15 @@ func RenderFinish(r service.FinishResult) string {
 			ids = append(ids, f.ID)
 		}
 		fmt.Fprintf(&b, "후속 %d건 등록: %s (판단에 이어졌다)\n", len(ids), strings.Join(ids, ", "))
+		// ★ 버스트에만 낸다(창작 ≥3 — 실측: finish 의 9.5%가 후속 유입의 51%를 낳았다).
+		// R≥1 조건은 기각됐다 — 전 관측창에서 상시 참이라 판별력이 0이고(§4),
+		// 지표 도입 당일 필요한 후속을 회피한 굿하트 실물이 이미 있다. 버스트는 전이다.
+		// 문구는 지시가 아니라 기준 + 실행 동사다 — 판단은 세션이 한다.
+		if len(ids) >= 3 {
+			fmt.Fprintf(&b, "  창작 후속 %d건 — 이런 버스트가 후속 유입의 절반을 낳는다. "+
+				"이 중 **본문이 곧 패치**인 것이 있으면 pick(item_ids=[…]) 으로 지금 이어받아 "+
+				"이 세션에서 닫아라. 같은 검증 축인 것들은 한 항목으로 묶을 수 있었는지 보라.\n", len(ids))
+		}
 	}
 	// ★ 이은 것은 **따로** 낸다. 등록과 한 줄에 담으면 "후속 2건 등록"이라고 말하는데
 	// 큐에는 1건만 늘어, 세션이 자기가 큐에 무엇을 했는지 못 본다.
@@ -1371,8 +1390,13 @@ func RenderFinish(r service.FinishResult) string {
 	}
 	// ★ 0건 문구는 **등록과 잇기가 둘 다 0**일 때만 뜬다. 등록만 보면 잇기만 한 마무리에서
 	// "지금 add 로 넣어라"가 떠서 방금 이은 것을 부정한다.
+	// ★ "있다면 지금 add 로 넣어라"를 지웠다 — 규율 전체에 항목화를 미는 문장만 10곳이고
+	// 거르는 기준이 0이던 불균형의 한 자리다(2026-08-07 실측: 이 줄을 포함한 관문·문구가
+	// add 를 followups 로 전환만 시키고 총유입을 못 줄였다). 빠뜨림 방지는 거절-시점
+	// 관문(judgeMissingFollowups)이 진다 — 그쪽이 준수가 실측된 표면이다.
 	if len(r.Followups) == 0 && len(r.LinkedFollowups) == 0 {
-		b.WriteString("후속 0건 — 이번에 나온 후속이 정말 없다면 그대로 두고, 있다면 지금 add 로 넣어라.\n")
+		b.WriteString("후속 0건 — 그 자리에서 끝냈거나 정말 없다면 그것이 맞다. " +
+			"빠뜨린 것이 있으면 add 로 넣되, **본문이 곧 패치인 것은 항목이 아니라 지금 할 일이다.**\n")
 	}
 	// ★ 건너뛴 후속은 **반드시 낸다.** 사유는 둘로 갈렸다(만들 대상이 그 사이 생겼다 ·
 	// 이을 대상이 사라졌다) — 화면은 무엇이 안 들어갔는지를 이름으로 말하고,
