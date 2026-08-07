@@ -861,6 +861,66 @@ func (s *Store) ReleasedItems(ctx context.Context, sessionID string, since time.
 	return out, nil
 }
 
+// SiblingClaimedItems 는 **같은 대화의 다른 카드**가 지금 쥔 항목 id 를 낸다.
+//
+// 대화는 (project, machine_id, cc_session_id) 다 — 정체 3중키에서 worktree 축만 뺀 것이다.
+// 카드를 합치지 않는다. 카드 3중키도 claim 의 소유 축(session_id)도 그대로다.
+// **넓히는 것은 읽기 하나뿐이다.**
+//
+// ★ 생존 창을 안 건다. 보드가 OutsideClaims 에서 같은 판정을 이미 냈다 — 창을 함께 걸면
+// 회수가 가장 필요한 카드가 먼저 사라진다. 여기서도 조용해진 형제 카드가 창 밖으로 빠지면
+// 그 순간 이 대화 전체가 다시 거짓 양성을 받는다.
+//
+// ★ 빈 cc 는 빈 목록이다. 빈 값끼리는 같은 대화가 아니다 — judge.sameConversation 이
+// 같은 규칙을 쓰고, 그 규칙이 저장층과 갈리면 어긋남이 어느 화면에도 안 뜬다.
+func (s *Store) SiblingClaimedItems(ctx context.Context, project, machineID, cc, excludeSessionID string) ([]string, error) {
+	return s.siblingClaimIDs(ctx, `c.released_at IS NULL`, project, machineID, cc, excludeSessionID)
+}
+
+// SiblingReleasedItems 는 같은 대화의 다른 카드가 **이 구간에 반납한** 항목 id 를 낸다.
+// since 는 짝인 ReleasedItems 와 같은 값을 써야 한다 — 두 창이 갈리면 "이번 턴에 끝낸 항목"이
+// 카드마다 다른 구간을 가리키게 되고 그 어긋남은 화면에 안 뜬다.
+func (s *Store) SiblingReleasedItems(ctx context.Context, project, machineID, cc, excludeSessionID string, since time.Time) ([]string, error) {
+	return s.siblingClaimIDs(ctx,
+		`c.released_at IS NOT NULL AND c.released_at > ?`,
+		project, machineID, cc, excludeSessionID, fmtTime(since))
+}
+
+// siblingClaimIDs 는 위 둘의 한 벌이다 — 조인 축이 갈리면 "같은 대화"의 뜻이 두 개가 된다.
+//
+// ★ 조인 축 셋(project·machine_id·cc_session_id)이 **각각** 접기를 갈라야 한다.
+// item_sibling_claims_test.go 가 축마다 되돌려 그것을 잠근다.
+func (s *Store) siblingClaimIDs(ctx context.Context, cond, project, machineID, cc, excludeSessionID string, extra ...any) ([]string, error) {
+	if cc == "" {
+		return nil, nil
+	}
+	args := append([]any{project, machineID, cc, excludeSessionID}, extra...)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT c.item_id FROM claim c
+		 JOIN session s ON s.id = c.session_id
+		 WHERE c.project = ? AND s.machine_id = ? AND s.cc_session_id = ? AND c.session_id <> ?
+		   AND `+cond+`
+		 ORDER BY c.item_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("형제 카드 선점 조회 실패(project=%q machine=%q cc=%q): %w",
+			clip(project, 64), clip(machineID, 64), clip(cc, 64), err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("형제 카드 선점 행 해석 실패: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("형제 카드 선점 목록 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) ClaimedItems(ctx context.Context, sessionID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT item_id FROM claim WHERE session_id = ? AND released_at IS NULL ORDER BY item_id`, sessionID)
