@@ -79,7 +79,29 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 // 그래서 행동이 `land()` 인 처방을 **정확히 따르고** 판단을 안 남긴 세션은 — 확인율을
 // 떨어뜨리는 것이 아니라 — `Emitted` 에만 들어가고 **`Reachable` 에서 통째로 빠진다.**
 // 즉 관측에서 사라진다. 위 격차의 둘째 사유가 이것이다.
+//
+// ★ 그리고 **구간이 둘이다.** 전 역사만 내면 Emitted 가 단조 증가해, 갈림의 원인을
+// 고쳐도 이미 갈린 옛 카드가 분모에 영영 남는다 — 두 수의 차이가 회복되지 않으니
+// "지금 규율이 나아졌나"를 물을 수 없다(§10 이 요구한 재측정이 그 물음이다).
+// 최근 벌만 내면 반대로 표본이 얇아 노이즈가 된다. 그래서 둘을 나란히 낸다.
 type AckReach struct {
+	// AllTime 은 프로젝트 전 역사다. 추세로만 읽어라 — 분모가 단조 증가한다.
+	AllTime AckCounts `json:"all_time"`
+	// Recent 는 Window 안의 벌이다. "지금 규율"을 묻는 쪽은 이것이다.
+	Recent AckCounts `json:"recent"`
+	// Window 는 Recent 가 자른 폭이다. **값으로 낸다** — 표면이 어느 구간의 수인지
+	// 문장에 적어야 하고, 여기 없으면 렌더러가 24시간을 문자열로 박게 된다.
+	Window time.Duration `json:"recent_window"`
+}
+
+// AckCounts 는 **한 구간**의 세 수다.
+//
+// ★ JSON 모양이 바뀐 자리다. 옛 `ack_reach` 는 세 수를 최상위에 평탄하게 냈고
+// (`ack_reach.emitted`), 지금은 구간 아래로 들어간다(`ack_reach.all_time.emitted`).
+// 평탄한 채로 최근 벌만 덧붙이는 길도 있었지만 그러면 **구간 라벨이 없는 수**가 그대로
+// 남는다 — 그 이름 없음이 이 항목이 고치려던 결함 자체다. 이 저장소 안에 그 키를 읽는
+// 비-Go 소비자는 없다(표면은 dashboard.json 하나이고 렌더러를 같이 고쳤다).
+type AckCounts struct {
 	Emitted   int `json:"emitted"`
 	Reachable int `json:"reachable"`
 	Acked     int `json:"acked"`
@@ -168,10 +190,15 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 
 	// ★ 실패해도 보드를 죽이지 않는다 — 파생이 통째로 실패해도 응답을 내는 것이
 	//   이 도구의 존재 이유다. 다만 침묵하지 않고 파생 실패로 남긴다.
-	if em, re, ak, aerr := s.st.AckReach(ctx, project); aerr != nil {
+	//
+	// ★ 절단은 주입 시계를 탄다(now = s.now()). time.Now() 를 직접 부르면 시험이 창을
+	//   못 움직여 이 축이 통째로 안 잠긴다.
+	if all, recent, aerr := s.st.AckReach(ctx, project, now.Add(-AckWindow)); aerr != nil {
 		d.fail("ack-reach", aerr)
 	} else {
-		view.AckReach = &AckReach{Emitted: em, Reachable: re, Acked: ak}
+		view.AckReach = &AckReach{
+			AllTime: AckCounts(all), Recent: AckCounts(recent), Window: AckWindow,
+		}
 	}
 
 	// 창 밖 건수 — 카드를 안 만든다. 세는 것만 한다(파생 비용을 안 늘린다).

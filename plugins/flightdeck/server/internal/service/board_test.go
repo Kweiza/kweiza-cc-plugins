@@ -216,6 +216,17 @@ func TestDefaultLiveWindowIsTwoHours(t *testing.T) {
 	}
 }
 
+// ★ 값을 밖에서 한 번 못박는다. AckWindow 를 쓰는 다른 시험들은 창을 이 상수 자신으로
+// 표현하므로(예: now+AckWindow+1h) 값이 바뀌어도 함께 스케일해 전부 초록이다. 그런데
+// DESIGN §10 은 세 자리에서 "최근 24시간"이라고 **글자로** 적는다 — 값만 바뀌면 그 서술이
+// 조용히 거짓이 된다. 이 저장소가 가장 비싸게 보는 결함이 그것이라 여기서 잠근다.
+func TestAckWindowIsOneDay(t *testing.T) {
+	if AckWindow != 24*time.Hour {
+		t.Fatalf("확인율 창이 24시간이 아니다: %v — DESIGN §10 이 24시간이라고 적혀 있다. "+
+			"값을 바꾸려면 그 서술과 인용된 실측을 같이 고쳐라", AckWindow)
+	}
+}
+
 // TestBoardOldestOutsideOnlyCountsHiddenSessions 는 화면에 **보이는** 세션의 옛 신호가
 // OldestOutside 를 오염시키지 않는다는 것을 단정한다.
 //
