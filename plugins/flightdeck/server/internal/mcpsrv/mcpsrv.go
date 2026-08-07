@@ -649,7 +649,7 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	if len(twins) > 0 {
 		why = s.beaconMiss()
 	}
-	if d := RenderDrift(twins, self.CCSessionID, why); d != "" {
+	if d := RenderDrift(twins, self.SessionID, self.CCSessionID, why); d != "" {
 		if notice != "" {
 			notice += "\n"
 		}

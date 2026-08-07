@@ -127,7 +127,7 @@ func TestDriftedTwinsFindsTheCCAxisOnly(t *testing.T) {
 // 아니라 새 사실: why 인자가 화면에 그대로 실리는지, 그리고 재기동 권유가 사라졌는지다.
 func TestRenderDriftNamesTheAxisAndWhyRepairDidNotHappen(t *testing.T) {
 	twins := []CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}
-	got := RenderDrift(twins, "cc-new", "조상 사슬 어디에도 이 머신의 비콘이 없다")
+	got := RenderDrift(twins, "s-mine", "cc-new", "조상 사슬 어디에도 이 머신의 비콘이 없다")
 
 	for _, want := range []string{
 		"cc-old", // 상대가 든 값
@@ -159,7 +159,7 @@ func TestRenderDriftNamesTheAxisAndWhyRepairDidNotHappen(t *testing.T) {
 	}
 
 	// 표류가 없으면 **아무 말도 안 한다.** 매 board 마다 빈 절이 붙으면 예산이 토큰인 화면이 상한다.
-	if s := RenderDrift(nil, "cc-new", ""); s != "" {
+	if s := RenderDrift(nil, "s-mine", "cc-new", ""); s != "" {
 		t.Errorf("표류가 없는데 문구를 냈다: %q", s)
 	}
 }
@@ -178,7 +178,7 @@ func TestRenderDriftCapsNamedTwins(t *testing.T) {
 			CCSessionID: fmt.Sprintf("%08d-6ca4-4321-9912-f713e791f3fe", i),
 		})
 	}
-	got := RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+	got := RenderDrift(tw, "s-mine", "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
 
 	if named := strings.Count(got, "갈린 카드: "); named > driftTwinLimit {
 		t.Fatalf("이름을 %d개 적었다 — 상한 %d\n%s", named, driftTwinLimit, got)
@@ -192,7 +192,7 @@ func TestRenderDriftCapsNamedTwins(t *testing.T) {
 	}
 
 	// 대조 — 상한 이하면 전부 이름이 나온다.
-	few := RenderDrift(tw[:2], "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
+	few := RenderDrift(tw[:2], "s-mine", "ce5c2e79-767f-4e85-8893-52a0219f6d9a", "")
 	if named := strings.Count(few, "갈린 카드: "); named != 2 {
 		t.Fatalf("쌍둥이 2건인데 이름이 %d개다:\n%s", named, few)
 	}
@@ -200,7 +200,7 @@ func TestRenderDriftCapsNamedTwins(t *testing.T) {
 
 // why 가 비어도 문구가 잘 맺어지는지("사유:" 만 남고 뒤가 없는 꼴이 아닌지) 본다.
 func TestRenderDriftIsWellFormedWithoutAReason(t *testing.T) {
-	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "cc-new", "")
+	got := RenderDrift([]CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}, "s-mine", "cc-new", "")
 	if got == "" {
 		t.Fatalf("표류가 있는데 문구가 비었다")
 	}
@@ -352,5 +352,29 @@ func TestBoardShowsCCDriftInTheResponse(t *testing.T) {
 	}
 	if strings.Contains(body, "재기동") {
 		t.Errorf("고쳐진 뒤에도 재기동을 권한다:\n%s", body)
+	}
+}
+
+// TestRenderDriftNamesTheStableAxis 는 배너가 **rekey 를 건너 보존되는 축**을 내는지 본다.
+//
+// ★ 왜 cc 만으로는 안 되는가. 배너가 인쇄하는 mineCC 는 `s.openedCC` 인데, 그 값은
+// ensureSession 안 한 자리에서만 쓰이고 그 함수는 두 번째 호출부터 조기 반환한다.
+// 지우는 코드도 없다 — 즉 "카드를 연 값"이 아니라 **"카드를 열었던 값"** 이다.
+// 그 사이 훅이 SessionStart 에서 카드를 그 cc 에서 떼어 간다(Rekey 는 cc 컬럼만 UPDATE
+// 하고 카드 id 는 보존한다). 그래서 인쇄된 cc 는 **어떤 카드도 갖지 않은 값**이 된다.
+//
+// ★ 실물 피해(2026-08-06 판단): 그 값을 유일한 소비처 `fd close -cc-session` 에 넣었더니
+// 그 호출이 3중키 upsert 라 **새 카드를 만들어서 그것을 닫았다.** 진단하려는 사람이
+// 카드를 하나씩 더 만들면서 진단했다.
+//
+// ★ 이 파일의 DriftedTwins 주석이 이미 답을 적어 뒀다 — "id 는 rekey 를 건너 보존되므로
+// (설계 제약 ⑥) 그 축만이 안정적이다". 판정에는 그 사실을 쓰면서 화면에는 안 냈다.
+func TestRenderDriftNamesTheStableAxis(t *testing.T) {
+	twins := []CoordinateTwin{{SessionID: "s-old", CCSessionID: "cc-old"}}
+	got := RenderDrift(twins, "01KZMINECARD", "cc-new", "")
+	if !strings.Contains(got, "01KZMINECARD") {
+		t.Fatalf("배너가 내 **카드 id** 를 안 냈다:\n%s\n"+
+			"cc 는 rekey 를 못 견딘다 — 그 값으로 할 수 있는 일이 없고, "+
+			"유일한 소비처에 넣으면 카드가 하나 더 생긴다", got)
 	}
 }

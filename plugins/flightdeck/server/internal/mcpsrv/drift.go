@@ -121,13 +121,22 @@ const driftTwinLimit = 3
 // 수리가 영영 안 오고 **안 오는 것이 옳다.** 단정형은 그 경우에 오지 않을 약속을 하고,
 // 그 약속을 믿고 기다리면 "왜 아직 두 장이냐"에 아무도 답을 못 한다.
 // 그래서 두 갈래를 그대로 말하고, 어느 쪽인지는 사람이 가른다 — 이 함수는 못 가른다.
-func RenderDrift(twins []CoordinateTwin, mineCC, why string) string {
+func RenderDrift(twins []CoordinateTwin, mineID, mineCC, why string) string {
 	if len(twins) == 0 {
 		return ""
 	}
+	// ★ **카드 id 를 먼저 낸다.** cc 는 rekey 를 못 견딘다 — 아래 mineCC 는 이 프로세스가
+	// 카드를 열 때 쓴 값이고(openedCC, 무효화 경로가 없다) 그 뒤 훅이 SessionStart 에서
+	// 카드를 그 cc 에서 떼어 갈 수 있다(Rekey 는 cc 컬럼만 UPDATE 하고 id 는 보존한다).
+	// 그러면 인쇄된 cc 는 **어떤 카드도 갖지 않은 값**이 되고, 그 값으로 할 수 있는 일이
+	// 하나도 없다 — 실물로 그 일이 났다: `fd close -cc-session <그 값>` 이 3중키 upsert 라
+	// 카드를 하나 만들어서 그것을 닫았고 실제 카드는 그대로 열려 있었다.
+	// DriftedTwins 주석이 이미 "id 는 rekey 를 건너 보존되므로 그 축만이 안정적이다"를
+	// 판정 근거로 쓴다. 화면도 같은 축을 내야 사람이 그 값으로 무언가 할 수 있다.
 	s := "⚠ 이 워크트리에 cc_session_id 가 갈린 세션이 " +
 		itoa(len(twins)) + "건 더 있다 — 카드가 여러 장인 이유가 이것이다.\n" +
-		"  이 MCP 프로세스가 카드를 연 값: " + clip(mineCC, 64) + "\n"
+		"  이 MCP 프로세스의 카드: " + clip(mineID, 64) +
+		" (열 때 쓴 cc=" + clip(mineCC, 64) + " — 이 값은 rekey 로 옮겨갔을 수 있다)\n"
 	for i, t := range twins {
 		if i >= driftTwinLimit {
 			s += "  갈린 카드 " + itoa(len(twins)-driftTwinLimit) +
