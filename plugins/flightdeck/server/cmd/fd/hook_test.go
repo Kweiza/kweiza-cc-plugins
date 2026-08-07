@@ -167,6 +167,50 @@ func TestPostToolHookRecordsFootprintPath(t *testing.T) {
 }
 
 // PreCompact 는 초안 판단을 남긴다. 무엇을 못 하는지도 본문이 말해야 한다.
+// TestPreCompactResolvesTheProjectFromThePayloadCwd 는 **여섯 훅의 비대칭**을 잠근다.
+//
+// ★ session-start · user-prompt · post-tool · stop · session-end 다섯은 전부
+// `a.proj = resolveProject(a.env, p.CWD)` 로 페이로드 cwd 에서 좌표를 다시 푼다.
+// pre-compact 만 그것이 없어서 **훅 프로세스의 cwd** 기준 카드로 간다. 그 둘이 갈리는
+// 것이 이 제품의 정상 흐름이다 — 규율이 `git worktree add` 를 지시하므로 대화는 트리를 옮긴다.
+//
+// ★ 기존 시험(아래 TestPreCompactLeavesDraftJudgment)은 이 비대칭을 못 잡는다.
+// `cwd:"/tmp"` 를 보내면서 초안 **개수만** 세므로, 초안이 엉뚱한 카드에 붙어도 초록이다.
+// 압축 직전 초안은 그 대화가 컨텍스트를 잃기 직전에 남기는 마지막 기록이라 가장 나쁜
+// 자리에서 어긋난다 — 복귀한 세션이 자기 카드에서 그것을 못 찾는다.
+func TestPreCompactResolvesTheProjectFromThePayloadCwd(t *testing.T) {
+	h := newHarness(t)
+	elsewhere := t.TempDir()
+
+	payload := `{"session_id":"cc-1","cwd":"` + elsewhere + `"}`
+	if code, out := h.run(payload, "hook", "session-start"); code != 0 {
+		t.Fatalf("세션 열기 실패(%d): %s", code, out)
+	}
+	live := h.liveSessions()
+	if len(live) != 1 {
+		t.Fatalf("전제가 깨졌다 — 카드가 %d건이다, want 1", len(live))
+	}
+	card := live[0].Session.ID
+
+	if code, out := h.run(payload[:len(payload)-1]+`,"trigger":"auto"}`,
+		"hook", "pre-compact"); code != 0 {
+		t.Fatalf("pre-compact 훅 실패(%d): %s", code, out)
+	}
+
+	js := h.judgments(model.JudgmentDraft)
+	if len(js) != 1 {
+		t.Fatalf("초안이 %d건이다, want 1", len(js))
+	}
+	if js[0].SessionID != card {
+		t.Fatalf("초안이 카드 %s 에 붙었다, want %s\n"+
+			"pre-compact 만 페이로드 cwd 로 좌표를 다시 안 풀어서 훅 프로세스 cwd 기준 "+
+			"카드로 갔다 — 복귀한 세션이 자기 카드에서 이 초안을 못 찾는다", js[0].SessionID, card)
+	}
+	if !strings.Contains(js[0].Body, elsewhere) {
+		t.Errorf("초안 본문의 워크트리가 페이로드 cwd 가 아니다:\n%s", js[0].Body)
+	}
+}
+
 func TestPreCompactLeavesDraftJudgment(t *testing.T) {
 	h := newHarness(t)
 	if code, _ := h.run(`{"session_id":"cc-1","cwd":"/tmp"}`, "hook", "session-start"); code != 0 {

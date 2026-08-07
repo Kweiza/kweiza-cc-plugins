@@ -443,6 +443,15 @@ func (a *App) hookPostTool(ctx context.Context, p HookPayload) {
 // transcript 형식은 이 설계가 기대는 플랫폼 사실 목록(§13)에 없으므로 파싱하지 않는다.
 // 못 하는 것을 하는 척하지 않는다.
 func (a *App) hookPreCompact(ctx context.Context, p HookPayload) {
+	// ★ 다른 다섯 훅과 같은 자리다 — 이것만 빠져 있었다.
+	//
+	// 규율이 `git worktree add` 를 지시하므로 대화는 도중에 트리를 옮긴다. 그때 훅
+	// 프로세스의 cwd 와 페이로드의 cwd 가 갈리고, 좌표를 다시 안 풀면 이 초안이
+	// **엉뚱한 카드**로 간다. 압축 직전 초안은 그 대화가 컨텍스트를 잃기 직전에 남기는
+	// 마지막 기록이라 가장 나쁜 자리에서 어긋난다 — 복귀한 세션이 자기 카드에서 못 찾는다.
+	if strings.TrimSpace(p.CWD) != "" {
+		a.proj = resolveProject(a.env, p.CWD)
+	}
 	cc := a.ccSessionID(p.SessionID)
 	if cc == "" {
 		a.log.Warn("pre-compact: 세션 id 를 못 읽어 초안을 남기지 못했다")

@@ -57,6 +57,50 @@ func TestCloseRefusesWhileHoldingClaims(t *testing.T) {
 	}
 }
 
+// TestCloseRefusesRatherThanMintingACard 는 **닫으려다 카드를 만드는 것**을 막는다.
+//
+// ★ 실물 재현(2026-08-06 판단): board 가 스스로 인쇄한 「이 MCP 프로세스가 카드를 연 값」을
+// 그대로 `fd close -cc-session <값>` 에 넣었더니 **그 호출이 새 카드를 만들어서 그것을 닫았다.**
+// 실제 카드는 그대로 열려 있었다. `runClose` 가 카드를 정하는 유일한 호출(a.OpenSession)이
+// 조회가 아니라 **3중키 upsert** 라서다 — 그리고 반환값의 Created 를 아무도 안 봤다.
+//
+// ★ 왜 이것이 특히 나쁜가. 새 카드는 선점이 0건이라 위의 「선점이 남아 있으면 거절」
+// 가드도 안 걸린다. 즉 진단하려는 사람이 **카드를 하나씩 더 만들면서** 진단하고,
+// 그 카드들이 겹침 판정에 창 내내 잡힌다.
+func TestCloseRefusesRatherThanMintingACard(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open"); code != 0 {
+		t.Fatalf("open 실패(%d): %s", code, out)
+	}
+	before := h.liveSessions()
+	if len(before) != 1 {
+		t.Fatalf("전제가 깨졌다 — 살아 있는 카드가 %d건이다, want 1", len(before))
+	}
+
+	// 이 좌표에 카드가 없는 cc 다. 옛 거동은 여기서 카드를 만들고 그것을 닫았다.
+	code, out := h.run("", "close", "--cc-session", "cc-that-has-no-card")
+	if code == 0 {
+		t.Fatalf("없는 카드를 닫았다고 보고했다 — 그 호출이 카드를 만든 것이다:\n%s", out)
+	}
+
+	after := h.liveSessions()
+	if len(after) != 1 || after[0].Session.ID != before[0].Session.ID {
+		t.Fatalf("살아 있는 카드가 바뀌었다: %d건 — 원래 카드 %s 는 그대로 열려 있어야 한다",
+			len(after), before[0].Session.ID)
+	}
+	if !strings.Contains(out, "cc-that-has-no-card") {
+		t.Errorf("무엇으로 찾았는지를 안 냈다 — 사유 없는 거절은 다음 사람이 못 푼다:\n%s", out)
+	}
+
+	// ★ **두 번째가 이 시험의 핵심이다.** "만들어 놓고 거절한다"로 고치면 첫 호출은
+	// 거절이지만 카드는 남고, 그래서 두 번째 호출은 그 카드를 찾아 **닫아 버린다.**
+	// 조회 전용 갈래(FindSession)를 써야만 둘 다 거절이다.
+	code2, out2 := h.run("", "close", "--cc-session", "cc-that-has-no-card")
+	if code2 == 0 {
+		t.Fatalf("두 번째 호출이 통과했다 — 첫 호출이 카드를 남긴 것이다(만들고 거절했다):\n%s", out2)
+	}
+}
+
 // 닫은 뒤에도 신호 하나면 살아난다 — store 의 안전핀이 cmd 계층에서도 도는지 본다.
 func TestClosedSessionRevivesOnNextBeat(t *testing.T) {
 	h := newHarness(t)

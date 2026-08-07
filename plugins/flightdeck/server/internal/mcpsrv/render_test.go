@@ -532,7 +532,7 @@ func heavyTail(overlaps, twins int) string {
 	}
 	return RenderTail(TailInput{
 		Now: t0, NotesObserved: true, OverlapsObserved: true, Overlaps: ol,
-		Banner: RenderDrift(tw, "ce5c2e79-767f-4e85-8893-52a0219f6d9a", ""),
+		Banner: RenderDrift(tw, "s-mine", "ce5c2e79-767f-4e85-8893-52a0219f6d9a", ""),
 	})
 }
 

@@ -507,7 +507,25 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).")
 		return 1
 	}
+	// ★ **먼저 조회한다. 없으면 만들지 않는다.**
+	//
+	// 아래 OpenSession 은 3중키 upsert 라, 이 좌표에 그 cc 의 카드가 없으면 **새 카드를
+	// 만들고** 그것을 닫는다. 실물로 그 일이 났다 — board 가 인쇄한 「이 MCP 프로세스가
+	// 카드를 연 값」을 그대로 넣었더니 그 호출이 카드를 하나 만들어 done 으로 내렸고 실제
+	// 카드는 그대로 열려 있었다. 새 카드는 선점이 0건이라 아래 선점 가드도 안 걸린다.
+	// 즉 진단하려는 사람이 카드를 하나씩 더 만들면서 진단한다.
+	//
+	// 조회 전용 갈래가 이미 있다(FindSession — 훅의 복구 갈래가 같은 이유로 쓴다).
+	if _, ferr := a.FindSession(ctx, cc); ferr != nil {
+		fmt.Fprintf(out, "안 닫았다 — 이 좌표(머신·워크트리)에 cc=%s 인 카드가 없다.\n", clip(cc, 64))
+		fmt.Fprintln(out, "닫을 카드를 못 찾았을 뿐이고, 여기서 카드를 만들지는 않는다.")
+		fmt.Fprintln(out, "보드의 카드 id 로 확인해라 — cc 는 /clear 때 rekey 로 옮겨가지만 카드 id 는 보존된다.")
+		return 1
+	}
+
 	// 선점 목록은 이 응답에 실려 온다. 따로 묻지 않는다 — 두 번 물으면 그 사이가 창이다.
+	// (위 조회는 **존재 여부**만 본다. 카드는 지워지지 않으므로 그 사이에 사라질 수 없고,
+	// 선점은 여전히 이 응답 하나로 읽으므로 원래의 창은 안 생긴다.)
 	res, _, err := a.OpenSession(ctx, cc, "")
 	if err != nil {
 		fmt.Fprintf(out, "세션 좌표를 못 얻어 닫지 못했다: %v\n", err)
