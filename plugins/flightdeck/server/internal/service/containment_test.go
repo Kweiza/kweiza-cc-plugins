@@ -173,7 +173,7 @@ func TestBeatKeepsEveryPathInsideTheWorktree(t *testing.T) {
 	// 항목 fd-footprint-paths-keep-the-worktree-prefix 가 그 경로를 트리 **밖**으로
 	// 옮겼다. 파일시스템 포함(filepath.Rel)으로는 자손이지만 git 포함으로는 다른 트리이고,
 	// 그 좌표로 저장된 발자국은 어떤 선언 경로와도 원리적으로 안 겹쳐 outside 처방을
-	// 100% 발화시켰다(실측 행 107건 · 인용 처방 19건).
+	// 100% 발화시켰다(실측 행 111건 · 인용 처방 22건).
 	//
 	// 새 계약은 footprint_worktree_prefix_test.go 가 세 갈래로 잠근다 — 버려지는 것 ·
 	// 카드가 그 워크트리 자체면 살아남는 것 · 중첩 배치. 이 시험은 원래 목적(관문이

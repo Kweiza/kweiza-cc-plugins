@@ -145,7 +145,7 @@ var destructiveExempt = map[int]exemption{
 		why: "footprint 는 D(파생) 계층이고 참조하는 표가 없다. 지우는 행은 judge.comparablePath 를 " +
 			"통과해 grounded=true 로 세어지면서 pathRelated 에서는 성분 0번부터 갈려 100% 안 덮인 " +
 			"것으로 인용되는 행이다 — 배제된 것이 아니라 **읽혀서 거짓 증거가 된다**(실측: 인용 처방 " +
-			"19건, 전부 outside: 키). 접두를 벗겨 살리면 형제 워크트리의 같은 이름 파일이 한 문자열로 " +
+			"22건, 전부 outside: 키). 접두를 벗겨 살리면 형제 워크트리의 같은 이름 파일이 한 문자열로 " +
 			"합쳐져 4530e3c 의 판단과 DESIGN §3 이 없앤 조상 트리 상속이 되살아난다. 유입은 같은 " +
 			"회차의 관문(service/session.go 의 judge.CarriesWorktreePrefix)이 막았고, 생산 문이 " +
 			"Beat 하나뿐이라 그것으로 0이 된다. 판올림 전 VACUUM INTO 백업이 자동으로 뜬다. " +

@@ -375,7 +375,7 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 			// 어떤 선언 경로와도 **원리적으로** 안 겹친다(pathRelated 는 성분 0번부터 맞추는데
 			// `.flightdeck` vs `plugins` 에서 즉시 갈린다). 더 나쁜 것은 절대경로가 아니라
 			// judge.comparablePath 를 통과한다는 것이다 — 비교 가능한 척하며 100% 안 덮인
-			// 것으로 세어진다. 실측: 그런 행 107건, 그것을 인용한 처방 19건 전부 `outside:` 키.
+			// 것으로 세어진다. 실측: 그런 행 111건, 그것을 인용한 처방 22건 전부 `outside:` 키.
 			//
 			// 규율은 위와 같다 — **버리되 남긴다**(dropped_paths 와 경고 로그로 간다).
 			if judge.CarriesWorktreePrefix(rel) {
