@@ -56,15 +56,15 @@ func afterSchema() map[string]any {
 func followupSchema() map[string]any {
 	return map[string]any{
 		"type":        "array",
-		"description": "이번에 나온 후속. 같은 호출에 넣으면 판단과 FK 로 이어진다",
+		"description": "이번에 나온 후속. 같은 호출에 넣으면 판단에 이어진다",
 		"items": obj(map[string]any{
-			"id":     str("항목 id — 브랜치 이름이 된다"),
-			"title":  str("한 줄 제목"),
-			"body":   str("무엇을 해야 하는가"),
+			"id":     str("항목 id — 브랜치 이름이 된다. **이미 있는 id 면 만들지 않고 잇는다**(이 세션이 이 선점 뒤 만든 열린 항목만 — 없는 id 면 새로 만드니 제목·본문이 필요하다)"),
+			"title":  str("한 줄 제목. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
+			"body":   str("무엇을 해야 하는가. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
 			"paths":  strArr("이 항목이 건드릴 경로"),
 			"labels": strArr("표시 전용 꼬리표"),
 			"after":  afterSchema(),
-		}, "id", "title", "body"),
+		}, "id"),
 	}
 }
 

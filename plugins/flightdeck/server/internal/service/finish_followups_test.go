@@ -52,10 +52,21 @@ func TestFinishStopsOnceWhenFollowupsFellOnTheFloor(t *testing.T) {
 		t.Fatalf("후속을 바닥에 떨어뜨렸는데 통과했다")
 	}
 	msg := err.Error()
-	for _, want := range []string{"spun-off-axis", "followups"} {
+	// ★ 문구를 **문장 단위로** 잠근다. 지금까지 "spun-off-axis"·"followups" 두 조각만 봤는데,
+	//   그 사이 안내 본문이 거짓이 되어도(실제로 그랬다 — "지금 followups 로 옮길 수 없다")
+	//   시험은 조용히 초록이었다.
+	for _, want := range []string{"spun-off-axis", "followups", "id 만"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("거절 사유에 %q 가 없다:\n%s", want, msg)
 		}
+	}
+	if strings.Contains(msg, "옮길 수 없다") {
+		t.Fatalf("안내가 아직 '옮길 수 없다'고 말한다 — 이제 이어진다:\n%s", msg)
+	}
+	// ★ 이 브랜치의 존재 이유가 "judgment_link.target_id 에 REFERENCES 가 없다"(schema.sql:265)
+	//   인데, 같은 응답이 "FK 로 이어진다"고 말하면 우리가 없앤 거짓말 하나를 우리가 되살린다.
+	if strings.Contains(msg, "FK") {
+		t.Fatalf("안내가 아직 'FK 로 이어진다'고 말한다 — judgment_link.target_id 에는 REFERENCES 가 없다(schema.sql:265):\n%s", msg)
 	}
 
 	// ② 두 번째는 통과한다. 이 단정이 관문을 벽과 가른다.

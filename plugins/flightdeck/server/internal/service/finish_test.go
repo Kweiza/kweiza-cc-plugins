@@ -619,136 +619,203 @@ func TestFinishAcceptsFollowupWithGoodCoordinatePaths(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 후속 id 충돌 — 판단은 롤백되지 않는다
+// 후속 id 충돌 — 부적격이면 tx 전에 거절하고 아무것도 안 쓴다
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 후속 id 가 이미 있으면 그 후속만 건너뛰고 **판단은 남는다.**
+// TestFinishWritesNothingWhenAFollowupIsIneligible 은 **옛 계약을 뒤집은 자리**다.
 //
-// ★ 이 축의 전부다. 후속 중복은 복구 가능하다 — 같은 id 의 항목이 이미 존재하므로
-// "후속이 유입되지 않은" 상태가 아니다. 판단 본문은 그 세션의 머릿속에만 있어
-// 롤백되면 영영 사라진다. 비대칭이 명확하므로 흡수하는 쪽이 맞다.
+// 옛 계약: 후속 id 가 이미 있으면 그 후속만 건너뛰고 판단은 무조건 지킨다.
+// 그 규율은 흡수가 **트랜잭션 안**에 있었기 때문이다 — 거기서 거절하면 판단이 함께 죽는다.
 //
-// 같은 함수의 ④(자원 반납)가 이미 같은 판단을 내렸다 — 남이 이미 반납했거나
-// 회수했으면 finish 를 실패시키지 않고 원장에만 남긴다.
-func TestFinishKeepsJudgmentWhenFollowupIDAlreadyExists(t *testing.T) {
+// 새 계약: 자격 판정이 트랜잭션 **밖**으로 나왔으므로 거절해도 아무것도 안 쓴다.
+// 판단 본문은 아직 세션 손에 있고 그 후속만 빼면 그대로 다시 부를 수 있다 —
+// title·body 누락 거절과 같은 자리·같은 성격이다. 그 대가로 오타 하나가 남의 항목을
+// 내 판단에 잇는 문이 닫힌다(그 문은 지금 열려 있다 — 링크는 이미 걸리고 있었다).
+//
+// (단정 주의: claimed() 는 Pick→ClaimItem 을 거치므로 항목 상태는 이 시점에 이미 'claimed' 다.
+//
+//	"안 썼다" 를 볼 때 'open' 을 기대하면 구현이 맞아도 빨간불이 뜬다 — 실측으로 확인했다.)
+func TestFinishWritesNothingWhenAFollowupIsIneligible(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
-	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저 끝내는 세션")
-	b := openSession(t, s, "p", repo, wt, "cc-b", "나중에 끝내는 세션")
-	addItem(t, s, "p", "collide-a", nil, nil)
-	addItem(t, s, "p", "collide-b", nil, nil)
-	claimed(t, s, "p", a.Session.ID, "collide-a")
-	claimed(t, s, "p", b.Session.ID, "collide-b")
+	author := openSession(t, s, "p", repo, repo, "cc-a", "트랙A")
+	me := openSession(t, s, "p", repo, wt, "cc-b", "트랙B")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", author.Session.ID, "shared-followup")
 
-	if _, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: a.Session.ID, ItemID: "collide-a", Outcome: model.ItemDone,
-		Title: "A 의 마무리", Body: "A 의 판단",
-		Followups: []FollowupInput{{ID: "shared-followup", Title: "후속", Body: "A 가 만들었다"}},
-	}); err != nil {
-		t.Fatalf("A 의 마무리가 실패했다: %v", err)
-	}
-
-	// 대조 성립 단정 — 읽기 전에 먼저.
-	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'shared-followup'`); n != 1 {
-		t.Fatalf("사전 조건이 깨졌다 — A 의 후속이 %d건이다", n)
-	}
-
-	const bBody = "B 의 판단 — 이 본문은 어디에도 파생될 수 없다"
 	_, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: b.Session.ID, ItemID: "collide-b", Outcome: model.ItemDone,
-		Title: "B 의 마무리", Body: bBody,
-		Followups: []FollowupInput{{ID: "shared-followup", Title: "같은 이름", Body: "B 도 같은 이름을 골랐다"}},
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+		Followups: []FollowupInput{{ID: "shared-followup", Title: "제목", Body: "본문"}},
 	})
-	if err != nil {
-		t.Fatalf("후속 id 가 겹쳤다고 마무리 전체가 실패했다 — 복구 불가한 판단이 사라진다: %v", err)
+	if err == nil {
+		t.Fatalf("남이 만든 항목을 후속으로 실었는데 통과했다")
 	}
-
-	if n := countRows(t, st, `SELECT count(*) FROM judgment WHERE body = ?`, bBody); n != 1 {
-		t.Fatalf("B 의 판단이 %d건 남았다(1이어야 한다) — 롤백이 원리적으로 파생 불가한 자산을 지웠다", n)
+	// 자격 관문의 고유 문구 — 다른 관문이 먼저 거절하면 아래 단정들이 헛돈다.
+	if !strings.Contains(err.Error(), "이을 자격이 없다") {
+		t.Fatalf("자격 축이 아닌 다른 관문이 먼저 거절했다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
+		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 반쪽 상태가 없어야 한다", n)
+	}
+	// 'open' 이 아니라 'claimed' 다 — 위 claimed() 가 Pick 을 거쳐 ClaimItem 을 부르고,
+	// ClaimItem(store/item.go:645)이 항목 상태를 open→claimed 로 이미 옮겨 놨다.
+	// 여기서 볼 것은 "거절이 그 상태를 건드리지 않았다" 이지 "아직 open 이다" 가 아니다.
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'batch7' AND state = 'claimed'`); n != 1 {
+		t.Fatalf("거절인데 항목이 여전히 이 세션 손에 있지 않다 — 그 후속만 빼고 그대로 다시 부를 수 있어야 한다")
 	}
 }
 
-// 건너뛴 후속은 **응답에 실린다.** 흡수와 발화는 한 쌍이다.
+// TestFinishRefusesTheWholeCallWhenOneFollowupIsIneligible 은 **부분 성공을 기각한 자리**다.
 //
-// 조용히 넘기면 세션은 후속이 들어간 줄 알고 떠나고, 그 후속은 남이 만든 다른 항목이다.
-// 그러면 이 함수는 "판단을 지켰다"면서 더 나쁜 거짓을 만든다.
-func TestFinishReportsSkippedFollowupInsteadOfSwallowingIt(t *testing.T) {
-	s, _ := newSvc(t)
+// 옛 계약은 섞인 호출에서 정상 후속만 살렸다. 그러면 오타 하나가 "후속 1건 등록" 안에
+// 조용히 섞여 나가고, 세션은 자기가 실은 둘 중 하나가 다른 뜻이 된 것을 못 본다.
+// 지금은 전체를 세운다 — 되부르는 비용은 한 번이고, 그 한 번이 무엇이 틀렸는지 이름을 낸다.
+func TestFinishRefusesTheWholeCallWhenOneFollowupIsIneligible(t *testing.T) {
+	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
-	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저")
-	b := openSession(t, s, "p", repo, wt, "cc-b", "나중")
-	addItem(t, s, "p", "report-a", nil, nil)
-	addItem(t, s, "p", "report-b", nil, nil)
-	claimed(t, s, "p", a.Session.ID, "report-a")
-	claimed(t, s, "p", b.Session.ID, "report-b")
+	author := openSession(t, s, "p", repo, repo, "cc-a", "트랙A")
+	me := openSession(t, s, "p", repo, wt, "cc-b", "트랙B")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+	addItemAs(t, s, "p", author.Session.ID, "taken-id")
 
-	if _, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: a.Session.ID, ItemID: "report-a", Outcome: model.ItemDone,
-		Title: "A", Body: "A 의 판단",
-		Followups: []FollowupInput{{ID: "taken-id", Title: "후속", Body: "A 가 만들었다"}},
-	}); err != nil {
-		t.Fatalf("A 의 마무리가 실패했다: %v", err)
-	}
-
-	res, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: b.Session.ID, ItemID: "report-b", Outcome: model.ItemDone,
-		Title: "B", Body: "B 의 판단",
+	_, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
 		Followups: []FollowupInput{
-			{ID: "taken-id", Title: "겹친 것", Body: "B 도 같은 이름"},
-			{ID: "fresh-id", Title: "안 겹친 것", Body: "이건 새 것이다"},
+			{ID: "taken-id", Title: "제목", Body: "본문"},
+			{ID: "fresh-id", Title: "제목", Body: "본문"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("B 의 마무리가 실패했다: %v", err)
+	if err == nil {
+		t.Fatalf("부적격 후속이 섞였는데 통과했다")
 	}
-
-	if len(res.SkippedFollowups) != 1 || res.SkippedFollowups[0] != "taken-id" {
-		t.Fatalf("건너뛴 후속이 응답에 없다 — 세션은 안 들어간 것을 들어간 줄 안다: %+v", res.SkippedFollowups)
+	if !strings.Contains(err.Error(), "taken-id") {
+		t.Fatalf("거절 사유가 어느 후속인지 안 낸다:\n%s", err.Error())
 	}
-	// 안 겹친 후속은 정상적으로 들어간다. 하나가 겹쳤다고 나머지를 버리지 않는다.
-	if len(res.Followups) != 1 || res.Followups[0].ID != "fresh-id" {
-		t.Fatalf("안 겹친 후속이 안 들어갔다: %+v", res.Followups)
+	// 자격 관문의 고유 문구 — 아래 "정상 후속도 안 만들어졌다" 단정은 어떤 거절에서도 참이라,
+	// 이 줄이 없으면 **왜** 전체가 섰는지를 이 시험이 안 잠근다.
+	if !strings.Contains(err.Error(), "이을 자격이 없다") {
+		t.Fatalf("자격 축이 아닌 다른 관문이 먼저 거절했다:\n%s", err.Error())
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'fresh-id'`); n != 0 {
+		t.Fatalf("정상 후속이 %d건 만들어졌다 — 전체가 거절돼야 한다", n)
 	}
 }
 
-// 건너뛴 사실은 **원장에도** 남는다. 응답은 그 세션만 보고 사라진다.
-func TestFinishLogsSkippedFollowupToLedger(t *testing.T) {
+// TestFinishNeverLosesAJudgmentWhenTwoSessionsRaceTheSameFollowupID 는 경합의 **끝**을 잠근다.
+//
+// 자격 판정은 트랜잭션 **밖**이고 링크는 **안**이다. 그래서 두 세션이 같은 새 id 를 동시에
+// 후속으로 실으면 끝이 둘 중 하나이고, **어느 쪽이 나오는지는 스케줄러가 정한다** —
+// 시험이 고를 수 없다:
+//
+//	ⓐ 둘 다 classifyFollowups 를 지난 뒤에 커밋이 붙는다 → 진 쪽은 tx 안에서
+//	  ConflictDuplicate 를 만나 **그 후속만 건너뛰고**(SkippedFollowups) 판단은 산다.
+//	  흡수 갈래(finish.go 의 ②)가 실제로 밟히는 것은 이 경우다.
+//	ⓑ 이긴 쪽이 커밋까지 마친 뒤에 진 쪽이 분류를 돈다 → 진 쪽에게 그 id 는 이미
+//	  "있는 항목"이고 이을 자격이 없으므로 **트랜잭션 진입 전에 거절**된다.
+//
+// ★ **ⓑ 를 "판단 소실"이라고 부르면 안 된다.** 거절은 tx 진입 전이라 아무것도 안 쓰고,
+//
+//	판단 본문은 아직 세션 손에 있어 그 후속만 빼면 그대로 되부를 수 있다 —
+//	title·body 누락 거절과 같은 자리·같은 성격이다. 이 시험이 잠그는 것은 "둘 다 성공한다"가
+//	아니라 **반쪽 상태가 없다**는 것이다.
+//
+// ★ **갈래를 단정하지 않는 이유는 실측이다.** 갈래를 가르는 것은 **suite 부하가 아니라
+//
+//	-race 자체다** — 개정 전 주석이 "전체 suite 부하에서는 ⓐ" 라고 적었던 것은 틀렸다.
+//	실측(리뷰 + 재확인, -run … -count=24~40 여러 배치): `-race` 로 돌리면 사실상 항상 ⓑ
+//	(63/64), `-race` 없이 돌리면 사실상 항상 ⓐ(63/64). 원인은 -race 계측이 두 고루틴의
+//	분류→커밋 구간을 늘려 서로의 tx 밖 classifyFollowups 를 갈라놓기 때문으로 보인다 —
+//	suite 안의 다른 시험이 도는 것과 무관하다. 그래서 "둘 다 성공한다"로 단정하면 **관문이
+//	-race 로 도는지 여부에 따라** 빨개지고, 원인이 시험이 아니라 계약이라 다음 세션이
+//	시험만 고치다 이 설계의 진짜 모양을 덮는다.
+//
+// ★ **그래도 흡수의 산출은 잠근다 — 조건부로.** 이 시험이 지우는
+//
+//	TestFinishLogsSkippedFollowupToLedger 가 원장 축(item.followup_skipped 의 건수와
+//	**어느** 후속인지)을 보던 유일한 자리였다. 갈래가 tx 안 전용이 됐다고 축까지 사라지면
+//	그 발신이 통째로 죽거나 payload 에서 좌표가 빠져도 전 스위트가 초록이다. 그래서
+//	"응답으로 건너뛰었다고 말한 세션 수" 를 세고, 원장 기록이 **정확히 그 수만큼** 있는지를
+//	본다 — ⓑ 만 나온 회차에서는 둘 다 0이 되어 유령 기록도 함께 잡힌다.
+func TestFinishNeverLosesAJudgmentWhenTwoSessionsRaceTheSameFollowupID(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
-	a := openSession(t, s, "p", repo, wt, "cc-a", "먼저")
-	b := openSession(t, s, "p", repo, wt, "cc-b", "나중")
-	addItem(t, s, "p", "ledger-a", nil, nil)
-	addItem(t, s, "p", "ledger-b", nil, nil)
-	claimed(t, s, "p", a.Session.ID, "ledger-a")
-	claimed(t, s, "p", b.Session.ID, "ledger-b")
+	a := openSession(t, s, "p", repo, wt, "cc-a", "트랙A")
+	b := openSession(t, s, "p", repo, repo, "cc-b", "트랙B")
+	addItem(t, s, "p", "item-a", nil, nil)
+	addItem(t, s, "p", "item-b", nil, nil)
+	claimed(t, s, "p", a.Session.ID, "item-a")
+	claimed(t, s, "p", b.Session.ID, "item-b")
 
-	if _, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: a.Session.ID, ItemID: "ledger-a", Outcome: model.ItemDone,
-		Title: "A", Body: "A 의 판단",
-		Followups: []FollowupInput{{ID: "ledger-dup", Title: "후속", Body: "A 가 만들었다"}},
-	}); err != nil {
-		t.Fatalf("A 의 마무리가 실패했다: %v", err)
+	fin := func(sessionID, itemID string) (FinishResult, error) {
+		return s.Finish(ctx(), FinishInput{
+			Project: "p", SessionID: sessionID, ItemID: itemID,
+			Outcome: model.ItemDone, Title: "끝냈다", Body: "판단 본문",
+			Followups: []FollowupInput{{ID: "twin-race", Title: "제목", Body: "본문"}},
+		})
 	}
+	type outcome struct {
+		res FinishResult
+		err error
+	}
+	outs := make(chan outcome, 2)
+	go func() { r, e := fin(a.Session.ID, "item-a"); outs <- outcome{r, e} }()
+	go func() { r, e := fin(b.Session.ID, "item-b"); outs <- outcome{r, e} }()
 
+	ok, skipped := 0, 0
+	for i := 0; i < 2; i++ {
+		o := <-outs
+		if o.err == nil {
+			ok++
+			// 흡수 갈래(ⓐ)를 밟았으면 응답이 **반드시** 그 사실을 말한다. 조용히 넘기면
+			// 세션은 후속이 들어간 줄 알고 떠나는데 그 id 의 항목은 남이 만든 다른 것이다.
+			if len(o.res.SkippedFollowups) == 1 && o.res.SkippedFollowups[0] == "twin-race" {
+				skipped++
+			} else if len(o.res.SkippedFollowups) != 0 {
+				t.Fatalf("건너뛴 후속 목록이 %v 다 — twin-race 하나이거나 비어 있어야 한다",
+					o.res.SkippedFollowups)
+			}
+			continue
+		}
+		// 거절이 아닌 오류는 tx 안에서 올라온 것이고, 그 갈래는 ① 의 판단을 함께 롤백한다.
+		var refused *RefusedError
+		if !errors.As(o.err, &refused) {
+			t.Fatalf("경합이 거절 아닌 오류로 죽었다 — 이 모양이 판단을 잃는다: %v", o.err)
+		}
+		if !strings.Contains(o.err.Error(), "twin-race") {
+			t.Fatalf("거절이 어느 후속인지 안 낸다:\n%s", o.err.Error())
+		}
+	}
+	if ok == 0 {
+		t.Fatalf("둘 다 거절됐다 — 먼저 커밋한 쪽은 반드시 성공해야 한다")
+	}
+	// ★ 판단 수 == 성공 수. 이것이 이 시험의 심장이다 — 성공했는데 판단이 없으면
+	//   롤백이 파생 불가한 자산을 지운 것이고, 거절했는데 판단이 있으면 반쪽 상태가 남은 것이다.
+	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != ok {
+		t.Fatalf("판단이 %d건인데 성공한 마무리는 %d건이다 — 성공마다 하나, 거절은 0건이어야 한다", n, ok)
+	}
+	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'twin-race'`); n != 1 {
+		t.Fatalf("같은 id 의 항목이 %d건이다 — 정확히 하나여야 한다", n)
+	}
+	// 거절당한 세션의 항목은 **안 닫힌 채로** 남아야 되부를 수 있다(선점은 유지되므로 claimed 다).
 	if n := countRows(t, st,
-		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped'`); n != 0 {
-		t.Fatalf("사전 조건이 깨졌다 — 건너뛴 기록이 이미 %d건 있다", n)
+		`SELECT count(*) FROM item WHERE id IN ('item-a','item-b') AND state = 'done'`); n != ok {
+		t.Fatalf("닫힌 항목이 %d건인데 성공은 %d건이다 — 거절당한 항목은 안 닫혀 있어야 한다", n, ok)
 	}
-
-	if _, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: b.Session.ID, ItemID: "ledger-b", Outcome: model.ItemDone,
-		Title: "B", Body: "B 의 판단",
-		Followups: []FollowupInput{{ID: "ledger-dup", Title: "겹친 것", Body: "B 도 같은 이름"}},
-	}); err != nil {
-		t.Fatalf("B 의 마무리가 실패했다: %v", err)
-	}
-
+	// ★ **건너뜀은 원장에도 남는다.** 응답 SkippedFollowups 는 그 세션과 함께 사라지므로,
+	//   나중에 "왜 이 후속이 안 들어갔나"를 되짚을 수 있는 자리는 원장뿐이다.
+	//   갈래를 단정하지 않으려고 기대값을 위에서 센 skipped 로 잡는다 — ⓐ 면 1, ⓑ 면 0이다.
 	if n := countRows(t, st,
-		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped'`); n != 1 {
-		t.Fatalf("건너뛴 사실이 원장에 %d건 남았다(1이어야 한다) — 응답은 그 세션과 함께 사라진다", n)
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped'`); n != skipped {
+		t.Fatalf("응답으로 건너뛰었다고 말한 세션은 %d개인데 원장 기록은 %d건이다 — 응답과 원장이 갈렸다",
+			skipped, n)
 	}
 	if n := countRows(t, st,
-		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped' AND payload LIKE '%ledger-dup%'`); n != 1 {
-		t.Fatalf("원장 기록에 **어느** 후속이 겹쳤는지가 없다 — 좌표 없는 기록은 나중에 못 되짚는다")
+		`SELECT count(*) FROM event WHERE kind = 'item.followup_skipped' AND payload LIKE '%twin-race%'`); n != skipped {
+		t.Fatalf("원장 기록에 **어느** 후속을 건너뛰었는지가 없다 — 좌표 없는 기록은 나중에 못 되짚는다(기대 %d건, 실제 %d건)",
+			skipped, n)
 	}
 }
