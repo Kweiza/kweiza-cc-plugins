@@ -1,8 +1,10 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
@@ -185,11 +187,14 @@ func TestSiblingClaimDoesNotTurnOnOutside(t *testing.T) {
 	if err != nil {
 		t.Fatalf("처방 실패: %v", err)
 	}
+	// ★ 키는 `outside:<경로>` 다(judge.PrescribeOutside + ":" + p). `p.Key == "outside"` 로
+	// 쓰면 **원리적으로 참이 안 되어** 이 단정이 헛돈다 — 처음에 그렇게 썼고, 그 상태로는
+	// 위 ★ 제약이 코드가 아니라 주석으로만 지켜지고 있었다.
 	for _, p := range res.All {
-		if p.Key == "outside" {
-			t.Fatalf("형제의 선언 경로를 기준으로 outside 가 켜졌다:\n  %s\n"+
+		if strings.HasPrefix(p.Key, judge.PrescribeOutside+":") {
+			t.Fatalf("형제의 선언 경로를 기준으로 outside 가 켜졌다:\n  %s (키 %s)\n"+
 				"형제 선점은 경로를 안 실어야 한다 — 실으면 실측상 82개 발자국이 한 판에 켜진다\n전체: %+v",
-				p.Reason, res.All)
+				p.Reason, p.Key, res.All)
 		}
 	}
 	// 이 카드 자신은 아무것도 안 쥐었지만 형제가 쥐었으므로 unclaimed 도 조용해야 한다.
