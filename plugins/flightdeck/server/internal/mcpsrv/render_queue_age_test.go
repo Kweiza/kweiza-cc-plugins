@@ -73,6 +73,43 @@ func TestBoardQueueAgeUsesBoardClockNotWallClock(t *testing.T) {
 	}
 }
 
+// 티클러는 굶김 축에서 빠진다 — 기한까지 늙는 것이 정상인 항목이 굶김 절을 상시
+// 점등시키면 판별력이 0이 된다(§4). 대신 나이 옆에 이름을 얻는다: 표식 없는 긴
+// 나이가 "잊힌 항목"으로 읽히면 빠진 것이 침묵이 된다.
+func TestBoardQueueExcludesTicklerFromStarvation(t *testing.T) {
+	v := service.BoardView{
+		Project: model.Project{ID: "sample-platform", DefaultBranch: "main"},
+		At:      t0, Window: 8 * time.Hour,
+		OpenItems: []model.Item{
+			{ID: "tick-due", Title: "기한 대기", CreatedAt: t0.Add(-40 * time.Hour),
+				Labels: []string{"tickler"}},
+			{ID: "fresh-one", Title: "최근 것", CreatedAt: t0.Add(-1 * time.Hour)},
+		},
+	}
+	brief := RenderBoard(v, BoardRenderOptions{Now: t0})
+	if strings.Contains(brief, FormatAge(judge.StarvationAge)+"+") {
+		t.Fatalf("티클러 하나뿐인데 굶김 절이 켜졌다 — 상시 점등이 된다:\n%s", brief)
+	}
+	if strings.Contains(brief, FormatAge(40*time.Hour)) {
+		t.Fatalf("티클러의 나이가 최고령으로 나왔다 — 기한 대기가 방치로 읽힌다:\n%s", brief)
+	}
+
+	detail := RenderBoard(v, BoardRenderOptions{Now: t0, Detail: true})
+	if strings.Contains(detail, "★"+FormatAge(40*time.Hour)) {
+		t.Fatalf("티클러 항목에 ★ 가 붙었다:\n%s", detail)
+	}
+	if !strings.Contains(detail, "티클러") {
+		t.Fatalf("티클러가 이름을 안 얻었다 — 빠진 것이 침묵이 된다:\n%s", detail)
+	}
+
+	// 대조: 비티클러가 임계를 넘기면 굶김 절과 ★ 는 그대로 산다.
+	v.OpenItems[0].Labels = nil
+	brief = RenderBoard(v, BoardRenderOptions{Now: t0})
+	if !strings.Contains(brief, FormatAge(judge.StarvationAge)+"+ 1건") {
+		t.Fatalf("대조가 깨졌다 — 비티클러 굶김 절이 사라졌다:\n%s", brief)
+	}
+}
+
 // 굶은 것이 0건이면 그 절을 **안 낸다**.
 //
 // 상시 점등된 경고는 판별력이 0이 된다 — 이 저장소가 겹침 알림에서 이미 내린

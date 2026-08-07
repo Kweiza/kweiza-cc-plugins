@@ -36,6 +36,7 @@ type Candidate struct {
 	// Needs 는 이 항목을 하려면 잡아야 하는 자원이다(.flightdeck.yaml 의 resources).
 	// model.Item 에 이 축이 없어 여기에 둔다 — labels 로 대신할 수 없다.
 	// labels 는 표시 전용이고 **어떤 배제 판정에도 안 쓴다**(설계 §5).
+	// 유일한 예외는 굶김 축의 티클러(tickler.go)다 — 그것도 배제가 아니라 승격의 부재다.
 	Needs []string
 
 	// Overlaps 는 **탈락 사유가 아니다.** 이 항목의 경로가 살아 있는 다른 세션과 겹친다는
