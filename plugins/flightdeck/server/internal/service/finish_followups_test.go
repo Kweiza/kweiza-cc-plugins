@@ -68,6 +68,14 @@ func TestFinishStopsOnceWhenFollowupsFellOnTheFloor(t *testing.T) {
 	if strings.Contains(msg, "FK") {
 		t.Fatalf("안내가 아직 'FK 로 이어진다'고 말한다 — judgment_link.target_id 에는 REFERENCES 가 없다(schema.sql:265):\n%s", msg)
 	}
+	// ★ 트리아지 — 이 규율의 **유일한 거르는 기준**이 이 표면(거절-시점, 준수 실측 유일)에
+	//   실린다. 빠지면 규율은 다시 "실어라"만 말하는 10:0 불균형으로 돌아간다(2026-08-07 실측:
+	//   그 불균형의 관문이 add→followups 전환만 만들고 총유입을 못 줄였다).
+	for _, want := range []string{"본문이 곧 패치", "지금 못 하는 이유"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("거절 안내에 거르는 기준(%q)이 없다:\n%s", want, msg)
+		}
+	}
 
 	// ② 두 번째는 통과한다. 이 단정이 관문을 벽과 가른다.
 	if err := finishNoFollowups(s, me.Session.ID, "batch7"); err != nil {
