@@ -133,11 +133,13 @@ func TestSiblingClaimedItemsExcludesMyOwnCard(t *testing.T) {
 	}
 }
 
-// TestSiblingClaimedItemsIgnoresAnEmptyConversation 은 **빈 cc 는 같은 대화가 아니다**를 잠근다.
+// TestSiblingClaimedItemsDropsAReleasedClaim 은 **반납한 선점은 형제 축에서 사라진다**를 잠근다.
 //
-// judge.sameConversation 이 같은 규칙을 쓴다. 저장층과 판정층이 여기서 갈리면 그 어긋남은
-// 어느 화면에도 안 뜬다 — 빈 cc 카드 둘이 서로의 선점을 보게 되어 배타가 조용히 새어 나간다.
-func TestSiblingClaimedItemsIgnoresAnEmptyConversation(t *testing.T) {
+// ★ 이 그물이 없으면 `c.released_at IS NULL` 을 지워도 전 시험이 초록이다. 그리고 그것이
+// 뚫리면 대가가 가장 비싸다 — 선점에 만료가 없으므로(schema.sql: 자동 반납이 없다) 옛날에
+// 반납한 항목 하나가 그 대화의 미선점 처방을 **영구히** 끈다. 이 수리가 만들 수 있는
+// 가장 나쁜 거짓 음성이고, 그것을 막는 유일한 자리다.
+func TestSiblingClaimedItemsDropsAReleasedClaim(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	seed(t, s, "p")
@@ -146,12 +148,34 @@ func TestSiblingClaimedItemsIgnoresAnEmptyConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.SiblingClaimedItems(ctx, "p", "m1", "", me.ID)
+	sib, _, err := s.OpenSession(ctx, "p", "m1", "/w/tree2", "cc-A", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddItem(ctx, model.Item{
+		Project: "p", ID: "it-x", Title: "t", Body: "b", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimItem(ctx, "p", "it-x", sib.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 대조 전제: 반납 전에는 분명히 형제로 보인다.
+	if got, _ := s.SiblingClaimedItems(ctx, "p", "m1", "cc-A", me.ID); len(got) != 1 {
+		t.Fatalf("전제가 깨졌다 — 살아 있는 형제 선점이 안 보인다: %v", got)
+	}
+
+	if err := s.SetItemState(ctx, "p", "it-x", model.ItemDone, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SiblingClaimedItems(ctx, "p", "m1", "cc-A", me.ID)
 	if err != nil {
 		t.Fatalf("형제 선점 조회 실패: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("빈 cc 인데 형제를 찾았다: %v", got)
+	if len(got) != 0 {
+		t.Fatalf("반납된 선점이 형제로 살아 있다: %v\n"+
+			"선점에 만료가 없으므로 이것이 뚫리면 그 대화의 미선점 처방이 영구히 꺼진다", got)
 	}
 }
 

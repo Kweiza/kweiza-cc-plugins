@@ -871,8 +871,11 @@ func (s *Store) ReleasedItems(ctx context.Context, sessionID string, since time.
 // 회수가 가장 필요한 카드가 먼저 사라진다. 여기서도 조용해진 형제 카드가 창 밖으로 빠지면
 // 그 순간 이 대화 전체가 다시 거짓 양성을 받는다.
 //
-// ★ 빈 cc 는 빈 목록이다. 빈 값끼리는 같은 대화가 아니다 — judge.sameConversation 이
-// 같은 규칙을 쓰고, 그 규칙이 저장층과 갈리면 어긋남이 어느 화면에도 안 뜬다.
+// ★ 빈 cc 를 막는 가드를 **일부러 안 뒀다.** judge.sameConversation 은 빈 값끼리를 같은
+// 대화로 안 보는데, 여기서 같은 규칙을 한 번 더 쓰면 시험할 수 없는 방어가 된다 —
+// OpenSession 이 3중키 전부를 요구하므로(store/session.go:38) 세션 표에 빈 cc 행이
+// 존재할 수 없고, 조인이 저절로 빈 목록을 낸다. 가드를 지워도 죽는 시험이 없다는 것을
+// 되돌림으로 확인했다. 규칙이 갈릴 자리가 아니라 도달할 수 없는 자리였다.
 func (s *Store) SiblingClaimedItems(ctx context.Context, project, machineID, cc, excludeSessionID string) ([]string, error) {
 	return s.siblingClaimIDs(ctx, `c.released_at IS NULL`, project, machineID, cc, excludeSessionID)
 }
@@ -891,9 +894,6 @@ func (s *Store) SiblingReleasedItems(ctx context.Context, project, machineID, cc
 // ★ 조인 축 셋(project·machine_id·cc_session_id)이 **각각** 접기를 갈라야 한다.
 // item_sibling_claims_test.go 가 축마다 되돌려 그것을 잠근다.
 func (s *Store) siblingClaimIDs(ctx context.Context, cond, project, machineID, cc, excludeSessionID string, extra ...any) ([]string, error) {
-	if cc == "" {
-		return nil, nil
-	}
 	args := append([]any{project, machineID, cc, excludeSessionID}, extra...)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT c.item_id FROM claim c
