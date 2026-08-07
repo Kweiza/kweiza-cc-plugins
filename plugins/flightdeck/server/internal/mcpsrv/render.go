@@ -729,11 +729,21 @@ func boardDetailFoot(v service.BoardView) []string {
 			out = append(out, "  · "+clip(firstLine(j.Title, j.Body), 120))
 		}
 	}
-	if r := v.AckReach; r != nil && r.Emitted > 0 {
+	// ★ 두 구간을 **각각 자기 이름과 함께** 낸다. 라벨 없이 세 수만 있으면 다음 사람이
+	//   그것을 "지금 값"으로 읽는데, 전 역사 쪽은 분모가 단조 증가라 그렇게 읽으면 틀린다.
+	//   구간 폭은 값(r.Window)에서 가져온다 — 문장에 24시간을 박으면 상수가 바뀌는 날
+	//   문구만 조용히 낡는다(위 창 문구와 같은 규율).
+	// ★ 게이트는 전 역사 Emitted 다. 최근이 0인 것은 침묵할 사실이 아니라 "이 구간에
+	//   처방이 없었다"는 사실이라 0 그대로 낸다 — 안 나온 것과 못 잰 것을 가르는 자리다.
+	if r := v.AckReach; r != nil && r.AllTime.Emitted > 0 {
 		out = append(out, fmt.Sprintf(
-			"확인율 — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
+			"확인율 최근 %s — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
 				"(두 수가 크게 다르면 그 차이가 카드 갈림이다)",
-			r.Emitted, r.Reachable, r.Acked))
+			FormatAge(r.Window), r.Recent.Emitted, r.Recent.Reachable, r.Recent.Acked))
+		out = append(out, fmt.Sprintf(
+			"확인율 전 역사 — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
+				"(분모가 단조 증가한다 — 추세로만 읽어라)",
+			r.AllTime.Emitted, r.AllTime.Reachable, r.AllTime.Acked))
 	}
 	return out
 }

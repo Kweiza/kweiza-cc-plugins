@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/gitreader"
 	"github.com/kweiza/flightdeck/internal/model"
@@ -176,8 +177,86 @@ func TestBoardWiresAckReach(t *testing.T) {
 	if view.AckReach == nil {
 		t.Fatal("Board 가 AckReach 를 배선하지 않았다 — view.AckReach 가 nil 이다")
 	}
-	if view.AckReach.Emitted != 3 || view.AckReach.Reachable != 2 || view.AckReach.Acked != 1 {
-		t.Errorf("view.AckReach = %+v, want {Emitted:3 Reachable:2 Acked:1}", *view.AckReach)
+	want := AckCounts{Emitted: 3, Reachable: 2, Acked: 1}
+	if view.AckReach.AllTime != want {
+		t.Errorf("view.AckReach.AllTime = %+v, want %+v", view.AckReach.AllTime, want)
+	}
+	// 픽스처가 전부 방금 만든 행이라 두 구간이 같아야 한다. 갈리면 절단이 창 안까지 잘랐다.
+	if view.AckReach.Recent != want {
+		t.Errorf("view.AckReach.Recent = %+v, want %+v — 창 안 픽스처인데 잘렸다", view.AckReach.Recent, want)
+	}
+	// 구간을 **값으로** 낸다. 표면이 "어느 구간의 수인가"를 문장에 적으려면 이 필드가 있어야
+	// 하고, 없으면 렌더러가 24시간을 문자열로 박게 된다(render.go 의 창 문구 규율 참조).
+	if view.AckReach.Window != AckWindow {
+		t.Errorf("view.AckReach.Window = %v, want %v", view.AckReach.Window, AckWindow)
+	}
+}
+
+// 최근 벌이 **실제로 잘리는지**, 그리고 그 절단이 주입 시계를 타는지 잠근다.
+//
+// ★ 위 시험만으로는 이 축이 안 잡힌다 — 픽스처가 전부 방금 만든 행이라 두 벌이 같은 값이고,
+// 그러면 Board 가 since 를 아예 안 넘겨(전 역사를 두 번 세어) 도 초록이다. 여기서는 같은
+// 픽스처를 창 밖으로 보낸다.
+//
+// ★ 미는 쪽이 시계다. event 행의 at 은 store 가 저장 시점의 time.Now() 로 박고 event 표는
+// UPDATE 가 트리거로 막혀 있어 **행을 과거로 못 민다**. 그래서 반대로 시계를 미래로 민다.
+// 부수 효과로 이 시험은 Board 가 `s.now()` 대신 `time.Now()` 를 직접 부르는 변이도 잡는다 —
+// 주입 시계를 안 타면 절단이 안 움직인다.
+//
+// ★ 창을 `AckWindow` 로 **표현하지 않는다.** `now + AckWindow + 1h` 로 밀면 절단폭이 상수와
+// 함께 스케일해서, 절단이 2시간으로 좁아져도(board.go 의 `-AckWindow` 를 `-DefaultLiveWindow`
+// 로 바꾸는 변이) 픽스처가 여전히 전부 창 밖이라 초록이다 — 그 변이는 화면 라벨이 "1일 0시간"
+// 인 채 2시간 창의 수를 찍게 만든다. 그래서 절대 시간 두 표본으로 폭을 **양쪽에서** 조인다:
+// 23시간 뒤에는 아직 창 안이고 25시간 뒤에는 창 밖이다.
+func TestBoardCutsAckReachRecentByWindow(t *testing.T) {
+	inWindow := AckCounts{Emitted: 3, Reachable: 2, Acked: 1}
+	for _, c := range []struct {
+		name       string
+		ahead      time.Duration
+		wantRecent AckCounts
+	}{
+		{"23시간 뒤 — 아직 창 안이다", 23 * time.Hour, inWindow},
+		{"25시간 뒤 — 창 밖이다", 25 * time.Hour, AckCounts{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			clockAt := time.Now().Add(c.ahead).UTC()
+			s, st := newSvcWithClock(t, func() time.Time { return clockAt })
+			repo := newRepo(t)
+			s1 := openSession(t, s, "p", repo, filepath.Join(repo, "a"), "cc-1", "")
+			s2 := openSession(t, s, "p", repo, filepath.Join(repo, "b"), "cc-2", "")
+			s3 := openSession(t, s, "p", repo, filepath.Join(repo, "c"), "cc-3", "")
+
+			for _, sess := range []SessionResult{s1, s2, s3} {
+				st.LogEvent(ctx(), "prescribe", "p", sess.Session.ID, map[string]any{"key": "k"})
+			}
+			for _, sess := range []SessionResult{s1, s2} {
+				if _, err := st.AddJudgment(ctx(), model.Judgment{
+					Project: "p", SessionID: sess.Session.ID, Kind: model.JudgmentDecision,
+					Title: "t", Body: "b",
+				}); err != nil {
+					t.Fatalf("AddJudgment(%s): %v", sess.Session.ID, err)
+				}
+			}
+			st.LogEvent(ctx(), "prescribe_ack", "p", s1.Session.ID, map[string]any{"keys": []string{"k"}})
+
+			view, err := s.Board(ctx(), "p", BoardOptions{})
+			if err != nil {
+				t.Fatalf("Board: %v", err)
+			}
+			if view.AckReach == nil {
+				t.Fatal("Board 가 AckReach 를 배선하지 않았다 — view.AckReach 가 nil 이다")
+			}
+			// 전 역사는 시계와 무관하다 — 절단은 최근 벌에만 걸린다.
+			if view.AckReach.AllTime != inWindow {
+				t.Errorf("view.AckReach.AllTime = %+v, want %+v — 절단이 전 역사 벌에까지 샜다",
+					view.AckReach.AllTime, inWindow)
+			}
+			if view.AckReach.Recent != c.wantRecent {
+				t.Errorf("view.AckReach.Recent = %+v, want %+v — Board 가 자르는 폭이 "+
+					"보고하는 Window(%v)와 다르다. 화면은 라벨만 보고 수치를 그 구간으로 읽는다",
+					view.AckReach.Recent, c.wantRecent, view.AckReach.Window)
+			}
+		})
 	}
 }
 
