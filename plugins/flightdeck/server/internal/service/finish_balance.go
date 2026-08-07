@@ -73,6 +73,11 @@ func (s *Service) queueBalance(ctx context.Context, project string, added int, n
 		if it.CreatedAt.IsZero() {
 			continue // 관측을 못 한 것은 안 센다
 		}
+		// 티클러는 굶김 축(Starved·Oldest)에서 뺀다 — 기한까지 늙는 것이 정상이라
+		// 넣으면 경고가 상시 점등돼 판별력이 0이 된다(§4). Open 수에는 그대로 든다.
+		if judge.IsTickler(it.Labels) {
+			continue
+		}
 		age := now.Sub(it.CreatedAt)
 		if age > b.Oldest {
 			b.Oldest = age
