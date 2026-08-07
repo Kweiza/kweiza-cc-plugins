@@ -197,6 +197,19 @@ func conventionRoots(p string) []string {
 	return out
 }
 
+// CarriesWorktreePrefix 는 **이미 상대화된 경로**가 관례 워크트리 루트를 성분으로
+// 이고 있는지다. 발자국의 포함 축이 이것으로 트리 밖을 한 겹 더 가른다.
+//
+// ★ **상대경로에만 쓴다.** 절대경로에 쓰면 워크트리 안에서 도는 세션의 경로가 전부
+// 걸린다 — 실측상 observed 발자국 1274건 중 1099건(86%)이 그런 세션의 것이다.
+// 판정의 전부는 "카드의 기준 트리로 상대화한 **뒤에도** 접두가 남았는가"이고,
+// 남았다는 것은 그 카드가 자기 트리 밖(물리적으로는 자손인 다른 git 트리)을 만졌다는 뜻이다.
+//
+// ★ 왜 filepath.Rel 만으로 부족한가. Rel 은 **파일시스템 포함**을 재는데 링크 워크트리는
+// `<repo>/.flightdeck/worktrees/<id>` 라 저장소 루트의 물리적 자손이다. git 은 그것을
+// 자기 것으로 안 본다(`.git/info/exclude`). 두 포함 개념이 갈리는 틈이 이 함수의 존재 이유다.
+func CarriesWorktreePrefix(rel string) bool { return len(conventionRoots(rel)) > 0 }
+
 // owningRoot 는 이 경로를 소유한 워크트리 루트다 — 조상-또는-자기인 루트 중 **가장 긴** 것.
 //
 // ★ 가장 긴 것을 골라야 한다. 가장 짧은 것을 고르면 `<repo>/.flightdeck/worktrees/X` 가

@@ -163,9 +163,21 @@ func TestBeatKeepsEveryPathInsideTheWorktree(t *testing.T) {
 	in := []string{
 		filepath.Join(repo, "cmd", "fd", "hook.go"),
 		filepath.Join(repo, "internal", "judge", "paths.go"),
-		// 저장소 **안**의 워크트리 디렉토리. 세션이 주 저장소에서 열렸으므로 안이다.
-		filepath.Join(repo, ".flightdeck", "worktrees", "X", "internal", "service", "session.go"),
+		// 깊이가 관문을 넓히지 않는다는 것을 재는 자리다. 얕은 둘로는 "깊으면 버린다"는
+		// 새는 수정이 안 잡힌다.
+		filepath.Join(repo, "internal", "service", "a", "b", "c", "session.go"),
 	}
+	// ★ **옛 계약이 여기서 갈렸다(2026-08-07).** 이 자리에는 원래
+	// `<repo>/.flightdeck/worktrees/X/internal/service/session.go` 가 있었고, 주석은
+	// "세션이 주 저장소에서 열렸으므로 안이다"라고 적었다. 그 단정이 지금은 거짓이다 —
+	// 항목 fd-footprint-paths-keep-the-worktree-prefix 가 그 경로를 트리 **밖**으로
+	// 옮겼다. 파일시스템 포함(filepath.Rel)으로는 자손이지만 git 포함으로는 다른 트리이고,
+	// 그 좌표로 저장된 발자국은 어떤 선언 경로와도 원리적으로 안 겹쳐 outside 처방을
+	// 100% 발화시켰다(실측 행 107건 · 인용 처방 19건).
+	//
+	// 새 계약은 footprint_worktree_prefix_test.go 가 세 갈래로 잠근다 — 버려지는 것 ·
+	// 카드가 그 워크트리 자체면 살아남는 것 · 중첩 배치. 이 시험은 원래 목적(관문이
+	// 너무 넓어지지 않았는지)만 남기고 그 축을 그쪽에 넘겼다.
 	if err := s.Beat(ctx(), sess.Session.ID, model.SignalTool, in); err != nil {
 		t.Fatalf("비트 실패: %v", err)
 	}
