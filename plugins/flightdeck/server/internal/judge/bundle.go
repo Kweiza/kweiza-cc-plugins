@@ -395,7 +395,7 @@ func sortedCands(m map[string]Candidate) []Candidate {
 //	7.5h 이상 묵은 17건 — 전부 형제 0(단독)
 //	6.5h 이하 8건       — 전부 형제 있음      ← 경계가 하나뿐이다
 //
-// 그리고 followups 로 만든 항목은 같은 판단에 FK 로 걸려 **자동으로 서로 형제**라,
+// 그리고 followups 로 만든 항목은 같은 판단의 링크에 걸려 **자동으로 서로 형제**라,
 // 새 유입이 들어올 때마다 기존 단독 전부를 추월한다. 큐가 FIFO 로 보이면서 실제로는
 // LIFO 로 돈다(store/item.go 가 ORDER BY created_at 으로 정확히 주는데도 그렇다 —
 // 그 순서를 이 함수가 덮는다).
