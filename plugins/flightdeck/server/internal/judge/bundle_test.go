@@ -508,6 +508,36 @@ func TestEligibleBundleMarksStarvation(t *testing.T) {
 	}
 }
 
+// 티클러는 아무리 늙어도 묶음을 기아 승격시키지 않는다 — 기한을 기다리는 항목이
+// 매번 1순위로 추천되면 굶김 축의 판별력이 0이 된다(§4). 배제는 아니다: 티클러도
+// 여전히 적격이고, 같은 묶음의 비티클러가 임계를 넘기면 그 나이로는 굶는다.
+func TestEligibleBundleTicklerDoesNotStarve(t *testing.T) {
+	tick := cand("z-tickler-old", 0, nil)
+	tick.Item.Labels = []string{"tickler"}
+	n1 := cand("a-new-1", 600, nil)
+	n2 := cand("a-new-2", 600, nil)
+	sib := SiblingIndex{"a-new-1": {"J1"}, "a-new-2": {"J1"}}
+
+	// 티클러 단독이 임계를 넘겨도 형제 묶음이 그대로 이긴다 — 기아 승격이 없다.
+	best, _ := EligibleBundle(EligibleInput{
+		Candidates: []Candidate{tick, n1, n2},
+		Now:        t0.Add(StarvationAge + time.Minute),
+	}, sib)
+	if best == nil || best.Lead.Item.ID != "a-new-1" {
+		t.Fatalf("티클러의 나이가 기아 승격을 만들었다 — 기한 대기 항목이 매번 1순위가 된다: %+v", best)
+	}
+
+	// 대조: 같은 나이의 비티클러는 굶는다(기존 거동이 그대로 산다는 확인).
+	old := cand("z-old-solo", 0, nil)
+	best, _ = EligibleBundle(EligibleInput{
+		Candidates: []Candidate{old, n1, n2},
+		Now:        t0.Add(StarvationAge + time.Minute),
+	}, sib)
+	if best == nil || best.Lead.Item.ID != "z-old-solo" || !best.Starved {
+		t.Fatalf("대조가 깨졌다 — 비티클러 기아 승격이 사라졌다: %+v", best)
+	}
+}
+
 // Now 를 안 준 호출은 기아 판정을 **안 돌린다**.
 //
 // ★ zero time 을 그대로 쓰면 모든 항목이 "1년 넘게 굶었다"로 판정돼 묶음 기능이

@@ -635,6 +635,11 @@ func queueAgeClause(v service.BoardView) string {
 		if it.CreatedAt.IsZero() {
 			continue
 		}
+		// 티클러는 굶김 축(최고령·굶은 건수)에서 뺀다 — 기한까지 늙는 것이 정상이라
+		// 넣으면 이 절이 상시 점등돼 판별력이 0이 된다(§4). 건수에는 그대로 든다.
+		if judge.IsTickler(it.Labels) {
+			continue
+		}
 		if age := v.At.Sub(it.CreatedAt); age > oldest {
 			oldest = age
 		}
@@ -661,6 +666,11 @@ func queueItemAge(at time.Time, it model.Item) string {
 		return "나이?"
 	}
 	age := at.Sub(it.CreatedAt)
+	// 티클러는 ★ 를 안 단다 — 대신 그 사실을 이름으로 낸다. 표식 없는 긴 나이가
+	// "잊힌 항목"으로 읽히면, 굶김 축에서 뺀 것이 침묵으로 바뀐다.
+	if judge.IsTickler(it.Labels) {
+		return FormatAge(age) + "·티클러"
+	}
 	if age >= judge.StarvationAge {
 		return "★" + FormatAge(age)
 	}

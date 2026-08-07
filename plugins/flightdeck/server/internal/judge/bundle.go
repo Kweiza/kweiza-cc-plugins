@@ -151,6 +151,12 @@ type Bundle struct {
 	Dependents int
 	// Oldest 는 가장 오래된 구성원의 생성 시각이다.
 	Oldest time.Time
+	// StarveOldest 는 **굶김 판정에 쓰는** 최고령이다 — 티클러(TicklerLabel)를 뺀 값.
+	// 티클러는 기한까지 늙는 것이 정상이라, 그 나이로 묶음을 기아 승격시키면
+	// 상시 점등이 된다(§4). 전원이 티클러면 zero 고, 그 묶음은 굶지 않는다.
+	// Oldest 와 갈라 둔 이유: Oldest 는 순서 동률 해소와 표시에도 쓰여서
+	// 티클러를 빼면 "가장 오래된 구성원"이라는 이름이 거짓이 된다.
+	StarveOldest time.Time
 	// Starved 는 이 묶음의 최고령이 StarvationAge 를 넘겼다는 사실이다.
 	//
 	// EligibleInput.Now 가 zero 면 **언제나 false** 다 — 판정을 안 돌린 것과
@@ -235,9 +241,10 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 	for _, lead := range fit {
 		b := bundleAround(lead, fit, absorbable, sib)
 		// 기아 판정은 여기서만 한다 — bundleAround 는 시각을 안 받는 순수 조립이다.
-		// Now 가 zero 면 안 돌린다(EligibleInput.Now 주석 참고).
-		if !in.Now.IsZero() {
-			if age := in.Now.Sub(b.Oldest); age >= StarvationAge {
+		// Now 가 zero 면 안 돌린다(EligibleInput.Now 주석 참고). 나이는 StarveOldest 로
+		// 잰다 — 티클러의 나이로 승격하면 기한을 기다리는 항목이 매번 1순위가 된다.
+		if !in.Now.IsZero() && !b.StarveOldest.IsZero() {
+			if age := in.Now.Sub(b.StarveOldest); age >= StarvationAge {
 				b.Starved = true
 				b.Reason += fmt.Sprintf(" · ★기아 %s 경과(임계 %s) — 묶음 크기보다 먼저 본다",
 					age.Round(time.Minute), StarvationAge)
@@ -285,12 +292,19 @@ func flatten(order []string, byItem map[string][]model.Rejection) []model.Reject
 // 사유가 전부 after-unmet-item 인 탈락 항목만 여기 들어온다.
 func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candidate, sib SiblingIndex) Bundle {
 	b := Bundle{Lead: lead, Dependents: lead.Dependents, Oldest: lead.Item.CreatedAt}
+	if !IsTickler(lead.Item.Labels) {
+		b.StarveOldest = lead.Item.CreatedAt
+	}
 	add := func(c Candidate, l Link) {
 		b.Members = append(b.Members, c)
 		b.Links = append(b.Links, l)
 		b.Dependents += c.Dependents
 		if c.Item.CreatedAt.Before(b.Oldest) {
 			b.Oldest = c.Item.CreatedAt
+		}
+		if !IsTickler(c.Item.Labels) &&
+			(b.StarveOldest.IsZero() || c.Item.CreatedAt.Before(b.StarveOldest)) {
+			b.StarveOldest = c.Item.CreatedAt
 		}
 	}
 	for _, c := range fit {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -54,6 +55,47 @@ func TestFinishFillsQueueBalance(t *testing.T) {
 	}
 	if b.ReproWindow != ReproWindow {
 		t.Fatalf("표본 크기를 응답에 안 실었다: got %d, want %d", b.ReproWindow, ReproWindow)
+	}
+}
+
+// 티클러는 굶김 축(Starved·Oldest)에서 빠진다 — 기한 대기 항목이 굶김 경고를 상시
+// 점등시키면 §4 가 고발한 판별력 0 을 수지 절이 재현한다. Open 수에는 그대로 든다.
+func TestQueueBalanceExcludesTicklerFromStarvation(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-tick", "트랙2")
+	addItem(t, s, "p", "closing", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "closing")
+	// 40시간 묵은 티클러와 25시간 묵은 실질 항목 — 최고령이 티클러를 따라가면 안 된다.
+	if err := st.AddItem(ctx(), model.Item{Project: "p", ID: "tick-due", Title: "기한 대기", Body: "b",
+		CreatedAt: time.Now().Add(-40 * time.Hour), Labels: []string{"tickler"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddItem(ctx(), model.Item{Project: "p", ID: "old-real", Title: "실질", Body: "b",
+		CreatedAt: time.Now().Add(-25 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "closing",
+		Outcome: model.ItemDone, Title: "끝냈다",
+		Body: "왜 그렇게 했나 · 무엇을 기각했나 · 일부러 안 한 것 · 확인했으나 못 한 것",
+	})
+	if err != nil {
+		t.Fatalf("마무리 실패: %v", err)
+	}
+	b := out.QueueBalance
+	if b == nil {
+		t.Fatal("큐 수지가 nil 이다")
+	}
+	if b.Open != 2 {
+		t.Fatalf("Open 이 %d 다(기대 2) — 티클러가 열린 수에서까지 빠지면 재고가 거짓이 된다", b.Open)
+	}
+	if b.Starved != 1 {
+		t.Fatalf("Starved 가 %d 다(기대 1: old-real 만) — 티클러가 굶김에 세어졌거나 실질이 빠졌다", b.Starved)
+	}
+	if b.Oldest >= 39*time.Hour {
+		t.Fatalf("Oldest 가 %s 다 — 티클러의 나이가 최고령으로 나왔다(기대 ~25h)", b.Oldest)
 	}
 }
 
