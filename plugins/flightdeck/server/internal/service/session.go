@@ -367,6 +367,21 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 				outside = append(outside, p)
 				continue
 			}
+			// ★ 포함 축의 둘째 겹 — **상대화한 뒤에도** 워크트리 접두가 남았으면 트리 밖이다.
+			//
+			// filepath.Rel 은 파일시스템 포함을 재는데 링크 워크트리는
+			// `<repo>/.flightdeck/worktrees/<id>` 라 저장소 루트의 **물리적 자손**이라
+			// within=true 가 나온다. 그러면 rel 이 접두를 인 채 발자국이 되고, 그 문자열은
+			// 어떤 선언 경로와도 **원리적으로** 안 겹친다(pathRelated 는 성분 0번부터 맞추는데
+			// `.flightdeck` vs `plugins` 에서 즉시 갈린다). 더 나쁜 것은 절대경로가 아니라
+			// judge.comparablePath 를 통과한다는 것이다 — 비교 가능한 척하며 100% 안 덮인
+			// 것으로 세어진다. 실측: 그런 행 107건, 그것을 인용한 처방 19건 전부 `outside:` 키.
+			//
+			// 규율은 위와 같다 — **버리되 남긴다**(dropped_paths 와 경고 로그로 간다).
+			if judge.CarriesWorktreePrefix(rel) {
+				outside = append(outside, p)
+				continue
+			}
 			inside = append(inside, rel)
 		}
 

@@ -135,6 +135,22 @@ var destructiveExempt = map[int]exemption{
 			"판올림 전 VACUUM INTO 백업이 자동으로 뜨고 RollbackHint 가 복구 절차를 낸다. " +
 			"근거 전문은 005 머리말과 설계 §7 에 있다.",
 	},
+	// 006 · 워크트리 접두 발자국 삭제.
+	//
+	// ★ 005 의 사유를 복사하면 안 된다. 저쪽 ⒝ 는 "읽는 쪽이 이미 배제한 행"인데
+	// 이 행들에는 그 문장이 **거짓**이다 — 접두 경로는 절대경로가 아니라 comparablePath 를
+	// 통과하고, 그래서 배제되는 대신 거짓 증거로 인용된다.
+	6: {
+		ops: []op{opDeleteFrom},
+		why: "footprint 는 D(파생) 계층이고 참조하는 표가 없다. 지우는 행은 judge.comparablePath 를 " +
+			"통과해 grounded=true 로 세어지면서 pathRelated 에서는 성분 0번부터 갈려 100% 안 덮인 " +
+			"것으로 인용되는 행이다 — 배제된 것이 아니라 **읽혀서 거짓 증거가 된다**(실측: 인용 처방 " +
+			"19건, 전부 outside: 키). 접두를 벗겨 살리면 형제 워크트리의 같은 이름 파일이 한 문자열로 " +
+			"합쳐져 4530e3c 의 판단과 DESIGN §3 이 없앤 조상 트리 상속이 되살아난다. 유입은 같은 " +
+			"회차의 관문(service/session.go 의 judge.CarriesWorktreePrefix)이 막았고, 생산 문이 " +
+			"Beat 하나뿐이라 그것으로 0이 된다. 판올림 전 VACUUM INTO 백업이 자동으로 뜬다. " +
+			"근거 전문은 006 머리말에 있다.",
+	},
 }
 
 // neverExempt 는 예외로도 못 여는 조작이다. 데이터가 아니라 **구조**가 사라지는 것들이다.
