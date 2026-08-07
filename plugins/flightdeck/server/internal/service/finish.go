@@ -27,7 +27,7 @@ const HandoffGuidance = `무엇을 적어야 하는가 — 넷이다:
   ④ 확인했으나 못 한 것
 안 남기면 다음 세션이 같은 조사를 처음부터 다시 하거나,
 더 나쁘게는 **의도적으로 남긴 자리를 결함으로 보고 고치러 간다.**
-후속이 있으면 followups 로 같은 호출에 넣어라 — 그러면 판단과 후속이 FK 로 이어진다.`
+후속이 있으면 followups 로 같은 호출에 넣어라(이미 있는 항목이면 id 만, 이 선점 뒤 이 세션이 만든 열린 항목만 이어진다) — 그러면 판단과 후속이 판단 링크로 이어진다.`
 
 // FollowupInput 은 마무리와 같은 호출에 넣는 후속 항목이다.
 type FollowupInput struct {
@@ -58,12 +58,22 @@ type FinishResult struct {
 	Judgment  model.Judgment `json:"judgment"`
 	Followups []model.Item   `json:"followups,omitempty"`
 	Released  []string       `json:"released,omitempty"` // 함께 반납한 자원
-	// SkippedFollowups 는 **id 가 이미 있어 안 넣은** 후속이다.
-	//
-	// 이 칸이 없으면 흡수가 거짓말이 된다 — 세션은 후속이 들어간 줄 알고 떠나고,
-	// 그 id 의 항목은 남이 만든 다른 것이다. Released 와 같은 성격의 칸이다:
-	// "요청한 것과 실제로 된 것이 다르다"를 그 자리에서 말한다.
+	// SkippedFollowups 는 판단을 지키려고 tx 안에서 건너뛴 후속이다. 사유는 셋이다:
+	// 새로 만들려던 id 가 분류 뒤 이 트랜잭션 사이에 이미 생겼다 · 이을 대상이
+	// 사라졌거나 못 읽었다 · 이을 대상이 분류 뒤 닫혔다. 각 사유는 원장
+	// item.followup_skipped 에 남는다(이 칸은 id 만 낸다). Released 와 같은 성격의
+	// 칸이다: "요청한 것과 실제로 된 것이 다르다"를 그 자리에서 말한다.
 	SkippedFollowups []string `json:"skipped_followups,omitempty"`
+
+	// LinkedFollowups 는 **새로 만들지 않고 판단에 이은** 기존 항목이다.
+	//
+	// ★ Followups 와 갈라 두는 이유가 둘이다.
+	//   ① 계측: 이것들은 큐를 안 늘린다. len(out.Followups) 가 그대로 QueueBalance 의
+	//     added 이고(아래), 같은 축이 원장 item.finish 의 count 를 거쳐 재생산율 R 의
+	//     분자가 된다(store/event.go:203). 여기 섞으면 만들지 않은 항목이 R 을 부풀린다.
+	//   ② 화면: 세션은 "만들었다"와 "이었다"를 구분해서 봐야 한다. 같은 칸에 담으면
+	//     응답이 "후속 2건 등록"이라고 말하는데 큐에는 1건만 는다.
+	LinkedFollowups []string `json:"linked_followups,omitempty"`
 
 	// StillHeld 는 이 finish 뒤에도 **이 세션이 여전히 쥐고 있는** 항목 id 다
 	// (방금 닫은 항목은 뺀다).
@@ -157,27 +167,57 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			return FinishResult{}, refused
 		}
 	}
+	// ① id 자체는 전부 본다 — 잇기든 만들기든 브랜치 이름 규칙을 지나야 한다.
+	// ★ 같은 호출에 같은 후속 id 가 두 번 실리면 여기서 끊는다. 링크는 dedupeLinks 가
+	//   살리지만, 두 번째 AddItem 은 **자기 트랜잭션의 첫 INSERT** 때문에 중복 흡수로 빠져
+	//   "남이 만든 것이라 건너뛰었다"는 거짓 사유가 응답에 나간다.
+	seen := make(map[string]bool, len(in.Followups))
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason:   fmt.Sprintf("%d번째 후속: %v", i+1, err),
 				Guidance: "후속 항목 id 도 브랜치 이름으로 그대로 쓰인다."}
 		}
+		if seen[f.ID] {
+			return FinishResult{}, &RefusedError{What: "finish",
+				Reason:   fmt.Sprintf("%d번째 후속(%s)이 같은 호출에 두 번 실렸다", i+1, clip(f.ID, 64)),
+				Guidance: "같은 항목을 두 번 만들 수도, 두 번 이을 수도 없다 — 한 번만 실어라."}
+		}
+		seen[f.ID] = true
+	}
+	// ② 만들 것과 이을 것을 가른다. **부적격이면 여기서 거절한다** — 트랜잭션 진입 전이라
+	//    아무것도 안 쓴다. 자격 정의와 사유는 finish_followups.go 에 있다.
+	plan, refused := s.classifyFollowups(ctx, in)
+	if refused != nil {
+		s.log.WarnContext(ctx, "마무리 거절 — 이을 자격이 없는 후속",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"item", clip(in.ItemID, 64))
+		return FinishResult{}, refused
+	}
+	// ③ 제목·본문·경로 좌표는 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 본문을
+	//    안 덮으므로(store 에 그럴 메서드가 아예 없다) 다시 적게 할 이유가 없다 —
+	//    적게 하고 버리는 것이 조용한 거짓이다.
+	for _, c := range plan.Create {
+		f := c.Item
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", i+1, clip(f.ID, 64)),
+				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", c.Index, clip(f.ID, 64)),
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
-					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다."}
+					"그 세션이 무엇을 해야 하는지 다시 조사해야 한다.\n" +
+					linkableHint(plan.Eligible)}
 		}
 		// ★ followup.paths 도 add(item.paths)와 같은 관문(judgeItemPathsCoordinate,
-		// pick.go)을 거친다. Finish 는 아래 ②에서 t.AddItem 을 직접 불러 AddItem 의
+		// pick.go)을 거친다. Finish 는 tx 안에서 t.AddItem 을 직접 불러 Service.AddItem 의
 		// 검증 루프를 거치지 않으므로, 여기서 따로 부르지 않으면 같은 사람이 같은
 		// 세션에서 add 는 거절당하고 finish followup 은 조용히 통과하는 우회 문이
 		// 된다 — 반쪽 발화는 균일한 부재보다 나쁘다(관문이 발화한다는 것만 가르치고
 		// 다른 문에서 배신한다).
+		//
+		// ★ 이제 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 경로를 안 건드리므로
+		// 통과시킬 우회 문 자체가 없다(store 에 그 항목의 paths 를 덮을 메서드가 없다).
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
 			return FinishResult{}, &RefusedError{What: "finish",
-				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", i+1, clip(f.ID, 64), err),
+				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", c.Index, clip(f.ID, 64), err),
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
 					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
 		}
@@ -191,63 +231,124 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		//   "무엇을 시도했다 실패했나"가 원장에 남는다 — 끝에 두면 성공한 것만 세게 되고,
 		//   그러면 §10 의 "세션당 쓰기 호출 수"가 실패를 못 본다.
 		t.LogEvent("item.finish", in.Project, in.SessionID, map[string]any{
-			"item": in.ItemID, "mode": string(in.Outcome), "count": len(in.Followups),
+			"item": in.ItemID, "mode": string(in.Outcome),
+			// ★ count 는 **만들 것의 수**다. 잇기를 여기 세면 store.QueueReproduction
+			//   (store/event.go:203)이 만들지도 않은 항목을 재생산율 R 의 분자로 더한다 —
+			//   DESIGN §10 이 R 을 이 설계의 판정 축으로 세운 자리라 조용히 거짓이 된다.
+			"count": len(plan.Create), "linked": len(plan.Link),
 			"bytes": len(in.Body), // §10 "세션당 판단 바이트" — 0 에 수렴하면 위험 신호다
 		})
 
+		// ★ 무엇을 만들고 무엇을 이을지 **이 안에서** 확정한다. 트랜잭션 밖 분류는 참고값이고,
+		//   BEGIN IMMEDIATE(store/store.go:211)가 다른 커넥션을 막는 이 안쪽이 정본이다.
+		//
+		// ★ **여기서는 거절하지 않는다.** 오류를 올리면 ① 의 판단이 함께 롤백된다.
+		//   어긋난 것은 건너뛰고 원장에 남긴다 — 자격 거절은 tx 진입 전에 이미 끝났다.
+		creates := make([]model.Item, 0, len(plan.Create))
+		for _, c := range plan.Create {
+			if _, err := t.GetItem(in.Project, c.Item.ID); err == nil {
+				out.SkippedFollowups = append(out.SkippedFollowups, c.Item.ID)
+				t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
+					"item": c.Item.ID,
+					"why":  "분류 뒤 이 트랜잭션 사이에 같은 id 의 항목이 생겼다 — 판단을 지키려고 이 후속만 건너뛴다",
+				})
+				continue
+			}
+			creates = append(creates, model.Item{
+				Project: in.Project, ID: c.Item.ID, Title: c.Item.Title, Body: c.Item.Body,
+				Paths: c.Item.Paths, Labels: c.Item.Labels, State: model.ItemOpen,
+				After: c.Item.After, CreatedAt: now,
+			})
+		}
+		linked := make([]string, 0, len(plan.Link))
+		for _, id := range plan.Link {
+			it, err := t.GetItem(in.Project, id)
+			// ★ **사유를 셋으로 가른다.** judgment·event 는 추가 전용이라 여기 적은 원인이
+			//   영구히 남는다 — "사라졌거나 닫혔다" 한 문구로 접으면 DB 를 못 읽었을 뿐인 것이
+			//   "닫혔다"로 굳고, 그 거짓은 나중에 되짚을 방법이 없다. 같은 파일의 itemExists 가
+			//   (exists, observed) 로 가르고 refuseIneligibleFollowup 이 사유를 셋으로 가르는
+			//   것과 같은 규율이다.
+			//
+			// ★ "item" 키는 세 갈래 모두에 남긴다 — 빼면 나중에 **어느** 후속이 빠졌는지 못 되짚는다.
+			//
+			// ★ 이 갈래들은 **분류 뒤 이 트랜잭션 사이**에만 도달한다. 그 창은 Service.now 가
+			//   불리는 자리라 시계 후크로 결정론적으로 벌릴 수 있다 — 닫힘 갈래는
+			//   TestFinishSkipsALinkTargetThatClosedBetweenClassifyAndTx 가 잠근다.
+			//   나머지 둘(지워짐·못 읽음)은 아직 시험이 못 밟는다.
+			var why string
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				why = "이을 대상이 분류 뒤 지워졌다 — 판단을 지키려고 이 후속만 건너뛴다"
+			case err != nil:
+				why = "이을 대상을 못 읽었다(원인 미상) — 판단을 지키려고 이 후속만 건너뛴다"
+			case it.State != model.ItemOpen:
+				why = "이을 대상이 분류 뒤 닫혔다 — 판단을 지키려고 이 후속만 건너뛴다"
+			}
+			if why != "" {
+				out.SkippedFollowups = append(out.SkippedFollowups, id)
+				t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
+					"item": id, "why": why,
+				})
+				continue
+			}
+			linked = append(linked, id)
+		}
+
 		// ① 판단 — 가장 먼저 저장한다. 이것이 원리적으로 파생 불가한 유일한 자산이다.
+		//
+		// 링크 = 이 항목 + 호출자가 준 링크 + **실제로 만들 것** + **실제로 이을 것**.
+		// dedupeLinks 를 지나는 이유는 그 함수 주석에 있다(겹치면 판단이 통째로 사라진다).
 		links := append([]model.JudgmentLink{{TargetKind: "item", TargetID: in.ItemID}}, in.Links...)
-		for _, f := range in.Followups {
-			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: f.ID})
+		for _, it := range creates {
+			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: it.ID})
+		}
+		for _, id := range linked {
+			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: id})
 		}
 		j, err := t.AddJudgment(model.Judgment{
 			Project: in.Project, SessionID: in.SessionID, At: now,
-			Kind: model.JudgmentHandoff, Title: in.Title, Body: in.Body, Links: links,
+			Kind: model.JudgmentHandoff, Title: in.Title, Body: in.Body, Links: dedupeLinks(links),
 		})
 		if err != nil {
 			return err
 		}
 		out.Judgment = j
 
-		// ② 후속 등록. 여기서 실패하면 ①③④ 가 전부 롤백된다 —
-		//    그것이 이 함수를 한 트랜잭션에 둔 이유다.
+		// ② 후속 등록 — **새로 만들 것만** 돈다.
 		//
-		// ★ 단 **중복 id 하나만 예외다.** 그 갈래는 흡수하고 계속 간다.
+		// ★ 중복 흡수 갈래는 남는다. 바로 위 t.GetItem 이 "없다"고 본 뒤에도 같은
+		//   트랜잭션 안에서 부딪히는 길이 남아 있고(같은 호출의 중복은 tx 전에 거절하지만
+		//   그 거절이 미래에 느슨해질 수 있다), 무엇보다 여기서 오류를 올리면 ① 의 판단이
+		//   함께 죽는다. lane.release_skipped 갈래와 같은 성격의 최후 방어다.
 		//
-		//   원자성이 지키려는 실패 모드는 "핸드오프는 했는데 후속이 유입되지 않은" 상태인데,
-		//   중복 id 에서는 그 모드가 성립하지 않는다 — **같은 id 의 항목이 이미 존재한다.**
-		//   반면 롤백하면 ① 의 판단이 함께 사라지고, 그것은 원리적으로 파생 불가하다.
-		//   나머지 셋(종료·반납·후속)은 전부 다시 만들 수 있지만 본문은 그 세션에만 있다.
-		//
-		//   ④ 가 이미 같은 판단을 내렸다(ErrNotFound·ResourceHeldError 를 흡수). 이 자리만
-		//   그 규율 밖에 있었다. 두 세션이 같은 축을 동시에 마무리하며 자연스럽게 같은
-		//   후속 이름을 고르는 것이 이 결함의 실제 진입로다.
-		//
-		//   중복 **이외의** 실패(FK 위반·CHECK·직렬화)는 그대로 롤백한다. 그 분류는
-		//   store.JudgeConstraintCode 가 이미 하고 있어 여기서 문구를 파싱하지 않는다.
-		for _, f := range in.Followups {
-			it := model.Item{
-				Project: in.Project, ID: f.ID, Title: f.Title, Body: f.Body,
-				Paths: f.Paths, Labels: f.Labels, State: model.ItemOpen, After: f.After,
-				CreatedAt: now,
-			}
+		// ★ 이 갈래도 **시험이 결정론적으로는 못 밟는다.** 바로 위 t.GetItem 선검사와
+		//   BEGIN IMMEDIATE(store/store.go:211)의 쓰기 직렬화 때문이다. 경합 시험이
+		//   전체 suite 부하에서 여기 닿을 때만 산출이 관측되고, 그 시험은 그 사실을
+		//   조건부로 단정한다(갈래를 못 고르기 때문이다).
+		for _, it := range creates {
 			if err := t.AddItem(it); err != nil {
 				var conflict *store.ConflictError
 				if errors.As(err, &conflict) && conflict.Kind == store.ConflictDuplicate {
-					// 흡수했으면 **반드시 말한다.** 조용히 넘기면 세션은 후속이 들어간 줄 알고
-					// 떠나고, 그 id 의 항목은 남이 만든 다른 것이다 — 판단을 지키려다
-					// 더 나쁜 거짓을 만들게 된다. 응답(SkippedFollowups)과 원장 양쪽에 남긴다.
-					out.SkippedFollowups = append(out.SkippedFollowups, f.ID)
+					out.SkippedFollowups = append(out.SkippedFollowups, it.ID)
 					t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
-						"item": f.ID,
+						"item": it.ID,
 						"why":  "같은 id 의 항목이 이미 있다 — 판단을 지키려고 이 후속만 건너뛴다",
 					})
 					continue
 				}
-				return fmt.Errorf("후속 항목 %s 등록 실패: %w", clip(f.ID, 64), err)
+				return fmt.Errorf("후속 항목 %s 등록 실패: %w", clip(it.ID, 64), err)
 			}
 			out.Followups = append(out.Followups, it)
 		}
+
+		// ②' 잇기는 원장에만 남는다 — 항목을 안 만들었으므로 out.Followups 에 안 담는다.
+		for _, id := range linked {
+			t.LogEvent("item.followup_linked", in.Project, in.SessionID, map[string]any{
+				"item": id,
+				"why":  "이 세션이 이 선점 뒤에 만든 열린 항목이라 새로 만들지 않고 판단에 이었다",
+			})
+		}
+		out.LinkedFollowups = linked
 
 		// ③ 항목 종료(선점 반납을 포함한다).
 		if err := t.FinishItem(in.Project, in.ItemID, in.SessionID, in.Outcome, in.CloseReason); err != nil {
@@ -370,6 +471,10 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 
 	// ★ 큐 수지도 **커밋 뒤에** 읽는다 — 방금 만든 후속이 열린 목록에 들어와야
 	// "이 마무리 직후의 큐"가 된다. 실패하면 nil 이고, 렌더가 "못 읽었다"를 말한다.
+	//
+	// ★ added 는 len(out.Followups) 다 — **이은 항목은 안 센다.** 이미 큐에 있던 것이라
+	//   순증이 0이기 때문이다. 이 줄을 out.LinkedFollowups 까지 세도록 고치면 "이 마무리가
+	//   큐를 늘렸나"가 거짓이 된다.
 	out.QueueBalance = s.queueBalance(ctx, in.Project, len(out.Followups), now)
 
 	item, err := s.st.GetItem(ctx, in.Project, in.ItemID)

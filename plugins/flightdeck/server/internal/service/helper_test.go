@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -37,6 +38,23 @@ func newSvc(t *testing.T) (*Service, *store.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 	return New(st, log), st
+}
+
+// newSvcWithClock 은 newSvc 와 같되 시계를 주입한다.
+//
+// ★ 시간을 고정하려고 두는 것이 아니다. **시계가 불리는 자리가 곧 창**인 갈래를 잠글 때 쓴다 —
+// 주입한 함수 안에서 DB 를 건드리면 그 지점이 결정론적인 경합 창이 된다. 이 패키지 머리의
+// 규율("주입은 실물로 만들기 어려운 실패에만 쓴다")과 같은 자리이고, 선례는
+// outOfWindowLister(service.go:93-99)다.
+func newSvcWithClock(t *testing.T, clock func() time.Time) (*Service, *store.Store) {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
+	if err != nil {
+		t.Fatalf("DB 열기 실패: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return New(st, log, WithClock(clock)), st
 }
 
 // runGit 은 시험이 저장소를 **준비**할 때 쓰는 git 이다(피시험 코드가 아니다).
