@@ -182,6 +182,13 @@ func (rec *statusRecorder) Write(b []byte) (int, error) {
 func (rec *statusRecorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
 // withAccessLog 는 **게이트를 통과한 요청 1건당 1줄**을 남기고 지표를 센다.
+//
+// 원격 주소·포트·UA 는 **일부러 안 싣는다.** 대가는 커넥션(4-tuple)과 이을 열쇠가
+// 로그에 없다는 것이다 — 미매칭 404 가 브라우저인지 탐침인지 못 가른 조사가 실제로
+// 있었다(drain-ms 측정, 판단 01KZA7Y76G). 그 수요를 원장에서 재집계했더니(2026-08-07)
+// 그 한 번뿐이고 이후 0건이라, 없는 수요에 로그 부피·사생활 축을 지불하지 않는다.
+// 두 번째 수요가 오면 원격 포트부터 검토하라 — IP 는 이미 게이트 판정에 쓰여
+// 카디널리티가 낮고, 포트가 4-tuple 을 완성한다(fd-access-log-cannot-join-connections).
 func (s *server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := s.now()

@@ -357,6 +357,7 @@ func (s *server) chain(h http.Handler) http.Handler {
 // `GET /api/v1/items/next` p95 0.249초다. 유예는 그 최댓값의 **12배**다.
 // 꼬리(p95 59.9초 · max 971초)는 **전부 `GET /events`** 였다 — 그것이 수명이 정해지지
 // 않은 유일한 응답이고, 그래서 유예가 아니라 Drain() 통지로 나간다.
+// 재측정(2026-08-07): 같은 라우트 max 0.864s(08-05)→2.757s(08-06)→1.313s(현 세대 17h·1678건) — 요동이지 추세가 아니다. 배수는 7.6배로 돌아왔다.
 //
 // ★ **액세스 로그가 못 보는 항이 하나 있다.** 요청 줄을 아직 한 줄도 안 보낸 커넥션
 // (`StateNew`)은 로그에 원리적으로 안 남는데, `srv.Shutdown` 은 그런 커넥션을 **5초가
@@ -479,6 +480,10 @@ func Serve(ctx context.Context, addr string, h Handler, log *slog.Logger) error 
 		// 걸렸다"와 "말 없는 StateNew 소켓이 net/http 의 5초 바닥을 밟았다"가 안 갈린다.
 		// 지금 가르지 않는 이유는 net/http 가 그 구분을 밖으로 안 내주기 때문이고, 그 사실을
 		// 여기 적어 두는 것이 지금 할 수 있는 전부다. 5초 근처의 drain_ms 는 그 바닥을 먼저 의심해라.
+		//
+		// ★ 이 줄은 stderr 뿐이라 **컨테이너 세대와 함께 지워진다**(제거 시 docker 가 json 로그를
+		// 지운다 — 2026-08-06 하루 7세대 실측). 세대를 넘겨 남기는 기구는 일부러 없다: 자랄
+		// 원천(≥5초 침묵 소켓)이 실측 0건이다(fd-shutdown-log-dies-with-container-generation).
 		log.InfoContext(ctx, "서버 종료", "drain_ms", time.Since(t0).Milliseconds())
 		return nil
 	}

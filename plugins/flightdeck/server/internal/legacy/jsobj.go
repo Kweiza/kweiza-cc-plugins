@@ -300,6 +300,11 @@ func (p *jsParser) hex(n int) (int64, error) {
 	if err != nil {
 		return 0, p.errf("16진 이스케이프를 읽지 못했다(%q): %v", s, err)
 	}
+	// 이 k 는 이 저장소에서 유일하게 진짜 0-based 순번인 k 다. 순번 표기 가드
+	// (service/indexnotation_test.go)는 순번 변수를 이름으로 근사하고, k 는 위양성
+	// 1건 실측과 맞바꿔 감시 목록에서 빠진다(fd-test-message-index-notation) —
+	// 여기에 "%d번째" 사유를 더하면 가드는 침묵한다(위반을 심어 실측). 싣게 되면
+	// k+1 로 세어라, 가드가 대신 세어 주지 않는다.
 	for k := 0; k < n; k++ {
 		p.adv()
 	}
