@@ -1451,7 +1451,7 @@ func RenderFinish(r service.FinishResult) string {
 // 추천 강제를 기각하고 실측을 남긴 것과 같은 형태다(fd-recommend-path-barely-used).
 //
 // ★ **거절하지 않는다.** R 이 높다고 finish 를 막으면 세션은 followups 를 안 실어
-// 우회하고, 그러면 판단과 후속의 FK 가 끊긴다 — 그것이 이 도구가 가장 비싸게 산 자산이다.
+// 우회하고, 그러면 판단과 후속의 링크가 끊긴다 — 그것이 이 도구가 가장 비싸게 산 자산이다.
 func finishBalanceLines(b *service.QueueBalance) string {
 	// nil 은 "수지 0"이 아니다. 침묵하면 조회가 실패한 응답이 "큐가 안 늘었다"를 단정한다.
 	if b == nil {

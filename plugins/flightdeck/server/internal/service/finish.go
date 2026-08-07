@@ -576,11 +576,11 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 		if err != nil {
 			return err
 		}
-		if in.SessionID != "" {
-			if err := t.Beat(in.SessionID, model.SignalMCP, now); err != nil {
-				return err
-			}
-		}
+		// 여기 있던 Beat(SignalMCP) 는 지웠다 — 판단 저장은 도구 호출이 아니다.
+		// 원장 전 기간 실측(fd-note-beat-masquerades-as-mcp): note 647건 중 이 비트가
+		// 유일한 생존 신호였던 세션은 0건이다(MCP 경로는 callTool 이 따로 찍고, 훅
+		// 경로는 방금 prompt/tool 비트를 찍었다). 잃는 것은 REST·CLI 로 세션 id 를
+		// 달고 직접 note 하는 드문 경로의 하트비트뿐 — 실현 실측 0건.
 		return nil
 	})
 	if err != nil {
