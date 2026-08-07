@@ -41,7 +41,7 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 			clip(project, 64), clip(machineID, 64), clip(worktree, 200), clip(ccSessionID, 64))
 	}
 
-	existing, err := t.sessionByTriple(machineID, worktree, ccSessionID)
+	existing, err := sessionByTriple(t.ctx, t.tx, machineID, worktree, ccSessionID)
 	switch {
 	case err == nil:
 		if label != "" && label != existing.Label {
@@ -131,8 +131,18 @@ func scanSession(sc interface{ Scan(...any) error }) (model.Session, error) {
 	return s, nil
 }
 
-func (t *Tx) sessionByTriple(machineID, worktree, ccSessionID string) (model.Session, error) {
-	row := t.tx.QueryRowContext(t.ctx,
+// sessionByTriple 은 3중키 조회 **한 벌**이다 — getProject·getSession 과 같은 꼴이다.
+//
+// ★ 두 벌이면 안 되는 이유가 이 조회에는 특히 강하다. 이것을 부르는 자리는 둘인데
+// 서로 반대 방향이다: OpenSession 은 "없으면 만든다"(upsert), FindSession 은
+// "없어도 안 만든다"(훅 복구 갈래). **둘이 같은 질문에 다른 답을 하면** 복구가
+// "없다"고 판단한 자리에 upsert 가 "있다"를 만들거나 그 반대가 된다 — 빈 카드가
+// 다시 생기거나, 있는 카드를 못 찾는다.
+//
+// 3중키 의미가 바뀔 자리도 이미 예고돼 있다: worktree 표기 정규화(Windows),
+// `AND project = ?` 추가(한 머신에서 워크트리가 겹칠 때). 그때 고칠 자리는 여기 하나다.
+func sessionByTriple(ctx context.Context, q dbtx, machineID, worktree, ccSessionID string) (model.Session, error) {
+	row := q.QueryRowContext(ctx,
 		`SELECT `+sessionCols+` FROM session
 		 WHERE machine_id = ? AND worktree = ? AND cc_session_id = ?`,
 		machineID, worktree, ccSessionID)
@@ -153,19 +163,7 @@ func (t *Tx) sessionByTriple(machineID, worktree, ccSessionID string) (model.Ses
 // 만든다. 훅의 복구 갈래가 "옛 cc 의 카드를 찾는" 용도로 그것을 부르고 있었고,
 // 카드가 없고 rekey 가 거절되는 갈래에서 **빈 카드 한 장을 남겼다.**
 func (s *Store) FindSession(ctx context.Context, machineID, worktree, ccSessionID string) (model.Session, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT `+sessionCols+` FROM session
-		 WHERE machine_id = ? AND worktree = ? AND cc_session_id = ?`,
-		machineID, worktree, ccSessionID)
-	sess, err := scanSession(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sess, notFoundNote(NFSession, "3중키(머신·워크트리·cc 세션)에 해당하는")
-	}
-	if err != nil {
-		return sess, fmt.Errorf("세션 3중키 조회 실패(machine=%q worktree=%q): %w",
-			clip(machineID, 64), clip(worktree, 200), err)
-	}
-	return sess, nil
+	return sessionByTriple(ctx, s.db, machineID, worktree, ccSessionID)
 }
 
 // DivergentSessions 는 **같은 대화(cc_session_id)인데 project 나 machine 이 다른** 세션을 낸다.
