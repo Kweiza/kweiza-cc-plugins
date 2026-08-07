@@ -23,7 +23,7 @@ import (
 // `.flightdeck` vs `plugins` 에서 즉시 갈려 **원리적으로 어떤 선언 경로와도 안 겹친다.**
 // 절대경로보다 나쁘다 — 그쪽은 최소한 근거에서 빠진다.
 //
-// 실측(2026-08-07 원장): 접두 행 107건(observed 1274 중 8.4%), 일자별 18/44/35/10 로
+// 실측(2026-08-07 원장): 접두 행 111건(observed 1296 중 8.6%), 일자별 18/44/35/14 로
 // 지금도 유입 중. 그 행을 인용한 처방 19건은 **전부 `outside:` 키**다.
 
 // TestBeatDropsAWorktreePrefixedPath 는 관문을 잠근다.
@@ -92,8 +92,8 @@ func TestBeatDropsAWorktreePrefixedPath(t *testing.T) {
 // 이것이 빨개진다.
 //
 // ★ 이 짝이 없으면 "경로에 worktrees 가 보이면 버린다"로 새는 수정이 초록불이 난다.
-// 그러면 워크트리 안에서 도는 세션의 발자국이 통째로 죽는다 — 실측상 observed 1274건 중
-// 1099건(86%)이 그런 세션의 것이다. 판정의 전부는 **접두가 rel 에 남았는가**이지
+// 그러면 워크트리 안에서 도는 세션의 발자국이 통째로 죽는다 — 실측상 observed 1296건 중
+// 1135건(87%)이 그런 세션의 것이다. 판정의 전부는 **접두가 rel 에 남았는가**이지
 // 절대경로에 그 문자열이 있는가가 아니다.
 func TestBeatKeepsPathsWhenTheCardIsTheWorktree(t *testing.T) {
 	s, st := newSvc(t)
@@ -115,7 +115,7 @@ func TestBeatKeepsPathsWhenTheCardIsTheWorktree(t *testing.T) {
 	if len(fps) != 1 || fps[0] != want {
 		t.Fatalf("발자국 = %v, 기대 [%s]\n"+
 			"워크트리 카드의 정상 발자국이 죽었다 — 관문이 rel 이 아니라 절대경로를 보고 있다. "+
-			"그러면 실측상 발자국의 86%%가 사라진다", fps, want)
+			"그러면 실측상 발자국의 87%%가 사라진다", fps, want)
 	}
 }
 
