@@ -100,14 +100,14 @@ func TestRenderBoardDetailShowsAckReach(t *testing.T) {
 	}
 	got := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
 	// 최근 벌이 먼저다 — "지금 규율"을 묻는 쪽이 이것이고, 전 역사는 배경이다.
-	wantRecent := "확인율 최근 1일 6시간 — 발화 카드 9 · 그중 ack 이 닿을 수 있는 카드 5 · 실제 ack 2 " +
-		"(두 수가 크게 다르면 그 차이가 카드 갈림이다)"
+	wantRecent := "확인율 최근 1일 6시간 — 발화 대화 9 · 그중 ack 이 닿을 수 있는 대화 5 · 실제 ack 2 " +
+		"(앞 두 수가 크게 다르면 처방을 받고 판단을 안 남긴 대화가 그만큼이다)"
 	if !strings.Contains(got, wantRecent) {
 		t.Fatalf("최근 구간 확인율 줄이 기대 문장과 다르다.\nwant 포함: %q\ngot:\n%s", wantRecent, got)
 	}
 	// ★ 전 역사 줄은 **자기가 무엇인지 말해야 한다.** 구간 라벨 없이 세 수만 있으면
 	// 다음 사람이 그것을 "지금 값"으로 읽는다 — 이 항목이 고치려던 결함 자체다.
-	wantAll := "확인율 전 역사 — 발화 카드 26 · 그중 ack 이 닿을 수 있는 카드 4 · 실제 ack 3 " +
+	wantAll := "확인율 전 역사 — 발화 대화 26 · 그중 ack 이 닿을 수 있는 대화 4 · 실제 ack 3 " +
 		"(분모가 단조 증가한다 — 추세로만 읽어라)"
 	if !strings.Contains(got, wantAll) {
 		t.Fatalf("전 역사 확인율 줄이 기대 문장과 다르다.\nwant 포함: %q\ngot:\n%s", wantAll, got)
@@ -135,13 +135,13 @@ func TestRenderBoardDetailShowsAckReach(t *testing.T) {
 		Window:  30 * time.Hour,
 	}
 	quietGot := RenderBoard(v, BoardRenderOptions{Now: now, Detail: true})
-	wantQuiet := "확인율 최근 1일 6시간 — 발화 카드 0 · 그중 ack 이 닿을 수 있는 카드 0 · 실제 ack 0 " +
-		"(두 수가 크게 다르면 그 차이가 카드 갈림이다)"
+	wantQuiet := "확인율 최근 1일 6시간 — 발화 대화 0 · 그중 ack 이 닿을 수 있는 대화 0 · 실제 ack 0 " +
+		"(앞 두 수가 크게 다르면 처방을 받고 판단을 안 남긴 대화가 그만큼이다)"
 	if !strings.Contains(quietGot, wantQuiet) {
 		t.Fatalf("최근 구간 처방이 0인데 그 줄이 안 찍혔다 — 0(안 나왔다)이 침묵(못 쟀다)으로 샜다.\n"+
 			"want 포함: %q\ngot:\n%s", wantQuiet, quietGot)
 	}
-	if !strings.Contains(quietGot, "확인율 전 역사 — 발화 카드 26") {
+	if !strings.Contains(quietGot, "확인율 전 역사 — 발화 대화 26") {
 		t.Fatalf("최근이 0이라고 전 역사 줄까지 사라졌다:\n%s", quietGot)
 	}
 }
