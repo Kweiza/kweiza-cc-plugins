@@ -120,6 +120,33 @@ func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) api.
 	return api.NewServer(svc, opt)
 }
 
+// noteBuild 는 이 기동이 새 실행 파일인지를 원장에 남긴다. **기동을 안 막는다.**
+//
+// ★ 관측을 `/proc/self/exe` 에서 한다 — 감시기의 기준값과 같은 자리다(newSelfWatcher 의 ★).
+// 경로를 stat 하면 파일이 이미 교체된 뒤에는 "지금 도는 이미지"가 아니라 다음 이미지를 잰다.
+//
+// ★ 감시기를 안 탄다. 감시기는 컨테이너와 미지원 플랫폼에서 일찍 물러나는데(detectContainer),
+// 배포는 그 두 곳에서도 일어난다 — 오히려 컨테이너에서는 이미지 갱신이 유일한 배포 경로다.
+//
+// ★ `id.OK` 를 반드시 본다. ExeID.String() 은 관측 실패를 `"관측 안 됨"` 이라는 **문자열**로
+// 내므로, 그대로 넘기면 그것이 정체가 되어 "관측 실패 → 진짜 빌드"가 배포 한 건으로 잡힌다.
+// 모르는 것은 아무 말도 안 하는 것이 맞다.
+func noteBuild(ctx context.Context, st *store.Store, log *slog.Logger) {
+	id, err := exeIDOfPath("/proc/self/exe")
+	if err != nil || !id.OK {
+		log.Debug("실행 파일 정체를 못 읽어 배포 관측을 건너뛴다", "error", errText(err))
+		return
+	}
+	deployed, derr := st.NoteServerBuild(ctx, id.String())
+	switch {
+	case derr != nil:
+		// 침묵하지 않는다. 이 축이 조용히 죽으면 "배포 뒤"로 자르는 지표가 옛 시각에 얼어붙는다.
+		log.Warn("배포 관측을 원장에 못 남겼다", "exe", id.String(), "error", derr.Error())
+	case deployed:
+		log.Info("새 실행 파일로 떴다 — 배포로 적었다", "exe", id.String())
+	}
+}
+
 // runServe 는 `fd serve` 다.
 func runServe(args []string, env func(string) (string, bool), log *slog.Logger) int {
 	fs := newFlagSet("serve")
@@ -155,6 +182,8 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 			log.Error("DB 닫기 실패", "error", cerr.Error())
 		}
 	}()
+
+	noteBuild(context.Background(), st, log)
 
 	svc := service.New(st, log)
 	token := envOr(env, "FD_TOKEN", "")
