@@ -66,6 +66,50 @@ func TestPickExplicitReasonNamesTheItemItClaimed(t *testing.T) {
 	}
 }
 
+// TestPickResumeReasonNamesTheSessionThatHoldsIt 은 **재개** 사유가 쥔 세션을 이름으로
+// 말한다는 것을 못박는다.
+//
+// 항목 본문은 "단독 경로의 Reason 만 규율이 안 물려 있다"고 적었는데, 그 단독 경로는 둘로
+// 갈린다 — 새 선점과 재개. 재개 쪽도 세션 id 를 빼면 전 스위트가 초록이었다(실측).
+//
+// 이 갈래에서 세션 id 가 값을 하는 이유가 따로 있다: 재개는 **컨텍스트가 날아간 세션이
+// 같은 워크트리로 돌아오는 자리**이고, 정체가 3중키(머신·워크트리·cc)라 한 워크트리에
+// 카드가 여럿일 수 있다. "이미 이 세션의 선점이다"에서 '이 세션'이 어느 카드인지가
+// 실제로 모호한 판이라, 이름이 빠지면 돌아온 세션은 자기 것인지 형제 카드 것인지 못 가른다.
+func TestPickResumeReasonNamesTheSessionThatHoldsIt(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	one := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	two := openSession(t, s, "p", repo, wt, "cc-2", "트랙3")
+	addItem(t, s, "p", "held-by-one", nil, nil)
+	addItem(t, s, "p", "held-by-two", nil, nil)
+
+	for _, tc := range []struct{ item, holder, other string }{
+		{"held-by-one", one.Session.ID, two.Session.ID},
+		{"held-by-two", two.Session.ID, one.Session.ID},
+	} {
+		if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: tc.holder,
+			ItemID: tc.item}); err != nil {
+			t.Fatalf("선점 준비 실패(%s): %v", tc.item, err)
+		}
+		again, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: tc.holder, ItemID: tc.item})
+		if err != nil {
+			t.Fatalf("재개 실패(%s): %v", tc.item, err)
+		}
+		if again.Mode != PickResumed {
+			t.Fatalf("%s 의 mode 가 %s 다(기대 %s)", tc.item, again.Mode, PickResumed)
+		}
+		if !strings.Contains(again.Reason, tc.holder) {
+			t.Fatalf("재개 사유가 쥔 세션을 안 말한다: %q", again.Reason)
+		}
+		// 짝 단정 — 남의 세션 id 는 없다. 없으면 두 카드를 다 싣는 문장이 통과하고,
+		// 그러면 '이 세션'의 모호함이 그대로 남는다.
+		if strings.Contains(again.Reason, tc.other) {
+			t.Fatalf("재개 사유가 쥐지 않은 세션(%s)도 말한다: %q", tc.other, again.Reason)
+		}
+	}
+}
+
 // TestPickBundleReasonNamesTheLeadThatBecomesTheBranch 는 묶음 사유가 **선두를
 // 이름으로** 말한다는 것을 못박는다.
 //
