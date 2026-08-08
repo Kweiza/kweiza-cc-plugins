@@ -1172,9 +1172,21 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 			"project", clip(in.Project, 64), "item", clip(in.ID, 64), "error", err.Error())
 		return model.Item{}, err
 	}
+	// ★ **못 읽어도 등록 확인을 낸다**(DESIGN §5「쓰기 뒤 조회가 실패하면」). 항목은 위
+	// 트랜잭션에서 이미 큐에 들어갔다 — 여기서 오류를 올리면 세션은 "못 만들었다"고 믿는데
+	// 큐에는 있고, 재시도하면 store 가 중복으로 거절한다. 만들지도 다시 만들지도 못하는
+	// 상태가 된다.
+	//
+	// ★ 채널이 A(로그만)인 이유: 이 함수의 반환은 model.Item 하나라 못 읽음을 나를 필드도
+	// derive 도 없다 — 고른 것이 아니라 타입이 강제한다. 다행히 잃는 것이 거의 없다:
+	// 화면(RenderAdd)이 쓰는 값은 전부 입력으로 아는 것이고(id·프로젝트·상태·제목·경로·선행),
+	// 못 읽은 것은 서버가 채운 CreatedAt 뿐이다. 그 축이 화면에 필요해지는 날 이 반환을
+	// 결과 타입으로 바꾸고 C 로 옮겨라.
 	saved, err := s.st.GetItem(ctx, in.Project, in.ID)
 	if err != nil {
-		return model.Item{}, err
+		s.log.WarnContext(ctx, "항목 등록 뒤 되읽기 실패 — 등록은 커밋됐다",
+			"project", clip(in.Project, 64), "item", clip(in.ID, 64), "error", err.Error())
+		saved = it
 	}
 	s.log.InfoContext(ctx, "항목 등록",
 		"project", in.Project, "session_id", in.SessionID, "item", it.ID, "count", len(it.After))

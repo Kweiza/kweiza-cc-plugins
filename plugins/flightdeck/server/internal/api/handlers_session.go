@@ -95,9 +95,25 @@ func (s *server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// ★ **못 읽어도 5xx 를 내지 않는다**(DESIGN §5「쓰기 뒤 조회가 실패하면」). 상태 변경은
+	// 위 SetState 에서 이미 원장에 남았다 — 여기서 실패로 응답하면 호출자는 안 바뀐 줄 알고
+	// 다시 부르고, SSE 알림도 안 나가 다른 세션이 그 변경을 영영 못 본다.
+	// 바로 아래 handleSignal 이 **같은 조회를 같은 자리에서** 무르게 하고 그 근거까지 적어
+	// 뒀다 — 한 파일 안에 정반대의 실패 정책 둘이 있던 자리다.
+	//
+	// ★ 응답은 **아는 사실만** 낸다. 세션 행 전체를 못 읽었으므로 id·state 만 채우고,
+	// 그것이 부분 응답이라는 사실을 partial 로 말한다 — 빈 세션 객체를 내면 "필드가 전부
+	// 빈 세션"이라는 없는 사실을 만든다.
 	sess, err := s.st.GetSession(r.Context(), id)
 	if err != nil {
-		s.fail(w, r, err)
+		s.log.WarnContext(r.Context(), "세션 상태 변경 뒤 조회 실패 — 변경은 원장에 남았다",
+			"session_id", clip(id, 64), "state", clip(req.State, 32), "error", err.Error())
+		s.publish(r, "session.state", "", id, map[string]any{"state": req.State})
+		s.writeJSON(w, r, http.StatusOK, map[string]any{
+			"session": map[string]any{"id": id, "state": req.State},
+			"partial": "세션 행을 못 읽었다 — 상태 변경은 원장에 남았다. 이 응답의 session 은 " +
+				"요청으로 아는 두 값뿐이다",
+		})
 		return
 	}
 	s.publish(r, "session.state", sess.Project, id, map[string]any{"state": req.State})

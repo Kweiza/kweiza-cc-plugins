@@ -26,6 +26,11 @@ type MoveResult struct {
 	From      string     `json:"from"`
 	To        string     `json:"to"`
 	CrossRefs int        `json:"cross_refs"`
+
+	// Derived 는 이동 **뒤** 되읽기의 신선도다. 이동은 되돌리는 코드가 없으므로
+	// 되읽기가 실패해도 결과를 버리면 안 된다(DESIGN §5「쓰기 뒤 조회가 실패하면」).
+	// item 축 실패가 있으면 Item 은 아는 사실(프로젝트·id)만 채워진 것이다.
+	Derived
 }
 
 // MoveItem 은 항목을 다른 프로젝트로 옮긴다.
@@ -52,10 +57,24 @@ func (s *Service) MoveItem(ctx context.Context, in MoveInput) (MoveResult, error
 	}
 	// 옮긴 뒤의 항목을 **대상 프로젝트에서** 다시 읽는다. 요청 값을 그대로 돌려주면
 	// 실제로 무엇이 저장됐는지가 아니라 무엇을 보냈는지를 화면에 내게 된다.
+	//
+	// ★ **못 읽어도 결과를 버리지 않는다**(DESIGN §5). 이동은 이미 커밋됐고 되돌리는
+	// 코드가 없다 — 여기서 오류를 올리면 항목은 옮겨진 채로 호출자는 실패만 받고,
+	// 무엇보다 **CrossRefs 가 함께 죽는다.** 그 값은 스키마로 표현 못 하게 된 선행 관계
+	// 건수이고, 이 타입의 주석이 "침묵하면 그 관계가 조용히 죽는다"고 적어 둔 자리다 —
+	// 되읽기 하나 때문에 그것까지 잃는 것은 정확히 반대 방향이다.
+	// 아는 사실은 프로젝트와 id 뿐이라 그 둘만 채우고 나머지는 item 축으로 고백한다.
+	d := &derive{}
 	it, gerr := s.st.GetItem(ctx, in.To, in.ItemID)
 	if gerr != nil {
-		return res, fmt.Errorf("옮겼으나 대상에서 다시 읽지 못했다(project=%q id=%q): %w",
-			in.To, in.ItemID, gerr)
+		s.log.WarnContext(ctx, "항목 이동 뒤 되읽기 실패 — 이동은 커밋됐다",
+			"from", clip(in.Project, 64), "to", clip(in.To, 64),
+			"item", clip(in.ItemID, 64), "error", gerr.Error())
+		d.fail("item", gerr)
+		it = model.Item{Project: in.To, ID: in.ItemID}
 	}
-	return MoveResult{Item: it, From: in.Project, To: in.To, CrossRefs: cross}, nil
+	return MoveResult{
+		Item: it, From: in.Project, To: in.To, CrossRefs: cross,
+		Derived: d.result(s.now()),
+	}, nil
 }
