@@ -27,7 +27,7 @@ func TestRenderFinishShowsQueueBalance(t *testing.T) {
 	got := RenderFinish(finishWithBalance(&service.QueueBalance{
 		Closed: 1, Added: 2, Open: 27, Starved: 6,
 		Oldest:      30 * time.Hour,
-		Repro:       store.Reproduction{Finishes: 20, Followups: 14, Adds: 12},
+		Repro:       &store.Reproduction{Finishes: 20, Followups: 14, Adds: 12},
 		ReproWindow: 20,
 	}))
 
@@ -59,12 +59,12 @@ func TestRenderFinishShowsQueueBalance(t *testing.T) {
 func TestRenderFinishDistinguishesShrinkingQueue(t *testing.T) {
 	shrink := RenderFinish(finishWithBalance(&service.QueueBalance{
 		Closed: 1, Added: 0, Open: 5,
-		Repro:       store.Reproduction{Finishes: 20, Followups: 8, Adds: 4},
+		Repro:       &store.Reproduction{Finishes: 20, Followups: 8, Adds: 4},
 		ReproWindow: 20,
 	}))
 	grow := RenderFinish(finishWithBalance(&service.QueueBalance{
 		Closed: 1, Added: 3, Open: 30,
-		Repro:       store.Reproduction{Finishes: 20, Followups: 14, Adds: 12},
+		Repro:       &store.Reproduction{Finishes: 20, Followups: 14, Adds: 12},
 		ReproWindow: 20,
 	}))
 	if shrink == grow {
@@ -92,20 +92,51 @@ func TestRenderFinishSaysWhenBalanceUnread(t *testing.T) {
 	}
 }
 
-// 표본이 0이면 "R 을 못 쟀다"를 적는다 — 생략하거나 0으로 찍지 않는다.
-func TestRenderFinishSaysWhenRateUnmeasured(t *testing.T) {
+// 표본이 0이면 그 사실을 적는다 — 생략하거나 0으로 찍지 않는다.
+//
+// ★ 그리고 **집계 실패와 다른 문장이어야 한다.** 앞 판은 둘을 한 문장으로 내어,
+// 집계가 실패했을 뿐인데 응답이 "최근 마무리 표본 0"이라고 원인을 단정했다.
+func TestRenderFinishSaysWhenSampleIsZero(t *testing.T) {
 	got := RenderFinish(finishWithBalance(&service.QueueBalance{
 		Closed: 1, Added: 1, Open: 3,
-		Repro:       store.Reproduction{}, // Finishes 0 — 못 쟀다
+		Repro:       &store.Reproduction{}, // 읽었고, Finishes 0 — 참일 수 있는 사실이다
 		ReproWindow: 20,
 	}))
 	if strings.Contains(got, "R=0.00") {
-		t.Fatalf("못 잰 것을 0으로 찍었다 — '큐가 안 는다'로 읽힌다:\n%s", got)
+		t.Fatalf("표본 0을 0으로 찍었다 — '큐가 안 는다'로 읽힌다:\n%s", got)
 	}
-	if !strings.Contains(got, "못 쟀다") {
+	if !strings.Contains(got, "마무리가 0회") {
 		t.Fatalf("표본 0인데 그 사실을 안 말한다:\n%s", got)
 	}
+	if strings.Contains(got, "집계가 실패") {
+		t.Fatalf("표본이 0일 뿐인데 집계 실패라고 말한다:\n%s", got)
+	}
 	// 큐 상태 자체는 읽었으므로 그 절은 살아 있어야 한다.
+	if !strings.Contains(got, "3건") {
+		t.Fatalf("R 만 못 쟀는데 큐 상태까지 통째로 뺐다:\n%s", got)
+	}
+}
+
+// 집계가 **실패**하면 그렇게 말한다 — "표본 0"이라고 원인을 단정하지 않는다.
+//
+// ★ 이것이 이 항목의 핵심이다. 같은 파일이 세 자리에서 "0과 못 잼을 가른다"를 지키는데
+// 이 축에서만 뭉개졌고, 그 값은 DESIGN §10 이 "큐가 줄고 있나"를 판정하는 유일한 축이다.
+func TestRenderFinishSeparatesUnmeasuredRateFromZeroSample(t *testing.T) {
+	got := RenderFinish(finishWithBalance(&service.QueueBalance{
+		Closed: 1, Added: 1, Open: 3,
+		Repro:       nil, // 집계가 실패했다 — 표본이 몇인지도 모른다
+		ReproWindow: 20,
+	}))
+	if strings.Contains(got, "R=0.00") {
+		t.Fatalf("못 잰 것을 0으로 찍었다:\n%s", got)
+	}
+	if !strings.Contains(got, "집계가 실패") {
+		t.Fatalf("집계 실패인데 그 사실을 안 말한다:\n%s", got)
+	}
+	// ★ 원인을 단정하면 안 된다 — 마무리가 20회 쌓여 있어도 이 갈래가 돈다.
+	if strings.Contains(got, "마무리가 0회") {
+		t.Fatalf("집계가 실패했을 뿐인데 '마무리가 0회'라고 원인을 단정했다:\n%s", got)
+	}
 	if !strings.Contains(got, "3건") {
 		t.Fatalf("R 만 못 쟀는데 큐 상태까지 통째로 뺐다:\n%s", got)
 	}
@@ -116,7 +147,7 @@ func TestRenderFinishOmitsStarvedClauseWhenNone(t *testing.T) {
 	got := RenderFinish(finishWithBalance(&service.QueueBalance{
 		Closed: 1, Added: 0, Open: 4, Starved: 0,
 		Oldest:      2 * time.Hour,
-		Repro:       store.Reproduction{Finishes: 5, Followups: 1, Adds: 1},
+		Repro:       &store.Reproduction{Finishes: 5, Followups: 1, Adds: 1},
 		ReproWindow: 20,
 	}))
 	if strings.Contains(got, "굶") {

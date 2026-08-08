@@ -1507,17 +1507,27 @@ func finishBalanceLines(b *service.QueueBalance) string {
 		fmt.Fprintf(&s, "  열린 %d건\n", b.Open)
 	}
 
-	// 표본 0을 R=0.00 으로 찍으면 "큐가 안 는다"로 읽힌다. 못 잰 것은 못 잤다고 적는다.
-	rate, ok := b.Rate()
-	if !ok {
-		s.WriteString("  R 은 못 쟀다(최근 마무리 표본 0) — 큐가 느는지 주는지 이 응답은 모른다.\n")
+	// 표본 0을 R=0.00 으로 찍으면 "큐가 안 는다"로 읽힌다. 못 잰 것은 못 쟀다고 적는다.
+	//
+	// ★ 갈래가 **셋**이다. 앞 판은 둘을 한 문장으로 내어, 집계가 실패했을 뿐인데 응답이
+	//   "최근 마무리 표본 0"이라고 **원인을 단정**했다 — 마무리가 20회 쌓여 있어도 같은
+	//   문장이 나갔다. 표본 0은 참일 수 있는 사실이라 실패와 섞으면 그 사실이 못 쓰게 된다.
+	rate, verdict := b.Rate()
+	switch verdict {
+	case service.RateUnmeasured:
+		s.WriteString("  R 은 못 쟀다 — 재생산율 집계가 실패했다(표본이 0인 것과 **다르다**). " +
+			"큐가 느는지 주는지 이 응답은 모른다.\n")
+		return s.String()
+	case service.RateNoSample:
+		s.WriteString("  R 은 아직 없다 — 이 창에 마무리가 0회다(집계는 됐다). " +
+			"마무리가 쌓이면 이 줄이 값을 낸다.\n")
 		return s.String()
 	}
-	verdict := "큐가 준다면 R<1 이어야 한다"
+	trend := "큐가 준다면 R<1 이어야 한다"
 	if rate < 1 {
-		verdict = "큐가 줄고 있다"
+		trend = "큐가 줄고 있다"
 	}
-	fmt.Fprintf(&s, "  최근 %d회 마무리 기준 R=%.2f — %s\n", b.ReproWindow, rate, verdict)
+	fmt.Fprintf(&s, "  최근 %d회 마무리 기준 R=%.2f — %s\n", b.ReproWindow, rate, trend)
 	return s.String()
 }
 

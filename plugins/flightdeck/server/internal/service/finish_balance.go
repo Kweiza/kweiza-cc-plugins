@@ -38,9 +38,43 @@ type QueueBalance struct {
 	Starved int           `json:"starved"`
 	Oldest  time.Duration `json:"oldest"`
 	// Repro 는 최근 ReproWindow 회 마무리의 원자료다. **비율을 여기 담지 않는다** —
-	// Finishes==0(못 쟀다)과 R=0 이 같은 값으로 접히면 안 되고, 그 구분은 렌더가 한다.
-	Repro       store.Reproduction `json:"repro"`
-	ReproWindow int                `json:"repro_window"`
+	// R=0 과 그 밖의 것이 같은 값으로 접히면 안 되고, 그 구분은 Rate 와 렌더가 한다.
+	//
+	// ★ **포인터다.** nil = 집계를 못 했다 · 채워졌는데 Finishes==0 = 읽었고 이 창에
+	// 마무리가 없었다. 앞 판은 값 타입이라 집계 실패가 제로값으로 남았고, 그 제로값이
+	// "표본 0"과 구별되지 않아 화면이 "R 은 못 쟀다(**최근 마무리 표본 0**)"로 **원인을
+	// 단정**했다 — 마무리가 20회 쌓여 있어도 같은 문장이 나갔다. DESIGN §5 가 묻는
+	// "빈 값이 거짓말을 하나"에 이 자리는 예라고 답한다: 표본 0은 참일 수 있는 사실이라
+	// 실패와 섞이면 그 사실이 못 쓰게 된다. 같은 파일의 QueueBalance·StillHeld 포인터와
+	// 같은 계약이고, 이 축만 예외였다.
+	Repro       *store.Reproduction `json:"repro,omitempty"`
+	ReproWindow int                 `json:"repro_window"`
+}
+
+// RateVerdict 는 R 을 낼 수 있는가의 **세 갈래**다. 둘로 접으면 안 되는 이유는
+// QueueBalance.Repro 의 ★ 에 있다.
+type RateVerdict int
+
+const (
+	// RateUnmeasured 는 집계 자체가 실패한 것이다 — 표본이 몇인지도 모른다.
+	RateUnmeasured RateVerdict = iota
+	// RateNoSample 은 읽었고, 이 창에 마무리가 0회인 것이다. **참일 수 있는 사실이다.**
+	RateNoSample
+	// RateMeasured 는 값이 있는 것이다.
+	RateMeasured
+)
+
+func (v RateVerdict) String() string {
+	switch v {
+	case RateUnmeasured:
+		return "못 쟀다"
+	case RateNoSample:
+		return "표본 0"
+	case RateMeasured:
+		return "값 있음"
+	default:
+		return "알 수 없음"
+	}
 }
 
 // 큐 수지 — "이 마무리가 큐를 늘렸나 줄였나"를 그 자리에서 낸다.
@@ -88,26 +122,35 @@ func (s *Service) queueBalance(ctx context.Context, project string, added int, n
 	}
 
 	// ★ 재생산율은 **따로 실패한다.** 큐 상태는 읽었는데 원장 집계만 실패한 경우,
-	// 그 하나 때문에 나머지를 버리면 세션은 굶은 항목 수도 못 본다. Repro.Finishes 가
-	// 0으로 남고 렌더가 "R 을 못 쟀다"를 말한다.
+	// 그 하나 때문에 나머지를 버리면 세션은 굶은 항목 수도 못 본다.
+	//
+	// ★ 실패하면 Repro 를 **nil 로 둔다** — 제로값으로 두면 "표본 0"과 같아져서 화면이
+	// 실패의 원인을 "마무리가 없었다"로 단정한다. 그 둘을 가르는 것이 이 포인터의 존재
+	// 이유다(필드 주석의 ★).
 	if r, rerr := s.st.QueueReproduction(ctx, project, ReproWindow); rerr != nil {
-		s.log.WarnContext(ctx, "재생산율 집계 실패 — 응답은 그 절만 뺀다",
+		s.log.WarnContext(ctx, "재생산율 집계 실패 — 응답은 그 절을 '못 쟀다'로 낸다",
 			"project", clip(project, 64), "error", rerr.Error())
 	} else {
-		b.Repro = r
+		b.Repro = &r
 	}
 	return b
 }
 
-// Rate 는 이 표본의 재생산율이다. 두 번째 값이 false 면 **못 쟀다**(표본 0).
+// Rate 는 이 표본의 재생산율과 **왜 못 내는지**다.
 //
 // ★ 저장 계층이 아니라 여기서 나눈다. store 는 원자료만 낸다 — 0으로 나누는 갈래를
 // 저장 계층에 두면 "마무리 0건"과 "R=0"이 같은 값으로 접힌다.
-func (b QueueBalance) Rate() (float64, bool) {
-	if b.Repro.Finishes == 0 {
-		return 0, false
+//
+// ★ 판정이 셋인 이유는 RateVerdict 와 QueueBalance.Repro 의 ★ 에 있다. 앞 판은 bool
+// 하나였고, 그 false 가 "집계 실패"와 "표본 0"을 같은 값으로 만들었다.
+func (b QueueBalance) Rate() (float64, RateVerdict) {
+	if b.Repro == nil {
+		return 0, RateUnmeasured
 	}
-	return float64(b.Repro.Followups+b.Repro.Adds) / float64(b.Repro.Finishes), true
+	if b.Repro.Finishes == 0 {
+		return 0, RateNoSample
+	}
+	return float64(b.Repro.Followups+b.Repro.Adds) / float64(b.Repro.Finishes), RateMeasured
 }
 
 // Delta 는 이 호출이 큐에 더한 순증이다. 음수면 큐를 줄였다.

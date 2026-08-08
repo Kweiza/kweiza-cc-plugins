@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 배선이 실제로 이어졌는지 본다 — **계산은 되는데 읽는 쪽이 0건**인 실패를
@@ -47,11 +48,14 @@ func TestFinishFillsQueueBalance(t *testing.T) {
 			"커밋 전에 읽으면 방금 만든 후속이 빠진다", b.Open)
 	}
 	// 이 마무리 자체가 표본 1건이다. 0이면 원장 집계가 안 돌았다.
+	if b.Repro == nil {
+		t.Fatalf("재생산율을 못 쟀다 — 이 마무리 자체가 표본에 들어와야 한다")
+	}
 	if b.Repro.Finishes == 0 {
 		t.Fatalf("재생산율 표본이 0이다 — 이 마무리 자체가 표본에 들어와야 한다")
 	}
-	if _, ok := b.Rate(); !ok {
-		t.Fatalf("표본이 있는데 비율을 못 냈다: %+v", b.Repro)
+	if _, v := b.Rate(); v != RateMeasured {
+		t.Fatalf("표본이 있는데 비율을 못 냈다(판정 %v): %+v", v, b.Repro)
 	}
 	if b.ReproWindow != ReproWindow {
 		t.Fatalf("표본 크기를 응답에 안 실었다: got %d, want %d", b.ReproWindow, ReproWindow)
@@ -102,18 +106,21 @@ func TestQueueBalanceExcludesTicklerFromStarvation(t *testing.T) {
 // Rate 는 표본 0에서 **못 쟀다**를 낸다 — 0.0 이 아니다.
 //
 // 0으로 접으면 "큐가 안 는다"로 읽힌다. 저장 계층이 원자료만 내고 나눗셈을 여기 둔 이유다.
+//
+// ★ 갈래가 셋이 된 뒤로는 "표본 0"과 "집계 실패"도 여기서 갈린다 — 그 축은
+// repro_unmeasured_test.go 가 잠근다. 이 시험은 **잰 0** 과 그 밖을 가른다.
 func TestQueueBalanceRateSeparatesZeroSampleFromZeroRate(t *testing.T) {
 	var empty QueueBalance
-	if _, ok := empty.Rate(); ok {
-		t.Fatalf("표본 0인데 잰 것처럼 답했다")
+	empty.Repro = &store.Reproduction{} // 읽었고 표본이 0이다
+	if _, v := empty.Rate(); v != RateNoSample {
+		t.Fatalf("표본 0인데 판정이 %v 다", v)
 	}
 
 	// 진짜 R=0 — 마무리는 있었고 아무것도 안 만들었다. 이것은 **잰 값**이다.
-	zero := QueueBalance{}
-	zero.Repro.Finishes = 3
-	got, ok := zero.Rate()
-	if !ok {
-		t.Fatalf("표본이 있는데 못 쟀다고 답했다")
+	zero := QueueBalance{Repro: &store.Reproduction{Finishes: 3}}
+	got, v := zero.Rate()
+	if v != RateMeasured {
+		t.Fatalf("표본이 있는데 판정이 %v 다", v)
 	}
 	if got != 0 {
 		t.Fatalf("R 이 0이어야 한다: got %v", got)
