@@ -150,7 +150,11 @@ func (s *Store) ListSessionEvents(ctx context.Context, sessionID, kind string, s
 // Reproduction 은 재생산율의 **원자료**다. 비율은 여기서 안 만든다.
 //
 // 0으로 나누는 갈래를 저장 계층에 두면 "마무리 0건"과 "R=0"이 같은 값으로 접힌다.
-// 호출자가 Finishes==0 을 보고 "못 쟀다"를 낸다.
+//
+// ★ Finishes==0 은 **"이 창에 마무리가 없었다"**이지 "못 쟀다"가 아니다. 그 둘을 가르는
+// 것은 호출자이고, 방식은 이 구조체가 아니라 **포인터의 유무**다(service.QueueBalance.Repro
+// 가 nil 이면 못 쟀다). 앞 판은 여기에 "호출자가 Finishes==0 을 보고 못 쟀다를 낸다"고
+// 적혀 있었는데, 그 뭉갬이 화면에서 집계 실패를 "표본 0"으로 원인 단정하게 만들었다.
 type Reproduction struct {
 	Finishes  int // 표본이 된 마무리 수(최근 N회)
 	Followups int // 그 마무리들이 실은 후속 합(item.finish payload 의 count)
@@ -208,7 +212,7 @@ func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (R
 		return Reproduction{}, fmt.Errorf("마무리 이벤트 순회 실패: %w", err)
 	}
 	if out.Finishes == 0 {
-		return out, nil // 표본이 없다. 0값 그대로 — 호출자가 "못 쟀다"를 낸다
+		return out, nil // 표본이 없다. 0값 그대로 — **오류가 아니다**(호출자가 표본 0으로 읽는다)
 	}
 
 	if err := s.db.QueryRowContext(ctx, `

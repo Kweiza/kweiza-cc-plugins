@@ -105,11 +105,16 @@ func TestRenderFinishSaysWhenSampleIsZero(t *testing.T) {
 	if strings.Contains(got, "R=0.00") {
 		t.Fatalf("표본 0을 0으로 찍었다 — '큐가 안 는다'로 읽힌다:\n%s", got)
 	}
-	if !strings.Contains(got, "마무리가 0회") {
+	if !strings.Contains(got, "표본이 0회") {
 		t.Fatalf("표본 0인데 그 사실을 안 말한다:\n%s", got)
 	}
-	if strings.Contains(got, "집계가 실패") {
-		t.Fatalf("표본이 0일 뿐인데 집계 실패라고 말한다:\n%s", got)
+	if strings.Contains(got, "원자료가 없다") {
+		t.Fatalf("표본이 0일 뿐인데 원자료가 없다고 말한다:\n%s", got)
+	}
+	// ★ **원인을 단정하면 안 된다.** 원자료가 실렸다는 것이 "집계가 성공했다"를 뜻하지
+	// 않는다 — 이 축을 값 타입으로 내던 옛 서버 판은 집계가 실패해도 제로값을 실어 보낸다.
+	if strings.Contains(got, "집계는 됐다") {
+		t.Fatalf("관측하지 않은 사실(집계 성공)을 단정했다:\n%s", got)
 	}
 	// 큐 상태 자체는 읽었으므로 그 절은 살아 있어야 한다.
 	if !strings.Contains(got, "3건") {
@@ -130,15 +135,53 @@ func TestRenderFinishSeparatesUnmeasuredRateFromZeroSample(t *testing.T) {
 	if strings.Contains(got, "R=0.00") {
 		t.Fatalf("못 잰 것을 0으로 찍었다:\n%s", got)
 	}
-	if !strings.Contains(got, "집계가 실패") {
-		t.Fatalf("집계 실패인데 그 사실을 안 말한다:\n%s", got)
+	if !strings.Contains(got, "원자료가 없다") {
+		t.Fatalf("원자료가 없는데 그 사실을 안 말한다:\n%s", got)
 	}
 	// ★ 원인을 단정하면 안 된다 — 마무리가 20회 쌓여 있어도 이 갈래가 돈다.
-	if strings.Contains(got, "마무리가 0회") {
-		t.Fatalf("집계가 실패했을 뿐인데 '마무리가 0회'라고 원인을 단정했다:\n%s", got)
+	if strings.Contains(got, "표본이 0회") {
+		t.Fatalf("원자료가 없을 뿐인데 '표본이 0회'라고 원인을 단정했다:\n%s", got)
+	}
+	// ★ 부재의 원인도 단정하면 안 된다 — 집계 실패 · 프록시 탈락 · 구서버 판이 다 가능하다.
+	if strings.Contains(got, "집계가 실패했다") {
+		t.Fatalf("원자료 부재의 원인을 단정했다:\n%s", got)
 	}
 	if !strings.Contains(got, "3건") {
 		t.Fatalf("R 만 못 쟀는데 큐 상태까지 통째로 뺐다:\n%s", got)
+	}
+}
+
+// 추세 문장이 **경계에서** 뒤집힌다 — R<1 만 "줄고 있다"다.
+//
+// ★ 이 축이 안 잠겨 있었다(검토가 변이로 확인). 부등호를 뒤집으면 R=1.30 이 "큐가 줄고
+// 있다"를 내는데, 그 문장은 DESIGN §10 의 R 반증 기한이 판정하는 바로 그 값이다 —
+// 계기가 반대로 말하면 기한이 와도 아무도 그것을 모른다.
+func TestRenderFinishTrendFlipsAtOne(t *testing.T) {
+	// R = (Followups+Adds)/Finishes 다. 아래 셋은 각각 0.90 · 1.00 · 1.30 을 만든다.
+	for _, c := range []struct {
+		name          string
+		repro         store.Reproduction
+		wantShrinking bool
+	}{
+		{"R=0.90 — 준다", store.Reproduction{Finishes: 10, Followups: 5, Adds: 4}, true},
+		{"R=1.00 — 안 준다(경계는 미포함)", store.Reproduction{Finishes: 10, Followups: 6, Adds: 4}, false},
+		{"R=1.30 — 는다", store.Reproduction{Finishes: 10, Followups: 8, Adds: 5}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := c.repro
+			got := RenderFinish(finishWithBalance(&service.QueueBalance{
+				Closed: 1, Added: 1, Open: 3, Repro: &r, ReproWindow: 20,
+			}))
+			shrinking := strings.Contains(got, "큐가 줄고 있다")
+			if shrinking != c.wantShrinking {
+				t.Fatalf("추세 판정이 뒤집혔다(줄고 있다=%v, 원하는 것 %v):\n%s",
+					shrinking, c.wantShrinking, got)
+			}
+			// 값 자체도 나와야 한다 — 판정만 있고 수가 없으면 재현이 안 된다.
+			if !strings.Contains(got, "R=") {
+				t.Fatalf("R 값이 화면에 없다:\n%s", got)
+			}
+		})
 	}
 }
 

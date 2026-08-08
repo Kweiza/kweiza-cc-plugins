@@ -98,7 +98,8 @@ func TestQueueReproductionIsPerProject(t *testing.T) {
 }
 
 // 마무리가 0건이면 **0값을 그대로 낸다** — 여기서 비율을 만들지 않으므로 나눗셈이 없다.
-// 호출자가 Finishes==0 을 보고 "못 쟀다"로 낸다.
+// 그리고 **오류가 아니다**: 호출자는 이것을 "표본 0"으로 읽고, "못 쟀다"는 조회 자체가
+// 실패해 원자료가 없을 때만 낸다(service.QueueBalance.Repro 의 nil).
 func TestQueueReproductionEmptyIsZeroNotError(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
