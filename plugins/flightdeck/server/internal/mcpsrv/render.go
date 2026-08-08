@@ -737,11 +737,11 @@ func boardDetailFoot(v service.BoardView) []string {
 	//   처방이 없었다"는 사실이라 0 그대로 낸다 — 안 나온 것과 못 잰 것을 가르는 자리다.
 	if r := v.AckReach; r != nil && r.AllTime.Emitted > 0 {
 		out = append(out, fmt.Sprintf(
-			"확인율 최근 %s — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
-				"(두 수가 크게 다르면 그 차이가 카드 갈림이다)",
+			"확인율 최근 %s — 발화 대화 %d · 그중 ack 이 닿을 수 있는 대화 %d · 실제 ack %d "+
+				"(앞 두 수가 크게 다르면 처방을 받고 판단을 안 남긴 대화가 그만큼이다)",
 			FormatAge(r.Window), r.Recent.Emitted, r.Recent.Reachable, r.Recent.Acked))
 		out = append(out, fmt.Sprintf(
-			"확인율 전 역사 — 발화 카드 %d · 그중 ack 이 닿을 수 있는 카드 %d · 실제 ack %d "+
+			"확인율 전 역사 — 발화 대화 %d · 그중 ack 이 닿을 수 있는 대화 %d · 실제 ack %d "+
 				"(분모가 단조 증가한다 — 추세로만 읽어라)",
 			r.AllTime.Emitted, r.AllTime.Reachable, r.AllTime.Acked))
 	}

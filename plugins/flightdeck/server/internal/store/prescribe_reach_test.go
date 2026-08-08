@@ -244,6 +244,73 @@ func TestAckReachCutsRecentByWindow(t *testing.T) {
 	}
 }
 
+// 한 대화가 카드 둘로 갈려도 **대화 한 개**로 센다 — 그리고 판단이 형제 카드에 있어도
+// 도달 가능으로 잡힌다.
+//
+// ★ 이것이 이 지표가 무엇을 재는지를 정하는 자리다. 이 저장소의 규율은 "작업은 워크트리로
+// 연다"이고, 카드 정체가 3중키 (machine, worktree, cc) 라 **규율을 지키는 대화는 반드시
+// 갈린다**(설계다 — DESIGN §3, 되돌릴 수 없다). 카드로 세면 그 갈림이 분모를 부풀려
+// 확인율이 규율이 아니라 갈림을 잰다. 앞 항목이 분모를 가른 뒤에도 남아 있던 몫이 이것이다.
+//
+// ★ 그리고 갈림은 분모만 부풀린 것이 아니라 **미확인을 지우고 있었다.** 처방이 A 카드에
+// 뜨고 판단이 B 카드에 쌓이면 A 는 판단이 0이라 도달 가능에서 빠진다 — 즉 그 대화의
+// 미확인이 관측에서 사라진다. 실측(2026-08-08 전 역사)에서 카드로 세면 13/13 = 100%,
+// 대화로 세면 15개 중 13 = 87% 였다. 100%는 규율이 완벽해서가 아니었다.
+func TestAckReachCountsConversationsNotCards(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	if err := s.UpsertProject(ctx, model.Project{ID: "p", Path: "/repo/p"}); err != nil {
+		t.Fatalf("프로젝트 등록 실패: %v", err)
+	}
+	if err := s.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "dev"}); err != nil {
+		t.Fatalf("머신 등록 실패: %v", err)
+	}
+
+	// 한 대화("cc-1")가 워크트리를 옮겨 카드 둘이 됐다 — 이 레포에서 매일 나는 모양이다.
+	// 처방은 먼저 열린 카드에 떴고, 판단은 워크트리로 들어간 뒤 쌓였다.
+	first, _, err := s.OpenSession(ctx, "p", "m", "/repo/p", "cc-1", "")
+	if err != nil {
+		t.Fatalf("OpenSession 저장소 루트: %v", err)
+	}
+	moved, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/x", "cc-1", "")
+	if err != nil {
+		t.Fatalf("OpenSession 워크트리: %v", err)
+	}
+	if first.ID == moved.ID {
+		t.Fatal("카드가 안 갈렸다 — 3중키가 바뀌었으면 이 시험의 전제를 다시 써야 한다")
+	}
+	// 처방은 훅이 쏘고 훅은 두 카드 모두에 닿으므로 **양쪽에 뜬다** — 실물이 그렇다.
+	// 판단은 MCP 가 쓰고 그것은 옮겨간 카드에만 쌓인다.
+	s.LogEvent(ctx, "prescribe", "p", first.ID, map[string]any{"key": "k"})
+	s.LogEvent(ctx, "prescribe", "p", moved.ID, map[string]any{"key": "k"})
+	if _, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "p", SessionID: moved.ID, Kind: model.JudgmentDecision, Title: "t", Body: "b",
+	}); err != nil {
+		t.Fatalf("AddJudgment(형제 카드): %v", err)
+	}
+
+	// 갈리지 않은 대화 하나를 나란히 둔다 — 값이 전부 1이 되어 시험이 퇴화하는 것을 막는다.
+	solo, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/y", "cc-2", "")
+	if err != nil {
+		t.Fatalf("OpenSession 단독: %v", err)
+	}
+	s.LogEvent(ctx, "prescribe", "p", solo.ID, map[string]any{"key": "k"})
+
+	all, recent, err := s.AckReach(ctx, "p", time.Now().Add(-ackWindow))
+	if err != nil {
+		t.Fatalf("AckReach: %v", err)
+	}
+	// 처방이 뜬 카드는 셋이지만 대화는 둘이다.
+	want := AckCounts{Emitted: 2, Reachable: 1, Acked: 0}
+	if all != want {
+		t.Errorf("전 역사 %+v, 원하는 것 %+v — 발화 3이면 카드를 센 것이고, "+
+			"도달 가능 0이면 형제 카드의 판단을 못 본 것이다", all, want)
+	}
+	if recent != want {
+		t.Errorf("최근 %+v, 원하는 것 %+v — 최근 벌만 카드 단위로 남았다", recent, want)
+	}
+}
+
 // 두 벌 모두 자기 프로젝트 밖을 안 센다.
 //
 // ★ 이 파일의 앞선 시험들은 프로젝트를 하나만 만들어서, 여섯 부질의의 `e.project=?` 를
