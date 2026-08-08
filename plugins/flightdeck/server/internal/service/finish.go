@@ -451,9 +451,11 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	// finish 를 다시 부른다. 대신 nil 로 두어 렌더가 "못 읽었다"고 정확히 말한다 —
 	// 빈 목록으로 접으면 관측한 적 없는 "남은 선점 0건"을 단정하게 된다.
 	//
-	// derive 에 안 넣는 이유는 fillQueueOpen 과 같다: FreshnessOf 가 failures>0 을
-	// **git 축** Stale 로 접어서, DB 조회 한 번이 실패했을 뿐인데 브랜치·조상 판정이
-	// 낡았다고 읽히게 된다.
+	// derive 에 안 넣는 이유: 이 축의 계약은 **필드 자신이** nil(못 읽음)과 빈 목록(0건)을
+	// 가르는 것이다 — derive 로 옮기면 필드가 그 구분을 잃고 소비자가 Failures 목록을
+	// 뒤져야 한다. (앞 판 주석은 "FreshnessOf 가 failures>0 을 git 축 Stale 로 접는다"를
+	// 이유로 댔는데, 그것은 reads>0 인 Board 이야기다 — 마무리는 git 읽기가 0이라
+	// FreshnessOf 가 어차피 db·낡음을 내고, 아래 GetItem 은 실제로 derive 에 고백한다.)
 	if held, herr := s.st.ClaimedItems(ctx, in.SessionID); herr != nil {
 		s.log.WarnContext(ctx, "마무리 뒤 남은 선점 조회 실패 — 응답은 그 축을 안 낸다",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
@@ -477,8 +479,8 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	//   큐를 늘렸나"가 거짓이 된다.
 	out.QueueBalance = s.queueBalance(ctx, in.Project, len(out.Followups), now)
 
-	// ★ 되읽기 실패로 **결과를 버리지 않는다.** 트랜잭션은 285줄에서 이미 커밋됐다 —
-	// 여기서 오류를 올리면 세션이 같은 finish 를 다시 부르고(20줄 위 ClaimedItems 가 무르게
+	// ★ 되읽기 실패로 **결과를 버리지 않는다.** 트랜잭션은 위 Tx 블록에서 이미 커밋됐다 —
+	// 여기서 오류를 올리면 세션이 같은 finish 를 다시 부르고(위 ClaimedItems 가 무르게
 	// 실패하는 이유 그대로다), 판단은 추가 전용이라 두 행이 남고 FinishItem 은 선점이 이미
 	// 반납돼 거절된다. id·상태·폐기 사유는 방금 커밋한 트랜잭션의 것이므로 응답이 그대로
 	// 말할 수 있고, 못 읽은 것은 항목 **전문**(제목·본문·경로)뿐이다 — 그 사실을 item 축으로
@@ -616,10 +618,10 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 
 	// 처방을 받고 판단을 남겼다 — 열린 처방을 닫는다. 실패해도 판단은 이미 저장됐다.
 	//
-	// ★ **수신자 파생보다 먼저 부른다.** 아래 sessionCards 가 실패하면 이 함수는
-	// 그 자리에서 바로 반환한다 — 그 반환 뒤에 ack 을 두면, 판단은 트랜잭션에서
-	// 이미 커밋됐는데 파생 실패 하나 때문에 처방이 영영 안 닫히는 반쪽 상태가 생긴다.
+	// ★ **수신자 파생보다 먼저 부른다.** 지금 수신자 파생은 실패해도 조기 반환하지
+	// 않지만(아래 — 고백하고 계속 간다), 이 순서는 그 사실에 기대지 않는다:
 	// 커밋 여부만이 ack 을 가르는 조건이어야 하고, 그 뒤의 다른 축 실패는 아니다.
+	// 파생 실패가 다시 조기 반환으로 바뀌는 날에도 ack 은 이미 지나갔어야 한다.
 	s.ackPrescriptions(ctx, in.Project, in.SessionID)
 
 	// 받을 세션은 조정 정보다 — 못 읽어도 판단 저장 확인은 낸다.
