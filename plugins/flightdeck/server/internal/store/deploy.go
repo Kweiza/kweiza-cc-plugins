@@ -31,6 +31,14 @@ const eventServerDeploy = "server.deploy"
 // 원장을 안 건드린다.
 //
 // exe 는 안정 식별자면 무엇이든 된다. 지금 호출부는 ExeID.String()(ino·size·mtime)을 준다.
+//
+// ★ **아직 못 가르는 것: 뜨지 못한 기동.** 호출부(cmd/fd 의 noteBuild)가 리스너를 열기
+// **전에** 부르므로, 포트를 이미 다른 서버가 물고 있어 곧바로 죽는 기동도 여기까지는 온다.
+// 실측으로 재현된다 — 컨테이너가 :7420 을 물고 도는데 사람이 README 의
+// `go run ./cmd/fd serve` 를 치면, 그 임시 바이너리가 배포로 적히고 "address already in
+// use" 로 죽는다. 그러면 `LastDeployAt` 이 **한 번도 응답한 적 없는 바이너리**의 시각을 낸다.
+// 고치려면 `api.Serve` 가 바인드 성공을 알려야 하는데 지금 그 훅이 없다 — 후속으로 낸다.
+// 그때까지 이 값은 "이 실행 파일이 이 원장에서 처음 관측된 시각"으로 읽어라.
 func (s *Store) NoteServerBuild(ctx context.Context, exe string) (deployed bool, err error) {
 	exe = strings.TrimSpace(exe)
 	if exe == "" {

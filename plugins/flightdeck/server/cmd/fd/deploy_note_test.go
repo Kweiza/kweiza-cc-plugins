@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -60,5 +63,55 @@ func TestNoteBuildObservesRealBinaryOnce(t *testing.T) {
 	if !second.Equal(first) {
 		t.Errorf("같은 실행 파일로 다시 떴는데 배포 시각이 움직였다: %v → %v — "+
 			"이러면 '마지막 배포'가 '마지막 기동'이 되어 이 축이 뜻을 잃는다", first, second)
+	}
+
+	// ★ **적힌 정체가 그 관측에서 나왔는지**까지 본다. 여기까지 안 보면 noteBuild 가 상수
+	// 하나를 적어도 위 단정이 전부 통과한다(첫 호출은 기준선이 없어 쓰고, 둘째는 같은
+	// 문자열이라 안 쓴다). 그 상태에서는 **진짜 배포가 와도 원장이 영영 모른다** —
+	// 이 축이 막으려던 것 자체다.
+	evs, err := st.ListEvents(ctx, "server.deploy", time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("배포 이벤트 %d건, 원하는 것 1", len(evs))
+	}
+	var got struct {
+		Exe string `json:"exe"`
+	}
+	if err := json.Unmarshal([]byte(evs[0].Payload), &got); err != nil {
+		t.Fatalf("payload 해석 실패(%q): %v", evs[0].Payload, err)
+	}
+	if want := buildIdentity(exeIDOfPath); got.Exe != want {
+		t.Errorf("적힌 정체 %q, 관측한 정체 %q — 원장이 실행 파일이 아닌 무언가를 적고 있다",
+			got.Exe, want)
+	}
+}
+
+// buildIdentity 는 관측 실패를 **빈 문자열**로 번역한다 — `"관측 안 됨"` 을 그대로 흘리지 않는다.
+//
+// ★ 이 갈래는 실물로 못 만든다(`/proc/self/exe` 는 시험 안에서 항상 읽힌다). 그래서 stat 을
+// 주입한다. 가드가 없으면 ExeID.String() 이 `"관측 안 됨"` 을 내고 store 는 그것을 정상
+// 정체로 받아 배포 한 건을 적는다 — 관측이 흔들릴 때마다 가짜 배포가 쌓이고, 그 시각으로
+// 자른 지표가 근거 없이 리셋된다.
+func TestBuildIdentityIsEmptyWhenUnobserved(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		stat func(string) (ExeID, error)
+	}{
+		{"stat 이 실패한다", func(string) (ExeID, error) { return ExeID{}, errors.New("없다") }},
+		{"stat 은 되는데 관측이 안 됐다", func(string) (ExeID, error) { return ExeID{OK: false, Ino: 7}, nil }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := buildIdentity(c.stat); got != "" {
+				t.Errorf("buildIdentity = %q, 원하는 것 빈 문자열 — 이 값이 원장에 정체로 적힌다", got)
+			}
+		})
+	}
+
+	// 관측되면 그 값을 그대로 낸다 — 빈 문자열만이 "모른다"의 표현이어야 한다.
+	ok := ExeID{OK: true, Dev: 1, Ino: 2, Size: 3, MtimeNano: 4}
+	if got := buildIdentity(func(string) (ExeID, error) { return ok, nil }); got != ok.String() {
+		t.Errorf("buildIdentity = %q, 원하는 것 %q", got, ok.String())
 	}
 }

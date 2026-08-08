@@ -61,6 +61,18 @@ func TestNoteServerBuildRecordsOnlyWhenBinaryChanged(t *testing.T) {
 	if n := countDeploys(t, s); n != 2 {
 		t.Errorf("배포 이벤트 %d건, 원하는 것 2", n)
 	}
+
+	// ★ 기준선은 **마지막** 배포여야 한다. 이력이 둘 이상이 된 지금 새 빌드로 한 번 더
+	// 재기동해 본다 — 기준선을 가장 오래된 행에서 잡으면(ORDER BY id ASC) 이 호출이
+	// exe1 과 견주어져 "바뀌었다"가 되고, 그 뒤로 두 빌드를 오갈 때마다 배포가 쌓인다.
+	if deployed, err := s.NoteServerBuild(ctx, "ino=2 size=180 mtime=20"); err != nil {
+		t.Fatalf("NoteServerBuild 새 빌드로 재기동: %v", err)
+	} else if deployed {
+		t.Error("새 빌드로 재기동했는데 또 배포로 잡혔다 — 기준선이 마지막 배포가 아니다")
+	}
+	if n := countDeploys(t, s); n != 2 {
+		t.Errorf("배포 이벤트 %d건, 원하는 것 2 — 기준선이 옛 행에 고정돼 있다", n)
+	}
 }
 
 // 관측 못 한 실행 파일은 배포로 세지 않는다.
@@ -121,7 +133,11 @@ func TestLastDeployAtSeparatesUnknownFromZero(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("둘째 배포 뒤 LastDeployAt(ok=%v err=%v)", ok, err)
 	}
-	if second.Before(first) {
-		t.Errorf("마지막 배포가 뒤로 갔다: %v → %v", first, second)
+	// ★ **앞으로 갔는지**를 본다. `Before` 만 보면 정렬이 뒤집혀 첫 배포를 계속 답해도
+	// 통과한다(같은 값은 Before 가 거짓이다) — 그러면 이 축이 첫 기동 시각에 영영 얼어붙고,
+	// 그 시각으로 자른 창은 전 역사에 수렴한다.
+	if !second.After(first) {
+		t.Errorf("둘째 배포 뒤인데 마지막 배포 시각이 안 움직였다: %v → %v — "+
+			"조회가 가장 오래된 행을 보고 있다", first, second)
 	}
 }

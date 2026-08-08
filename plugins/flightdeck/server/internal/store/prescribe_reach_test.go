@@ -296,15 +296,29 @@ func TestAckReachCountsConversationsNotCards(t *testing.T) {
 	}
 	s.LogEvent(ctx, "prescribe", "p", solo.ID, map[string]any{"key": "k"})
 
+	// ★ 머신 축을 함께 잠근다. cc_session_id 는 Claude Code 가 발급하는 값이라 **머신을
+	// 가로질러 유일하지 않다** — 키에서 machine_id 를 빼면 다른 노트북의 같은 id 를 가진
+	// 대화가 한 개로 접혀, 두 사람의 규율이 한 수에 섞인다. 여기서 "cc-1" 을 다른 머신에
+	// 다시 두어 그것이 **셋째 대화**로 세지는지 본다.
+	if err := s.UpsertMachine(ctx, model.Machine{ID: "m2", Hostname: "other"}); err != nil {
+		t.Fatalf("둘째 머신 등록 실패: %v", err)
+	}
+	elsewhere, _, err := s.OpenSession(ctx, "p", "m2", "/repo/p", "cc-1", "")
+	if err != nil {
+		t.Fatalf("OpenSession 다른 머신: %v", err)
+	}
+	s.LogEvent(ctx, "prescribe", "p", elsewhere.ID, map[string]any{"key": "k"})
+
 	all, recent, err := s.AckReach(ctx, "p", time.Now().Add(-ackWindow))
 	if err != nil {
 		t.Fatalf("AckReach: %v", err)
 	}
-	// 처방이 뜬 카드는 셋이지만 대화는 둘이다.
-	want := AckCounts{Emitted: 2, Reachable: 1, Acked: 0}
+	// 처방이 뜬 카드는 넷이지만 대화는 셋이다(갈린 것 · 단독 · 다른 머신의 동명 대화).
+	want := AckCounts{Emitted: 3, Reachable: 1, Acked: 0}
 	if all != want {
-		t.Errorf("전 역사 %+v, 원하는 것 %+v — 발화 3이면 카드를 센 것이고, "+
-			"도달 가능 0이면 형제 카드의 판단을 못 본 것이다", all, want)
+		t.Errorf("전 역사 %+v, 원하는 것 %+v — 발화 4면 카드를 센 것이고, 2면 머신 축이 빠져 "+
+			"다른 머신의 같은 cc 가 한 대화로 접힌 것이다. 도달 가능 0이면 형제 카드의 판단을 "+
+			"못 봤다", all, want)
 	}
 	if recent != want {
 		t.Errorf("최근 %+v, 원하는 것 %+v — 최근 벌만 카드 단위로 남았다", recent, want)

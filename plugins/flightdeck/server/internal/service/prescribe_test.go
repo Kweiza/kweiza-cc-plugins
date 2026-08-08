@@ -545,7 +545,7 @@ func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
 // 놓치지 말라고 이 시험이 있다. 통로 뚫기는 선언 경로(service/landing.go) 밖이라
 // 후속 항목으로 올렸다.
 //
-// ★ AckReach(board.go)는 이것과 **다른 축**이다 — 키를 안 보고 세션 단위로 센다.
+// ★ AckReach(board.go)는 이것과 **다른 축**이다 — 키를 안 보고 대화 단위로 센다.
 // 그래서 "lane-turn 확인율"이라는 수치는 코드 어디에도 없다. 설계 §10 이 인용하는
 // "overlap 0/31" 은 사람이 따로 잰 값이다. 이 구분을 안 적으면 다음 사람이 §10 의
 // 수치를 키별 확인율로 읽는다.

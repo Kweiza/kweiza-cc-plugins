@@ -132,19 +132,36 @@ func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) api.
 // 내므로, 그대로 넘기면 그것이 정체가 되어 "관측 실패 → 진짜 빌드"가 배포 한 건으로 잡힌다.
 // 모르는 것은 아무 말도 안 하는 것이 맞다.
 func noteBuild(ctx context.Context, st *store.Store, log *slog.Logger) {
-	id, err := exeIDOfPath("/proc/self/exe")
-	if err != nil || !id.OK {
-		log.Debug("실행 파일 정체를 못 읽어 배포 관측을 건너뛴다", "error", errText(err))
+	exe := buildIdentity(exeIDOfPath)
+	if exe == "" {
+		log.Debug("실행 파일 정체를 못 읽어 배포 관측을 건너뛴다")
 		return
 	}
-	deployed, derr := st.NoteServerBuild(ctx, id.String())
+	deployed, derr := st.NoteServerBuild(ctx, exe)
 	switch {
 	case derr != nil:
 		// 침묵하지 않는다. 이 축이 조용히 죽으면 "배포 뒤"로 자르는 지표가 옛 시각에 얼어붙는다.
-		log.Warn("배포 관측을 원장에 못 남겼다", "exe", id.String(), "error", derr.Error())
+		log.Warn("배포 관측을 원장에 못 남겼다", "exe", exe, "error", derr.Error())
 	case deployed:
-		log.Info("새 실행 파일로 떴다 — 배포로 적었다", "exe", id.String())
+		log.Info("새 실행 파일로 떴다 — 배포로 적었다", "exe", exe)
 	}
+}
+
+// buildIdentity 는 관측된 실행 파일의 정체다. **관측 못 했으면 빈 문자열**이다. 순수 함수다.
+//
+// ★ 이것이 따로 있는 이유는 `ExeID.String()` 이 관측 실패를 `"관측 안 됨"` 이라는 **평범한
+// 문자열**로 내기 때문이다. 그 값을 정체로 넘기면 원장이 그것을 하나의 빌드로 받아, 관측이
+// 흔들릴 때마다 "관측 안 됨 → 진짜 빌드"가 배포 한 건씩 만든다. 빈 문자열만이 store 가
+// 무시하기로 약속한 값이라(NoteServerBuild), 그 번역을 여기서 한 번에 한다.
+//
+// stat 을 인자로 받는 이유는 시험이 관측 실패를 만들 수 있어야 해서다 — `/proc/self/exe` 는
+// 시험 안에서 항상 읽히므로 실패 갈래를 실물로는 못 만든다.
+func buildIdentity(stat func(string) (ExeID, error)) string {
+	id, err := stat("/proc/self/exe")
+	if err != nil || !id.OK {
+		return ""
+	}
+	return id.String()
 }
 
 // runServe 는 `fd serve` 다.
