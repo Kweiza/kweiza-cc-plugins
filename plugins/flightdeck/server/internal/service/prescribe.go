@@ -288,7 +288,10 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 // 가 그대로 잠갔다 — 통로를 뚫으면(land 가 자기가 응답한 키만 골라 ack) 그 시험이 먼저
 // 빨개진다. 그때 고칠 것은 시험이 아니라 여기 적힌 사실이다.
 //
-// ★ 이 축과 `AckReach`(board.go)를 섞지 마라. 저쪽은 키를 안 보고 **세션 단위**로 센다.
+// ★ 이 축과 `AckReach`(board.go)를 섞지 마라. 저쪽은 키를 안 보고 **대화 단위**로 센다
+// (machine + cc_session_id. 카드가 갈려도 한 번 센다) — 반면 이 함수는 **카드 하나**의
+// 열린 처방만 닫는다. 그래서 형제 카드에 뜬 처방은 여기서 안 닫히고, 그 대화는 저쪽의
+// 분모에는 들어가면서 분자에는 안 들어간다. 그 차이가 지금 확인율이 100%가 아닌 이유다.
 // 키별 확인율을 내는 코드는 없다 — 설계 §10 의 "overlap 0/31" 은 사람이 따로 잰 값이다.
 func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID string) {
 	sess, err := s.st.GetSession(ctx, sessionID)

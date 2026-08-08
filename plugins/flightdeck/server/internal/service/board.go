@@ -64,8 +64,9 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 }
 
 // AckReach 는 처방 확인율이 지금 무엇을 재고 있는지다.
-// Emitted 와 Reachable 이 크게 다르면 그 격차의 사유는 하나다 —
-// **판단을 쓸 이유가 없던 대화**(land 만 하고 떠난 경우. 아래 ★).
+// Emitted 와 Reachable 이 크게 다르면 그 격차의 사유는 둘이다 — **판단을 아예 안 남긴
+// 대화**, 그리고 **판단을 쓸 이유가 없던 대화**(land 만 하고 떠난 경우. 아래 ★).
+// 카드 갈림은 더는 사유가 아니다 — 2026-08-08 부터 대화 단위로 세어 접힌다.
 //
 // ★ **세 값 다 대화 단위다 — 카드도 키도 안 본다.** 한 대화(machine + cc_session_id)가
 // 카드 여럿으로 갈려도 한 번 센다. 카드로 세던 판이 **갈림**을 규율로 착각하게 만들었고,
@@ -79,7 +80,7 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 //
 // ★ 축의 뒤집힘이 하나 섞여 있다: ack 을 남기는 경로는 판단을 쓰는 쪽(note·finish)뿐이고
 // `land` 는 그 통로를 안 지난다(service/prescribe.go 의 ackPrescriptions 주석).
-// 그래서 행동이 `land()` 인 처방을 **정확히 따르고** 판단을 안 남긴 세션은 — 확인율을
+// 그래서 행동이 `land()` 인 처방을 **정확히 따르고** 판단을 안 남긴 대화는 — 확인율을
 // 떨어뜨리는 것이 아니라 — `Emitted` 에만 들어가고 **`Reachable` 에서 통째로 빠진다.**
 // 즉 관측에서 사라진다. 위 격차의 둘째 사유가 이것이다.
 //
