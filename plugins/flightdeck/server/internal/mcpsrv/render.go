@@ -1312,6 +1312,17 @@ func RenderNote(r service.NoteResult) string {
 	if r.Judgment.Supersedes != "" {
 		fmt.Fprintf(&b, "정정: %s 를 대체한다 — 옛 행은 그대로 남는다(추가 전용)\n", r.Judgment.Supersedes)
 	}
+	// ★ 수신자 축이 실패했으면 "없다"를 단정하지 않는다 — recipients=nil 은 그때
+	//   "받을 세션 0건"이 아니라 "못 읽었다"다. 판단은 커밋됐으므로 재호출하면 중복이
+	//   남는다는 것까지 같은 줄에 말한다(그 함정이 이 갈래가 생긴 이유다).
+	if hasFailureAxis(r.Derived, "recipients") {
+		b.WriteString("받을 세션은 이 응답이 못 읽었다 — 판단은 저장됐다. " +
+			"**다시 부르지 마라**(추가 전용이라 중복이 남는다). 받을 세션은 board 로 봐라.\n")
+		for _, line := range renderFailures(r.Derived, 3) {
+			b.WriteString(line + "\n")
+		}
+		return b.String()
+	}
 	if len(r.Recipients) == 0 {
 		b.WriteString("지금 이 노트를 읽을 다른 세션이 없다 — 다음에 여는 세션이 board 에서 본다.\n")
 		return b.String()
@@ -1449,7 +1460,23 @@ func RenderFinish(r service.FinishResult) string {
 		b.WriteString("판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션이었다 — 검산할 순서가 없다.\n")
 	}
 	b.WriteString(finishBalanceLines(r.QueueBalance))
+	// ★ 파생 실패를 낸다 — 예컨대 커밋 뒤 항목 되읽기가 실패하면 첫 줄의 id·상태는
+	//   트랜잭션이 아는 사실이지만 전문(제목·본문·경로)은 이 응답이 못 읽은 것이다.
+	//   그 사실이 여기 없으면 JSON 에만 남아 MCP·CLI 세션은 결손을 모른 채 지나간다.
+	for _, line := range renderFailures(r.Derived, 3) {
+		b.WriteString(line + "\n")
+	}
 	return b.String()
+}
+
+// hasFailureAxis 는 파생 실패에 그 축이 있는가다. 순수 함수다.
+func hasFailureAxis(d service.Derived, axis string) bool {
+	for _, f := range d.Failures {
+		if f.Axis == axis {
+			return true
+		}
+	}
+	return false
 }
 
 // finishBalanceLines 는 "이 마무리가 큐를 늘렸나 줄였나"를 낸다.

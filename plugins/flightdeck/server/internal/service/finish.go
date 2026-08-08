@@ -477,12 +477,30 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	//   큐를 늘렸나"가 거짓이 된다.
 	out.QueueBalance = s.queueBalance(ctx, in.Project, len(out.Followups), now)
 
-	item, err := s.st.GetItem(ctx, in.Project, in.ItemID)
-	if err != nil {
-		return FinishResult{}, err
+	// ★ 되읽기 실패로 **결과를 버리지 않는다.** 트랜잭션은 285줄에서 이미 커밋됐다 —
+	// 여기서 오류를 올리면 세션이 같은 finish 를 다시 부르고(20줄 위 ClaimedItems 가 무르게
+	// 실패하는 이유 그대로다), 판단은 추가 전용이라 두 행이 남고 FinishItem 은 선점이 이미
+	// 반납돼 거절된다. id·상태·폐기 사유는 방금 커밋한 트랜잭션의 것이므로 응답이 그대로
+	// 말할 수 있고, 못 읽은 것은 항목 **전문**(제목·본문·경로)뿐이다 — 그 사실을 item 축으로
+	// 고백한다.
+	//
+	// ★ derive 에 넣어도 신선도는 안 다친다 — 마무리에는 git 읽기가 0이라 FreshnessOf 가
+	// 어차피 db·낡음을 낸다(failures 로 git 축이 낡는 것은 reads>0 일 때다. StillHeld 주석의
+	// 우려는 Board 쪽 이야기다). 실리는 것은 Failures 목록뿐이고 렌더가 그것을 낸다.
+	d := &derive{}
+	if item, ierr := s.st.GetItem(ctx, in.Project, in.ItemID); ierr != nil {
+		s.log.WarnContext(ctx, "마무리 뒤 항목 되읽기 실패 — 커밋된 사실로 응답한다",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"item", clip(in.ItemID, 64), "error", ierr.Error())
+		d.fail("item", ierr)
+		out.Item = model.Item{
+			Project: in.Project, ID: in.ItemID,
+			State: in.Outcome, CloseReason: in.CloseReason,
+		}
+	} else {
+		out.Item = item
 	}
-	out.Item = item
-	out.Derived = (&derive{}).result(now) // 마무리에는 git 파생이 없다. 그 사실도 사유로 남는다
+	out.Derived = d.result(now) // 마무리에는 git 파생이 없다. 그 사실도 사유로 남는다
 	s.log.InfoContext(ctx, "마무리",
 		"project", in.Project, "session_id", in.SessionID, "item", in.ItemID,
 		"mode", string(in.Outcome), "count", len(out.Followups), "released", len(out.Released))
@@ -509,6 +527,11 @@ type NoteInput struct {
 type NoteResult struct {
 	Judgment   model.Judgment `json:"judgment"`
 	Recipients []string       `json:"recipients"` // 지금 살아 있는 다른 세션들
+
+	// Derived 는 수신자 파생의 신선도다. **Recipients 가 비었을 때 이것이 뜻을 가른다** —
+	// recipients 축 실패가 있으면 "못 읽었다"이고, 없으면 정말 받을 세션이 없는 것이다.
+	// 슬라이스 하나로 접으면 그 둘이 같은 화면이 된다(0과 못 잼을 가르는 이 저장소의 규율).
+	Derived
 }
 
 // ValidateNoteKind 는 판단 종류가 열거에 있는지 본다. 순수 함수다.
@@ -599,22 +622,37 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 	// 커밋 여부만이 ack 을 가르는 조건이어야 하고, 그 뒤의 다른 축 실패는 아니다.
 	s.ackPrescriptions(ctx, in.Project, in.SessionID)
 
-	// 받을 세션은 조정 정보다. 파생 실패로 접지 않고 그대로 올린다.
+	// 받을 세션은 조정 정보다 — 못 읽어도 판단 저장 확인은 낸다.
+	//
+	// ★ **여기서 오류를 올리면 안 된다.** 판단은 위 트랜잭션에서 이미 커밋됐고 판단 표는
+	// 추가 전용이다("덮어쓰기는 없다"). 오류 응답을 받은 세션이 재시도하면 같은 판단이
+	// 두 행 남는다 — 파생 불가한 유일한 자산에 유령 중복이 쌓인다. 앞 판은 GetProject
+	// 실패는 무르게 넘기면서 sessionCards 실패는 500 이었다 — 한 함수 안에 정반대의
+	// 실패 정책 둘(pick.go 의 notesOrNote 가 없앤 그 모양). 지금은 둘 다 같은 축으로
+	// 고백한다.
+	//
+	// ★ 침묵으로도 안 접는다. recipients=nil 만 두면 화면이 "받을 세션이 없다"고 말한다 —
+	// 0(없다)과 못 잼이 같아진다. recipients 축의 파생 실패가 그 둘을 가른다.
 	d := &derive{}
-	proj, perr := s.st.GetProject(ctx, in.Project)
 	var recipients []string
-	if perr == nil {
-		cards, err := s.sessionCards(ctx, proj, s.cut(now, 0), in.SessionID, d)
-		if err != nil {
-			return NoteResult{}, err
-		}
+	if proj, perr := s.st.GetProject(ctx, in.Project); perr != nil {
+		s.log.WarnContext(ctx, "판단 저장 뒤 수신자 파생 실패 — 저장 확인은 그대로 낸다",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"error", perr.Error())
+		d.fail("recipients", perr)
+	} else if cards, cerr := s.sessionCards(ctx, proj, s.cut(now, 0), in.SessionID, d); cerr != nil {
+		s.log.WarnContext(ctx, "판단 저장 뒤 수신자 파생 실패 — 저장 확인은 그대로 낸다",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"error", cerr.Error())
+		d.fail("recipients", cerr)
+	} else {
 		recipients = Recipients(cards, in.SessionID)
 	}
 	s.log.InfoContext(ctx, "판단 저장",
 		"project", in.Project, "session_id", in.SessionID, "mode", string(in.Kind),
 		"count", len(recipients), "bytes", len(in.Body))
 
-	return NoteResult{Judgment: j, Recipients: recipients}, nil
+	return NoteResult{Judgment: j, Recipients: recipients, Derived: d.result(now)}, nil
 }
 
 // Alloc 은 논리 카운터의 다음 번호를 발급한다.
