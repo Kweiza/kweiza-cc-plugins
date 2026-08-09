@@ -118,6 +118,14 @@ type EligibleInput struct {
 //
 // 정렬은 의존자 수 많은 것 → 오래된 것 → id 사전순이다. 마지막 축은 동점 처리이고,
 // 없으면 같은 입력에 다른 답이 나올 수 있다(입력 순서에 의존하게 된다).
+//
+// ★ **기아도 종료 선언도 이 함수에는 없다 — 일부러다.** 둘 다 EligibleBundle 이
+// Bundle 에 찍고 lessBundle 이 읽는다(bundle.go). 여기 사본을 만들지 않은 이유는
+// 이 함수를 제품이 **안 부르기** 때문이다: 비시험 호출자가 저장소 전체에서 0건이고
+// (2026-08-09 전수) 제품 경로는 EligibleBundle 하나뿐이다. 그러니 여기 축을 더해도
+// 바뀌는 것은 judge 시험이 보는 값뿐이고, 대신 같은 규칙이 두 벌이 되어 조용히
+// 표류한다 — 이 패키지가 이미 그 이유로 SamePaths 를 PathsOverlap 에서 갈라 뒀다
+// (bundle.go). 이 함수 자체의 처분은 큐 항목 fd-eligible-dead-function-disposal 이 정한다.
 func Eligible(in EligibleInput) (picked *Candidate, rejected []model.Rejection) {
 	var fit []Candidate
 	for _, c := range in.Candidates {
@@ -211,6 +219,13 @@ func rejectionsFor(c Candidate, in EligibleInput) []model.Rejection {
 //
 // 순수 함수로 빼 둔 이유는 시험이 정렬 규칙을 **직접** 부를 수 있게 하기 위해서다.
 // 정렬이 Eligible 본문에 있으면 시험이 그 규칙의 사본을 단정하게 된다.
+//
+// ★ **강등 축(Bundle.CloseDeclared)은 여기 안 들어간다.** 이 비교자가 제품에서
+// 살아 있는 자리는 EligibleBundle 의 fit 정렬 하나뿐이고(bundle.go 의
+// sort.SliceStable), 그 순서가 흘러가는 곳은 묶음 **구성원의 표시 순서**다 —
+// 무엇을 추천하느냐는 lessBundle 이 정한다(그쪽은 선두 id 로 끝나는 전순서라
+// 안정 정렬의 입력 순서가 결과를 못 바꾼다). 여기 넣으면 강등이 두 곳에서 나고,
+// 그러면 "강등을 한 번 했나 두 번 했나"를 화면에서 가를 관측점이 사라진다.
 func lessCandidate(a, b Candidate) bool {
 	if a.Dependents != b.Dependents {
 		return a.Dependents > b.Dependents
