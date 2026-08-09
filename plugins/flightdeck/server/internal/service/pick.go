@@ -737,6 +737,83 @@ func (s *Service) siblingIndex(ctx context.Context, project string, cands []judg
 	return judge.SiblingIndex(links), true
 }
 
+// closeDeclarations 는 후보들에 걸린 **롤백된 종료 선언**을 항목별로 모은다.
+//
+// siblingIndex 와 같은 모양이다. 실패해도 pick 을 실패시키지 않는다 — 이 축 하나
+// 때문에 추천을 통째로 잃는 것이 더 나쁘고, 축이 없어도 나머지 판정은 그대로 돈다.
+// 못 읽은 사실은 **derive 에 안 넣는다**. 바로 위 siblingIndex 가 같은 함수에서 같은
+// 판단을 이미 내렸다 — "못 읽은 사실은 derive 에 안 넣는다(derive 에 넣으면
+// FreshnessOf 가 git 축을 낡음으로 접는다). 대신 로그에 남기고, **두 번째 반환값**으로
+// 호출부에 그대로 넘긴다." pick 은 git 읽기가 실제로 도는 경로라 예외가 안 선다.
+// 호출부는 그 bool 을 EligibleInput.CloseDeclarationsRead 와 Bundle.Scope 문장에
+// 태워야 한다 — 안 그러면 "선언 0건"(진짜로 없다)과 "이 축을 아예 못 읽었다"가
+// 같은 값(빈 맵)으로 접힌다.
+//
+// ★ 원장이 낸 수를 그대로 안 쓴다. 관문 둘을 **여기서** 건다(store 는 원장만 읽는다 —
+// SQL 조인을 쓰면 json_extract 를 조인 조건에 넣어야 하는데 그 선례가 저장소에 0건이다):
+//
+//  1. **시간 앵커.** 항목의 CreatedAt **이후**의 선언만 남긴다. item 의 PK 가
+//     (project, id) 라 지워졌다 다시 만들어진 id, 프로젝트를 옮겨 비워진 뒤 재사용된
+//     id 가 옛 화신의 선언을 물려받는다. 두 값 다 이미 손에 있어 추가 조회가 없다.
+//     ★ 앵커는 **접힌 값 단위**로 건다. store 가 항목별로 접어 주므로 여기 오는 시각은
+//     마지막 선언(Last) 하나뿐이다 — 그것조차 생성 이전이면 그 접힘은 통째로 옛 화신의
+//     것이라 버린다. 생성 시각을 걸치는 접힘은 남는데, 그 상태는 같은 id 가 지워졌다
+//     다시 만들어진 **뒤에 또** 롤백된 finish 가 나야 성립한다(실측 0건). 그 갈래에서
+//     수가 실제보다 커지는 것은 아는 한계다.
+//     같은 시각은 **안 센다** — 항목이 있어야 닫을 수 있으니 동시각은 이 화신의 선언일
+//     수 없고, 애매한 쪽은 하한으로 접는 것이 이 축의 규율이다.
+//
+//  2. **좌표 어긋남은 표류와 가른다.** 후보 목록에 없는 id 의 선언은 **버린다**.
+//     실측 3건이 그 모양이다(context-platform 에서 친 finish 인데 항목은
+//     kweiza-cc-plugins 에 있다 — fd-session-row-fanout·fd-ci-timing-baseline·
+//     fd-prescribe-unclaimed-fires-after-finish). 그것은 좌표 오류지 표류가 아니다.
+//
+// ★ 이 수는 **하한이다.** flushDeferred 가 트랜잭션의 ctx 를 그대로 쓰고
+// (store/store.go:366) LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로(store/event.go:28-34),
+// 원장에 안 써진 마무리가 있을 수 있다. 문구가 그렇게 말해야 한다.
+func (s *Service) closeDeclarations(ctx context.Context, project string,
+	cands []judge.Candidate) (map[string]model.CloseDeclaration, bool) {
+
+	all, err := s.st.CloseDeclarationsByItem(ctx, project)
+	if err != nil {
+		s.log.WarnContext(ctx, "종료 선언 조회 실패 — 이 축 없이 판정한다",
+			"project", clip(project, 64), "count", len(cands), "error", err.Error())
+		return nil, false
+	}
+	out := make(map[string]model.CloseDeclaration, len(cands))
+	for _, c := range cands {
+		d, ok := all[c.Item.ID]
+		if !ok || d.Count() == 0 {
+			continue
+		}
+		if !d.Last.After(c.Item.CreatedAt) {
+			continue
+		}
+		out[c.Item.ID] = d
+	}
+	return out, true
+}
+
+// closeDeclaredOf 는 항목 하나의 종료 선언을 응답에 실을 포인터로 바꾼다. 순수 함수다.
+//
+// ★ **포인터의 뜻은 PathCheck 의 규약 그대로다**(PickResult.PathCheck 의 주석):
+// nil 은 "이 응답은 그 축을 안 읽었다"이고, 그 상태가 실제로 난다 — 구서버 + 신
+// 클라이언트, 그리고 이 필드가 생기기 전에 굳은 오프라인 캐시가 그것을 만든다.
+// 그래서 **읽었으면 선언이 0건이어도 non-nil 을 싣는다**(zero 값 = 읽었고 0건).
+// 값 타입이나 "있을 때만 채움"으로 두면 그 두 상태가 한 값으로 접히고, 그러면
+// 원장을 못 읽은 응답이 "이 항목은 깨끗하다"를 관측 없이 단정한다 —
+// checkItemPaths 가 "절대 nil 을 돌려주지 않는다"로 선 것과 같은 자리다.
+//
+// read 가 false 면 맵을 아예 안 본다. 그때 못 읽었다는 사실은 Bundle.Scope 가 말한다
+// (bundleScope 의 closeRead 인자) — 항목마다 같은 고백을 반복하지 않는다.
+func closeDeclaredOf(m map[string]model.CloseDeclaration, id string, read bool) *model.CloseDeclaration {
+	if !read {
+		return nil
+	}
+	d := m[id] // 없으면 zero — "읽었고 0건"이다. 맵 원소의 주소는 못 잡으므로 복사본을 낸다
+	return &d
+}
+
 // bundleScope 는 Bundle.Scope 문장을 만든다. 순수 함수다 — 시험이 DB 없이 문구를 고정한다.
 //
 // ★ total 은 **적격 여부와 무관하게 후보 전부를 센 수**(len(cands))다. EligibleBundle

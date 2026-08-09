@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 이 파일은 **판정을 먹이는 배선**을 본다. 판정 자체는 judge 가, 화면은 mcpsrv 가 본다.
@@ -216,5 +218,84 @@ func TestPickBundleMemberCarriesItsPathVerdictOnTheClaimPath(t *testing.T) {
 	if res.PathCheck != nil && res.Bundle.Members[0].PathCheck.Summary == res.PathCheck.Summary {
 		t.Fatalf("구성원이 선두의 판정을 받았다: 선두=%q 구성원=%q",
 			res.PathCheck.Summary, res.Bundle.Members[0].PathCheck.Summary)
+	}
+}
+
+// seedCloseDeclaration 은 롤백된 종료 선언 하나를 원장에 **손으로** 심는다.
+//
+// ★ 왜 손으로 심나. 실물 원장에는 지금 `open`+`item.finish` 조합이 0건이다 — 두 번째
+// finish 가 성공하면 항목이 done 이 되어 후보에서 아예 빠지기 때문이다. 실물 경로로는
+// 이 상태를 못 밟는다. 그리고 앵커(항목 생성 **이전**의 이벤트)를 밟으려면 at 을 우리가
+// 골라야 하는데 store.LogEvent 는 언제나 time.Now() 를 찍는다.
+//
+// 표기는 store 의 timeLayout 과 같아야 한다 — 폭 고정이라야 사전순 정렬이 시간순과
+// 일치한다(그 상수는 store 안에 있어 여기서는 같은 문자열을 적는다).
+func seedCloseDeclaration(t *testing.T, st *store.Store, project, sessionID, itemID, mode string, at time.Time) {
+	t.Helper()
+	payload := fmt.Sprintf(`{"item":%q,"mode":%q,"bytes":10300,"count":0}`, itemID, mode)
+	if _, err := st.DB().ExecContext(ctx(),
+		`INSERT INTO event(at, project, session_id, kind, payload) VALUES (?, ?, ?, 'item.finish', ?)`,
+		at.UTC().Format("2006-01-02T15:04:05.000000Z"), project, sessionID, payload); err != nil {
+		t.Fatalf("종료 선언 심기 실패(item=%s mode=%s): %v", itemID, mode, err)
+	}
+}
+
+// hideEvent 는 원장 표를 **이름만 숨긴다**(hideJudgmentLink 과 같은 방식).
+// 지우면 추가 전용 트리거까지 함께 흔들려 무엇이 실패했는지가 흐려진다.
+func hideEvent(t *testing.T, st *store.Store) {
+	t.Helper()
+	if _, err := st.DB().ExecContext(ctx(),
+		`ALTER TABLE event RENAME TO event_hidden`); err != nil {
+		t.Fatalf("event 숨기기 실패: %v", err)
+	}
+}
+
+// ⑦ 원장이 낸 수를 **그대로 안 믿는다** — 앵커와 존재 판정이 service 에서 걸린다.
+//
+// ★ 이 둘이 없으면 무엇이 깨지나. item 의 PK 가 (project, id) 라 지워졌다 다시 만들어진
+// id 가 옛 화신의 선언을 물려받고, 실측 3건은 finish 를 친 프로젝트와 항목이 사는
+// 프로젝트가 갈린 **좌표 오류**다 — 그것을 표류로 세면 이 축이 애먼 항목을 강등한다.
+// 두 관문 다 store 가 아니라 여기 있다: candidates() 가 이미 items 를 손에 쥐고 있고,
+// SQL 조인으로 하려면 json_extract 를 조인 조건에 넣어야 하는데 그 선례가 0건이다.
+func TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates(t *testing.T) {
+	cases := []struct {
+		name    string
+		item    string // 빈 문자열이면 이 항목 자신
+		offset  time.Duration
+		wantHit bool
+	}{
+		{"생성 이후의 선언은 센다", "", time.Minute, true},
+		{"생성 이전의 선언은 옛 화신의 것이라 안 센다", "", -time.Hour, false},
+		{"생성과 같은 시각은 안 센다 — 애매한 쪽은 하한으로 접는다", "", 0, false},
+		{"후보에 없는 id 의 선언은 좌표 어긋남이라 버린다", "ghost-item", time.Minute, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, st := newSvc(t)
+			repo := newRepo(t)
+			me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+			it := addItem(t, s, "p", "anchored", []string{"services/a.go"}, nil)
+
+			id := c.item
+			if id == "" {
+				id = it.ID
+			}
+			seedCloseDeclaration(t, st, "p", me.Session.ID, id, "done", it.CreatedAt.Add(c.offset))
+
+			got, read := s.closeDeclarations(ctx(), "p", []judge.Candidate{{Item: it}})
+			if !read {
+				t.Fatalf("원장을 읽을 수 있는데 못 읽었다고 한다: %+v", got)
+			}
+			d, hit := got[it.ID]
+			if hit != c.wantHit {
+				t.Fatalf("이 항목의 선언 유무가 %v 다(기대 %v) — 맵: %+v", hit, c.wantHit, got)
+			}
+			if c.wantHit && d.Count() != 1 {
+				t.Fatalf("선언 수가 %d 다(기대 1): %+v", d.Count(), d)
+			}
+			if _, ghost := got["ghost-item"]; ghost {
+				t.Fatalf("후보에 없는 id 가 맵에 남았다 — 좌표 오류를 표류로 셌다: %+v", got)
+			}
+		})
 	}
 }
