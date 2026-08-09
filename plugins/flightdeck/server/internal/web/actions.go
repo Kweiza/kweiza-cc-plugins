@@ -226,20 +226,60 @@ func (h *handler) drop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := fmt.Sprintf("대시보드에서 항목을 폐기했다.\n항목: %s (%s)\n사유: %s\n"+
-		"행위자: 대시보드(사람). 세션이 아니라 사람이 누른 것이므로 session_id 는 비어 있다.",
-		in.Item, Clip(it.Title, 200), in.Reason)
-
 	err = st.Tx(ctx, func(t *store.Tx) error {
+		// ★ 시도를 **먼저** 예약한다 — 예약 이벤트는 롤백 뒤에도 흘러서(store/store.go:346-352)
+		//   아래가 통째로 죽어도 "누가 무엇을 폐기하려 했나"가 원장에 남는다.
+		//   그래서 이 payload 에는 아래에서야 알게 되는 것(선점을 실제로 닫았는지)을 안 싣는다.
 		t.LogEvent("web.item.drop", in.Project, "", map[string]any{
 			"item": in.Item, "state": string(it.State),
 		})
+
+		// ★ 선점을 **SetItemState 앞에서** 닫는다. 순서에 두 가지가 걸려 있다.
+		//
+		//   ⓐ ForceReleaseClaim 은 `UPDATE item SET state='open' … AND state='claimed'` 를
+		//     함께 친다(store/item.go:783). 폐기를 먼저 찍고 뒤에 회수하면 방금 닫은 항목이
+		//     다시 열린다.
+		//   ⓑ 그런데 지금 그 되돌림은 실제로는 안 일어난다 — SetItemState 가 종료 상태에서
+		//     살아 있는 선점을 스스로 반납하므로(store/item.go:512-527) 뒤에 놓인
+		//     ForceReleaseClaim 은 `released_at IS NULL` 가드에 0행으로 걸려 ⓐ 의 UPDATE 에
+		//     닿기 전에 NFLiveClaim 으로 빠진다. 즉 **틀린 순서가 오류도 증상도 안 낸다.**
+		//     그 갈래에서 유일하게 사라지는 것이 force_reason 이고, 그래서 시험의 관측점이
+		//     released_at 이 아니라 force_reason 이다(actions_test.go 의 같은 이름 시험).
+		//
+		// ★ 사유는 폐기 사유를 **그대로** 나른다. ForceReleaseClaim 이 빈 사유를 거절하기
+		//   때문만이 아니다(store/item.go:764) — 회수 경로가 이미 사람이 친 문장을 가공 없이
+		//   넘긴다(service/reclaim.go:129). 같은 컬럼에 두 경로가 다른 모양을 쓰면 나중에
+		//   force_reason 을 읽는 쪽이 접두를 벗겨 가며 읽어야 한다.
+		claimLine := "선점: 폐기 시점에 살아 있는 선점이 없었다."
+		switch err := t.ForceReleaseClaim(in.Project, in.Item, in.Reason); {
+		case err == nil:
+			claimLine = "선점: 살아 있던 선점을 이 폐기와 같은 트랜잭션에서 함께 닫았다. " +
+				"사유는 claim.force_reason 에도 그대로 남았다."
+		case errors.Is(err, store.ErrNotFound):
+			// ★ NFLiveClaim 이다. "선점이 원래 없었다"는 **정상 갈래**이지 폐기의 실패가 아니다 —
+			//   열린 항목의 폐기가 이 경로에서 제일 흔하다. 여기서 올리면 큐를 정리하는 유일한
+			//   화면 경로가 정확히 정상 입력에 대해 500 을 낸다.
+			//   같은 모양의 흡수가 service/finish.go:373 에 있고, 거기와 달리 여기는 갈래가
+			//   이 하나뿐이라 errors.As 짝이 없다.
+		default:
+			return err
+		}
+
 		if err := t.SetItemState(in.Project, in.Item, model.ItemDropped, in.Reason); err != nil {
 			return err
 		}
+
+		// ★ 선점을 어떻게 처리했는지는 **판단 본문**에 남긴다. 새 이벤트 종류를 만들지 않고
+		//   위 payload 도 안 늘린다(그 자리는 롤백돼도 남는 시도 기록이라 결과를 못 싣는다).
+		//   claim.force_reason 은 지금 어느 화면도 안 읽으므로(page.go·dashboard.gohtml 전수
+		//   확인) 원장에만 두면 선점을 잃은 세션 쪽에서는 그 사실이 영영 안 보인다.
+		//   판단은 이 폐기의 서사를 담는 자리이고 커밋된 사실만 담기므로 여기가 맞다.
 		_, err := t.AddJudgment(model.Judgment{
 			Project: in.Project, Kind: model.JudgmentDecision,
-			Title: "항목 폐기: " + in.Item, Body: body,
+			Title: "항목 폐기: " + in.Item,
+			Body: fmt.Sprintf("대시보드에서 항목을 폐기했다.\n항목: %s (%s)\n사유: %s\n%s\n"+
+				"행위자: 대시보드(사람). 세션이 아니라 사람이 누른 것이므로 session_id 는 비어 있다.",
+				in.Item, Clip(it.Title, 200), in.Reason, claimLine),
 			Links: []model.JudgmentLink{{TargetKind: "item", TargetID: in.Item}},
 		})
 		return err
