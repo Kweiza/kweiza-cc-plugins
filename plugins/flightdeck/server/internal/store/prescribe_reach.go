@@ -89,6 +89,12 @@ func (s *Store) AckReach(ctx context.Context, project string, since time.Time) (
 		  SELECT e.kind AS kind, e.at AS at,
 		         COALESCE(conv.k, 'sid:' || e.session_id) AS k
 		  FROM event e LEFT JOIN conv ON conv.sid = e.session_id
+		  -- ★ kind 목록이 **명시**인 것이 계약이다. 2026-08-09 에 kind 가 하나 늘었는데
+		  --   (prescribe_folded — 접힌 턴의 계측) 이 목록이 그것을 자동으로 안 집었다.
+		  --   접힘은 **발화가 아니다**: 세션은 그 문구를 못 봤으므로 확인할 대상이 없고,
+		  --   분모에 넣으면 확인율이 "본 것 중 몇을 확인했나"가 아니라 "판정된 것 중 몇"이
+		  --   되어 이 수치의 뜻이 바뀐다. 여기에 kind 를 더할 때는 그 축이 **세션이 실제로
+		  --   읽은 것**인지 먼저 물어라.
 		  WHERE e.project = ? AND e.kind IN ('prescribe','prescribe_ack')
 		),
 		judged AS (

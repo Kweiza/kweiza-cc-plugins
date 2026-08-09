@@ -78,11 +78,16 @@ func splitCardsOf(cards []SessionCard) []judge.SplitCard {
 // 그리고 `Reachable` 에는 조건이 하나 더 붙는다 — 그 대화의 **어느 카드든 `judgment` 행이
 // 있어야 한다**(store/prescribe_reach.go 의 `judged`). 셋을 같은 모양으로 읽으면 안 된다.
 //
-// ★ 축의 뒤집힘이 하나 섞여 있다: ack 을 남기는 경로는 판단을 쓰는 쪽(note·finish)뿐이고
-// `land` 는 그 통로를 안 지난다(service/prescribe.go 의 ackPrescriptions 주석).
-// 그래서 행동이 `land()` 인 처방을 **정확히 따르고** 판단을 안 남긴 대화는 — 확인율을
-// 떨어뜨리는 것이 아니라 — `Emitted` 에만 들어가고 **`Reachable` 에서 통째로 빠진다.**
-// 즉 관측에서 사라진다. 위 격차의 둘째 사유가 이것이다.
+// ★ **여기 있던 축의 뒤집힘은 2026-08-09 에 고쳐졌다.** 원래 이 자리는 "ack 을 남기는
+// 경로는 판단을 쓰는 쪽(note·finish)뿐이고 `land` 는 그 통로를 안 지난다"였고, 그래서
+// 행동이 `land()` 인 처방을 **정확히 따르고** 판단을 안 남긴 대화가 `Emitted` 에만 들어가
+// **`Reachable` 에서 통째로 빠졌다**(관측에서 사라졌다). 지금은 land 가 자기가 응답한
+// `lane-turn:<행>` 을 닫는다(service/prescribe.go 의 ackLaneTurn).
+//
+// ★ **그래도 `Reachable` 의 조건은 안 바뀌었다.** 저쪽은 여전히 그 대화의 어느 카드든
+// `judgment` 행이 있어야 분모에 든다(store/prescribe_reach.go 의 `judged`) — land 만 하고
+// 판단을 하나도 안 남긴 대화는 **ack 은 남기면서 분모에는 안 든다.** 위 격차의 둘째 사유는
+// 이제 "통로가 없다"가 아니라 "분모의 조건이 판단이다"이고, 둘은 다른 것이다.
 //
 // ★ 그리고 **구간이 둘이다.** 전 역사만 내면 Emitted 가 단조 증가해, 갈림의 원인을
 // 고쳐도 이미 갈린 옛 카드가 분모에 영영 남는다 — 두 수의 차이가 회복되지 않으니
