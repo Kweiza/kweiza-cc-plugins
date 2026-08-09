@@ -452,7 +452,16 @@ const CloseDeclUnread = "?"
 // 안 적으면 다음 세션이 이 축을 완전한 것으로 믿는다.
 //
 // ★ 시각을 못 읽은 선언에는 앵커를 안 건다. 그것을 "항목보다 옛것"으로 몰면 관측하지 않은
-// 사실을 단정하는 것이다 — 그때는 버리지 않고 시각만 미상으로 낸다.
+// 사실을 단정하는 것이다 — 그때는 버리지 않고 시각만 미상으로 낸다. (이 규율은 아래
+// 동시각 규율과 **다른** 규율이다 — Last 가 zero 인 갈래와 Last 가 created 와 같은
+// 갈래를 같은 조건으로 묶지 않는다.)
+//
+// ★ 경계는 **동시각 포함**이다 — service.closeDeclarations(pick.go:817)와 글자로
+// 맞춘다: `!d.Last.After(c.Item.CreatedAt)` 면 버린다. 항목이 있어야 닫을 수 있으니
+// 동시각은 이 화신의 선언일 수 없고, 애매한 쪽은 하한으로 접는 것이 이 축의 규율이다
+// (pick_wiring_test.go:269 의 "생성과 같은 시각은 안 센다" 가 그 경계를 이름 붙여
+// 못박았다). 예전에는 여기가 `Before` 로만 걸러 동시각을 남겼다 — 같은 사실에
+// service 와 web 두 표면이 다른 답을 내는 병이었다.
 func CloseDeclaredLabel(d model.CloseDeclaration, read bool, created time.Time) string {
 	if !read {
 		return CloseDeclUnread
@@ -460,7 +469,7 @@ func CloseDeclaredLabel(d model.CloseDeclaration, read bool, created time.Time) 
 	if d.Count() == 0 {
 		return ""
 	}
-	if !created.IsZero() && !d.Last.IsZero() && d.Last.Before(created) {
+	if !created.IsZero() && !d.Last.IsZero() && !d.Last.After(created) {
 		return ""
 	}
 	last, mode, sess := "마지막 시각 미상", "mode 미상", "세션 미상"

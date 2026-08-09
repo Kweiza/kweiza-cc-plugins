@@ -448,6 +448,18 @@ func TestCloseDeclaredLabel(t *testing.T) {
 			want: "",
 		},
 		{
+			// service.closeDeclarations(pick.go:817)의 경계와 글자로 맞춘다 —
+			// `!d.Last.After(created)`. 항목이 있어야 닫을 수 있으니 동시각은 이
+			// 화신의 선언일 수 없다. 예전에는 여기가 Before 로만 걸러 동시각을
+			// 남겨서, 같은 사실에 service 와 web 두 표면이 다른 답을 냈다 —
+			// 이 표에 그 경계 갈래가 없어서 아무도 못 봤다.
+			name: "생성과 같은 시각은 안 센다 — service 의 동시각 경계와 맞춘다",
+			d: model.CloseDeclaration{
+				Done: 1, Last: created, LastSession: sess, LastMode: "done",
+			}, read: true, created: created,
+			want: "",
+		},
+		{
 			name: "항목 생성 시각을 모르면 앵커를 안 건다 — 없는 근거로 버리지 않는다",
 			d: model.CloseDeclaration{
 				Done: 1, Last: last, LastSession: sess, LastMode: "done",
