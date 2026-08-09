@@ -380,3 +380,109 @@ func TestSubSecondFutureIsNoiseNotSkew(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCloseDeclaredLabel 은 **화면이 세 상태를 세 문장으로 가르는지** 본다:
+// 안 읽음 · 선언 없음 · 선언 있음. 이 셋을 둘로 접는 순간 조회가 죽은 화면이
+// "이 항목은 깨끗하다"고 말하게 되고, 그 거짓말이 정확히 이 축이 막으려는 사고다.
+func TestCloseDeclaredLabel(t *testing.T) {
+	created := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	last := time.Date(2026, 8, 4, 23, 54, 37, 0, time.UTC)
+	const sess = "01KZ785TQ8VWXYZ0123456789"
+
+	cases := []struct {
+		name    string
+		d       model.CloseDeclaration
+		read    bool
+		created time.Time
+		want    string
+	}{
+		{
+			name: "못 읽었다 — 0으로 접지 않는다",
+			d:    model.CloseDeclaration{}, read: false, created: created,
+			want: CloseDeclUnread,
+		},
+		{
+			// 표 밖: 못 읽었는데 값이 딸려 온 경우. 센티널이 이긴다 —
+			// 못 읽은 조회가 낸 수는 수가 아니다.
+			name: "못 읽었으면 값이 있어도 센티널이 이긴다",
+			d:    model.CloseDeclaration{Done: 3, Last: last}, read: false, created: created,
+			want: CloseDeclUnread,
+		},
+		{
+			name: "읽었고 선언이 없다 — 아무 말도 안 한다",
+			d:    model.CloseDeclaration{}, read: true, created: created,
+			want: "",
+		},
+		{
+			name: "done 1건 — 사고 사례의 실제 값",
+			d: model.CloseDeclaration{
+				Done: 1, Last: last, LastSession: sess, LastMode: "done",
+			}, read: true, created: created,
+			want: "종료 선언 최소 1건(done 1 · dropped 0) — 마지막 08-04 23:54 · mode=done · 세션 01KZ785TQ8VW…",
+		},
+		{
+			// dropped 를 done 에 합치지 않는다 — 처방이 갈린다(done 은 "이미 랜딩됐을 수 있다",
+			// dropped 는 "이미 버리기로 판정됐을 수 있다"). 실측 384건 중 76건이 dropped 다.
+			name: "dropped 도 센다",
+			d: model.CloseDeclaration{
+				Dropped: 1, Last: last, LastSession: sess, LastMode: "dropped",
+			}, read: true, created: created,
+			want: "종료 선언 최소 1건(done 0 · dropped 1) — 마지막 08-04 23:54 · mode=dropped · 세션 01KZ785TQ8VW…",
+		},
+		{
+			name: "둘 다 — 합은 Count 가 낸다",
+			d: model.CloseDeclaration{
+				Done: 1, Dropped: 2, Last: last, LastSession: sess, LastMode: "dropped",
+			}, read: true, created: created,
+			want: "종료 선언 최소 3건(done 1 · dropped 2) — 마지막 08-04 23:54 · mode=dropped · 세션 01KZ785TQ8VW…",
+		},
+		{
+			// item 의 PK 가 (project, id) 라 지웠다 다시 만든 id 가 옛 이벤트를 물려받는다.
+			// store 가 그 앵커를 **일부러 안 걸고** 호출자에게 넘긴다고 doc 에 적어 뒀다.
+			name: "항목보다 옛 선언은 버린다 — 되살아난 id 의 유산이다",
+			d: model.CloseDeclaration{
+				Done: 1, Last: created.Add(-time.Hour), LastSession: sess, LastMode: "done",
+			}, read: true, created: created,
+			want: "",
+		},
+		{
+			name: "항목 생성 시각을 모르면 앵커를 안 건다 — 없는 근거로 버리지 않는다",
+			d: model.CloseDeclaration{
+				Done: 1, Last: last, LastSession: sess, LastMode: "done",
+			}, read: true, created: time.Time{},
+			want: "종료 선언 최소 1건(done 1 · dropped 0) — 마지막 08-04 23:54 · mode=done · 세션 01KZ785TQ8VW…",
+		},
+		{
+			// 표 밖 — store 는 Count>0 이면 Last·LastMode 를 반드시 채운다(event.go 의
+			// `if d.LastMode == ""` 갈래). 화면은 그 전제에 기대지 않는다: 기대면 store 가
+			// 바뀌는 날 빈칸이 사실인 척한다.
+			name: "메타를 못 읽어도 수는 낸다",
+			d:    model.CloseDeclaration{Done: 1}, read: true, created: created,
+			want: "종료 선언 최소 1건(done 1 · dropped 0) — 마지막 시각 미상 · mode 미상 · 세션 미상",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := CloseDeclaredLabel(c.d, c.read, c.created); got != c.want {
+				t.Fatalf("CloseDeclaredLabel = %q, 기대 %q", got, c.want)
+			}
+		})
+	}
+}
+
+// 문구가 **하한이라고 말하는지**를 따로 잠근다.
+//
+// ★ flushDeferred 는 트랜잭션이 물던 ctx 를 그대로 쓰고 LogEvent 는 쓰기 실패를 WARN 으로만
+// 삼키므로, 클라이언트가 끊기면 행이 안 써진다. "정확히 N건"으로 쓰면 화면이 관측하지 않은
+// 것을 단정하는 셈이고, 그 문구는 위 표의 want 문자열 안에 묻혀 조용히 지워질 수 있다.
+func TestCloseDeclaredLabelSaysTheCountIsALowerBound(t *testing.T) {
+	got := CloseDeclaredLabel(model.CloseDeclaration{
+		Done: 1, Last: time.Date(2026, 8, 4, 23, 54, 0, 0, time.UTC),
+		LastSession: "01KZ785TQ8VWXYZ0123456789", LastMode: "done",
+	}, true, time.Time{})
+	if !strings.Contains(got, "최소") {
+		t.Fatalf("%q — 이 수는 하한인데 문구가 정확한 수인 척한다", got)
+	}
+}
