@@ -733,13 +733,17 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 		return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
 	}
 	// ★ 회수는 이 서버가 하지 않는다. 설계 §4: "회수는 사람만, 사유 필수,
-	//   근거를 다섯 축으로 나란히 보여준 뒤에." 인자를 조용히 무시하면
+	//   근거를 여섯 축으로 나란히 보여준 뒤에." 인자를 조용히 무시하면
 	//   에이전트가 회수됐다고 믿고 남의 작업 위에서 일한다.
+	//
+	//   ★ 여섯째(종료 선언)는 세션이 아니라 **항목**을 묻는다 — 이 항목을 닫으려다
+	//   롤백된 finish 가 원장에 있나. 다섯 축이 전부 "저 세션은 떠났다"로 옳았는데도
+	//   회수가 사고가 된 실측이 그 축을 낳았다(2026-08-04~05, 같은 모양 넷).
 	if strings.TrimSpace(a.StealReason) != "" {
 		return textResult(s.withTail(ctx, RenderRefusal("pick",
 			"steal_reason 이 왔지만 이 서버는 선점을 회수하지 않는다",
 			"회수는 사람만 한다 — 마지막 신호 종류·나이, 발자국 경로 수, 원격 마지막 커밋 시각, "+
-				"미푸시 커밋 수, 마지막 판단 다섯 축을 나란히 본 뒤에야 한다(설계 §4). "+
+				"미푸시 커밋 수, 마지막 판단, 그리고 그 항목의 종료 선언 여섯 축을 나란히 본 뒤에야 한다(설계 §4). "+
 				"하나의 신호로 판정해 두 번 틀렸다. 지금 할 수 있는 것: note(kind=ask) 로 점유자에게 묻거나, "+
 				"웹 대시보드의 '선점 회수' 버튼(사유 필수)을 쓴다."), tailOpts{}), true)
 	}
@@ -883,6 +887,11 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 
 	// ★ 회수는 이 서버가 하지 않는다 — pick 의 steal_reason 거절과 **같은 판정, 같은 문장 틀**이다.
 	//   한 서버가 선점 회수는 거절하고 레인 회수는 허용하면 그 거절 문구가 화면에서 거짓이 된다.
+	//
+	//   ★ **축 목록만 갈린다.** pick 은 여섯이고 여기는 다섯이다 — 여섯째(종료 선언)는
+	//   항목에 붙는 사실인데 이쪽의 회수 대상은 줄 행이라 그 축이 존재하지 않는다(설계 §4).
+	//   수를 맞추면 이 응답이 없는 축을 보라고 말하게 된다. 그 갈림은 표류가 아니라
+	//   대상이 다르다는 사실이고, reclaim_axes_test.go 가 양쪽을 각각 잠근다.
 	if strings.TrimSpace(a.Release) != "" {
 		return textResult(s.withTail(ctx, RenderRefusal("land",
 			"release 가 왔지만 이 서버는 레인을 회수하지 않는다",
