@@ -124,9 +124,10 @@ T16 … T19   (산문 — 마지막. T16 은 T4 의 문구가 확정된 뒤)
 ---
 
 ### Task 1: model.CloseDeclaration — store 와 judge 가 공유할 수 있는 유일한 자리
+
 **Files:**
-- Test: internal/model/close_declaration_test.go (새 파일 — 이 패키지의 첫 _test.go 다)
-- Modify: internal/model/types.go:310-317 (Event struct 블록 바로 뒤에 삽입)
+- Test: $SRV/internal/model/close_declaration_test.go (새 파일 — 이 패키지의 첫 _test.go 다)
+- Modify: $SRV/internal/model/types.go:310-317 (Event struct 블록 바로 뒤에 삽입)
 
 **Interfaces:**
 - Consumes: 없음 — 이 회차의 첫 태스크다. 기존 코드에서 쓰는 것은 model 패키지가 이미 import 한 `time` 하나뿐이다(types.go:10).
@@ -185,7 +186,7 @@ func TestCloseDeclarationCountSumsBothModes(t *testing.T) {
 
 타입이 아직 없으므로 **컴파일이 안 된다**. Go 에서 이것이 이 단계의 빨간불이다 — 통과할 수 없는 시험이 먼저 있어야 구현이 시험을 따라간다.
 
-Run: `go test ./internal/model/ -run TestCloseDeclarationCountSumsBothModes -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/model/ -run TestCloseDeclarationCountSumsBothModes -v -count=1`
 
 Expected: 빌드 실패. `internal/model/close_declaration_test.go:14:8: undefined: CloseDeclaration` 류. FAIL [build failed].
 
@@ -248,7 +249,7 @@ func (d CloseDeclaration) Count() int { return d.Done + d.Dropped }
 
 네 갈래 전부 초록이어야 한다.
 
-Run: `go test ./internal/model/ -run TestCloseDeclarationCountSumsBothModes -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/model/ -run TestCloseDeclarationCountSumsBothModes -v -count=1`
 
 Expected: --- PASS: TestCloseDeclarationCountSumsBothModes 및 하위 네 갈래(done_만 · dropped_만 · 둘_다 · 빈_값은_0) 전부 PASS. ok github.com/kweiza/flightdeck/internal/model
 
@@ -257,7 +258,7 @@ Expected: --- PASS: TestCloseDeclarationCountSumsBothModes 및 하위 네 갈래
 gofmt 관문(`service/gofmt_gate_test.go`)이 **_test.go 를 포함해** 모듈 전수를 본다. 새 파일 둘 다 걸린다.
 교차 빌드는 `go build` 가 아니라 `go vet` 이다 — build 는 _test.go 를 건너뛴다.
 
-Run: `gofmt -l ./internal/model && go vet ./...`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal/model && go vet ./...`
 
 Expected: gofmt 출력 0줄, vet 출력 0줄. (`internal/web/actions_test.go` 가 gofmt -l 에 뜨면 그것은 이 워크트리의 다른 세션 것이다 — 노트 참조)
 
@@ -279,17 +280,18 @@ Count() 는 사유 문구의 "종료 선언 N건"을 만드는 유일한 자리�
 (이 패키지의 첫 _test.go 다).
 ```
 
-Run: `git add plugins/flightdeck/server/internal/model/types.go plugins/flightdeck/server/internal/model/close_declaration_test.go && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/model/types.go plugins/flightdeck/server/internal/model/close_declaration_test.go && git commit -F -`
 
 Expected: 커밋 1건. `git status --short` 에 model 관련 항목이 남지 않는다.
 
 ---
 
 ### Task 2: Store.CloseDeclarationsByItem — 원장을 한 번 긁어 항목별로 접는다
+
 **Files:**
-- Test: internal/store/event_close_declarations_test.go (새 파일)
-- Modify: internal/store/event.go:3-11 (import 에 strings 추가)
-- Modify: internal/store/event.go:227 (CountEvents 주석 바로 앞에 상수 + 함수 둘 삽입)
+- Test: $SRV/internal/store/event_close_declarations_test.go (새 파일)
+- Modify: $SRV/internal/store/event.go:3-11 (import 에 strings 추가)
+- Modify: $SRV/internal/store/event.go:227 (CountEvents 주석 바로 앞에 상수 + 함수 둘 삽입)
 
 **Interfaces:**
 - Consumes: 태스크 1의 `model.CloseDeclaration` (Done·Dropped·Last·LastSession·LastMode + Count()). 그리고 기존 store 헬퍼 넷을 그대로 쓴다: `clip(string,int) string`(store.go:799) · `parseTime(string) (time.Time, error)`(store.go:758) · `str(sql.NullString) string`(store.go:790) · `fmtTime`·`nowStamp`(store.go:731·739, 시험에서만).
@@ -630,7 +632,7 @@ func TestCloseDeclarationsByItemEmptyIsEmptyMapNotError(t *testing.T) {
 
 메서드 둘이 아직 없으므로 패키지가 빌드되지 않는다.
 
-Run: `go test ./internal/store/ -run TestCloseDeclarationsByItem -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/store/ -run TestCloseDeclarationsByItem -v -count=1`
 
 Expected: 빌드 실패. `s.CloseDeclarationsByItem undefined (type *Store has no field or method CloseDeclarationsByItem)` 및 `s.closeDeclarationsByItem undefined`. FAIL [build failed].
 
@@ -790,7 +792,7 @@ func (s *Store) closeDeclarationsByItem(ctx context.Context, project string, lim
 
 여섯 시험 전부 초록이어야 한다. 실물 SQLite 파일을 쓰므로 시험당 0.4초쯤 든다.
 
-Run: `go test ./internal/store/ -run TestCloseDeclarationsByItem -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/store/ -run TestCloseDeclarationsByItem -v -count=1`
 
 Expected: PASS 6건: SeesRolledBackFinish · FoldsRepeatsAndSeparatesModes · IsPerProject · SkipsUnreadableRows · CutsOldestFirst · EmptyIsEmptyMapNotError. ok github.com/kweiza/flightdeck/internal/store (약 2.5초)
 
@@ -809,7 +811,7 @@ Expected: PASS 6건: SeesRolledBackFinish · FoldsRepeatsAndSeparatesModes · Is
 
 확인 뒤 반드시 원상 복구한다.
 
-Run: `go test ./internal/store/ -run TestCloseDeclarationsByItem -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/store/ -run TestCloseDeclarationsByItem -count=1`
 
 Expected: 변이마다 위에 적은 시험이 FAIL. 원상 복구 뒤 다시 전부 PASS.
 
@@ -817,7 +819,7 @@ Expected: 변이마다 위에 적은 시험이 FAIL. 원상 복구 뒤 다시 �
 
 store 전수는 70초쯤 든다(실물 SQLite). 교차 빌드 관문은 `go vet` 이다 — `go build` 는 _test.go 를 건너뛴다.
 
-Run: `gofmt -l ./internal/store ./internal/model && go vet ./... && go test ./internal/store/ ./internal/model/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal/store ./internal/model && go vet ./... && go test ./internal/store/ ./internal/model/ -count=1`
 
 Expected: gofmt 0줄 · vet 0줄 · `ok github.com/kweiza/flightdeck/internal/store` · `ok github.com/kweiza/flightdeck/internal/model`. (실측: store 71초)
 
@@ -847,16 +849,17 @@ context-platform 245건/5.26일)로 107일이고, 열린 항목 나이의 실측
 변이로 확인했다.
 ```
 
-Run: `git add plugins/flightdeck/server/internal/store/event.go plugins/flightdeck/server/internal/store/event_close_declarations_test.go && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/store/event.go plugins/flightdeck/server/internal/store/event_close_declarations_test.go && git commit -F -`
 
 Expected: 커밋 1건. `git status --short` 에 store 관련 항목이 남지 않는다.
 
 ---
 
 ### Task 3: judge 정렬 축 — Bundle 두 필드 + lessBundle 의 자리 (굶김 갈래보다 위)
+
 **Files:**
-- Create: internal/judge/bundle_close_declared_test.go
-- Modify: internal/judge/bundle.go (12-16 · 166-169 · 178-184 · 378-426)
+- Create: $SRV/internal/judge/bundle_close_declared_test.go
+- Modify: $SRV/internal/judge/bundle.go (12-16 · 166-169 · 178-184 · 378-426)
 
 **Interfaces:**
 - Consumes: 없다. 이 태스크는 model.CloseDeclaration 을 **안 쓴다** — Bundle 에 얹는 것이 bool 과 string 이라 저장층 태스크와 순서에 안 묶인다. 시험 헬퍼 t0(eligible_test.go:12) · cand(bundle_test.go:103) 는 같은 패키지에 이미 있다.
@@ -958,7 +961,7 @@ func TestLessBundleStarvedBeatsCloseDeclared(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
 
 Expected: 컴파일 실패. `internal/judge/bundle_close_declared_test.go:32:3: unknown field CloseDeclared in struct literal of type Bundle` (네 시험 전부 같은 이유). 이것이 첫 RED 다.
 
@@ -994,9 +997,11 @@ after:
 
 `\tReason string` 은 이 파일에 한 번뿐이다(확인함).
 
-Run: `go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
 
-Expected: 컴파일은 통과하고 **단정 두 개가 붉다**:
+Expected:
+
+컴파일은 통과하고 **단정 두 개가 붉다**:
 --- FAIL: TestLessBundleCloseDeclaredSinksAmongUnstarved ("종료 선언이 붙은 3건 묶음이 안 붙은 단독을 이겼다")
 --- FAIL: TestLessBundleCloseDeclaredSinksAmongStarvedToo ("둘 다 굶었을 때 강등이 안 읽혔다")
 --- PASS: TestLessBundleDependentsBeatCloseDeclared
@@ -1028,7 +1033,7 @@ after:
 
 세 줄이다. `!a.CloseDeclared` 를 돌려주는 것이 강등이다 — a 에 선언이 없을 때 a 가 앞선다.
 
-Run: `go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
 
 Expected: 네 시험 전부 PASS. `ok  github.com/kweiza/flightdeck/internal/judge`
 
@@ -1040,7 +1045,7 @@ Expected: 네 시험 전부 PASS. `ok  github.com/kweiza/flightdeck/internal/jud
 
 실측(사본에서 이미 밟았다): 옮기면 `TestLessBundleCloseDeclaredSinksAmongStarvedToo` **하나만** 붉어진다. 축을 통째로 지우면 두 개가, 방향을 `return a.CloseDeclared` 로 뒤집어도 두 개가 붉어진다.
 
-Run: `go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclared' -v -count=1`
 
 Expected: 옮긴 상태: `--- FAIL: TestLessBundleCloseDeclaredSinksAmongStarvedToo` 하나만 붉다(나머지 셋 PASS). 되돌린 뒤: 넷 다 PASS.
 
@@ -1153,7 +1158,7 @@ after:
 // 표시 순서만 바꾼다(설계 §4-②).
 ```
 
-Run: `gofmt -l internal/judge && go vet ./...`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/judge && go vet ./...`
 
 Expected: 둘 다 출력 없음(gofmt 가 파일 이름을 하나도 안 낸다).
 
@@ -1161,7 +1166,7 @@ Expected: 둘 다 출력 없음(gofmt 가 파일 이름을 하나도 안 낸다)
 
 기존 시험이 하나도 안 깨졌는지 본다. Bundle 에 필드를 더한 것은 어느 호출부도 위치 지정 리터럴을 안 쓰므로(전수 확인: `judge.Bundle{` 생산 호출부 0건, `EligibleInput{` 은 pick.go:776 하나이고 전부 키 지정) 컴파일이 그대로 선다.
 
-Run: `go test ./internal/judge/ -count=1 && go vet ./...`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -count=1 && go vet ./...`
 
 Expected: `ok  github.com/kweiza/flightdeck/internal/judge` · vet 출력 없음
 
@@ -1190,18 +1195,19 @@ Starved 아래인 것도 근거가 있다: 강등에 유효기간을 안 걸었�
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add plugins/flightdeck/server/internal/judge && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/judge && git commit -F -`
 
 Expected: 커밋 1건. `git show --stat` 이 bundle.go · bundle_close_declared_test.go 둘만 낸다.
 
 ---
 
 ### Task 4: judge 입력 — EligibleInput 두 필드 + EligibleBundle 이 선두에 찍는다
+
 **Files:**
-- Modify: internal/judge/eligible.go (95-96)
-- Modify: internal/judge/bundle.go (246-253 · 290)
-- Modify: internal/judge/bundle_close_declared_test.go
-- Test: internal/model/types.go (없을 때만)
+- Modify: $SRV/internal/judge/eligible.go (95-96)
+- Modify: $SRV/internal/judge/bundle.go (246-253 · 290)
+- Modify: $SRV/internal/judge/bundle_close_declared_test.go
+- Test: $SRV/internal/model/types.go (없을 때만)
 
 **Interfaces:**
 - Consumes: 태스크 1 의 `Bundle.CloseDeclared bool` · `Bundle.CloseDeclaredDetail string` · lessBundle 축. 그리고 저장층 태스크의 `model.CloseDeclaration{Done, Dropped int; Last time.Time; LastSession, LastMode string}` + `func (d CloseDeclaration) Count() int`. 그 타입이 아직 없으면 첫 단계가 만든다.
@@ -1226,7 +1232,7 @@ func (d CloseDeclaration) Count() int { return d.Done + d.Dropped }
 
 `model` 은 `time` 을 이미 import 한다(types.go:11).
 
-Run: `grep -n 'type CloseDeclaration' internal/model/types.go`
+Run: `cd plugins/flightdeck/server && grep -n 'type CloseDeclaration' internal/model/types.go`
 
 Expected: `internal/model/types.go:NNN:type CloseDeclaration struct {` 한 줄. 안 나오면 위 블록을 붙이고 다시 돌려 한 줄이 나오게 만든다.
 
@@ -1400,7 +1406,7 @@ func TestEligibleBundleZeroCountCloseDeclarationDoesNotDemote(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
 
 Expected: 컴파일 실패. `unknown field CloseDeclarations in struct literal of type EligibleInput` · `unknown field CloseDeclarationsRead in struct literal of type EligibleInput`.
 
@@ -1436,9 +1442,11 @@ after:
 
 `eligible.go` 는 `model` 을 이미 import 한다(8행).
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
 
-Expected: 컴파일 통과. **정확히 두 개가 붉다**:
+Expected:
+
+컴파일 통과. **정확히 두 개가 붉다**:
 --- FAIL: TestEligibleBundleMarksCloseDeclared ("선언이 있는데 CloseDeclared 가 false 다 — 배선이 끊겼다")
 --- FAIL: TestEligibleBundleCloseDeclaredDemotesButDoesNotDrop ("선두가 \"a-declared\" 다 — 선언이 붙은 a-declared 가 밀렸어야 한다")
 나머지 여섯(태스크 1 의 넷 + WithoutRead + ZeroCount)은 PASS. 뒤의 둘이 지금 초록인 것은 정상이다 — 그 둘은 **축이 안 도는 것**을 지키는 가드다.
@@ -1532,7 +1540,7 @@ after:
 
 `fmt` 은 이미 import 돼 있다.
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
 
 Expected: 여덟 시험 전부 PASS. Reason 실제 값 예: `의존자 합 0 · 묶음 1건 · 최고령 … · 선두 a-declared · ★종료 선언 1건 이상(done 1 · dropped 0 · 마지막 2026-08-01 08:00:00 세션 01KZ785T-OLD mode=done) — 이미 랜딩됐을 수 있다. 연결된 판단부터 읽어라`
 
@@ -1544,7 +1552,7 @@ Expected: 여덟 시험 전부 PASS. Reason 실제 값 예: `의존자 합 0 · 
 · `if !ok || d.Count() == 0 {` 를 `if !ok {` 로 바꾼다 → `TestEligibleBundleZeroCountCloseDeclarationDoesNotDemote` **하나만** 붉다.
 · `b.Reason += " · ★" + b.CloseDeclaredDetail` 을 지운다 → `TestEligibleBundleMarksCloseDeclared` **하나만** 붉다("Reason 이 … 를 안 싣는다").
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -count=1`
 
 Expected: 변이마다 지정된 시험 하나만 FAIL. 셋 다 되돌린 뒤 `ok`.
 
@@ -1552,7 +1560,7 @@ Expected: 변이마다 지정된 시험 하나만 FAIL. 셋 다 되돌린 뒤 `o
 
 Bundle.Reason 은 service 의 `BundleInfo.Reason` 으로, 거기서 mcpsrv 렌더로 그대로 흐른다. 이 축은 `CloseDeclarationsRead` 가 켜졌을 때만 문자열을 늘리고 지금 service 는 그 필드를 안 채우므로 제품 거동은 아직 안 바뀐다 — 그것을 시험으로 확인한다.
 
-Run: `gofmt -l internal/judge internal/model && go vet ./... && go test ./internal/judge/ ./internal/service/ ./internal/mcpsrv/ ./internal/web/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/judge internal/model && go vet ./... && go test ./internal/judge/ ./internal/service/ ./internal/mcpsrv/ ./internal/web/ -count=1`
 
 Expected: gofmt·vet 출력 없음. `ok` 넷(judge · service · mcpsrv · web).
 
@@ -1578,16 +1586,17 @@ done 과 dropped 는 처방이 갈려 합치지 않는다.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add plugins/flightdeck/server/internal/judge plugins/flightdeck/server/internal/model && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/judge plugins/flightdeck/server/internal/model && git commit -F -`
 
 Expected: 커밋 1건. model/types.go 는 저장층 태스크가 이미 커밋했으면 diff 에 안 뜬다.
 
 ---
 
 ### Task 5: judge 원장 — RejectNotTop 이 이 축의 발화를 셀 수 있게 남긴다
+
 **Files:**
-- Modify: internal/judge/bundle.go (267-275)
-- Modify: internal/judge/bundle_close_declared_test.go
+- Modify: $SRV/internal/judge/bundle.go (267-275)
+- Modify: $SRV/internal/judge/bundle_close_declared_test.go
 
 **Interfaces:**
 - Consumes: 태스크 2 의 `closeDeclarationOf(in EligibleInput, id string) (model.CloseDeclaration, bool)` 와 `closeDeclaredDetail(d model.CloseDeclaration) string`. 시험 파일의 `decl(done, dropped int, mode string)` 헬퍼와 strings·model import 도 태스크 2 가 이미 넣었다.
@@ -1644,7 +1653,7 @@ func TestEligibleBundleNotTopLedgersWhyCloseDeclared(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/judge/ -run TestEligibleBundleNotTopLedgersWhyCloseDeclared -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run TestEligibleBundleNotTopLedgersWhyCloseDeclared -v -count=1`
 
 Expected: --- FAIL: TestEligibleBundleNotTopLedgersWhyCloseDeclared — `not-top 사유가 "종료 선언 1건 이상" 를 안 싣는다: "적격이지만 추천 묶음에 없다(추천 선두는 z-clean, 묶음 1건)"`
 
@@ -1678,7 +1687,7 @@ after:
 			model.Rejection{Item: c.Item.ID, Reason: RejectNotTop, Detail: detail})
 ```
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -v -count=1`
 
 Expected: 아홉 시험 전부 PASS(태스크 1 의 넷 + 태스크 2 의 넷 + 이번 하나).
 
@@ -1686,7 +1695,7 @@ Expected: 아홉 시험 전부 PASS(태스크 1 의 넷 + 태스크 2 의 넷 + 
 
 방금 넣은 `if d, ok := closeDeclarationOf(in, c.Item.ID); ok { … }` 세 줄을 지우고 돌린 뒤 되돌린다.
 
-Run: `go test ./internal/judge/ -run 'CloseDeclar' -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'CloseDeclar' -count=1`
 
 Expected: `--- FAIL: TestEligibleBundleNotTopLedgersWhyCloseDeclared` 하나만 붉다. 되돌리면 `ok`.
 
@@ -1694,7 +1703,7 @@ Expected: `--- FAIL: TestEligibleBundleNotTopLedgersWhyCloseDeclared` 하나만 
 
 이 태스크로 judge 층이 끝난다. 패키지 전체 + 소비자 층 + 교차 빌드 관문을 한 번에 돈다. `go build` 는 _test.go 를 건너뛰므로 반드시 `go vet` 이다.
 
-Run: `gofmt -l internal/judge && go vet ./... && go test ./internal/judge/ ./internal/service/ ./internal/mcpsrv/ ./internal/web/ ./internal/api/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/judge && go vet ./... && go test ./internal/judge/ ./internal/service/ ./internal/mcpsrv/ ./internal/web/ ./internal/api/ -count=1`
 
 Expected: gofmt·vet 출력 없음. `ok` 다섯.
 
@@ -1717,16 +1726,17 @@ RejectNotTop 의 Detail 에 그 후보 자신의 종료 선언 근거를 덧붙�
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add plugins/flightdeck/server/internal/judge && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/judge && git commit -F -`
 
 Expected: 커밋 1건. judge 층 완료 — 다음은 service 배선(closeDeclarations 가 이 두 필드를 채운다)이다.
 
 ---
 
 ### Task 6: S1. closeDeclarations / closeDeclaredOf — 원장의 수를 후보의 좌표로 거른다
+
 **Files:**
-- Modify: internal/service/pick.go (738-739 사이 — siblingIndex 의 닫는 괄호와 bundleScope 주석 사이에 함수 둘을 새로 판다)
-- Test: internal/service/pick_wiring_test.go (3-11 import 블록 · 220 파일 끝에 헬퍼 둘 + 시험 하나)
+- Modify: $SRV/internal/service/pick.go (738-739 사이 — siblingIndex 의 닫는 괄호와 bundleScope 주석 사이에 함수 둘을 새로 판다)
+- Test: $SRV/internal/service/pick_wiring_test.go (3-11 import 블록 · 220 파일 끝에 헬퍼 둘 + 시험 하나)
 
 **Interfaces:**
 - Consumes: model 층: `type CloseDeclaration struct { Done, Dropped int; Last time.Time; LastSession, LastMode string }` 와 `func (d CloseDeclaration) Count() int`. store 층: `func (s *Store) CloseDeclarationsByItem(ctx context.Context, project string) (map[string]model.CloseDeclaration, error)` — 프로젝트 스코프로 event(kind='item.finish')를 긁어 항목별로 접은 **원자료**(앵커·존재 판정 없음).
@@ -1857,7 +1867,7 @@ func TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates(t *testing.T) {
 
 
 
-Run: `go test ./internal/service/ -run TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates -v -count=1`
 
 Expected: 컴파일 실패: `s.closeDeclarations undefined (type *Service has no field or method closeDeclarations)`. 이것이 이 태스크의 RED 다 — 다른 오류(model.CloseDeclaration undefined 등)가 함께 나면 앞선 model/store 태스크가 아직 안 랜딩된 것이다.
 
@@ -1964,7 +1974,7 @@ func closeDeclaredOf(m map[string]model.CloseDeclaration, id string, read bool) 
 
 
 
-Run: `go test ./internal/service/ -run TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates -v -count=1 && go test ./internal/service/ -count=1 && go vet ./...`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates -v -count=1 && go test ./internal/service/ -count=1 && go vet ./...`
 
 Expected: 네 하위 시험 전부 PASS(--- PASS: …/생성_이후의_선언은_센다 등). 패키지 전체 ok. go vet 무출력.
 
@@ -1990,17 +2000,18 @@ store 는 원장만 읽는다. 앵커(항목 CreatedAt 이후)와 존재 판정(
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add -A plugins/flightdeck/server/internal/service && git status --short`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A plugins/flightdeck/server/internal/service && git status --short`
 
 Expected: pick.go · pick_wiring_test.go 둘만 스테이지된다.
 
 ---
 
 ### Task 7: S2. 배선 — EligibleInput 에 싣고, 못 읽으면 Bundle.Scope 가 말한다
+
 **Files:**
-- Modify: internal/service/pick.go (746-759 bundleScope · 775-782 EligibleBundle 호출 · 831-834 BundleInfo 조립)
-- Modify: internal/service/pick_test.go (1131 · 1144 · 1148 · 2001 — bundleScope 호출부 넷 + 새 순수 시험 하나)
-- Test: internal/service/pick_wiring_test.go (파일 끝에 시험 둘)
+- Modify: $SRV/internal/service/pick.go (746-759 bundleScope · 775-782 EligibleBundle 호출 · 831-834 BundleInfo 조립)
+- Modify: $SRV/internal/service/pick_test.go (1131 · 1144 · 1148 · 2001 — bundleScope 호출부 넷 + 새 순수 시험 하나)
+- Test: $SRV/internal/service/pick_wiring_test.go (파일 끝에 시험 둘)
 
 **Interfaces:**
 - Consumes: S1 의 `s.closeDeclarations(ctx, project, cands) (map[string]model.CloseDeclaration, bool)`.
@@ -2108,9 +2119,11 @@ func TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive(t *test
 
 
 
-Run: `go test ./internal/service/ -run 'TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack|TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack|TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive' -v -count=1`
 
-Expected: 컴파일은 된다(둘 다 기존 심볼만 쓴다). 단정 실패 둘:
+Expected:
+
+컴파일은 된다(둘 다 기존 심볼만 쓴다). 단정 실패 둘:
 · `닫히려다 롤백된 항목이 여전히 1순위다 … 선두="a-rolled-back"`
 · `종료 선언 축을 못 읽었다는 고백이 Scope 에 없다: "관찰한 후보는 전체 1건이다…"`
 하위 시험 `선언이 없으면 나이순 그대로다` 는 지금도 PASS 여야 한다 — 아니면 기준선이 밀린 것이다.
@@ -2281,7 +2294,7 @@ closeRead 자리에 상수를 박지 않았다"까지 함께 잠근다.
 
 
 
-Run: `go test ./internal/service/ -run 'TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack|TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive|TestBundleScope|TestPickRecommendScopeDoesNotConfessAnAxisItRead|TestPickBundleScopeReflectsRealCandidateCount' -v -count=1 && go test ./internal/service/ -count=1 && go vet ./...`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack|TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive|TestBundleScope|TestPickRecommendScopeDoesNotConfessAnAxisItRead|TestPickBundleScopeReflectsRealCandidateCount' -v -count=1 && go test ./internal/service/ -count=1 && go vet ./...`
 
 Expected: 전부 PASS. 특히 `TestPickRecommendScopeDoesNotConfessAnAxisItRead` 가 초록이어야 한다 — 그것이 closeRead 에 상수를 박는 변이를 잡는 자리다. 패키지 전체 ok, go vet 무출력.
 
@@ -2304,16 +2317,17 @@ nil 을 "안 읽음"으로 재활용할 수도 없다.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add -A plugins/flightdeck/server/internal/service && git status --short`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A plugins/flightdeck/server/internal/service && git status --short`
 
 Expected: pick.go · pick_test.go · pick_wiring_test.go 셋만 스테이지된다.
 
 ---
 
 ### Task 8: S3. 표면 — 선두와 구성원 양쪽이 자기 종료 선언을 싣는다
+
 **Files:**
-- Modify: internal/service/pick.go (81-84 PickResult · 126-127 BundleMember · 820-823 선두 조립 · 835-841 구성원 루프)
-- Test: internal/service/pick_wiring_test.go (파일 끝에 시험 둘)
+- Modify: $SRV/internal/service/pick.go (81-84 PickResult · 126-127 BundleMember · 820-823 선두 조립 · 835-841 구성원 루프)
+- Test: $SRV/internal/service/pick_wiring_test.go (파일 끝에 시험 둘)
 
 **Interfaces:**
 - Consumes: S1 의 `closeDeclaredOf(m, id, read) *model.CloseDeclaration`. S2 가 pickRecommend 안에 만든 지역 변수 `closed` · `closeRead`. 시험 헬퍼 `seedCloseDeclaration` · `hideEvent` · 기존 `makeSiblings`(pick_test.go:658).
@@ -2440,7 +2454,7 @@ func TestPickBundleMemberCarriesItsOwnCloseDeclaration(t *testing.T) {
 
 
 
-Run: `go test ./internal/service/ -run 'TestPickResultCarriesCloseDeclarationForTheLead|TestPickBundleMemberCarriesItsOwnCloseDeclaration' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestPickResultCarriesCloseDeclarationForTheLead|TestPickBundleMemberCarriesItsOwnCloseDeclaration' -v -count=1`
 
 Expected: 컴파일 실패: `res.CloseDeclared undefined (type PickResult has no field or method CloseDeclared)` · `m.CloseDeclared undefined (type BundleMember has no field or method CloseDeclared)`.
 
@@ -2565,7 +2579,7 @@ after:
 
 
 
-Run: `go test ./internal/service/ -run 'TestPickResultCarriesCloseDeclarationForTheLead|TestPickBundleMemberCarriesItsOwnCloseDeclaration' -v -count=1 && go test ./internal/... ./cmd/fd/ -count=1 && go vet ./...`
+Run: `cd plugins/flightdeck/server && go test ./internal/service/ -run 'TestPickResultCarriesCloseDeclarationForTheLead|TestPickBundleMemberCarriesItsOwnCloseDeclaration' -v -count=1 && go test ./internal/... ./cmd/fd/ -count=1 && go vet ./...`
 
 Expected: 두 시험과 하위 시험 전부 PASS. `TestGofmtGateCoversTheWholeModuleIncludingTests` 도 초록이어야 한다(위 코드는 전부 gofmt 로 검증했다). 모듈 전수 ok, go vet 무출력.
 
@@ -2591,13 +2605,14 @@ renderBundle 은 BundleInfo 하나만 받고 Members 는 정의상 선두 제외
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Run: `git add -A plugins/flightdeck/server/internal/service && git status --short`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A plugins/flightdeck/server/internal/service && git status --short`
 
 Expected: pick.go · pick_wiring_test.go 둘만 스테이지된다.
 
 ---
 
 ### Task 9: R1 — renderCloseDeclared 순수 함수: nil·0건·done·dropped 넷 다 말한다
+
 **Files:**
 - Create: plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go
 - Modify: plugins/flightdeck/server/internal/mcpsrv/render.go (renderPathCheck 끝 1301줄 바로 뒤, 1303줄 구분선 앞)
@@ -2615,7 +2630,7 @@ Expected: pick.go · pick_wiring_test.go 둘만 스테이지된다.
 이 태스크는 service 층에 안 기댄다. model 타입만 있으면 바로 빨강까지 갈 수 있다.
 없다면 model 층 태스크가 먼저다.
 
-Run: `grep -n "type CloseDeclaration struct" -A 8 internal/model/types.go && grep -n "func (d CloseDeclaration) Count" internal/model/types.go`
+Run: `cd plugins/flightdeck/server && grep -n "type CloseDeclaration struct" -A 8 internal/model/types.go && grep -n "func (d CloseDeclaration) Count" internal/model/types.go`
 
 Expected: types.go:333 의 구조체 다섯 필드와 342줄의 Count 가 둘 다 출력된다.
 
@@ -2800,7 +2815,7 @@ Expected: 파일이 생긴다.
 
 renderCloseDeclared 가 아직 없으므로 컴파일이 안 된다. 이것이 이 태스크의 빨강이다.
 
-Run: `go test ./internal/mcpsrv/ -run TestRenderCloseDeclared -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run TestRenderCloseDeclared -v -count=1`
 
 Expected: `undefined: renderCloseDeclared` 로 빌드 실패. 다른 이유(예: model.CloseDeclaration undefined)로 실패하면 전제가 안 선 것이다.
 
@@ -2906,7 +2921,7 @@ Expected: render.go 가 컴파일된다. model·strings·fmt 는 이미 import �
 
 두 번 돈다. 새 시험만 보면 기존 개수 단정을 밟았는지 못 잰다.
 
-Run: `go test ./internal/mcpsrv/ -run TestRenderCloseDeclared -v -count=1 && go test ./internal/mcpsrv/ -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run TestRenderCloseDeclared -v -count=1 && go test ./internal/mcpsrv/ -count=1`
 
 Expected: 새 시험 둘 다 PASS(하위 절 5개 포함). mcpsrv 패키지 전체도 ok — 이 시점에는 render.go 에 새 함수만 있고 호출부가 없으므로 기존 출력이 한 글자도 안 바뀐다.
 
@@ -2914,13 +2929,14 @@ Expected: 새 시험 둘 다 PASS(하위 절 5개 포함). mcpsrv 패키지 전�
 
 
 
-Run: `git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 종료 선언 한 줄을 짓는다 — nil 도 0건도 침묵하지 않고, 수는 하한이라고 말한다" -m "renderPathCheck 의 쌍둥이다. nil 문구는 일부러 그쪽과 글자를 달리했다 — 같은 문장을 쓰면 구성원 절의 격리 단정이 남의 판정으로 오인한다."`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 종료 선언 한 줄을 짓는다 — nil 도 0건도 침묵하지 않고, 수는 하한이라고 말한다" -m "renderPathCheck 의 쌍둥이다. nil 문구는 일부러 그쪽과 글자를 달리했다 — 같은 문장을 쓰면 구성원 절의 격리 단정이 남의 판정으로 오인한다."`
 
 Expected: 커밋 1건.
 
 ---
 
 ### Task 10: R2 — 선두의 종료 선언을 pick 응답에 싣는다(이 사고의 주인공이 선두다)
+
 **Files:**
 - Modify: plugins/flightdeck/server/internal/mcpsrv/render.go:989 (renderPathCheck 호출 바로 뒤)
 - Modify: plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go (import 블록 + 시험 셋 추가)
@@ -2933,7 +2949,7 @@ Expected: 커밋 1건.
 
 
 
-Run: `grep -n "CloseDeclared \*model.CloseDeclaration" internal/service/pick.go`
+Run: `cd plugins/flightdeck/server && grep -n "CloseDeclared \*model.CloseDeclaration" internal/service/pick.go`
 
 Expected: PickResult 와 BundleMember 두 자리가 나온다. 안 나오면 service 구조체 태스크를 먼저 끝내라.
 
@@ -3044,7 +3060,7 @@ Expected: 파일이 고쳐진다.
 
 
 
-Run: `go test ./internal/mcpsrv/ -run 'TestRenderPick(CarriesTheLeadCloseDeclaration|SaysTheCloseAxisWasNotReadWhenNil|OmitsCloseDeclarationWhenThereIsNoItem)' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run 'TestRenderPick(CarriesTheLeadCloseDeclaration|SaysTheCloseAxisWasNotReadWhenNil|OmitsCloseDeclarationWhenThereIsNoItem)' -v -count=1`
 
 Expected: 앞의 둘이 FAIL("선두의 종료 선언 줄이 …" / "… 그 사실을 말하지 않는다"). 셋째는 이미 PASS 다 — 그것이 정상이다(빼는 것을 잠그는 시험이라 구현 전에도 참이다).
 
@@ -3080,7 +3096,7 @@ new_string:
 
 패키지 전체를 반드시 같이 돈다. 이 줄이 처음으로 **기존 출력에 끼어드는** 변경이라, `경로 실재: ` 개수·`브랜치: ` 개수·구성원 절 경계를 밟았는지는 여기서만 드러난다.
 
-Run: `go test ./internal/mcpsrv/ -run 'TestRenderPick(CarriesTheLeadCloseDeclaration|SaysTheCloseAxisWasNotReadWhenNil|OmitsCloseDeclarationWhenThereIsNoItem)' -v -count=1 && go test ./internal/mcpsrv/ -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run 'TestRenderPick(CarriesTheLeadCloseDeclaration|SaysTheCloseAxisWasNotReadWhenNil|OmitsCloseDeclarationWhenThereIsNoItem)' -v -count=1 && go test ./internal/mcpsrv/ -count=1`
 
 Expected: 셋 다 PASS, mcpsrv 전체 ok. 특히 TestRenderPickGivesEachBundleMemberItsOwnPathVerdict(render_test.go:1372)가 초록이어야 한다 — 붉어지면 nil 문구가 renderPathCheck 의 그것과 같아진 것이다.
 
@@ -3088,13 +3104,14 @@ Expected: 셋 다 PASS, mcpsrv 전체 ok. 특히 TestRenderPickGivesEachBundleMe
 
 
 
-Run: `git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 선두의 종료 선언을 pick 응답에 싣는다 — 이 사고의 주인공이 선두였다" -m "renderBundle 은 Members 가 선두 제외라 선두를 모른다. 구성원 자리에만 심으면 08-05 의 1순위 추천이 하던 침묵을 그대로 재현한다."`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 선두의 종료 선언을 pick 응답에 싣는다 — 이 사고의 주인공이 선두였다" -m "renderBundle 은 Members 가 선두 제외라 선두를 모른다. 구성원 자리에만 심으면 08-05 의 1순위 추천이 하던 침묵을 그대로 재현한다."`
 
 Expected: 커밋 1건.
 
 ---
 
 ### Task 11: R3 — 구성원의 종료 선언: continue 보다 **위에**, 각자 제 값으로
+
 **Files:**
 - Modify: plugins/flightdeck/server/internal/mcpsrv/render.go:1209-1210 (renderBundle 구성원 머리줄 바로 뒤 · 1215줄 continue 위)
 - Modify: plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go (import 에 judge 추가 + 시험 하나 추가)
@@ -3264,7 +3281,7 @@ Expected: 파일이 고쳐진다.
 
 
 
-Run: `go test ./internal/mcpsrv/ -run TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration -v -count=1`
 
 Expected: FAIL — "종료 선언 줄이 1개다 — 선두 1 + 구성원 4 = 5여야 한다". (선두만 있고 구성원 넷이 비어 있다.)
 
@@ -3302,7 +3319,7 @@ new_string:
 
 go build 는 _test.go 를 건너뛰므로 관문은 go vet 이다.
 
-Run: `go test ./internal/mcpsrv/ -run TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration -v -count=1 && go test ./internal/mcpsrv/ -count=1 && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration -v -count=1 && go test ./internal/mcpsrv/ -count=1 && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...`
 
 Expected: 새 시험 PASS · mcpsrv 전체 ok · vet 셋 다 무출력. 특히 render_test.go:1372(경로 축 격리)·render_lines_test.go:232(구성원 수)·render_accounting_test.go 전부가 초록이어야 한다.
 
@@ -3310,16 +3327,17 @@ Expected: 새 시험 PASS · mcpsrv 전체 ok · vet 셋 다 무출력. 특히 r
 
 
 
-Run: `git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 못 집은 구성원에게도 종료 선언이 나온다 — continue 보다 위에 쓴다" -m "머리줄 바로 밑이다. 사유 줄 뒤에 두면 continue 가 절을 끊어 못 집은 구성원에게 영영 안 나오는데, 그 항목이야말로 다음 세션이 다시 집으러 오는 자리다."`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/mcpsrv/render.go plugins/flightdeck/server/internal/mcpsrv/render_close_declared_test.go && git commit -m "feat(flightdeck): 못 집은 구성원에게도 종료 선언이 나온다 — continue 보다 위에 쓴다" -m "머리줄 바로 밑이다. 사유 줄 뒤에 두면 continue 가 절을 끊어 못 집은 구성원에게 영영 안 나오는데, 그 항목이야말로 다음 세션이 다시 집으러 오는 자리다."`
 
 Expected: 커밋 1건.
 
 ---
 
 ### Task 12: 종료 선언 표기 — 순수 함수 하나(format.go)
+
 **Files:**
-- Modify: internal/web/format.go (파일 끝, 현재 423줄 뒤에 덧붙인다)
-- Test: internal/web/format_test.go (파일 끝, 현재 382줄 뒤에 덧붙인다)
+- Modify: $SRV/internal/web/format.go (파일 끝, 현재 423줄 뒤에 덧붙인다)
+- Test: $SRV/internal/web/format_test.go (파일 끝, 현재 382줄 뒤에 덧붙인다)
 
 **Interfaces:**
 - Consumes: model.CloseDeclaration{Done,Dropped int; Last time.Time; LastSession,LastMode string} + (d CloseDeclaration) Count() int — **이미 랜딩됐다**(internal/model/types.go:319-342). store.(*Store).CloseDeclarationsByItem 도 이미 있다(internal/store/event.go:263) — 그 doc 이 "앵커도 항목 존재 판정도 여기서 하지 않는다 … 지웠다 다시 만든 id 의 옛 선언이 그대로 들어 있다"고 못박았으므로 앵커는 이 함수가 건다.
@@ -3444,7 +3462,7 @@ Expected: 파일이 저장된다. 아직 컴파일 안 된다(CloseDeclaredLabel
 
 빨간불이 **올바른 이유로** 나는지 본다. 이 단계에서는 단정 실패가 아니라 미정의 심볼이 정상이다.
 
-Run: `go test ./internal/web/ -run TestCloseDeclaredLabel -count=1 2>&1 | head -20`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run TestCloseDeclaredLabel -count=1 2>&1 | head -20`
 
 Expected: `undefined: CloseDeclUnread` · `undefined: CloseDeclaredLabel` 로 빌드 실패. [build failed] 로 끝난다.
 
@@ -3530,7 +3548,7 @@ Expected: format.go 가 컴파일된다.
 
 표의 아홉 갈래가 전부 초록이어야 한다. 하나라도 빨간불이면 문자열을 시험에 맞추지 말고 **어느 쪽이 옳은지 먼저 정하라** — 이 문자열은 세 표면이 공유한다.
 
-Run: `go test ./internal/web/ -run 'TestCloseDeclaredLabel' -v -count=1 2>&1 | tail -30`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run 'TestCloseDeclaredLabel' -v -count=1 2>&1 | tail -30`
 
 Expected: `--- PASS: TestCloseDeclaredLabel` 아래 9개 하위 갈래 PASS + `--- PASS: TestCloseDeclaredLabelSaysTheCountIsALowerBound` · `ok`
 
@@ -3538,7 +3556,7 @@ Expected: `--- PASS: TestCloseDeclaredLabel` 아래 9개 하위 갈래 PASS + `-
 
 교차 빌드 관문은 `go vet` 이다(`go build` 는 _test.go 를 건너뛴다). gofmt 는 **내 파일만** 본다 — actions_test.go 는 다른 담당이 지금 손대는 중이라 목록에 뜰 수 있다.
 
-Run: `gofmt -l internal/web/format.go internal/web/format_test.go && go vet ./internal/web/ && go test ./internal/web/ -count=1 2>&1 | tail -3`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/web/format.go internal/web/format_test.go && go vet ./internal/web/ && go test ./internal/web/ -count=1 2>&1 | tail -3`
 
 Expected: gofmt 무출력 · vet 무출력 · `ok github.com/kweiza/flightdeck/internal/web`
 
@@ -3546,7 +3564,10 @@ Expected: gofmt 무출력 · vet 무출력 · `ok github.com/kweiza/flightdeck/i
 
 이 커밋은 문자열 하나를 정한 것이다. 커밋 메시지가 **왜 세 상태인지**를 말한다.
 
-Run: `git add plugins/flightdeck/server/internal/web/format.go plugins/flightdeck/server/internal/web/format_test.go && git commit -m "$(cat <<'EOF'
+Run:
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/web/format.go plugins/flightdeck/server/internal/web/format_test.go && git commit -m "$(cat <<'EOF'
 feat(flightdeck): 화면이 종료 선언을 문장으로 옮긴다 — 못 읽음을 0으로 접지 않는다
 
 안 읽음·선언 없음·선언 있음 셋을 세 문장으로 가른다. 둘로 접으면 조회가 죽은
@@ -3561,17 +3582,19 @@ doc 에 적어 뒀다. 다만 앵커를 Last 하나로만 걸어 되살아난 id
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
-)"`
+)"
+```
 
 Expected: 커밋 하나. 파일 둘만 들어간다(다른 담당의 actions.go·actions_test.go 를 절대 담지 마라).
 
 ---
 
 ### Task 13: 두 시점을 잇는다 — 큐 표 · 회수 폼 · 폐기 폼(page.go + dashboard.gohtml)
+
 **Files:**
-- Create: internal/web/close_declared_test.go
-- Modify: internal/web/page.go (88-94 ClaimTarget · 109-121 ItemRow · 131 Targets · 596-619 queuePanel · 642-665 itemRow · 667-689 claimTargets)
-- Modify: internal/web/dashboard.gohtml (47 CSS · 149 회수 폼 option · 158 다섯→여섯 · 200 상태 칸 · 231 폐기 폼 option · 239 폐기 폼 꼬리 · 453 뒤 declText)
+- Create: $SRV/internal/web/close_declared_test.go
+- Modify: $SRV/internal/web/page.go (88-94 ClaimTarget · 109-121 ItemRow · 131 Targets · 596-619 queuePanel · 642-665 itemRow · 667-689 claimTargets)
+- Modify: $SRV/internal/web/dashboard.gohtml (47 CSS · 149 회수 폼 option · 158 다섯→여섯 · 200 상태 칸 · 231 폐기 폼 option · 239 폐기 폼 꼬리 · 453 뒤 declText)
 
 **Interfaces:**
 - Consumes: 태스크 1 의 `CloseDeclUnread` · `CloseDeclaredLabel(d, read, created)`. 그리고 **이미 랜딩된** `(*store.Store).CloseDeclarationsByItem(ctx, project) (map[string]model.CloseDeclaration, error)`(internal/store/event.go:263).
@@ -3764,7 +3787,7 @@ Expected: 파일이 저장된다. 컴파일은 된다(새 심볼을 안 쓴다) 
 
 넷 중 셋이 단정 실패여야 한다. `TestUnreadAxisDoesNotEraseTheEmptyQueueSentence` 는 지금 코드에서도 통과한다(아직 pan.Err 을 안 쓰므로) — 그것이 정상이다. 이 시험은 앞으로 그 판단이 뒤집히는 것을 막는 가드다.
 
-Run: `go test ./internal/web/ -run 'TestReclaimFormNamesTheRolledBackFinish|TestQueueTableKeepsTheDeclarationAfterReclaim|TestUnreadCloseDeclarationAxisIsNotFoldedIntoZero|TestUnreadAxisDoesNotEraseTheEmptyQueueSentence' -v -count=1 2>&1 | tail -30`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run 'TestReclaimFormNamesTheRolledBackFinish|TestQueueTableKeepsTheDeclarationAfterReclaim|TestUnreadCloseDeclarationAxisIsNotFoldedIntoZero|TestUnreadAxisDoesNotEraseTheEmptyQueueSentence' -v -count=1 2>&1 | tail -30`
 
 Expected: FAIL 셋: `HTML 에 "종료 선언 최소 1건" 이 없다` (회수 폼) · 같은 것 (큐 표) · `HTML 에 "종료 선언 축을 못 읽었다" 가 없다`. PASS 하나: TestUnreadAxisDoesNotEraseTheEmptyQueueSentence.
 
@@ -4008,7 +4031,7 @@ after:
 
 여기서 vet 을 돌리면 템플릿이 아직 `[]string` 을 가정하므로 **Go 는 초록인데 화면은 깨진 상태**다. 그 상태를 한 번 눈으로 확인하고 다음 단계로 간다 — 두 편집을 한 덩이로 묶으면 어느 쪽이 깨졌는지 못 가른다.
 
-Run: `gofmt -l internal/web/page.go && go vet ./internal/web/`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/web/page.go && go vet ./internal/web/`
 
 Expected: gofmt 무출력 · vet 무출력. (`go test` 는 아직 돌리지 마라 — 템플릿이 `{{.}}` 로 구조체를 찍어 회수/폐기 폼 시험이 엉뚱한 이유로 깨진다.)
 
@@ -4125,7 +4148,7 @@ after(**새 폼을 만들지 않는다** — 기존 폼 안에 설명 한 줄만
 
 
 
-Run: `go test ./internal/web/ -run 'TestReclaimFormNamesTheRolledBackFinish|TestQueueTableKeepsTheDeclarationAfterReclaim|TestUnreadCloseDeclarationAxisIsNotFoldedIntoZero|TestUnreadAxisDoesNotEraseTheEmptyQueueSentence' -v -count=1 2>&1 | tail -20`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run 'TestReclaimFormNamesTheRolledBackFinish|TestQueueTableKeepsTheDeclarationAfterReclaim|TestUnreadCloseDeclarationAxisIsNotFoldedIntoZero|TestUnreadAxisDoesNotEraseTheEmptyQueueSentence' -v -count=1 2>&1 | tail -20`
 
 Expected: PASS 넷 · `ok`. 만약 `TestUnreadCloseDeclarationAxisIsNotFoldedIntoZero` 가 500 이나 빈 표로 깨지면 event 표를 감춘 것이 보드까지 죽인 것이다 — service/board.go 가 AckReach 실패를 파생 실패로만 남기므로 그럴 리 없지만, 그때는 `f.get` 대신 `queuePanel` 이 낸 것을 로그로 확인하라.
 
@@ -4133,7 +4156,7 @@ Expected: PASS 넷 · `ok`. 만약 `TestUnreadCloseDeclarationAxisIsNotFoldedInt
 
 이 세 시험이 이번 편집의 진짜 위험 지점이다: 폼/POST/사유 개수 락(render_test.go:399-412)과 회수 폼 줄 모양(actions_test.go:35·57·87).
 
-Run: `go test ./internal/web/ -run 'TestWriteFormsAreAtMostFourAndAllRequireReason|TestReclaim|TestDrop|TestPageHasSixSections|TestDashboardTemplateWrappersAreBalanced|TestItemTitleIsEscaped' -v -count=1 2>&1 | grep -E "^(---|    ---|ok|FAIL)" | head -30`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run 'TestWriteFormsAreAtMostFourAndAllRequireReason|TestReclaim|TestDrop|TestPageHasSixSections|TestDashboardTemplateWrappersAreBalanced|TestItemTitleIsEscaped' -v -count=1 2>&1 | grep -E "^(---|    ---|ok|FAIL)" | head -30`
 
 Expected: 전부 PASS. `폼 N개 — 넷을 넘었다` · `POST 폼 N개` · `<option value="t5-a">t5-a ←` 관련 실패가 0건이어야 한다.
 
@@ -4141,7 +4164,7 @@ Expected: 전부 PASS. `폼 N개 — 넷을 넘었다` · `POST 폼 N개` · `<o
 
 교차 빌드 관문은 `go vet` 이다(`go build` 는 _test.go 를 건너뛴다). gofmt 는 **내 파일만** 지목한다 — 다른 담당이 손대는 중인 파일이 목록에 뜨면 건드리지 말고 그대로 두라.
 
-Run: `gofmt -l internal/web/page.go internal/web/close_declared_test.go && go vet ./... && go test ./internal/web/ -count=1 2>&1 | tail -3 && go test ./... 2>&1 | grep -E "^(FAIL|---)" | head -20`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/web/page.go internal/web/close_declared_test.go && go vet ./... && go test ./internal/web/ -count=1 2>&1 | tail -3 && go test ./... 2>&1 | grep -E "^(FAIL|---)" | head -20`
 
 Expected: gofmt 무출력 · vet 무출력 · `ok …/internal/web` · 전 저장소 FAIL 0건(다른 담당이 진행 중인 패키지의 빨간불은 내 것과 분리해 보고하라).
 
@@ -4149,7 +4172,10 @@ Expected: gofmt 무출력 · vet 무출력 · `ok …/internal/web` · 전 저�
 
 
 
-Run: `git add plugins/flightdeck/server/internal/web/page.go plugins/flightdeck/server/internal/web/dashboard.gohtml plugins/flightdeck/server/internal/web/close_declared_test.go && git commit -m "$(cat <<'EOF'
+Run:
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add plugins/flightdeck/server/internal/web/page.go plugins/flightdeck/server/internal/web/dashboard.gohtml plugins/flightdeck/server/internal/web/close_declared_test.go && git commit -m "$(cat <<'EOF'
 feat(flightdeck): 롤백된 마무리를 화면이 두 시점에서 말한다
 
 회수 폼의 줄은 회수하는 순간 사라지는데 사고는 그 다음에 났다 — open 이 된 항목을
@@ -4170,15 +4196,17 @@ pick 이 나이순 1순위로 냈다. 그래서 큐 표가 두 시점을 잇는�
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
-)"`
+)"
+```
 
 Expected: 커밋 하나. 파일 셋만. actions.go·actions_test.go(폐기 액션 담당)를 절대 담지 마라.
 
 ---
 
 ### Task 14: 실패 시험 — 폐기가 claim 행을 '사유째로' 닫는지 잠근다
+
 **Files:**
-- Test: internal/web/actions_test.go (import 블록 3-13 수정 · 158줄 `func TestGetOnActionPathIs404` 앞에 시험 삽입)
+- Test: $SRV/internal/web/actions_test.go (import 블록 3-13 수정 · 158줄 `func TestGetOnActionPathIs404` 앞에 시험 삽입)
 
 **Interfaces:**
 - Consumes: 없다. 이 태스크는 이 항목의 다른 층(store/judge/service/mcpsrv/web-page)과 파일이 하나도 안 겹친다 — actions.go · actions_test.go 둘뿐이라 순서 제약 없이 언제 실행해도 된다.
@@ -4201,7 +4229,7 @@ Expected: 커밋 하나. 파일 셋만. actions.go·actions_test.go(폐기 액�
 
 그러므로 **단정을 `released_at` 에 걸면 이 시험은 고침이 통째로 없어도 초록이다.** 관측점은 `force_reason` 이다.
 
-Run: `sed -n '505,532p' internal/store/item.go && sed -n '757,790p' internal/store/item.go && sed -n '210,254p' internal/web/actions.go`
+Run: `cd plugins/flightdeck/server && sed -n '505,532p' internal/store/item.go && sed -n '757,790p' internal/store/item.go && sed -n '210,254p' internal/web/actions.go`
 
 Expected: item.go:512-527 에 "★ 종료하면 선점도 함께 반납한다" 주석과 claim UPDATE 가 보인다. item.go:779-781 의 `if n == 0 { return notFound(NFLiveClaim, ...) }` 가 782줄의 `UPDATE item SET state='open'` **앞**에 있다. actions.go:237 은 SetItemState 만 친다.
 
@@ -4352,9 +4380,11 @@ func TestDropClosesTheClaimWithTheDropReason(t *testing.T) {
 
 
 
-Run: `go test ./internal/web/ -run TestDropClosesTheClaimWithTheDropReason -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run TestDropClosesTheClaimWithTheDropReason -v -count=1`
 
-Expected: 두 하위 시험 모두 FAIL. 실제로 나온 문구:
+Expected:
+
+두 하위 시험 모두 FAIL. 실제로 나온 문구:
 ```
 === RUN   TestDropClosesTheClaimWithTheDropReason/선점된_항목
     actions_test.go:241: claim.force_reason = "", 기대 "설계에서 빠진 축이라 이 항목은 성립하지 않는다 — 버린다" — 선점을 왜 끊었는지가 원장에 없다
@@ -4368,15 +4398,16 @@ Expected: 두 하위 시험 모두 FAIL. 실제로 나온 문구:
 
 관문 시험(`internal/service/gofmt_gate_test.go`)은 service 패키지에 있어 111초가 걸린다. 여기서는 gofmt 를 직접 부른다.
 
-Run: `gofmt -l internal/web/`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/web/`
 
 Expected: 출력이 비어 있다. `internal/web/actions_test.go` 가 찍히면 doc 주석의 들여쓴 이어짐 줄이 남아 있다는 뜻이다 — `gofmt -d internal/web/actions_test.go` 로 자리를 보고 평평한 `// ` 로 고쳐라(gofmt -w 로 덮으면 주석이 탭 코드블록으로 재작성돼 읽기가 나빠진다).
 
 ---
 
 ### Task 15: 최소 구현 — drop 의 tx 안에서 ForceReleaseClaim 을 SetItemState 앞에 부른다
+
 **Files:**
-- Modify: internal/web/actions.go (229-246 치환)
+- Modify: $SRV/internal/web/actions.go (229-246 치환)
 
 **Interfaces:**
 - Consumes: `TestDropClosesTheClaimWithTheDropReason` 이 두 하위 시험 모두 빨간불인 상태. 특히 `선점된_항목` 이 `claim.force_reason = ""` 로 죽고 있어야 한다.
@@ -4482,9 +4513,11 @@ Expected: `body` 지역 변수가 사라지고 본문 조립이 `AddJudgment` �
 
 
 
-Run: `go test ./internal/web/ -run TestDropClosesTheClaimWithTheDropReason -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/web/ -run TestDropClosesTheClaimWithTheDropReason -v -count=1`
 
-Expected: ```
+Expected:
+
+```
 --- PASS: TestDropClosesTheClaimWithTheDropReason (0.41s)
     --- PASS: TestDropClosesTheClaimWithTheDropReason/선점된_항목 (0.23s)
     --- PASS: TestDropClosesTheClaimWithTheDropReason/선점_없는_항목 (0.18s)
@@ -4507,7 +4540,7 @@ Expected: 변이를 넣으면 `선점된_항목` 이 force_reason 으로 FAIL. �
 
 `go build` 는 _test.go 를 건너뛰므로 교차 빌드 관문은 `go vet` 으로 돈다.
 
-Run: `gofmt -l internal/web/ && go vet ./internal/web/ && GOOS=windows go vet ./internal/web/ && go test ./internal/web/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l internal/web/ && go vet ./internal/web/ && GOOS=windows go vet ./internal/web/ && go test ./internal/web/ -count=1`
 
 Expected: gofmt 출력 없음 · vet 둘 다 무출력 · `ok  github.com/kweiza/flightdeck/internal/web  약 11s`. (내가 실제로 이 넷을 다 통과시켰다.)
 
@@ -4556,6 +4589,7 @@ Expected: 두 파일만 담긴 커밋 하나.
 ---
 
 ### Task 16: 회수 근거 축이 여섯이 된다 — DESIGN §4 · pick 거절 문구 · page.go 주석을 한 수로 맞춘다
+
 **Files:**
 - Test: plugins/flightdeck/server/internal/mcpsrv/reclaim_axes_test.go (신규)
 - Modify: plugins/flightdeck/DESIGN.md:369-371
@@ -4682,13 +4716,13 @@ func TestLaneReclaimStaysAtFiveAxes(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/mcpsrv/ -run 'TestReclaimAxisCountAgreesBetweenDesignAndPickRefusal|TestLaneReclaimStaysAtFiveAxes' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run 'TestReclaimAxisCountAgreesBetweenDesignAndPickRefusal|TestLaneReclaimStaysAtFiveAxes' -v -count=1`
 
 Expected: TestReclaimAxisCount... 이 FAIL 한다. 실패 줄 둘: `DESIGN.md 의 회수 근거 축이 "다섯" 이다` · `pick 거절이 여섯째 축을 이름으로 안 부른다`. TestLaneReclaimStaysAtFiveAxes 는 PASS(지금 다섯이므로) — 이쪽은 회귀 관문이다.
 
 - [ ] **Step 2: DESIGN.md §4 를 고친다**
 
-`/home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item/plugins/flightdeck/DESIGN.md` 369-371.
+`plugins/flightdeck/DESIGN.md` 369-371.
 
 BEFORE (그대로, 선행 공백 없음):
 ```
@@ -4809,7 +4843,7 @@ AFTER:
 // 존재만 보므로 문서가 여섯이 되고 문구가 다섯인 상태를 못 잡았다 — 실제로 그랬다.
 ```
 
-Run: `go test ./internal/mcpsrv/ -run 'TestPickRefusesSteal|TestReclaimAxisCountAgreesBetweenDesignAndPickRefusal|TestLaneReclaimStaysAtFiveAxes|TestLandReleaseArgIsRefused' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/mcpsrv/ -run 'TestPickRefusesSteal|TestReclaimAxisCountAgreesBetweenDesignAndPickRefusal|TestLaneReclaimStaysAtFiveAxes|TestLandReleaseArgIsRefused' -v -count=1`
 
 Expected: 넷 다 PASS.
 
@@ -4832,7 +4866,7 @@ AFTER:
 // 같은 이름으로 다른 사실을 내는 어긋남이 재현된다(설계 §4-⑤).
 ```
 
-Run: `gofmt -l ./internal && go vet ./... && go test ./internal/mcpsrv/ ./internal/web/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal && go vet ./... && go test ./internal/mcpsrv/ ./internal/web/ -count=1`
 
 Expected: gofmt 출력 없음, vet 조용, 두 패키지 ok.
 
@@ -4854,13 +4888,14 @@ docs(flightdeck): 회수 근거에 여섯째가 붙는다 — 다섯 축은 전�
 말하는 수 낱말이 곧 응답이 말하는 수 낱말이어야 한다.
 ```
 
-Run: `git add -A && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A && git commit -F -`
 
 Expected: 커밋 1개.
 
 ---
 
 ### Task 17: "조정할 상수가 0개다"는 두 번 낡았다 — 그 주장을 기계가 지킨다
+
 **Files:**
 - Test: plugins/flightdeck/server/internal/judge/sort_axis_doc_test.go (신규)
 - Modify: plugins/flightdeck/DESIGN.md:288-293
@@ -4985,7 +5020,7 @@ func TestDesignSortKeyParagraphNamesEveryLiveAxis(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/judge/ -run 'TestNoOneClaimsTheSortHasZeroTuningConstants|TestDesignSortKeyParagraphNamesEveryLiveAxis' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run 'TestNoOneClaimsTheSortHasZeroTuningConstants|TestDesignSortKeyParagraphNamesEveryLiveAxis' -v -count=1`
 
 Expected: 둘 다 FAIL. 앞엣것은 `DESIGN.md:288` 과 `judge/bundle.go:378` 두 줄을 지목한다. 뒤엣것은 `bundle.go 에 "const StarvationAge" 가 있는데 DESIGN 의 정렬 키 문단이 "기아" 를 안 부른다` 로 실패한다(`CloseDeclared` 는 아직 코드에 없어 건너뛴다).
 
@@ -5051,7 +5086,7 @@ AFTER:
 
 **⚠ 함정.** AFTER 문안에 `조정할 상수가 하나도 없다` 나 `조정할 상수가 0개` 를 다시 쓰면 안 된다 — 같은 관문이 잡는다. 위 문안은 `"상수가 0"으로 읽으면 안 된다` 로 우회했다.
 
-Run: `gofmt -l ./internal && go test ./internal/judge/ -count=1 && go vet ./...`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal && go test ./internal/judge/ -count=1 && go vet ./...`
 
 Expected: gofmt 출력 없음. judge 패키지 ok(새 시험 둘 포함 전부 초록). vet 조용.
 
@@ -5072,13 +5107,14 @@ lessBundle 의 머리줄도 함께 고쳤다. 그 함수 안에 상수가 없는
 축 하나는 바깥 상수가 정하고 또 하나는 원장 관측이 정한다.
 ```
 
-Run: `git add -A && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A && git commit -F -`
 
 Expected: 커밋 1개.
 
 ---
 
 ### Task 18: StarvationAge 의 근거가 거짓이 됐다 — 2026-08-09 실측으로 정정하고 날짜를 박는다
+
 **Files:**
 - Test: plugins/flightdeck/server/internal/judge/starvation_rationale_test.go (신규)
 - Modify: plugins/flightdeck/server/internal/judge/bundle.go:12-16 (파일 머리말)
@@ -5156,7 +5192,7 @@ func TestStarvationRationaleCarriesADatedMeasurement(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/judge/ -run TestStarvationRationaleCarriesADatedMeasurement -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run TestStarvationRationaleCarriesADatedMeasurement -v -count=1`
 
 Expected: FAIL. 실패 줄 셋: 날짜 0개 · `정상 작업이 안 걸린다` 가 아직 있다 · 잔량(`열린`)을 안 말한다.
 
@@ -5224,7 +5260,7 @@ const StarvationAge = 24 * time.Hour
 
 **⚠ 함정.** AFTER 에 `정상 작업이 안 걸린다` 라는 정확한 문자열을 다시 쓰면 관문이 잡는다. 위 문안이 인용을 `평시 작업이 안 걸린다` 로 바꿔 쓴 이유가 이것이다.
 
-Run: `go test ./internal/judge/ -run TestStarvationRationaleCarriesADatedMeasurement -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/judge/ -run TestStarvationRationaleCarriesADatedMeasurement -v -count=1`
 
 Expected: PASS.
 
@@ -5282,7 +5318,7 @@ AFTER:
 func lessBundle(a, b Bundle) bool {
 ```
 
-Run: `gofmt -l ./internal && go test ./internal/judge/ -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal && go test ./internal/judge/ -count=1`
 
 Expected: gofmt 출력 없음. judge 패키지 ok.
 
@@ -5317,7 +5353,7 @@ AFTER:
 // 못 본다.** 그것을 잠그는 것은 service 의 배선 시험이다(service/pick_wiring_test.go).
 ```
 
-Run: `gofmt -l ./internal && go test ./internal/judge/ -count=1 && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal && go test ./internal/judge/ -count=1 && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./...`
 
 Expected: gofmt 출력 없음, judge ok, vet 세 벌 전부 조용.
 
@@ -5343,13 +5379,14 @@ docs(flightdeck): StarvationAge 의 근거가 나흘 만에 거짓이 됐다 —
 굶김 전용 갈래 위인 두 경계의 이유를 적었다.
 ```
 
-Run: `git add -A && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A && git commit -F -`
 
 Expected: 커밋 1개.
 
 ---
 
 ### Task 19: §5 파생 표 · §10 지표 · eligible.go — 원장에서 파생되는 축을 문서와 주석에 앉힌다
+
 **Files:**
 - Test: plugins/flightdeck/server/internal/store/close_declaration_doc_test.go (신규 · 교차층 관문)
 - Modify: plugins/flightdeck/DESIGN.md:389-390 (§5 파생 표 + 표 뒤 문단)
@@ -5424,7 +5461,7 @@ func TestLedgerDerivedAxisIsNamedInDesign(t *testing.T) {
 }
 ```
 
-Run: `go test ./internal/store/ -run TestLedgerDerivedAxisIsNamedInDesign -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/store/ -run TestLedgerDerivedAxisIsNamedInDesign -v -count=1`
 
 Expected: SKIP (`CloseDeclarationsByItem 이 아직 없다`). 통과지 초록 거짓이 아니다 — 건너뛴 이유가 출력에 있다.
 
@@ -5480,7 +5517,7 @@ AFTER:
 
 **⚠ 함정.** 이 절에 문장을 더할 때 `신호`(또는 `signal`)와 `간격·분포·횟수·이력·누적·추세` 중 하나가 **같은 줄에 40자 이내로** 붙으면 `store/signal_is_not_history_test.go` 의 전수 그물이 잡는다. 위 문안은 `분포` 를 쓰지만 같은 줄에 `신호` 가 없어 안전하다. 표현을 바꿀 때 이 규칙을 지켜라 — 못 지키면 그 줄에 `값이 없다`·`쓸 수 없다` 같은 부정을 함께 적어야 통과한다.
 
-Run: `go test ./internal/store/ -run 'TestSignalTableIsNotProposedAsHistory|TestSignalGuardActuallyCatches' -v -count=1`
+Run: `cd plugins/flightdeck/server && go test ./internal/store/ -run 'TestSignalTableIsNotProposedAsHistory|TestSignalGuardActuallyCatches' -v -count=1`
 
 Expected: 둘 다 PASS. `정본 문장을 한 줄도 못 봤다` 로 죽지 않는다.
 
@@ -5566,7 +5603,7 @@ AFTER:
 // 그러면 "강등을 한 번 했나 두 번 했나"를 화면에서 가를 관측점이 사라진다.
 ```
 
-Run: `gofmt -l ./internal && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./... && go test ./internal/... -count=1`
+Run: `cd plugins/flightdeck/server && gofmt -l ./internal && go vet ./... && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=darwin GOARCH=arm64 go vet ./... && go test ./internal/... -count=1`
 
 Expected: gofmt 출력 없음. vet 세 벌 조용. `go test ./internal/...` 전부 ok — 특히 `internal/store`(신호 그물)와 `internal/judge`(Task 2·3 관문)가 초록.
 
@@ -5594,7 +5631,7 @@ store 쪽 관문은 지금 SKIP 한다 — CloseDeclarationsByItem 이 아직 �
 그 함수가 들어오는 순간 이 문서를 요구한다.
 ```
 
-Run: `git add -A && git commit -F -`
+Run: `cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-finish-refusal-strands-completed-item && git add -A && git commit -F -`
 
 Expected: 커밋 1개.
 
