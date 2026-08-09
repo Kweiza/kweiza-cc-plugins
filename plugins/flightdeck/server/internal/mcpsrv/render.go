@@ -1300,6 +1300,65 @@ func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
 	return s
 }
 
+// renderCloseDeclared 는 종료 선언 축이다. 순수 함수이고 renderPathCheck 의 **쌍둥이**다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다.** renderPathCheck 이 이상이 없어도 한 줄을 찍는
+// 그 이유 그대로다 — 침묵하면 "선언이 없다"와 "이 축을 안 봤다"가 같은 화면이 되고,
+// 그러면 원장 조회가 통째로 실패한 날에도 pick 은 평소와 똑같아 보인다. 이 사고가
+// 정확히 그 모양이었다: 신호는 08-04 부터 원장에 있었고 08-05 의 추천이 그것을
+// 한 글자도 말하지 않았다.
+//
+// ★ nil 갈래의 문장은 renderPathCheck·renderBundle 의 그것과 **글자가 다르다.**
+// 같은 문장을 쓰면 구성원 절 안에서 남의 판정과 내 판정이 문자열로 구분되지 않고,
+// render_test.go:1415-1435 의 "제 것인가" 단정이 그 순간 무의미해진다(그 시험은
+// unreadSum 을 남의 절에서 못 찾는 것으로 격리를 잰다). 실제로 복제하면 붉어진다.
+//
+// ★ 접두를 `종료 선언:` 으로 새로 판 이유는 기존 접두들에 개수·절 분할 시험이 물려
+// 있기 때문이다(`경로 실재: ` 4개 · `fd move ` 1개 · `브랜치: ` 1개 · 구성원 표식 3종).
+//
+// ★ 수는 **하한이다.** store 의 CloseDeclarationsByItem doc 이 못박은 계약이다
+// (event.go:255-258 — flushDeferred 가 트랜잭션 ctx 를 그대로 쓰고 LogEvent 는 쓰기
+// 실패를 WARN 으로 삼키므로 안 써진 마무리가 있을 수 있다). 그래서 0건 갈래에서도
+// "0이다"로 단정하지 않는다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
+//
+// ★ 처방이 mode 로 갈린다 — done 은 이미 랜딩됐을 수 있고 dropped 는 이미 버리기로
+// 판정됐을 수 있다. 둘을 "끝난 일" 하나로 뭉치면 다음 세션이 무엇을 확인해야 하는지가
+// 사라진다(랜딩 이력인가, 버린 판단인가). 그래서 둘 다 0이 아니면 두 줄을 다 낸다.
+//
+// ★ 매개변수 이름 `indent` 가 같은 파일의 indent(s, pad) 헬퍼를 가린다. 계약이 정한
+// 시그니처라 그대로 두고, 대신 이 함수 안에서는 줄마다 접두를 직접 붙인다 —
+// 여기서 indent(...) 를 부르면 "cannot call non-function" 으로 컴파일이 죽는다.
+func renderCloseDeclared(d *model.CloseDeclaration, indent string) string {
+	// 이어지는 줄은 "종료 선언: " 만큼 민다 — renderPathCheck 의 되돌리기 줄과 같은 모양이다.
+	const cont = "           "
+	if d == nil {
+		return indent + "종료 선언: 이 응답은 이 축을 안 읽었다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
+	}
+	if d.Count() == 0 {
+		return indent + "종료 선언: 원장에서 하나도 못 봤다 — 이 항목을 닫으려다 롤백된 시도가 관측되지 않았다.\n" +
+			indent + cont + "이 수는 하한이다 — 원장에 안 써진 마무리는 여기서 영영 0으로 보인다.\n"
+	}
+	// 세션 id 는 event.session_id 에서 오는데 그 열은 NULL 을 받고(schema.sql:367)
+	// store 는 그것을 빈 문자열로 낸다. 그대로 찍으면 "세션  · mode=done" 이 되어
+	// 읽는 쪽이 잘린 줄로 오해한다.
+	session := ShortID(d.LastSession)
+	if session == "" {
+		session = "미상"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s종료 선언: 롤백된 마무리 선언 적어도 %d건(done %d · dropped %d) — 마지막 %s · 세션 %s · mode=%s\n",
+		indent, d.Count(), d.Done, d.Dropped,
+		d.Last.UTC().Format("2006-01-02 15:04"), session, d.LastMode)
+	if d.Done > 0 {
+		fmt.Fprintf(&b, "%s%sdone %d건: 이미 랜딩됐을 수 있다.\n", indent, cont, d.Done)
+	}
+	if d.Dropped > 0 {
+		fmt.Fprintf(&b, "%s%sdropped %d건: 이미 버리기로 판정됐을 수 있다.\n", indent, cont, d.Dropped)
+	}
+	fmt.Fprintf(&b, "%s%s연결된 판단부터 읽어라. 이 수는 하한이다 — 원장에 안 써진 마무리는 여기 안 잡힌다.\n", indent, cont)
+	return b.String()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // note · add · finish · alloc
 // ─────────────────────────────────────────────────────────────────────────────
