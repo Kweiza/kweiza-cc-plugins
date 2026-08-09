@@ -1434,6 +1434,18 @@ R=0.85(<1)인데 open 191건이 방치돼 있다. 잔량·나이 꼬리는 소�
 `~/.flightdeck/fd.db` 읽기 전용 사본 · `event.at` 를 초 단위로 자르고 `session_id` 로 짝지음):
 `item.finish` 388건 중 롤백 4건(1.0%, `item.finish.fail` 과 같은 초·같은 세션에 짝지어 있다).
 
+**그 짝짓기 방법은 이제 낡았다.** `item.finish.fail` 이 payload 에 `item`·`mode`·`cause` 를
+싣는다(`service/logfail.go`). 초 단위 대조는 한 세션이 한 초에 두 항목을 건드리는 순간
+조용히 틀리고 — 틀렸다는 사실조차 안 남는다 — 위 4건은 그 방법으로 잰 값이다.
+다시 잴 때는 payload 의 `item` 으로 짝지어라. 그리고 `cause` 가 갈래
+(`followup-write`·`claim-drift`·`item-missing`·`not-found`·`other`)를 말하므로,
+"롤백이 몇 건인가" 다음 질문인 "무엇을 고쳐야 하는가"에 원장이 직접 답한다.
+
+**그리고 tx 진입 전 거절은 `item.finish.refused` 다.** 그 kind 는 위 두 질의
+(`CloseDeclarationsByItem`·`QueueReproduction`)가 `kind = 'item.finish'` 로 정확히 거르므로
+분모에도 표류 탐지에도 안 들어간다 — 마무리 관문이 실제로 무는 빈도는 그 kind 를 따로
+세어라(`gate` 축이 어느 문인지 말한다).
+
 **분자와 분모는 서로 다르게 표류한다.** 롤백 4건은 전부 2026-08-04~05 사고(위 §4 문단)에서
 났고 그 뒤로 새 사례가 없어 안정적이다. 반면 분모(전체 건수)는 다른 세션이 계속 `finish`
 하는 한 잴 때마다 커진다 — 이 물결 안에서만 383→384→386→388 로 관측됐다(각 수는 잰
