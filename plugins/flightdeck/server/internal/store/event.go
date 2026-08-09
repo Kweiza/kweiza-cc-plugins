@@ -57,6 +57,54 @@ func (s *Store) TryLogEvent(ctx context.Context, kind, project, sessionID string
 	return nil
 }
 
+// 트랜잭션 결말 표시 — 예약 이벤트가 "그래서 그 트랜잭션이 어떻게 끝났나"를 스스로 말한다.
+//
+// ★ 왜 필요한가. Tx.LogEvent 로 예약된 이벤트는 롤백 갈래에서도 흘러간다(store.go 의
+// flushDeferred). 그것은 결함이 아니라 "무엇을 시도했다 실패했나"를 남기려는 설계이고,
+// 그 대가로 원장의 item.finish 에는 **성공한 마무리와 롤백된 마무리가 같이** 들어 있다.
+// 결말을 여기서 안 찍으면 소비자는 항목 상태로 되추론할 수밖에 없는데, 그 되추론은
+// 실측으로 죽었다(QueueReproduction 의 ★ 와 DESIGN §10 의 표).
+//
+// ★ **양쪽 다 찍는다.** 롤백만 찍으면 "커밋됐다"와 "이 표시 이전에 쓰인 옛 행"이 같은
+// 값(키 없음)으로 접힌다 — 이 저장소가 반복해서 닫아 온 0과 못 잼의 혼동 그대로다.
+const (
+	// TxOutcomeKey 는 결말이 실리는 payload 키다. **store 가 소유한다** — 호출자가 같은
+	// 키를 실어도 덮인다. 키가 아예 없으면 그 행은 이 표시 이전에 쓰인 것이다.
+	TxOutcomeKey = "tx"
+	// TxCommitted 는 그 트랜잭션이 커밋된 것이다.
+	TxCommitted = "committed"
+	// TxRolledBack 은 그 트랜잭션이 롤백된 것이다 — 커밋 자체가 실패한 갈래를 포함한다.
+	TxRolledBack = "rolled_back"
+)
+
+// markTxOutcome 은 예약 이벤트 payload 에 결말을 얹은 **사본**을 낸다.
+//
+// 사본을 뜨는 이유: 호출자가 만든 맵을 여기서 고치면, 같은 맵을 두 번 쓰는 호출자가
+// 생기는 날 값이 조용히 달라진다. 지금 호출부가 전부 인라인 리터럴이라는 것은 호출부의
+// 성질이지 이 함수의 성질이 아니다.
+//
+// map[string]any 가 아닌 payload 는 **그대로 낸다** — 결말을 못 찍고, 그 행은 키가 없어
+// "관측 못 함"으로 읽힌다. 실호출부는 전부 map[string]any 다(store·service·web·legacy 전수).
+func markTxOutcome(payload any, committed bool) any {
+	outcome := TxRolledBack
+	if committed {
+		outcome = TxCommitted
+	}
+	switch p := payload.(type) {
+	case nil:
+		return map[string]any{TxOutcomeKey: outcome}
+	case map[string]any:
+		out := make(map[string]any, len(p)+1)
+		for k, v := range p {
+			out[k] = v
+		}
+		out[TxOutcomeKey] = outcome
+		return out
+	default:
+		return payload
+	}
+}
+
 // ListEvents 는 종류로 걸러 최신순으로 낸다. kind 가 비면 전 종류다.
 func (s *Store) ListEvents(ctx context.Context, kind string, since time.Time, limit int) ([]model.Event, error) {
 	if limit <= 0 {

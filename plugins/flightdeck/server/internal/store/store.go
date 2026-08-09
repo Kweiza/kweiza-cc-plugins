@@ -345,17 +345,20 @@ func (s *Store) Tx(ctx context.Context, fn func(*Tx) error) error {
 	if err := fn(t); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			// 예약 이벤트는 롤백 뒤에도 흘린다 — 실패한 시도가 원장에 남는 것이 목적이다.
-			t.flushDeferred()
+			t.flushDeferred(false)
 			return fmt.Errorf("%w (롤백도 실패: %v)", err, rbErr)
 		}
-		t.flushDeferred()
+		t.flushDeferred(false)
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		t.flushDeferred()
+		// ★ 커밋 실패도 롤백이다. 여기를 true 로 두면 아무것도 안 쓴 트랜잭션이 원장에서
+		//   "썼다"고 말한다 — 롤백 갈래보다 되짚기 어려운 거짓이다(여기는 fn 이 오류를
+		//   안 냈으므로 service 쪽 실패 로그조차 안 남는다).
+		t.flushDeferred(false)
 		return fmt.Errorf("커밋 실패: %w", err)
 	}
-	t.flushDeferred()
+	t.flushDeferred(true)
 	return nil
 }
 
@@ -421,14 +424,19 @@ func flushCtx(parent context.Context) (context.Context, context.CancelFunc) {
 // 마찬가지다 — 이 호출들이 defer 가 아닌 이유는 패닉 되감기 시점에는 롤백이 아직 안 돼
 // 쓰기 잠금이 살아 있고, 그때 별도 커넥션으로 쓰면 위 교착에 그대로 빠지기 때문이다.
 // 그래서 이 수를 읽는 표면의 "하한이다" 단서는 이 수정 뒤에도 안 뗀다.
-func (t *Tx) flushDeferred() {
+//
+// ★ committed 를 받는다. 여기가 **트랜잭션의 결말을 아는 유일한 자리**다 — 호출자(service)는
+// fn 이 오류를 냈는지만 알고 커밋 자체가 실패한 갈래는 모른다. 그 사실을 payload 에 안 찍으면
+// 소비자가 항목 상태로 되추론해야 하는데, 그 되추론은 실측으로 죽었다
+// (event.go 의 markTxOutcome · QueueReproduction · DESIGN §10).
+func (t *Tx) flushDeferred(committed bool) {
 	if len(t.deferred) == 0 {
 		return
 	}
 	ctx, cancel := flushCtx(t.ctx)
 	defer cancel()
 	for _, e := range t.deferred {
-		t.s.LogEvent(ctx, e.kind, e.project, e.sessionID, e.payload)
+		t.s.LogEvent(ctx, e.kind, e.project, e.sessionID, markTxOutcome(e.payload, committed))
 	}
 	t.deferred = nil
 }
