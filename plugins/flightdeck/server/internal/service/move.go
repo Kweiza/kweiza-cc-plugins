@@ -37,7 +37,10 @@ type MoveResult struct {
 //
 // ★ 범위를 **프로젝트 한 축으로 못박는다.** title·body·paths 를 함께 고치는 일반 amend 로
 // 번지면, "무엇을 고칠 수 있나"가 표면마다 달라지고 그 차이를 아무도 못 따라간다.
-// 그 일반 amend 는 별도 미결 질문이다(옛 셸 도구의 wq-amend-command 가 같은 자리에 열려 있다).
+// 그 일반 amend 는 별도 미결 질문이고, **그 지위를 DESIGN §11 이 적는다** — 지금 표면이
+// 전수로 없다는 사실과, 그것이 영구 결정은 아니라는 것까지. 여기 있던 포인터(옛 셸 도구의
+// `wq-amend-command`)는 이 레포에 **0건**이다. 그 항목이 안 넘어왔으므로 이쪽에서 따라갈
+// 수 없다 — 끊긴 포인터를 남겨 두면 다음 사람이 그것을 찾느라 시간을 쓴다.
 func (s *Service) MoveItem(ctx context.Context, in MoveInput) (MoveResult, error) {
 	var res MoveResult
 	in.Project = strings.TrimSpace(in.Project)
