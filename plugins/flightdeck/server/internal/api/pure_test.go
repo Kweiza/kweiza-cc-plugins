@@ -185,6 +185,8 @@ func TestClassifyError(t *testing.T) {
 			http.StatusConflict, "claim_held", "S1", false},
 		{"선점 거절", &store.ClaimRefusedError{ItemID: "t5-x", Reason: "이미 끝난 항목이다"},
 			http.StatusConflict, "claim_refused", "이미 끝난 항목이다", false},
+		{"종료된 항목", &store.ItemClosedError{ItemID: "t5-x", State: "dropped", Want: "open"},
+			http.StatusConflict, "item_closed", "dropped", false},
 		{"자원 점유", &store.ResourceHeldError{Resource: "staging", Holder: store.Holder{SessionID: "S2"}, AcquiredAt: at},
 			http.StatusConflict, "resource_held", "staging", false},
 		{"없다", fmt.Errorf("항목 조회: %w", store.ErrNotFound),
