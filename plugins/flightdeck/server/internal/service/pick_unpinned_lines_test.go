@@ -241,7 +241,7 @@ func TestRecommendationQueueOpenIsTheCandidateObservationNotARecount(t *testing.
 // (ClaimedItems, 뒤에 덧붙는다). 정렬이 없으면 순서가 "열린 것 먼저, 쥔 것 나중"이 되고
 // 그 안에서 다시 live 순회 순서에 의존한다. 그러면 같은 큐 상태가 **누가 무엇을 쥐고
 // 있느냐에 따라** 다른 순서를 내고, 그 순서는 부적격 후보의 탈락 사유 목록 순서로 그대로
-// 나간다(judge.Eligible 은 부적격을 입력 순서대로 쌓는다).
+// 나간다(judge.EligibleBundle 은 부적격을 입력 순서대로 편다 — flatten).
 //
 // ★ **정렬 방향은 일부러 안 못박는다.** 방향을 뒤집어도 전 스위트가 초록이고(실측),
 // 그것이 참인 사실이 아니기 때문이다: judge 가 lessCandidate(의존자 → 나이 → id)로

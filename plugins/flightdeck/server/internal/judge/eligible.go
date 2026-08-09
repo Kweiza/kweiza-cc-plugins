@@ -2,7 +2,6 @@ package judge
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -46,7 +45,8 @@ type Candidate struct {
 	// "겹침 없음"과 "이 축을 아예 안 본다"가 구분되지 않는다 — 그 구분이 안 되는 도구는
 	// 두 번째 세션부터 무시된다.
 	//
-	// Eligible 이 돌려주는 picked 에만 채워진다(입력으로 준 값은 무시하고 다시 계산한다).
+	// EligibleBundle 이 돌려주는 묶음의 **선두**에만 채워진다(입력으로 준 값은 무시하고
+	// 다시 계산한다). 재는 범위는 묶음 전체의 경로다 — bundlePaths 를 보라.
 	Overlaps []Overlap
 }
 
@@ -91,7 +91,6 @@ type EligibleInput struct {
 	// ★ zero 면 그 판정을 **안 돌린다**. 넣지 않은 호출이 "모든 항목이 1년 넘게
 	// 굶었다"로 판정되면 묶음 기능이 통째로 죽는다 — 관측을 못 하면 판정하지 않는
 	// 이 저장소의 규율 그대로다(judgeMissingFollowups 의 fail-open 과 같은 모양).
-	// Eligible(단일 추천)은 이 값을 아예 안 본다.
 	Now time.Time
 	// CloseDeclarations 는 항목 id → 그 항목을 닫으려다 롤백된 선언이다.
 	//
@@ -109,52 +108,20 @@ type EligibleInput struct {
 	CloseDeclarationsRead bool
 }
 
-// Eligible 은 지금 집을 수 있는 항목 하나를 고르고, **고르지 않은 전부의 사유**를 돌려준다.
+// 적격 판정의 불변식: **모든 후보는 picked 이거나 rejected 에 최소 한 줄이 있다.**
+// 사유가 없으면 큐는 블랙박스가 되고, 블랙박스는 두 번째 세션부터 무시된다. 조용히
+// 버리는 것이 하나도 없고, 한 후보가 여러 축에서 걸리면 사유도 여러 줄이 나온다
+// (축을 뭉개지 않는다). 이 불변식을 지키는 것은 EligibleBundle 이다(bundle.go).
 //
-// 사유가 없으면 큐는 블랙박스가 되고, 블랙박스는 두 번째 세션부터 무시된다.
-// 그래서 불변식은 이것이다: **모든 후보는 picked 이거나 rejected 에 최소 한 줄이 있다.**
-// 조용히 버리는 것이 하나도 없다. 한 후보가 여러 축에서 걸리면 사유도 여러 줄이 나온다
-// (축을 뭉개지 않는다).
+// ★ 이 파일에 **단일 추천 진입점은 없다.** 옛 judge.Eligible 이 그 자리였는데
+// 호출부가 0이라 지웠다(큐 항목 fd-eligible-dead-function-disposal). 그 함수가
+// 하던 일은 아래 세 순수 판정을 순서대로 부르는 것뿐이었고 — rejectionsFor ·
+// lessCandidate · OverlapsWithLive — 셋은 EligibleBundle 이 그대로 쓴다.
+// 껍데기를 남겨 두면 제품이 안 부르는 규칙 사본이 하나 서고, 그것이 조용히 표류한다
+// (이 패키지가 이미 그 이유로 SamePaths 를 PathsOverlap 에서 갈라 뒀다 — bundle.go).
 //
-// 정렬은 의존자 수 많은 것 → 오래된 것 → id 사전순이다. 마지막 축은 동점 처리이고,
-// 없으면 같은 입력에 다른 답이 나올 수 있다(입력 순서에 의존하게 된다).
-//
-// ★ **기아도 종료 선언도 이 함수에는 없다 — 일부러다.** 둘 다 EligibleBundle 이
-// Bundle 에 찍고 lessBundle 이 읽는다(bundle.go). 여기 사본을 만들지 않은 이유는
-// 이 함수를 제품이 **안 부르기** 때문이다: 비시험 호출자가 저장소 전체에서 0건이고
-// (2026-08-09 전수) 제품 경로는 EligibleBundle 하나뿐이다. 그러니 여기 축을 더해도
-// 바뀌는 것은 judge 시험이 보는 값뿐이고, 대신 같은 규칙이 두 벌이 되어 조용히
-// 표류한다 — 이 패키지가 이미 그 이유로 SamePaths 를 PathsOverlap 에서 갈라 뒀다
-// (bundle.go). 이 함수 자체의 처분은 큐 항목 fd-eligible-dead-function-disposal 이 정한다.
-func Eligible(in EligibleInput) (picked *Candidate, rejected []model.Rejection) {
-	var fit []Candidate
-	for _, c := range in.Candidates {
-		rs := rejectionsFor(c, in)
-		if len(rs) == 0 {
-			fit = append(fit, c)
-			continue
-		}
-		rejected = append(rejected, rs...)
-	}
-	if len(fit) == 0 {
-		return nil, rejected
-	}
-
-	sort.SliceStable(fit, func(i, j int) bool { return lessCandidate(fit[i], fit[j]) })
-
-	// 적격이었으나 1순위가 아닌 것도 원장에 남긴다. 안 남기면 그 후보들이
-	// pick_eval 어디에도 없어 "왜 저것이 아니라 이것인가"에 답할 수 없다.
-	for i, c := range fit[1:] {
-		rejected = append(rejected, model.Rejection{Item: c.Item.ID, Reason: RejectNotTop,
-			Detail: fmt.Sprintf("적격이지만 추천 %d순위다(추천은 %s)", i+2, fit[0].Item.ID)})
-	}
-
-	// 값 복사본을 만들어 겹침을 채운다. 입력 슬라이스를 건드리지 않는다 —
-	// 순수 함수가 인자를 고치면 시험이 보는 것과 호출자가 보는 것이 갈라진다.
-	best := fit[0]
-	best.Overlaps = OverlapsWithLive(best.Item.Paths, in.Live, in.Self, in.SelfCC)
-	return &best, rejected
-}
+// 다시 세우려면 근거가 필요하다: 지운 시점의 실측은 비시험 호출자 0건(2026-08-09 전수)
+// 이었고, 없앤 뒤 시험 18건은 전부 제품 경로(EligibleBundle)를 통과해 같은 규칙을 잠근다.
 
 // rejectionsFor 은 후보 하나가 걸리는 축을 전부 낸다. 빈 슬라이스면 적격이다.
 //
@@ -218,7 +185,15 @@ func rejectionsFor(c Candidate, in EligibleInput) []model.Rejection {
 // lessCandidate 는 추천 순서다. 의존자 수 많은 것 → 오래된 것 → id 사전순.
 //
 // 순수 함수로 빼 둔 이유는 시험이 정렬 규칙을 **직접** 부를 수 있게 하기 위해서다.
-// 정렬이 Eligible 본문에 있으면 시험이 그 규칙의 사본을 단정하게 된다.
+//
+// ★ 그 "직접"이 선택이 아니라 **필수**다. 제품 경로(EligibleBundle)를 통과해서는
+// 이 함수의 축을 하나도 확인할 수 없다 — 돌연변이로 실측했다: 의존자 축을 뒤집어도
+// (`>` → `<`) 나이 축을 통째로 지워도(`if false`) 전 스위트가 초록이었다. 이 함수가
+// 정렬한 fit 을 EligibleBundle 이 lessBundle 로 **다시** 정렬하고, 그쪽이
+// Bundle.Dependents(합)·Bundle.Oldest 로 같은 판정을 하면서 선두 id 로 끝나는
+// 전순서라 SliceStable 의 입력 순서가 결과를 못 바꾸기 때문이다.
+// TestLessCandidateOrdersByDependentsThenAgeThenID 가 그래서 직접 부른다
+// (bundle_test.go 의 lessBundle 시험들이 반대 방향에서 같은 함정을 피한 것과 같다).
 //
 // ★ **강등 축(Bundle.CloseDeclared)은 여기 안 들어간다.** 이 비교자가 제품에서
 // 살아 있는 자리는 EligibleBundle 의 fit 정렬 하나뿐이고(bundle.go 의

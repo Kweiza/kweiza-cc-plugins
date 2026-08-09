@@ -261,7 +261,7 @@ func shellQuote(s string) string {
 //
 // 지키는 것 넷:
 //
-//  1. 인자가 없으면 judge.Eligible 이 고르고, **탈락 사유 전부**를 함께 낸다.
+//  1. 인자가 없으면 judge.EligibleBundle 이 고르고, **탈락 사유 전부**를 함께 낸다.
 //  2. 추천을 못 해도 pick_eval 을 남긴다 — 적격 0건도 기록이다.
 //  3. 경로 겹침은 **거르지 않고 결과에 실어 낸다**(설계 §5).
 //  4. 이미 자기 선점이면 거절이 아니라 **맥락 재출력**이다(재개 경로).
@@ -723,7 +723,7 @@ func dedupeIDs(ids []string) []string {
 // 묶음 구성원 선점 실패의 탈락 사유 코드 — rejectionOf 가 낸다.
 //
 // ★ judge.Reject* 표(internal/judge/eligible.go)와 **다른 자리**에 둔다. 그 표는
-// 추천 시점의 적격 판정(judge.Eligible)이 pick_eval.rejected 에 남기는 사유고,
+// 추천 시점의 적격 판정(judge.EligibleBundle)이 pick_eval.rejected 에 남기는 사유고,
 // 이건 선점 **시도 자체**가 store 축에서 실패한 결과다 — 질문이 다르다(적격이냐
 // vs 지금 잡혔냐). 같은 이름 공간에 섞으면 두 생애주기가 뭉개진다.
 //
@@ -756,7 +756,7 @@ func rejectionOf(id string, err error) *model.Rejection {
 	case errors.Is(err, store.ErrNotFound):
 		code = RejectClaimNotFound
 	case errors.As(err, &held):
-		code = judge.RejectClaimed // 남이 이미 선점했다 — Eligible 축과 같은 코드를 쓴다
+		code = judge.RejectClaimed // 남이 이미 선점했다 — 적격 판정 축과 같은 코드를 쓴다
 	case errors.As(err, &refused):
 		code = judge.RejectClosed // 항목이 이미 끝났거나 폐기됐다
 	}

@@ -7,17 +7,23 @@ import (
 	"github.com/kweiza/flightdeck/internal/model"
 )
 
+// 이 파일은 rejectionsFor 의 축 **사이**에 난 틈을 잠근다. 표 안이 아니라 표의 경계다.
+//
+// ★ 전부 추천 경로 전체(EligibleBundle)로 부른다 — 제품이 실제로 부르는 것이 이쪽이다.
+// 앞선 판에는 껍데기 진입점(judge.Eligible)이 있었고 이 파일의 앞 두 시험이 그것을
+// 불렀는데, 호출부 0으로 지워졌다(큐 항목 fd-eligible-dead-function-disposal).
+
 // 리뷰가 찾은 틈: TestClaimedItemReportsClaimNotClosed 는 state=claimed 만 보고,
 // TestSelfClaimIsItsOwnCode 는 state=open 만 본다. 그 사이가 이 조합이다.
 func TestClosedItemWithLiveSelfClaimReportsClosed(t *testing.T) {
 	for _, st := range []model.ItemState{model.ItemDone, model.ItemDropped} {
-		picked, rej := Eligible(EligibleInput{
+		picked, rej := EligibleBundle(EligibleInput{
 			Self: "S1",
 			Candidates: []Candidate{{
 				Item:      model.Item{Project: "p", ID: "x", State: st},
 				ClaimedBy: "S1",
 			}},
-		})
+		}, SiblingIndex{})
 		if picked != nil {
 			t.Fatalf("state=%s 인데 추천됐다", st)
 		}
@@ -34,13 +40,13 @@ func TestClosedItemWithLiveSelfClaimReportsClosed(t *testing.T) {
 
 // 회귀 방지: claimed 상태는 여전히 선점 축이 맡아야 한다(종료 축이 가로채면 안 된다).
 func TestClaimedStateStillReportsClaim(t *testing.T) {
-	_, rej := Eligible(EligibleInput{
+	_, rej := EligibleBundle(EligibleInput{
 		Self: "S2",
 		Candidates: []Candidate{{
 			Item:      model.Item{Project: "p", ID: "x", State: model.ItemClaimed},
 			ClaimedBy: "S1",
 		}},
-	})
+	}, SiblingIndex{})
 	if len(rej) != 1 || rej[0].Reason != RejectClaimed {
 		t.Errorf("claimed 항목의 사유가 %v 다 — %q 여야 한다", rej, RejectClaimed)
 	}
@@ -54,8 +60,6 @@ func TestClaimedStateStillReportsClaim(t *testing.T) {
 // 집힌다.** 그러면 보드에는 claimed 로 떠 있는 항목을 다른 세션이 새 일로 받아 들고,
 // 원래 그것을 하던(그러나 선점 행이 사라진) 쪽과 같은 파일을 동시에 고친다.
 // 이 판에는 선점 만료도 세션 종료 반납도 없어서 그 상태는 사람이 손대기 전까지 안 풀린다.
-//
-// 추천 경로 전체(EligibleBundle)로 부른다 — 제품이 실제로 부르는 것이 이쪽이다.
 func TestClaimedStateWithoutAClaimRowIsNotRecommended(t *testing.T) {
 	b, rej := EligibleBundle(EligibleInput{
 		Self: "S1",

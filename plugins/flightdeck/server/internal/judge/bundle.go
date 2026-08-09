@@ -15,7 +15,7 @@ import (
 // 필요한 사실은 호출부가 EligibleInput 에 찍어 넣고(Now · CloseDeclarations)
 // 판정은 그 값만 본다. 그래야 시험이 판정 규칙을 직접 부를 수 있다.
 //
-// 그리고 **Eligible·PathsOverlap·lessCandidate 는 하나도 안 고친다** — 셋은 다른
+// 그리고 **rejectionsFor·PathsOverlap·lessCandidate 는 하나도 안 고친다** — 셋은 다른
 // 질문에 답하고 있고, 같은 함수를 두 질문에 쓰면 한쪽을 고칠 때 다른 쪽이 조용히
 // 바뀐다. lessBundle 은 이 파일의 것이라 여기서 자란다(기아 축과 종료 선언 축이
 // 그렇게 붙었다). "하나도 안 고친다"를 lessBundle 까지로 읽으면 그 문장이 거짓이 된다.
@@ -224,14 +224,17 @@ type Bundle struct {
 // 일부다. 원장이 낸 순위를 사람이 못 읽으면 두 번째 세션부터 무시된다.
 const StarvationAge = 24 * time.Hour
 
-// EligibleBundle 은 Eligible 위에 얹는다.
+// EligibleBundle 은 추천의 **유일한** 진입점이다.
 //
 // 적격 후보 **각각을 선두로** 놓고 방사형으로 이웃을 붙인 뒤 §2.4 의 키 넷으로 정렬해
 // 1순위를 낸다. **전이하지 않는다** — 이웃의 이웃은 안 들어온다.
 //
-// Eligible 을 안 고치고 그 위에 얹는 이유는, 시험이 단일 추천 규칙을 독립으로
-// 계속 부를 수 있어야 하기 때문이다. 묶음 판정이 그 규칙의 사본을 만들면
-// 두 규칙이 조용히 표류한다.
+// ★ 하위 판정(rejectionsFor·lessCandidate·OverlapsWithLive)을 **직접** 부른다.
+// 감싸는 껍데기를 하나 두고 그 위에 얹는 모양이 앞선 판이었는데(judge.Eligible),
+// 제품이 그것을 안 불러 호출부가 0으로 남았고 결국 지웠다 — 큐 항목
+// fd-eligible-dead-function-disposal. 사본을 안 만든다는 원칙은 그대로다:
+// 묶음 판정이 저 셋의 사본을 뜨면 두 규칙이 조용히 표류한다. 다만 그 원칙을 지키는
+// 방법은 껍데기를 남기는 것이 아니라 **같은 함수를 부르는 것**이다.
 func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Rejection) {
 	var fit []Candidate
 	byID := make(map[string]Candidate, len(in.Candidates))
@@ -529,9 +532,9 @@ func sortedCands(m map[string]Candidate) []Candidate {
 //	  뒤에 두면 이 축이 겨냥한 인구 **전체**에 대해 무동작이 된다.
 //	  TestLessBundleCloseDeclaredSinksAmongStarvedToo 가 그 배치를 못박는다.
 //
-// lessCandidate 에는 **안 넣는다.** 제품이 부르는 것은 EligibleBundle 하나이고
-// (judge.Eligible 은 저장소 전체에서 호출자가 0건이다), 거기 넣은 축은 묶음 구성원의
-// 표시 순서만 바꾼다(설계 §4-②).
+// lessCandidate 에는 **안 넣는다.** 추천의 진입점은 EligibleBundle 하나뿐이고,
+// 거기서 lessCandidate 가 정한 순서가 흘러가는 곳은 묶음 구성원의 **표시 순서**뿐이다
+// (설계 §4-②).
 func lessBundle(a, b Bundle) bool {
 	if a.Dependents != b.Dependents {
 		return a.Dependents > b.Dependents

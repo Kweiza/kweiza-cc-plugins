@@ -515,7 +515,7 @@ func (t *Tx) SetItemState(project, itemID string, state model.ItemState, closeRe
 		// 증상이 셋으로 갈라졌다 — board 가 끝난 항목을 "이 세션이 쥐고 있다"로 계속 표시하고
 		// (게시판의 신호 대 소음이 단조 악화하던 기존 결함의 재현이다),
 		// pick 이 거절 대신 "맥락을 다시 낸다"를 실행하며,
-		// Eligible 이 그 항목을 claimed-by-self 로 분류해 **탈락 사유 분포가 거짓이 된다**.
+		// 적격 판정이 그 항목을 claimed-by-self 로 분류해 **탈락 사유 분포가 거짓이 된다**.
 		//
 		// 반납은 여기 한 자리에 둔다. FinishItem 이 먼저 반납해도 아래는 멱등이다
 		// (released_at IS NULL 조건이 이미 반납된 행을 건너뛴다).
