@@ -1341,9 +1341,8 @@ func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
 // 부근, "지어낸 원인보다 정확하다"). 그래서 여기서도 어느 것인지 단정하지 않는다.
 //
 // ★ 수는 **하한이다.** store 의 CloseDeclarationsByItem doc 이 못박은 계약이다
-// (event.go:255-258 — flushDeferred 가 트랜잭션 ctx 를 그대로 쓰고 LogEvent 는 쓰기
-// 실패를 WARN 으로 삼키므로 안 써진 마무리가 있을 수 있다). 그래서 0건 갈래에서도
-// "0이다"로 단정하지 않는다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
+// (BeginTx 가 실패하면 예약 자체가 없고, 쓰기 실패는 WARN 으로 삼킨다). 그래서 0건
+// 갈래에서도 "0이다"로 단정하지 않는다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
 //
 // ★ 처방이 mode 로 갈린다 — done 은 이미 랜딩됐을 수 있고 dropped 는 이미 버리기로
 // 판정됐을 수 있다. 둘을 "끝난 일" 하나로 뭉치면 다음 세션이 무엇을 확인해야 하는지가

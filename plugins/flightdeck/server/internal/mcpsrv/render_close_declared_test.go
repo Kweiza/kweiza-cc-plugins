@@ -29,7 +29,7 @@ import (
 // 다른 갈래의 문구가 새어 들어오지 않는 것도 같이 본다 — 둘을 맞바꾸는 변이는
 // want 만으로는 안 죽는다.
 //
-// ★ 수는 **하한**이다. store 의 doc 이 못박은 계약이다(event.go:255-258:
+// ★ 수는 **하한**이다. store 의 doc 이 못박은 계약이다(CloseDeclarationsByItem:
 // "소비자의 문구가 '정확히 N건'이 아니라 '적어도 N건'으로 말해야 한다").
 // 0건 갈래에서도 그 말을 한다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
 func TestRenderCloseDeclaredNeverStaysSilent(t *testing.T) {

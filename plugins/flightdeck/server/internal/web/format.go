@@ -440,8 +440,9 @@ const CloseDeclUnread = "?"
 //   - read=false → CloseDeclUnread. **0건으로 접지 않는다.**
 //   - 선언 0건 → 빈 문자열. 화면에 아무것도 안 낸다(없는 것에 자리를 주지 않는다).
 //   - 그 밖 → "최소 N건"으로 쓴다. store 가 낸 수는 정확한 수가 아니라 **하한**이다 —
-//     flushDeferred 가 트랜잭션의 ctx 를 그대로 쓰고 LogEvent 는 쓰기 실패를 WARN 으로만
-//     삼키므로, 클라이언트가 끊기면 행이 안 써진다. 문구가 그 사실을 말해야 한다.
+//     LogEvent 가 쓰기 실패를 WARN 으로만 삼키고, BeginTx 가 실패한 트랜잭션은 이벤트를
+//     예약조차 안 하기 때문이다. 문구가 그 사실을 말해야 한다. (요청이 끊겨 안 써지던
+//     갈래는 2026-08-09 에 닫혔다 — store.flushCtx.)
 //
 // ★ created 이전의 선언은 **버린다.** item 의 PK 가 (project, id) 라 지웠다 다시 만든 id 가
 // 옛 이벤트를 물려받는다. store.CloseDeclarationsByItem 이 그 앵커를 일부러 안 걸고
