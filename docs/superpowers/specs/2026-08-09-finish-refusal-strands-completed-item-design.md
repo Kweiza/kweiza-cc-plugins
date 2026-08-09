@@ -100,9 +100,10 @@ func (s *Store) CloseDeclarationsByItem(ctx context.Context, project string) (ma
   `fd-prescribe-unclaimed-fires-after-finish`). 후보 목록에 없는 id 의 선언은 **버리고**, 버린다는
   사실을 doc 주석에 적는다. 그것은 좌표 오류지 표류가 아니다.
 
-타입은 **`judge` 에 선언한다**. `judge.AfterFacts` 선례 그대로 — `judge` 의 import 는 전부
-`model` 하나뿐이고(`bundle.go:3-9`), `store` 에 두고 `judge` 가 받으면 `judge → store` 의존이
-새로 생긴다. `store` 는 `judge` 타입을 채워 돌려준다.
+타입은 **`model` 에 선언한다**. `store` 는 `judge` 를 import 하지 않고(`store/*.go` 전수 확인),
+`judge` 의 import 도 `model` 하나뿐이다(`bundle.go:3-9`) — 둘이 공유할 수 있는 자리는 `model`
+뿐이다. `judge` 에 두면 `store → judge` 의존이, `store` 에 두면 `judge → store` 의존이 새로 생긴다.
+`model.Rejection`(judge 가 만들고 store 가 저장한다)이 같은 모양의 선례다.
 
 ### ② 판정 — 비교자는 필드만 본다
 
@@ -236,20 +237,32 @@ func (s *Service) closeDeclarations(ctx context.Context, project string) (map[st
 **못 읽음을 0으로 접지 않는다.** 원장 조회가 실패하면 "종료 선언 없음"이 아니라 "이 축을
 못 읽었다"를 화면이 말한다. 같은 층의 선례가 `-1` 센티널이다(`page.go:657-662` 의 `r.Dependents`).
 
-### ⑥ 별개 결함 — 폐기가 `claim` 행을 안 닫는다
+### ⑥ 곁가지 — 폐기가 **왜** 선점을 끊었는지 원장이 모른다
 
-`web/actions.go:237` 은 선점 검사 없이 `SetItemState(..., ItemDropped, ...)` 만 친다.
-`JudgeDropTarget`(`actions.go:125-134`)이 거절하는 것은 `done`/`dropped` 뿐이라 **`claimed` 항목이
-통과하고, `claim` 행은 `released_at = NULL` 로 남는다.** 그러면 그 세션은 닫힌 항목의 선점을
-영영 쥐고 있고, `schema.sql` 에 만료가 없으므로 사람이 강제로 풀 때까지 안 풀린다.
+**이 절의 최초 진단은 틀렸다. 실측으로 뒤집혔으므로 그대로 적는다.**
 
-같은 tx 안에서 `Tx.ForceReleaseClaim` 을 **먼저** 부른다. 그 함수는 `UPDATE item SET state='open'
-... AND state='claimed'` 를 치므로(`store/item.go:783`) 반드시 `SetItemState(dropped)` **앞**이어야
-한다. 살아 있는 선점이 없으면 `NFLiveClaim` 을 올리는데, 그것은 "선점이 원래 없었다"는
-정상 갈래이므로 `errors.Is(err, store.ErrNotFound)` 로 흡수한다.
+최초 진단은 "`web/actions.go:237` 이 선점 검사 없이 `SetItemState(dropped)` 만 치므로
+`claim` 행이 `released_at = NULL` 로 남고, 그 세션이 닫힌 항목의 선점을 영영 쥔다"였다.
+**거짓이다.** `SetItemState` 의 종료 갈래(`store/item.go:521-527`)가 이미
+`UPDATE claim SET released_at = ? … AND released_at IS NULL` 을 친다. 주석이 그 이유까지
+적어 뒀다 — "앞선 판은 이 자리를 비워 뒀고, 그래서 끝난 항목의 선점이 영구히 살아남았다."
+이미 닫힌 결함이었다.
 
-사유는 폐기 사유를 그대로 나른다 — `ForceReleaseClaim` 이 빈 사유를 거절하기 때문이고,
-그 사유가 `claim.force_reason` 에 남아 나중에 되짚을 수 있다.
+실제로 비어 있는 것은 **`claim.force_reason` 하나**다. 원장에 "선점이 언젠가 끊겼다"는 있고
+"**사람이 폐기하면서** 끊었다"가 없다. 회수 경로(`ForceReleaseClaim`)는 사유를 남기는데 폐기
+경로는 안 남긴다 — 같은 일(사람이 남의 선점을 끊는다)에 근거가 한쪽에만 있다.
+
+그래서 고침은 유지하되 **가치가 다르다**: 세션이 선점을 잃지 않게 막는 것이 아니라,
+잃은 근거를 원장에 남기는 것이다. 같은 tx 안에서 `Tx.ForceReleaseClaim` 을 `SetItemState`
+**앞에** 부른다. 살아 있는 선점이 없으면 `NFLiveClaim` 을 올리는데 그것은 정상 갈래이므로
+`errors.Is(err, store.ErrNotFound)` 로 흡수한다.
+
+**순서가 틀려도 오늘은 침묵한다.** `SetItemState` 가 먼저 돌면 `ForceReleaseClaim` 은
+`released_at IS NULL` 가드에 0행으로 걸려 `NFLiveClaim` 으로 빠지고,
+`UPDATE item SET state='open'`(`item.go:782`)에 **닿지 못한다.** 즉 뒤에 두어도 항목은
+`dropped` 그대로고 사라지는 것은 `force_reason` 뿐이다. **그래서 시험의 판별축은
+`released_at IS NOT NULL` 이 아니라 `force_reason` 이어야 한다** — `released_at` 만 단정하면
+고침이 통째로 없어도 초록이다.
 
 ## 5. 안 하는 것 · 기각한 것
 
@@ -309,7 +322,8 @@ func (s *Service) closeDeclarations(ctx context.Context, project string) (map[st
   필요하다** — 이 사고의 주인공이 선두다.
 - **web 은 두 시점 모두**를 단정한다: 롤백 직후(`claimed`) 회수 폼에 표기가 뜨는 것,
   회수 후(`open`) 큐 표에 그대로 남는 것.
-- **폐기 뒤 `claim` 행이 닫힌 것**을 단정한다(`released_at IS NOT NULL`).
+- **폐기 뒤 `claim.force_reason` 에 폐기 사유가 남은 것**을 단정한다. `released_at IS NOT NULL` 도
+  함께 보되 그것은 판별축이 아니다 — `SetItemState` 가 이미 채우므로 고침이 없어도 초록이다(§4-⑥).
 
 ## 8. 함께 고칠 산문
 
