@@ -247,7 +247,7 @@ func TestRenderPickOmitsCloseDeclarationWhenThereIsNoItem(t *testing.T) {
 // 전 스위트가 초록이었다. 그래서 다섯 값을 **서로 다르게** 깔고 bundleMemberSegment 로
 // 잘라 그 안에서만 본다 — 선두 것을 구성원에 복사하는 변이가 여기서 죽는다.
 //
-// ★ 못 집은 구성원(Rejection≠nil)을 반드시 하나 넣는다. 그 갈래는 render.go:1215 의
+// ★ 못 집은 구성원(Rejection≠nil)을 반드시 하나 넣는다. 그 갈래는 render.go:1231 의
 // continue 로 절을 끊으므로, 줄을 continue 아래에 두는 구현은 **여기서만** 죽는다.
 // 그리고 그 자리가 중요한 이유가 있다: 못 집은 구성원이야말로 다음 세션이 다시
 // 집으러 오는 항목이다.
@@ -352,7 +352,7 @@ func TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration(t *testing.T) {
 		t.Fatalf("dropped 구성원의 처방이 틀렸다:\n%s\n전체:\n%s", segs["m-dropped"], got)
 	}
 
-	// ⑤ 못 집은 구성원에게도 나온다 — render.go:1215 의 continue **위**여야 한다.
+	// ⑤ 못 집은 구성원에게도 나온다 — render.go:1231 의 continue **위**여야 한다.
 	if !strings.Contains(segs["m-dropped"], "못 집었다: ") {
 		t.Fatalf("전제 실패 — m-dropped 가 못 집은 구성원이 아니다:\n%s", segs["m-dropped"])
 	}
