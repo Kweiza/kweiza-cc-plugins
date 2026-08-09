@@ -64,11 +64,16 @@ func TestPrescriptionsAreEmittedOnceAcrossCalls(t *testing.T) {
 // 그래서 둘째 턴에 **다섯 경로를 전부 다시** 만지고도 뜨는 것이 접혔던 둘뿐인지를 본다.
 // 이 단정이 상시 점등(설계 §4: 같은 것이 매 턴 반복)과 이 동작을 가르는 자리다.
 //
-// ★ "다음 턴에 다시 뜬다"의 정확한 조건은 **그 축의 입력이 다시 생길 때**다. `outside`·
-// `overlap` 의 입력인 TurnPaths 는 `f.LastAt.After(since)` 로 뽑고 그 `since` 가
-// **마지막 발화 시각**이라, 아무것도 안 만진 턴에는 축 자체가 안 돈다. 그러니 이 시험이
-// 경로를 다시 만지는 것은 편의가 아니라 **일하는 세션의 정상 흐름을 그대로 재현하는 것**이다
-// (훅은 매 턴 부르고, 그 사이 세션은 파일을 만진다).
+// ★ 이 시험이 둘째 턴에 경로를 다시 만지는 것은 **일하는 세션의 정상 흐름을 그대로
+// 재현하는 것**이다(훅은 매 턴 부르고, 그 사이 세션은 파일을 만진다).
+//
+// ★ **여기 있던 "정확한 조건" 문단은 2026-08-09 에 조건이 없어져 걷어냈다.** 원래는
+// "다음 턴에 다시 뜬다의 정확한 조건은 그 축의 입력이 다시 생길 때다 — TurnPaths 가
+// `f.LastAt.After(since)` 로 뽑히고 since 가 마지막 발화 시각이라 아무것도 안 만진 턴에는
+// 축 자체가 안 돈다"였다. 그 조건이 실재했고 그래서 다발이 끝나면 밀린 것이 사라졌다.
+// 접힌 턴이 창을 물려주게 되면서 조건이 사라졌고, **아무것도 안 만진 턴**을 재현하는 것은
+// 이제 이 시험이 아니라 TestFoldedTurnKeepsTheWindowUntilTheBacklogDrains 다.
+// 둘은 다른 것을 잰다: 이쪽은 억제가 표시분만 누른다, 저쪽은 창이 밀린 것을 기다린다.
 func TestFoldedPrescriptionsAreNotRecordedAndComeBack(t *testing.T) {
 	svc, st := newSvc(t)
 
@@ -356,6 +361,13 @@ func laneTurnKeys(res PrescribeResult) []string {
 	return out
 }
 
+// ackedIn 은 ack payload 가 그 키를 담았는지다. **따옴표째 본다** —
+// `lane-turn:1` 은 `lane-turn:12` 의 부분 문자열이라 맨 문자열 비교는 줄 행이 두 자리로
+// 넘어가는 순간 오탐한다. 그러면 "응답하지 않은 행까지 닫았나"를 묻는 단정이 조용히 무의미해진다.
+func ackedIn(payload, key string) bool {
+	return strings.Contains(payload, `"`+key+`"`)
+}
+
 // landOrFail 은 줄에 서고, 기대한 갈래가 아니면 시험을 세운다.
 func landOrFail(t *testing.T, s *Service, sessionID, want string) LandResult {
 	t.Helper()
@@ -530,26 +542,31 @@ func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
 	}
 }
 
-// TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed 은 이 축이 **지금 무엇을 재는지**를
-// 그대로 잠근다. 고발이 아니라 관측이다.
+// TestLaneTurnIsClosedByLandAndUnrelatedJudgmentsLeaveItOpen — **확인은 처방이 지정한 행동을
+// 잰다.** 2026-08-09 개정으로 통로가 뚫렸고, 이 시험은 그 전에 여기 있던 시험을 뒤집은 것이다.
 //
-// `lane-turn` 이 지정하는 행동은 `land()` 인데 **land 경로는 ackPrescriptions 를 한 번도
-// 안 지난다.** 반대로 처방과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 을 확인 처리한다 —
-// ackPrescriptions 가 키를 안 가리고 그 세션에 **열린 것을 전부** 닫기 때문이다.
-// 즉 이 키에 대해 확인은 **정확히 반대 신호**를 잰다: 처방대로 랜딩한 세션은 미확인으로
-// 남고, 처방을 무시하고 판단만 남긴 세션이 확인으로 잡힌다.
+// ★ **뒤집기 전에 무엇이 있었나.** `TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed`
+// 가 "land 경로는 ackPrescriptions 를 한 번도 안 지난다 · 상관없는 note 한 줄이
+// `lane-turn:<행>` 을 확인 처리한다"를 **현재 사실로** 잠그고 있었다. 그 축은 정확히
+// 반대 신호를 쟀다: 처방대로 랜딩한 세션은 미확인으로 남고, 처방을 무시하고 판단만 남긴
+// 세션이 확인으로 잡혔다. 그 시험은 스스로 "통로를 뚫으면 이 시험이 먼저 빨개진다.
+// 그때 고칠 것은 시험이 아니라 여기 적힌 사실"이라고 적어 뒀고, 이것이 그 자리다.
 //
-// ★ 여기 잠긴 것은 **계약이 아니라 현재 사실**이다(godoc 에 사실을 적고 그 사실을 잠그는
-// 이 레포의 방식). 통로를 뚫는 수리 — land 가 자기가 응답한 키만 골라 ack — 를 하면 이
-// 시험이 **먼저** 빨개진다. 그때 고칠 것은 이 시험이 아니라 여기 적힌 사실이고, 그 자리를
-// 놓치지 말라고 이 시험이 있다. 통로 뚫기는 선언 경로(service/landing.go) 밖이라
-// 후속 항목으로 올렸다.
+// ★ **수리가 둘인 이유.** land 가 ack 을 남기게 하는 것만으로는 축이 안 선다 —
+// note 가 여전히 먼저 닫아 버리면 "처방을 무시하고 판단만 남긴 세션이 확인으로 잡힌다"가
+// 그대로 남기 때문이다. 그래서 `judge.AckedByLand` 가 가리는 키를 note·finish 쪽에서 뺀다.
+// 그 두 축을 한 시험에서 함께 보는 이유가 이것이다: 한쪽만 하면 다른 쪽이 결과를 덮는다.
+//
+// ★ **note 의 "한 번이 전부를 닫는다"는 안 뒤집었다.** 그 판정(ackPrescriptions 주석:
+// 처방마다 대응 판단을 요구하면 형식적 note 를 양산한다)은 여전히 유효하고, 여기서 좁힌 것은
+// **행동이 판단이 아닌 처방** 하나뿐이다. 그래서 이 시험은 lane-turn 외의 키가 note 로
+// 닫히는 것도 함께 단정한다 — 안 그러면 "전부 안 닫는다"로도 초록이 난다.
 //
 // ★ AckReach(board.go)는 이것과 **다른 축**이다 — 키를 안 보고 대화 단위로 센다.
 // 그래서 "lane-turn 확인율"이라는 수치는 코드 어디에도 없다. 설계 §10 이 인용하는
 // "overlap 0/31" 은 사람이 따로 잰 값이다. 이 구분을 안 적으면 다음 사람이 §10 의
 // 수치를 키별 확인율로 읽는다.
-func TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed(t *testing.T) {
+func TestLaneTurnIsClosedByLandAndUnrelatedJudgmentsLeaveItOpen(t *testing.T) {
 	svc, st := newSvc(t)
 	a, b := twoSessions(t, svc)
 
@@ -558,37 +575,116 @@ func TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed(t *testing.T) {
 	mine := landOrFail(t, svc, b, "waiting")
 	releaseLaneOrFail(t, svc, a)
 
+	// b 가 경로를 하나 만진다 — lane-turn 과 **나란히** 열리는 다른 축을 만들어야
+	// "키를 가린다"와 "통째로 안 닫는다"가 갈린다.
+	touchPathForPrescribeTest(t, st, b, "cmd/fd/hook.go")
+
 	want := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, mine.RowID)
-	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != want {
+	res := prescribeOrFail(t, svc, b)
+	if got := laneTurnKeys(res); len(got) != 1 || got[0] != want {
 		t.Fatalf("차례 처방이 안 떴다(기대 %q): %v — 이 시험의 전제가 깨졌다", want, got)
 	}
-
-	// ① 처방이 시킨 그대로 한다 — land() 를 부른다.
-	landOrFail(t, svc, b, "turn")
-
-	acks, err := st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
-	if err != nil {
-		t.Fatalf("ack 조회 실패: %v", err)
+	var other string
+	for _, p := range res.Shown {
+		if p.Key != want {
+			other = p.Key
+		}
 	}
-	if len(acks) != 0 {
-		t.Fatalf("land 경로가 ack 을 남겼다(%d건) — **통로가 뚫렸다는 뜻이다.**\n"+
-			"그렇다면 고칠 것은 이 시험이 아니라 이 시험의 주석과 DESIGN §10 의 서술이다: %+v",
-			len(acks), acks)
+	if other == "" {
+		t.Fatalf("lane-turn 말고 열린 처방이 없다 — 이 시험의 전제가 깨졌다: %v", keysOf(res.Shown))
 	}
 
-	// ② 처방과 아무 상관 없는 판단 한 줄을 남긴다.
+	// ① 처방과 아무 상관 없는 판단 한 줄. 다른 키는 닫고 lane-turn 은 **열어 둬야** 한다.
 	if _, err := svc.Note(ctx(), NoteInput{
 		Project: "p", SessionID: b, Kind: model.JudgmentDecision,
 		Title: "레인과 무관한 판단", Body: "랜딩과 아무 상관 없는 내용이다",
 	}); err != nil {
 		t.Fatalf("note 실패: %v", err)
 	}
+	acks, err := st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	if len(acks) != 1 {
+		t.Fatalf("note 가 남긴 ack 이 %d건이다(기대 1): %+v", len(acks), acks)
+	}
+	if ackedIn(acks[0].Payload, want) {
+		t.Fatalf("상관없는 note 가 %q 를 확인 처리했다: %s\n"+
+			"이 키가 지정하는 행동은 land() 다 — 판단 한 줄로 닫히면 확인은 "+
+			"**처방을 무시한 세션**을 확인으로 잡는다", want, acks[0].Payload)
+	}
+	if !ackedIn(acks[0].Payload, other) {
+		t.Fatalf("note 가 %q 마저 안 닫았다: %s\n"+
+			"좁힌 것은 행동이 판단이 아닌 처방 하나뿐이고, "+
+			"'note 한 번이 전부를 닫는다'는 나머지에 그대로 유효하다", other, acks[0].Payload)
+	}
+
+	// ② 처방이 시킨 그대로 한다 — land() 가 자기가 응답한 그 키를 닫는다.
+	landOrFail(t, svc, b, "turn")
 	acks, err = st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
 	if err != nil {
 		t.Fatalf("ack 조회 실패: %v", err)
 	}
-	if len(acks) != 1 || !strings.Contains(acks[0].Payload, want) {
-		t.Fatalf("상관없는 note 가 %q 를 확인 처리하지 않았다: %+v\n"+
-			"이 단정이 깨졌다면 ackPrescriptions 가 키를 가리기 시작한 것이다 — 그것이 수리다", want, acks)
+	var closed bool
+	for _, e := range acks {
+		if ackedIn(e.Payload, want) {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Fatalf("처방대로 land 했는데 %q 가 안 닫혔다: %+v\n"+
+			"이 통로가 없으면 처방을 정확히 따른 세션이 미확인으로 남는다", want, acks)
+	}
+}
+
+// TestLandAcksOnlyTheRowItAnswered — land 는 **자기가 응답한 줄 행**만 닫는다.
+//
+// 억제 키에 줄 행 번호가 실려 있으므로(laneTurnPrescription) 한 세션에 서로 다른 행의
+// lane-turn 이 여럿 열릴 수 있다 — 차례를 받고 안 쓰고 빠졌다가 다시 서면 그 모양이다.
+// 접두만 보고 닫으면 **아직 응답하지 않은 차례까지** 확인 처리되고, 그러면 확인율은
+// 다시 행동이 아니라 접두 일치를 재게 된다. 겹침 축의 좌우 교환과 같은 부류다.
+func TestLandAcksOnlyTheRowItAnswered(t *testing.T) {
+	svc, st := newSvc(t)
+	a, b := twoSessions(t, svc)
+
+	// 1차 — b 가 차례를 받고 **안 쓰고** 줄에서 빠진다. 그 행의 처방은 열린 채 남는다.
+	landOrFail(t, svc, a, "turn")
+	first := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+	firstKey := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, first.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != firstKey {
+		t.Fatalf("1차 차례 처방이 %v 다(기대 [%s])", got, firstKey)
+	}
+	if _, err := svc.LandLeave(ctx(), LandLeaveInput{
+		Project: "p", SessionID: b, Detail: "차례를 안 쓰고 빠진다"}); err != nil {
+		t.Fatalf("줄에서 빠지기 실패: %v", err)
+	}
+
+	// 2차 — 새 행을 받고 이번에는 실제로 쥔다.
+	landOrFail(t, svc, a, "turn")
+	second := landOrFail(t, svc, b, "waiting")
+	releaseLaneOrFail(t, svc, a)
+	secondKey := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, second.RowID)
+	if got := laneTurnKeys(prescribeOrFail(t, svc, b)); len(got) != 1 || got[0] != secondKey {
+		t.Fatalf("2차 차례 처방이 %v 다(기대 [%s])", got, secondKey)
+	}
+	landOrFail(t, svc, b, "turn")
+
+	acks, err := st.ListSessionEvents(ctx(), b, "prescribe_ack", time.Time{})
+	if err != nil {
+		t.Fatalf("ack 조회 실패: %v", err)
+	}
+	var sawSecond bool
+	for _, e := range acks {
+		if ackedIn(e.Payload, firstKey) {
+			t.Fatalf("응답하지 않은 줄 행의 처방 %q 까지 닫았다: %s\n"+
+				"그 차례는 흘린 것이고 원장은 그대로 적어야 한다", firstKey, e.Payload)
+		}
+		if ackedIn(e.Payload, secondKey) {
+			sawSecond = true
+		}
+	}
+	if !sawSecond {
+		t.Fatalf("응답한 줄 행의 처방 %q 가 안 닫혔다: %+v", secondKey, acks)
 	}
 }
