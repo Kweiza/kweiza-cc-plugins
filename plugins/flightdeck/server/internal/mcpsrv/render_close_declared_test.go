@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/service"
 )
 
 // 종료 선언 축 — **닫히지 못한 항목이 큐의 머리에 서는 것**을 화면이 말하는 자리다.
@@ -166,5 +167,74 @@ func TestRenderCloseDeclaredStealsNoCountedString(t *testing.T) {
 		if strings.Contains("\n"+got, "\n  "+mark+" ") {
 			t.Fatalf("종료 선언 줄이 구성원 머리줄 접두(%q)로 시작한다 — 절이 그 자리에서 잘린다:\n%s", mark, got)
 		}
+	}
+}
+
+// TestRenderPickCarriesTheLeadCloseDeclaration 은 **선두**의 종료 선언을 못박는다.
+//
+// ★ 이 사고의 주인공이 선두다. 08-04 에 롤백된 finish 가 원장에 남은 항목이
+// 08-05 22:54 의 pick 에서 후보 26건 중 **1순위 선두**로 추천됐다. 그런데
+// renderBundle 은 BundleInfo 하나만 받고 Members 는 정의상 선두 제외라 **선두를
+// 모른다** — 구성원 자리에만 심으면 이 사고를 낳은 바로 그 항목에 대해 응답이
+// 정확히 침묵한다. 그래서 선두 갈래는 별도 단정이 필요하다.
+//
+// 묶음이 없는 응답(Bundle=nil)으로 본다. 묶음 절이 있으면 어느 구성원 줄이
+// 이 단정을 대신 통과시킬 수 있다.
+func TestRenderPickCarriesTheLeadCloseDeclaration(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+		CloseDeclared: &model.CloseDeclaration{
+			Done: 1, Last: time.Date(2026, 8, 4, 23, 54, 37, 0, time.UTC),
+			LastSession: "01LEADSESSION", LastMode: "done",
+		},
+	}, t0)
+
+	const want = "\n종료 선언: 롤백된 마무리 선언 적어도 1건(done 1 · dropped 0) — " +
+		"마지막 2026-08-04 23:54 · 세션 01LEADSE… · mode=done\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("선두의 종료 선언 줄이 0칸 들여쓰기로 제 값을 안 낸다:\n%s", got)
+	}
+	if !strings.Contains(got, "이미 랜딩됐을 수 있다") {
+		t.Fatalf("done 처방(이미 랜딩됐을 수 있다)이 없다 — 다음 세션이 무엇을 확인할지 모른다:\n%s", got)
+	}
+
+	// 자리도 못박는다 — 항목 절 **안**, `경로 실재:` 바로 뒤다. 응답 꼬리로 밀리면
+	// 본문 4000자와 묶음 절을 지나야 보이는 줄이 되고, 그것은 이 축이 겨냥한 독자
+	// (집기 전에 읽는 세션)에게 사실상 안 보이는 것과 같다.
+	head := strings.Index(got, "\n▸ lead")
+	axis := strings.Index(got, "\n경로 실재: ")
+	decl := strings.Index(got, "\n종료 선언: ")
+	if head < 0 || axis < 0 || decl < 0 {
+		t.Fatalf("항목 머리줄(%d)·경로 축(%d)·종료 선언(%d) 중 없는 줄이 있다:\n%s", head, axis, decl, got)
+	}
+	if head >= axis || axis >= decl {
+		t.Fatalf("종료 선언 줄이 항목 절 안 `경로 실재:` 뒤가 아니다(머리줄 %d · 경로 축 %d · 종료 선언 %d):\n%s",
+			head, axis, decl, got)
+	}
+}
+
+// 선두의 축이 nil 이면 그 사실을 말한다 — 침묵이 "선언 없음"으로 읽히면 안 된다.
+// (TestRenderPickSaysTheAxisWasNotReadWhenVerdictIsNil 과 같은 규율이다.)
+func TestRenderPickSaysTheCloseAxisWasNotReadWhenNil(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickRecommended, Reason: "1순위다",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemOpen, CreatedAt: t0},
+	}, t0)
+
+	if !strings.Contains(got, "\n종료 선언: 이 응답은 이 축을 안 읽었다") {
+		t.Fatalf("종료 선언 축이 nil 인데 그 사실을 말하지 않는다 — 못 읽음이 0건으로 접힌다:\n%s", got)
+	}
+}
+
+// 항목이 없으면 이 줄도 없다 — 관측할 대상이 없다.
+// (TestRenderPickOmitsPathAxisWhenThereIsNoItem 과 같은 규율이다.)
+func TestRenderPickOmitsCloseDeclarationWhenThereIsNoItem(t *testing.T) {
+	got := RenderPick(service.PickResult{
+		Mode: service.PickNone, Reason: "적격 항목이 0건이다", Scope: "후보 = 열린 항목 0건",
+	}, t0)
+
+	if strings.Contains(got, "종료 선언:") {
+		t.Fatalf("항목이 없는데 종료 선언 줄이 나왔다:\n%s", got)
 	}
 }

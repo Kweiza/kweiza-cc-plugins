@@ -987,6 +987,13 @@ func RenderPick(r service.PickResult, now time.Time) string {
 			fmt.Fprintf(&b, "경로: %s\n", strings.Join(it.Paths, ", "))
 		}
 		b.WriteString(renderPathCheck(r.PathCheck, it.ID))
+		// ★ 종료 선언 축은 **선두에도** 찍는다. renderBundle 은 BundleInfo 하나만 받고
+		// Members 는 정의상 선두 제외라 선두를 모른다 — 구성원 자리에만 심으면 이 사고를
+		// 낳은 그 항목(선두였다)에 대해 응답이 정확히 침묵한다.
+		//
+		// 들여쓰기 0칸은 바로 위 `경로 실재:` 와 같은 깊이라는 뜻이다. 자리도 여기여야
+		// 한다 — 본문 4000자와 묶음 절 뒤로 밀면 집기 전에 읽는 세션에게 사실상 안 보인다.
+		b.WriteString(renderCloseDeclared(r.CloseDeclared, ""))
 		if len(it.After) > 0 {
 			fmt.Fprintf(&b, "선행: %s\n", formatAfter(it.After))
 		}
