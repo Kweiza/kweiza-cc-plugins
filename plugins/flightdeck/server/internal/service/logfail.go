@@ -2,7 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 실패한 시도의 원장 — **시도만 남기면 실패율은 세지되 무엇을 고칠지는 답하지 못한다.**
@@ -51,6 +55,86 @@ func finishAbout(in FinishInput) failAbout {
 	return failAbout{Item: in.ItemID, Mode: string(in.Outcome)}
 }
 
+// FailCause 는 실패 사유의 갈래다. **열거다.**
+//
+// 자유 문자열로 두면 같은 사유가 자리마다 다른 값으로 쌓이고, event.payload 는 추가
+// 전용에 스키마가 없어 나중에 고칠 수 없다 — 그러면 이 축은 세지도 못하는 산문이 된다.
+// 갈래를 고르는 것도 호출부가 아니라 여기다. 13개 호출부가 각자 고르면 정의가 흩어지고,
+// 흩어진 정의는 반드시 표류한다.
+type FailCause string
+
+const (
+	// CauseFollowupWrite 는 **후속 등록 단계**에서 끊긴 것이다. 고칠 자리는 followups 인자다.
+	CauseFollowupWrite FailCause = "followup-write"
+	// CauseClaimDrift 는 선점이 이 세션의 것이 아니라 끊긴 것이다. 고칠 자리는 그 세션에
+	// 물어보는 것이고, 회수는 사람만 한다.
+	CauseClaimDrift FailCause = "claim-drift"
+	// CauseItemMissing 은 **항목**이 없어 끊긴 것이다. 고칠 자리는 item_id 다.
+	CauseItemMissing FailCause = "item-missing"
+	// CauseNotFound 는 항목 아닌 무엇이 없어 끊긴 것이다(세션·자원·줄 행 …).
+	// item-missing 과 가르는 이유는 처방이 다르기 때문이다 — 그리고 안 가르면 세션이
+	// 없어서 난 실패가 원장에 "항목이 없다"로 영구히 남는다.
+	CauseNotFound FailCause = "not-found"
+	// CauseOther 는 위 어디에도 안 걸린 것이다. **"원인 없음"이 아니라 "분류 안 됨"이다** —
+	// 이 값이 늘면 갈래를 늘릴 자리가 있다는 뜻이고, 그 판정은 여기가 아니라 원장이 낸다.
+	CauseOther FailCause = "other"
+)
+
+// followupWriteError 는 **후속 등록 단계에서** 난 실패다. 나르는 것은 오류가 아니라 단계다.
+//
+// ★ 왜 타입이 필요한가. 앞 판은 이 자리를 fmt.Errorf 로만 감쌌고, 그래서 갈래 판정이
+// leaf 오류의 타입밖에 못 봤다 — 같은 없음이 "끝내려는 항목이 없다"인지 "후속 인자가
+// 틀렸다"인지 구분되지 않는다. 고칠 자리가 정반대인 둘이다. store 의 NotFoundError 가
+// "타입이 도메인 필드를 들고, 문구는 소비 계층이 조립한다"로 연 길과 같은 길이다.
+//
+// ★ 문구는 앞 판과 **글자 그대로 같다**(%w 는 출력에서 %v 다). 그 문구를 단정하는 시험이
+// 있고(finish_test.go 의 "후속 항목 bad-after 등록 실패"), 이 개정은 문구가 아니라 타입을 바꾼다.
+//
+// ★ Unwrap 이 있으므로 표면의 ClassifyError(internal/api/errors.go)는 그대로 산다 —
+// 그쪽은 errors.As 로 store 타입을 집고, As 는 이 껍데기를 지나간다. 후속 등록에서 난
+// 중복·FK 위반이 계속 409 로 나가야 하고, 500 으로 접히면 멱등 표에 안 남아 재시도가
+// 계속 하류로 들어간다.
+type followupWriteError struct {
+	ID  string
+	Err error
+}
+
+func (e *followupWriteError) Error() string {
+	return fmt.Sprintf("후속 항목 %s 등록 실패: %v", clip(e.ID, 64), e.Err)
+}
+
+func (e *followupWriteError) Unwrap() error { return e.Err }
+
+// failCause 는 오류 하나를 갈래로 옮긴다. 순수 함수다.
+//
+// ★ **순서가 판정이다.**
+// ① 후속 등록 단계를 가장 먼저 본다. 그 안에 어떤 leaf 오류가 들어 있든 고칠 자리는
+// 후속 인자이고, 뒤로 미루면 후속 id 의 없음이 "끝내려는 항목이 없다"로 굳는다.
+// ② item-missing 은 NotFoundError 의 Kind 가 NFItem 일 때만이다. 세션·자원·줄 행의
+// 없음까지 item-missing 으로 적으면 이 이벤트가 관측하지 않은 원인을 단정한다 —
+// store/event.go 가 mode 를 모르는 종료 선언을 한쪽에 안 모는 것과 같은 규율이다.
+// ③ 그 밖의 없음은 not-found 로 남긴다. other 로 접으면 "무엇이 없었다"는 관측이
+// "분류 안 됨"으로 버려진다.
+func failCause(err error) FailCause {
+	var write *followupWriteError
+	var held *store.ClaimHeldError
+	var missing *store.NotFoundError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &write):
+		return CauseFollowupWrite
+	case errors.As(err, &held):
+		return CauseClaimDrift
+	case errors.As(err, &missing) && missing.Kind == store.NFItem:
+		return CauseItemMissing
+	case errors.Is(err, store.ErrNotFound):
+		return CauseNotFound
+	default:
+		return CauseOther
+	}
+}
+
 // logFail 은 실패한 시도의 **사유**를 원장에 덧붙인다.
 //
 // 시도 자체는 트랜잭션 안에서 Tx.LogEvent 로 먼저 예약되므로 롤백돼도 남는다.
@@ -60,6 +144,8 @@ func (s *Service) logFail(ctx context.Context, kind, project, sessionID string, 
 	if err == nil {
 		return
 	}
-	s.st.LogEvent(ctx, kind+".fail", project, sessionID,
-		aboutPayload(map[string]any{"error": clip(err.Error(), 400)}, about))
+	s.st.LogEvent(ctx, kind+".fail", project, sessionID, aboutPayload(map[string]any{
+		"error": clip(err.Error(), 400),
+		"cause": string(failCause(err)),
+	}, about))
 }

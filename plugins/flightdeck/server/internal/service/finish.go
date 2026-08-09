@@ -336,7 +336,11 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 					})
 					continue
 				}
-				return fmt.Errorf("후속 항목 %s 등록 실패: %w", clip(it.ID, 64), err)
+				// ★ 타입 있는 껍데기다. 나르는 것은 **단계**이고, 그 단계를 원장의 갈래가
+				//   읽는다(service/logfail.go 의 failCause). fmt.Errorf 로 감싸면 leaf 오류의
+				//   종류만 남아 "후속 인자가 틀렸다"가 "끝내려는 항목이 없다"로 굳는다.
+				//   문구는 앞 판과 글자 그대로 같다 — 그것을 단정하는 시험이 있다.
+				return &followupWriteError{ID: it.ID, Err: err}
 			}
 			out.Followups = append(out.Followups, it)
 		}

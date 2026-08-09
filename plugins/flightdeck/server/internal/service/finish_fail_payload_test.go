@@ -74,3 +74,126 @@ func TestFinishFailNamesItsItemAndMode(t *testing.T) {
 		t.Fatalf("종료 선언이 %d건이다(기대 1) — .fail 이 표류 탐지에 섞였다", got)
 	}
 }
+
+// TestFinishFailCauseSeparatesTheStageFromTheLeaf 는 **후속 등록 단계**의 실패가
+// leaf 오류의 종류에 먹히지 않는지 본다.
+//
+// 고칠 자리가 정반대다: 단계가 후속이면 고칠 것은 followups 인자이고, 끝내려는 항목이
+// 없는 것이면 고칠 것은 item_id 다. 그 둘이 같은 값으로 쌓이면 원장은 "몇 번 실패했나"만
+// 답하고 "무엇을 고쳐야 하나"에는 앞 판과 똑같이 침묵한다.
+func TestFinishFailCauseSeparatesTheStageFromTheLeaf(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	addItem(t, s, "p", "batch7", nil, nil)
+	claimed(t, s, "p", me.Session.ID, "batch7")
+
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+		Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "①…②…③…④…",
+		Followups: []FollowupInput{
+			{ID: "bad-after", Title: "후속", Body: "본문", After: []model.After{{}}},
+		},
+	}); err == nil {
+		t.Fatalf("불변식을 깨는 후속은 실패해야 한다 — 전제가 깨졌다")
+	}
+	p := readEventPayload(t, st, "item.finish.fail")
+	if p["cause"] != "followup-write" {
+		t.Fatalf("사유 갈래가 %v 다(기대 followup-write): %v", p["cause"], p)
+	}
+}
+
+// TestFinishFailCauseSeparatesClaimDriftFromItemMissing 은 처방이 갈리는 두 갈래를 본다.
+//
+// claim-drift 는 "그 세션에 물어라"이고 item-missing 은 "id 를 확인해라"다. 한 값으로
+// 뭉치면 원장은 두 처방 중 어느 쪽도 못 낸다.
+func TestFinishFailCauseSeparatesClaimDriftFromItemMissing(t *testing.T) {
+	t.Run("남이 쥔 항목", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo, wt := newRepoWithWorktree(t, "feat")
+		me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+		other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+		addItem(t, s, "p", "batch7", nil, nil)
+		claimed(t, s, "p", other.Session.ID, "batch7")
+
+		if _, err := s.Finish(ctx(), FinishInput{
+			Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
+			Outcome: model.ItemDone, Body: "①…②…③…④…",
+		}); err == nil {
+			t.Fatalf("남이 쥔 항목은 끝낼 수 없어야 한다")
+		}
+		p := readEventPayload(t, st, "item.finish.fail")
+		if p["cause"] != "claim-drift" || p["item"] != "batch7" {
+			t.Fatalf("선점 표류 갈래가 아니다: %v", p)
+		}
+	})
+
+	t.Run("없는 항목", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo, wt := newRepoWithWorktree(t, "feat")
+		me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+		if _, err := s.Finish(ctx(), FinishInput{
+			Project: "p", SessionID: me.Session.ID, ItemID: "ghost",
+			Outcome: model.ItemDropped, Body: "①…②…③…④…", CloseReason: "없는 항목이다",
+		}); err == nil {
+			t.Fatalf("없는 항목은 끝낼 수 없어야 한다")
+		}
+		p := readEventPayload(t, st, "item.finish.fail")
+		if p["cause"] != "item-missing" {
+			t.Fatalf("항목 없음 갈래가 아니다: %v", p)
+		}
+		if p["mode"] != string(model.ItemDropped) {
+			t.Fatalf("무엇을 하려 했는지가 없다: %v", p)
+		}
+	})
+}
+
+// TestLogFailKeepsANonItemAbsenceFromMasqueradingAsAMissingItem 은 **항목이 아닌 없음**이
+// item-missing 으로 굳지 않는지 본다.
+//
+// store 의 없음은 좌표를 들고 온다(NotFoundError.Kind — 항목·세션·자원·줄 행 …).
+// 그것을 안 보고 ErrNotFound 하나로 접으면, 세션이 없어서 난 실패가 원장에 "항목이 없다"로
+// 남는다 — 화면이 관측하지 않은 원인을 단정하는 이 저장소의 상습 실패 모양이다.
+func TestLogFailKeepsANonItemAbsenceFromMasqueradingAsAMissingItem(t *testing.T) {
+	s, st := newSvc(t)
+	if err := s.SetState(ctx(), "sess-없음", model.SessionPaused, ""); err == nil {
+		t.Fatalf("없는 세션의 상태는 못 바꾼다 — 전제가 깨졌다")
+	}
+	p := readEventPayload(t, st, "session.state.fail")
+	if p["cause"] != "not-found" {
+		t.Fatalf("없음 갈래가 %v 다(기대 not-found — 항목이 아닌 없음이다): %v", p["cause"], p)
+	}
+	if _, ok := p["item"]; ok {
+		t.Fatalf("겨눈 항목이 없는데 item 축이 실렸다: %v", p)
+	}
+	if p["mode"] != string(model.SessionPaused) {
+		t.Fatalf("무엇을 하려 했는지가 없다: %v", p)
+	}
+}
+
+// TestLogFailMarksAnUnclassifiedCauseAsOther 는 갈래에 안 걸린 것이 **분류 안 됨**으로
+// 남는지 본다. "원인 없음"이 아니다 — 이 값이 늘면 갈래를 늘릴 자리가 있다는 뜻이고,
+// 그 판정은 이 파일이 아니라 원장이 낸다.
+//
+// 수단: judgment.supersedes 는 judgment(id) FK 다(schema.sql:245). 없는 id 를 주면
+// 제약 위반이고, 그것은 없음도 선점 표류도 후속도 아니다.
+func TestLogFailMarksAnUnclassifiedCauseAsOther(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	if _, err := s.Note(ctx(), NoteInput{
+		Project: "p", SessionID: me.Session.ID, Kind: model.JudgmentDecision,
+		Body: "정정한다", Supersedes: "j-없음",
+	}); err == nil {
+		t.Fatalf("없는 판단을 정정할 수 없다 — 전제가 깨졌다")
+	}
+	p := readEventPayload(t, st, "judgment.note.fail")
+	if p["cause"] != "other" {
+		t.Fatalf("분류 안 됨 갈래가 아니다: %v", p)
+	}
+	if p["mode"] != string(model.JudgmentDecision) {
+		t.Fatalf("무엇을 하려 했는지가 없다: %v", p)
+	}
+}
