@@ -1566,6 +1566,9 @@ func hasFailureAxis(d service.Derived, axis string) bool {
 //
 // ★ 왜 이 자리에 있나. 실측(kweiza-cc-plugins · event 원장) R=1.30 — 사이클 1회
 // (pickup→작업→finish)마다 큐가 +0.29 다. **pickup 을 더 돌려서는 큐가 안 준다.**
+// (그 1.30 은 **2026-08-06 무렵의 전 기간** 값이다. 지금 다시 재면 최근 20 창은 0.80 이고,
+// 이 수의 출처와 §10 기한을 읽을 때의 오차는 store.QueueReproduction 의 doc 과 DESIGN §10 이
+// 적는다 — 이 자리는 그 값을 화면에 놓는 이유만 적는다.)
 // 그런데 세션은 자기가 큐에 무엇을 했는지 볼 방법이 없었다: 보드는 총량만 내고
 // 그것도 다음 세션이 본다. 측정을 그 자리에 놓으면 판단은 사람이 한다 — 이 저장소가
 // 추천 강제를 기각하고 실측을 남긴 것과 같은 형태다(fd-recommend-path-barely-used).
