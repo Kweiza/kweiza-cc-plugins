@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 쓰기 둘의 소비자 좌표계는 **응답 상태·Location 헤더·되돌아온 화면의 문자열**이다.
@@ -153,6 +155,99 @@ func TestDropRefusesAlreadyClosedItem(t *testing.T) {
 	// 그리고 원래 결과가 안 덮였다.
 	_, html := f.get("")
 	mustContain(t, html, "done", "종료 결과가 폐기로 덮였다")
+}
+
+// 폐기는 그 항목의 선점을 **사유째로** 닫는다.
+//
+// ★ 관측점이 released_at 이 아니라 force_reason 인 이유를 적어 둔다. 안 적으면 다음
+// 사람이 "released_at 이 더 직관적인데"라며 단정을 옮기고, 그 순간 이 시험이 아무것도
+// 안 잡게 된다.
+//
+// released_at 은 이 고침 **이전에도** 찍혔다 — SetItemState 가 종료 상태에서 살아 있는
+// 선점을 스스로 반납하기 때문이다(store/item.go:512-527). 그래서 released_at 만 보면
+// 세 구현이 전부 초록이다: ⓐ ForceReleaseClaim 을 아예 안 부르는 것, ⓑ SetItemState
+// **뒤에** 부르는 것(그 자리에서는 UPDATE 가 0행이라 NFLiveClaim 으로 빠져 조용히
+// 무동작이 된다), ⓒ **앞에** 부르는 올바른 것. 셋을 가르는 관측점은 force_reason 뿐이다.
+//
+// ★ 그리고 이 사실은 화면에도 있어야 한다. force_reason 은 지금 어느 표면도 안 읽으므로
+// (page.go·dashboard.gohtml 전수 확인) 원장에만 두면 선점을 잃은 쪽에서는 그 사실이
+// 영영 안 보인다. 그래서 판단 본문의 한 줄을 함께 단정한다.
+func TestDropClosesTheClaimWithTheDropReason(t *testing.T) {
+	const reason = "설계에서 빠진 축이라 이 항목은 성립하지 않는다 — 버린다"
+
+	cases := []struct {
+		name     string
+		item     string
+		claim    bool   // 폐기 전에 선점을 걸까
+		wantRow  bool   // claim 행이 있어야 하나
+		wantWhy  string // 기대하는 claim.force_reason
+		wantLine string // 판단 본문이 화면에서 말해야 하는 한 줄
+	}{
+		{
+			name: "선점된 항목", item: "t5-e", claim: true, wantRow: true, wantWhy: reason,
+			wantLine: "선점: 살아 있던 선점을 이 폐기와 같은 트랜잭션에서 함께 닫았다",
+		},
+		{
+			name: "선점 없는 항목", item: "t5-f", claim: false, wantRow: false, wantWhy: "",
+			wantLine: "선점: 폐기 시점에 살아 있는 선점이 없었다",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t).withRepo("feat")
+			sess := f.openSession("cc-1", "트랙2")
+			if c.claim {
+				f.claimOne(sess.ID, c.item)
+			} else {
+				f.addItem(c.item, c.item+" 제목", nil, nil)
+			}
+
+			rec := f.post("/actions/drop", url.Values{
+				"project": {testProject}, "item": {c.item}, "reason": {reason},
+			})
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, 기대 303 — 선점 유무가 폐기의 성패를 가르면 안 된다\n%s",
+					rec.Code, rec.Body.String())
+			}
+
+			ctx := context.Background()
+			it, err := f.st.GetItem(ctx, testProject, c.item)
+			if err != nil {
+				t.Fatalf("항목 조회 실패: %v", err)
+			}
+			// ★ 순서 가드다. ForceReleaseClaim 은 `UPDATE item SET state='open' …
+			//   AND state='claimed'` 를 함께 치므로(store/item.go:783), 폐기를 먼저 찍고
+			//   그 뒤에 회수하면 방금 닫은 항목이 다시 열린다.
+			if it.State != model.ItemDropped {
+				t.Fatalf("항목 상태 = %q, 기대 dropped — 선점 회수가 폐기를 되돌렸다", it.State)
+			}
+
+			claim, cerr := f.st.GetClaim(ctx, testProject, c.item)
+			switch {
+			case !c.wantRow:
+				if !errors.Is(cerr, store.ErrNotFound) {
+					t.Fatalf("선점 없는 항목에 claim 행이 생겼다(err=%v) — 폐기가 없던 선점을 만들었다", cerr)
+				}
+			case cerr != nil:
+				t.Fatalf("선점 조회 실패: %v", cerr)
+			default:
+				if claim.ReleasedAt == nil {
+					t.Fatal("폐기했는데 claim 행이 released_at = NULL 로 남았다 — " +
+						"claim 표에는 만료 컬럼이 없어 그 세션은 닫힌 항목의 선점을 영영 쥔다")
+				}
+				if claim.ForceReason != c.wantWhy {
+					t.Fatalf("claim.force_reason = %q, 기대 %q — 선점을 왜 끊었는지가 원장에 없다",
+						claim.ForceReason, c.wantWhy)
+				}
+			}
+
+			// 그리고 그 사실을 화면이 말한다.
+			_, html := f.get("")
+			mustContain(t, html, c.wantLine,
+				"선점을 어떻게 처리했는지가 판단에 안 남았다 — force_reason 은 어느 화면도 안 읽는다")
+		})
+	}
 }
 
 func TestGetOnActionPathIs404(t *testing.T) {
