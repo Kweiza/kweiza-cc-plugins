@@ -237,17 +237,17 @@ func (h *handler) drop(w http.ResponseWriter, r *http.Request) {
 		// ★ 선점을 **SetItemState 앞에서** 닫는다. 순서에 두 가지가 걸려 있다.
 		//
 		//   ⓐ ForceReleaseClaim 은 `UPDATE item SET state='open' … AND state='claimed'` 를
-		//     함께 친다(store/item.go:783). 폐기를 먼저 찍고 뒤에 회수하면 방금 닫은 항목이
+		//     함께 친다(store/item.go:857). 폐기를 먼저 찍고 뒤에 회수하면 방금 닫은 항목이
 		//     다시 열린다.
 		//   ⓑ 그런데 지금 그 되돌림은 실제로는 안 일어난다 — SetItemState 가 종료 상태에서
-		//     살아 있는 선점을 스스로 반납하므로(store/item.go:512-527) 뒤에 놓인
+		//     살아 있는 선점을 스스로 반납하므로(store/item.go:562-577) 뒤에 놓인
 		//     ForceReleaseClaim 은 `released_at IS NULL` 가드에 0행으로 걸려 ⓐ 의 UPDATE 에
 		//     닿기 전에 NFLiveClaim 으로 빠진다. 즉 **틀린 순서가 오류도 증상도 안 낸다.**
 		//     그 갈래에서 유일하게 사라지는 것이 force_reason 이고, 그래서 시험의 관측점이
 		//     released_at 이 아니라 force_reason 이다(actions_test.go 의 같은 이름 시험).
 		//
 		// ★ 사유는 폐기 사유를 **그대로** 나른다. ForceReleaseClaim 이 빈 사유를 거절하기
-		//   때문만이 아니다(store/item.go:764) — 회수 경로가 이미 사람이 친 문장을 가공 없이
+		//   때문만이 아니다(store/item.go:838) — 회수 경로가 이미 사람이 친 문장을 가공 없이
 		//   넘긴다(service/reclaim.go:129). 같은 컬럼에 두 경로가 다른 모양을 쓰면 나중에
 		//   force_reason 을 읽는 쪽이 접두를 벗겨 가며 읽어야 한다.
 		claimLine := "선점: 폐기 시점에 살아 있는 선점이 없었다."

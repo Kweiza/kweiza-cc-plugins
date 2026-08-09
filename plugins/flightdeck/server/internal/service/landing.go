@@ -179,7 +179,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
 	}
 	if err != nil {
-		s.logFail(ctx, "lane.land", in.Project, in.SessionID, err)
+		s.logFail(ctx, "lane.land", in.Project, in.SessionID, err, failAbout{})
 		s.log.ErrorContext(ctx, "랜딩 줄 서기 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"error", err.Error())
@@ -251,7 +251,7 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "lane.report", in.Project, in.SessionID, err)
+		s.logFail(ctx, "lane.report", in.Project, in.SessionID, err, failAbout{Mode: string(in.Kind)})
 		s.log.ErrorContext(ctx, "랜딩 보고 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"mode", string(in.Kind), "error", err.Error())
@@ -311,7 +311,7 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "lane.leave", in.Project, in.SessionID, err)
+		s.logFail(ctx, "lane.leave", in.Project, in.SessionID, err, failAbout{})
 		s.log.ErrorContext(ctx, "랜딩 줄 이탈 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"error", err.Error())
@@ -596,7 +596,7 @@ func (s *Service) ReleaseLaneRow(ctx context.Context, project string, rowID int6
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "lane.release", project, "", err)
+		s.logFail(ctx, "lane.release", project, "", err, failAbout{})
 		s.log.ErrorContext(ctx, "랜딩 줄 행 회수 실패",
 			"project", clip(project, 64), "count", rowID, "error", err.Error())
 		return LaneReleaseResult{}, err

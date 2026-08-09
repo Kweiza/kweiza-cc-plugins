@@ -164,7 +164,7 @@ func TestDropRefusesAlreadyClosedItem(t *testing.T) {
 // 안 잡게 된다.
 //
 // released_at 은 이 고침 **이전에도** 찍혔다 — SetItemState 가 종료 상태에서 살아 있는
-// 선점을 스스로 반납하기 때문이다(store/item.go:512-527). 그래서 released_at 만 보면
+// 선점을 스스로 반납하기 때문이다(store/item.go:562-577). 그래서 released_at 만 보면
 // 세 구현이 전부 초록이다: ⓐ ForceReleaseClaim 을 아예 안 부르는 것, ⓑ SetItemState
 // **뒤에** 부르는 것(그 자리에서는 UPDATE 가 0행이라 NFLiveClaim 으로 빠져 조용히
 // 무동작이 된다), ⓒ **앞에** 부르는 올바른 것. 셋을 가르는 관측점은 force_reason 뿐이다.
@@ -217,7 +217,7 @@ func TestDropClosesTheClaimWithTheDropReason(t *testing.T) {
 				t.Fatalf("항목 조회 실패: %v", err)
 			}
 			// ★ 순서 가드다. ForceReleaseClaim 은 `UPDATE item SET state='open' …
-			//   AND state='claimed'` 를 함께 치므로(store/item.go:783), 폐기를 먼저 찍고
+			//   AND state='claimed'` 를 함께 치므로(store/item.go:857), 폐기를 먼저 찍고
 			//   그 뒤에 회수하면 방금 닫은 항목이 다시 열린다.
 			if it.State != model.ItemDropped {
 				t.Fatalf("항목 상태 = %q, 기대 dropped — 선점 회수가 폐기를 되돌렸다", it.State)

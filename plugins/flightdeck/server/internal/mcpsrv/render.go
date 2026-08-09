@@ -1341,9 +1341,8 @@ func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
 // 부근, "지어낸 원인보다 정확하다"). 그래서 여기서도 어느 것인지 단정하지 않는다.
 //
 // ★ 수는 **하한이다.** store 의 CloseDeclarationsByItem doc 이 못박은 계약이다
-// (event.go:255-258 — flushDeferred 가 트랜잭션 ctx 를 그대로 쓰고 LogEvent 는 쓰기
-// 실패를 WARN 으로 삼키므로 안 써진 마무리가 있을 수 있다). 그래서 0건 갈래에서도
-// "0이다"로 단정하지 않는다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
+// (BeginTx 가 실패하면 예약 자체가 없고, 쓰기 실패는 WARN 으로 삼킨다). 그래서 0건
+// 갈래에서도 "0이다"로 단정하지 않는다 — 0 이야말로 안 써진 마무리에 가장 잘 속는 값이다.
 //
 // ★ 처방이 mode 로 갈린다 — done 은 이미 랜딩됐을 수 있고 dropped 는 이미 버리기로
 // 판정됐을 수 있다. 둘을 "끝난 일" 하나로 뭉치면 다음 세션이 무엇을 확인해야 하는지가
@@ -1567,6 +1566,9 @@ func hasFailureAxis(d service.Derived, axis string) bool {
 //
 // ★ 왜 이 자리에 있나. 실측(kweiza-cc-plugins · event 원장) R=1.30 — 사이클 1회
 // (pickup→작업→finish)마다 큐가 +0.29 다. **pickup 을 더 돌려서는 큐가 안 준다.**
+// (그 1.30 은 **2026-08-06 무렵의 전 기간** 값이다. 지금 다시 재면 최근 20 창은 0.80 이고,
+// 이 수의 출처와 §10 기한을 읽을 때의 오차는 store.QueueReproduction 의 doc 과 DESIGN §10 이
+// 적는다 — 이 자리는 그 값을 화면에 놓는 이유만 적는다.)
 // 그런데 세션은 자기가 큐에 무엇을 했는지 볼 방법이 없었다: 보드는 총량만 내고
 // 그것도 다음 세션이 본다. 측정을 그 자리에 놓으면 판단은 사람이 한다 — 이 저장소가
 // 추천 강제를 기각하고 실측을 남긴 것과 같은 형태다(fd-recommend-path-barely-used).

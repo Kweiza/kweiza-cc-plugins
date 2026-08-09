@@ -159,7 +159,7 @@ func (s *Service) ReclaimClaim(ctx context.Context, project, itemID, actor, reas
 	if err != nil {
 		// 실패도 원장에 남긴다(레인 회수와 같은 결선) — claim.reclaim 시도 이벤트만으로는
 		// "왜 안 됐나"가 원장에 없다.
-		s.logFail(ctx, "claim.reclaim", project, "", err)
+		s.logFail(ctx, "claim.reclaim", project, "", err, failAbout{Item: itemID})
 		s.log.ErrorContext(ctx, "선점 회수 실패",
 			"project", clip(project, 64), "item", clip(itemID, 64), "error", err.Error())
 		return ClaimReclaimResult{}, err
