@@ -239,9 +239,16 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		//   그러면 §10 의 "세션당 쓰기 호출 수"가 실패를 못 본다.
 		t.LogEvent("item.finish", in.Project, in.SessionID, map[string]any{
 			"item": in.ItemID, "mode": string(in.Outcome),
-			// ★ count 는 **만들 것의 수**다. 잇기를 여기 세면 store.QueueReproduction
-			//   (store/event.go:203)이 만들지도 않은 항목을 재생산율 R 의 분자로 더한다 —
-			//   DESIGN §10 이 R 을 이 설계의 판정 축으로 세운 자리라 조용히 거짓이 된다.
+			// ★ count 는 **만들 것의 수**다. 잇기를 여기 세면 store.QueueReproduction 이
+			//   만들지도 않은 항목을 재생산율 R 의 분자로 더한다 — DESIGN §10 이 R 을 이 설계의
+			//   판정 축으로 세운 자리라 조용히 거짓이 된다.
+			//
+			// ★ 같은 부류의 **롤백 갈래는 여기가 아니라 저장층이 막는다.** 이 줄이 예약한
+			//   이벤트는 tx 가 롤백돼도 흘러가고(store.go 의 flushDeferred), 그때 payload 에
+			//   결말이 찍혀(store.TxOutcomeKey) QueueReproduction 이 분모·분자에서 뺀다.
+			//   그러므로 이 자리의 count 는 "만들려 한 수"이지 "만들어진 수"가 아니다 —
+			//   그 구분을 여기서 지우지 마라. 롤백된 시도의 count 를 0으로 적으면 무엇을
+			//   시도했는지가 원장에서 사라지고, 그것이 이 이벤트의 존재 이유다.
 			"count": len(plan.Create), "linked": len(plan.Link),
 			"bytes": len(in.Body), // §10 "세션당 판단 바이트" — 0 에 수렴하면 위험 신호다
 		})

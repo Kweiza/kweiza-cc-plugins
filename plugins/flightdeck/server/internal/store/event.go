@@ -69,7 +69,12 @@ func (s *Store) TryLogEvent(ctx context.Context, kind, project, sessionID string
 // 값(키 없음)으로 접힌다 — 이 저장소가 반복해서 닫아 온 0과 못 잼의 혼동 그대로다.
 const (
 	// TxOutcomeKey 는 결말이 실리는 payload 키다. **store 가 소유한다** — 호출자가 같은
-	// 키를 실어도 덮인다. 키가 아예 없으면 그 행은 이 표시 이전에 쓰인 것이다.
+	// 키를 실어도 덮인다.
+	//
+	// 키가 **없는** 행은 두 인구다: 이 표시 이전에 쓰인 옛 행과, 트랜잭션 밖에서
+	// Store.LogEvent 로 직접 쓴 행(service 의 logFail 이 남기는 *.fail 이 그렇다).
+	// 둘을 가르는 방법은 없고 필요도 없다 — 뒤쪽은 애초에 예약 이벤트가 아니라
+	// 롤백될 트랜잭션 자체가 없다. 소비자가 알아야 할 것은 "커밋됐다가 아니다" 하나다.
 	TxOutcomeKey = "tx"
 	// TxCommitted 는 그 트랜잭션이 커밋된 것이다.
 	TxCommitted = "committed"
@@ -210,6 +215,28 @@ type Reproduction struct {
 	Adds      int // 같은 구간의 독립 add 수
 }
 
+// reproPayload 는 QueueReproduction 이 원장 payload 에서 읽는 전부다.
+//
+// item.finish 와 item.add 가 같은 타입을 쓴다 — 결말 표시를 읽는 규칙이 둘로 갈리면
+// 한쪽만 고쳐져 분자와 분모가 다른 규칙으로 세어진다. 그 갈림이 그 함수가 닫는 결함의
+// 원래 모양이다.
+type reproPayload struct {
+	Count int    `json:"count"`
+	Tx    string `json:"tx"`
+}
+
+// readReproPayload 는 payload 를 읽고 **읽혔는지**를 함께 낸다.
+//
+// bool 을 따로 내는 이유: 못 읽은 행과 "count 가 0인 행"은 다르다. 못 읽은 행은 결말도
+// 모르므로 롤백으로 뺄 수 없고(관측이 없다), 후속만 0으로 접어 센다.
+func readReproPayload(payload string) (reproPayload, bool) {
+	var p reproPayload
+	if json.Unmarshal([]byte(payload), &p) != nil {
+		return reproPayload{}, false
+	}
+	return p, true
+}
+
 // QueueReproduction 은 최근 n회 마무리 기준 재생산율의 원자료다.
 //
 // ★ 왜 이 축이 있나. 실측(kweiza-cc-plugins · 이 원장): finish 88건이 followups 61건과
@@ -223,6 +250,34 @@ type Reproduction struct {
 //
 // ★ **add 구간도 함께 자른다.** 마무리는 최근 n회만 세면서 add 는 전 기간을 세면 R 이 실제보다
 // 크게 나온다. AckReach 가 시각 절단 없이 전 기간을 누적해 겪은 것과 같은 부류다.
+//
+// ★ **롤백된 시도는 분모에도 분자에도 안 넣는다.** Tx.LogEvent 가 예약한 item.finish 는
+// 롤백 갈래에서도 흘러가므로(store.go 의 flushDeferred) 이 원장에는 성공한 마무리와 롤백된
+// 마무리가 같이 있다. 가르는 것은 payload 의 결말 표시(TxOutcomeKey)다 — 그것을 찍는 자리가
+// 결말을 아는 유일한 자리이기 때문이다.
+//
+// ★ **n 은 마무리 이벤트 수이지 성공한 마무리 수가 아니다.** 그래서 롤백이 섞인 창에서는
+// 표본이 n 보다 작아진다. 성공이 n개가 될 때까지 더 긁지 않는 이유는 창을 id 로 자르는
+// 이유와 같다 — 더 긁으면 창의 아래 끝이 내려가 add 구간이 함께 넓어지고, 그러면 분자와
+// 분모가 다른 구간을 본다. 표본이 줄면 분산이 커질 뿐 방향이 안 틀린다.
+//
+// ★ **항목 상태로 조인하는 길은 실측으로 기각했다**(2026-08-09 21:01 KST · ~/.flightdeck/fd.db
+// 읽기 전용 사본 · item.finish 391건). 롤백 4건 중 3건은 나중에 재시도로 닫혀 항목이 done 이라
+// 상태 조인이 한 건도 못 잡는다. 반대로 상태 조인이 실제로 잡는 3건(그 프로젝트에 항목이 없는
+// finish) 중 2건은 **성공한** 마무리다 — 항목이 프로젝트를 옮겨 event.project 와 갈렸을 뿐이고,
+// 같은 순간 handoff 판단이 커밋돼 있다. 즉 그 방법은 유령 count 2를 하나도 못 빼면서 진짜
+// count 8을 뺀다. 전문은 DESIGN §10 의 표에 있다.
+//
+// ★ **결말 표시가 없는 행은 센다.** 표시 이전에 쓰인 행이고, 그것은 "커밋됐다"가 아니라
+// "관측 못 했다"이다. 안 세면 표시 이전 구간의 R 이 통째로 0이 되고 0은 "큐가 안 는다"로
+// 읽힌다 — 접는 쪽을 고른 근거와 그 대가를 DESIGN §10 이 적는다. 창이 최근 n회라 실측
+// 마무리 속도(프로젝트 최대 46.3건/일)에서 몇 시간이면 창 전체가 표시된 행으로 바뀐다.
+//
+// ★ **그 접기가 R 을 틀리게 하는 방향은 하나뿐이다 — 크게만 틀린다.** 표시 없는 행에 섞인
+// 롤백은 예전처럼 세어지므로 남는 오염은 전부 과대 계상이고, 과소는 원리적으로 안 생긴다.
+// §10 의 반증 기한은 "R 이 한 번도 1 아래로 안 내려갔으면 가설을 죽인다"라 과대 쪽 오차는
+// **재심을 여는 쪽**으로 기운다 — 면죄부가 아니라 과잉 조치다. 방향이 반대였으면 표시 이전
+// 구간을 세는 이 선택 자체를 못 했을 것이다.
 func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (Reproduction, error) {
 	var out Reproduction
 	if n <= 0 {
@@ -244,16 +299,21 @@ func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (R
 		if err := rows.Scan(&id, &payload); err != nil {
 			return Reproduction{}, fmt.Errorf("마무리 이벤트 행 해석 실패: %w", err)
 		}
+		// payload 는 자유 JSON 이라 스키마가 없다. 못 읽으면 **0으로 접는다** —
+		// 이 축의 소비자는 "비면 안 센다"로 동작한다(eventItemID 와 같은 규율).
+		p, read := readReproPayload(payload)
+		// ★ 롤백된 시도는 마무리가 아니다. 분모에서 빼고 그 count 도 분자에 안 넣는다 —
+		//   그 후속들은 트랜잭션과 함께 사라져 큐에 한 건도 안 들어갔다.
+		if read && p.Tx == TxRolledBack {
+			continue
+		}
 		out.Finishes++
+		// ★ 창의 아래 끝은 **센 것 중** 가장 오래된 id 다. 롤백된 시도의 id 로 잡으면
+		//   분모는 그대로인데 add 구간만 넓어져 분자가 분모 없이 커진다.
 		if sinceID < 0 || id < sinceID {
 			sinceID = id
 		}
-		// payload 는 자유 JSON 이라 스키마가 없다. 못 읽으면 **0으로 접는다** —
-		// 이 축의 소비자는 "비면 안 센다"로 동작한다(eventItemID 와 같은 규율).
-		var p struct {
-			Count int `json:"count"`
-		}
-		if json.Unmarshal([]byte(payload), &p) == nil && p.Count > 0 {
+		if read && p.Count > 0 {
 			out.Followups += p.Count
 		}
 	}
@@ -264,11 +324,32 @@ func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (R
 		return out, nil // 표본이 없다. 0값 그대로 — **오류가 아니다**(호출자가 표본 0으로 읽는다)
 	}
 
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT count(*) FROM event
-		WHERE project = ? AND kind = 'item.add' AND id >= ?`,
-		project, sinceID).Scan(&out.Adds); err != nil {
+	// ★ add 도 같은 규칙으로 거른다. Service.AddItem 역시 Tx.LogEvent 로 예약하므로
+	// 롤백된 add 는 항목이 안 만들어진 채 이벤트만 남고, 그것이 분자에 그대로 든다 —
+	// 분자의 나머지 절반에 같은 오염이 있었다.
+	//
+	// ★ count(*) 를 못 쓰는 이유가 결말이 payload 안에 있기 때문이다. 조인 조건에
+	// json_extract 를 넣는 선례가 이 저장소에 0건이라 Go 로 읽는다 — 창이 최근 n회라
+	// 훑는 행 수가 원래 작다.
+	addRows, err := s.db.QueryContext(ctx, `
+		SELECT payload FROM event
+		WHERE project = ? AND kind = 'item.add' AND id >= ?`, project, sinceID)
+	if err != nil {
 		return Reproduction{}, fmt.Errorf("추가 이벤트 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer addRows.Close()
+	for addRows.Next() {
+		var payload string
+		if err := addRows.Scan(&payload); err != nil {
+			return Reproduction{}, fmt.Errorf("추가 이벤트 행 해석 실패: %w", err)
+		}
+		if p, read := readReproPayload(payload); read && p.Tx == TxRolledBack {
+			continue
+		}
+		out.Adds++
+	}
+	if err := addRows.Err(); err != nil {
+		return Reproduction{}, fmt.Errorf("추가 이벤트 순회 실패: %w", err)
 	}
 	return out, nil
 }
