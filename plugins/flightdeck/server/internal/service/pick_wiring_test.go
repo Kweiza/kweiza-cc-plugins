@@ -477,3 +477,97 @@ func TestPickBundleMemberCarriesItsOwnCloseDeclaration(t *testing.T) {
 		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
 	}
 }
+
+// ⑫ item_id 지정 **선점**(pickExplicit 의 새 선점 갈래)도 종료 선언 축을 싣는다.
+//
+// ★ 이 시험이 잠그는 것이 이 브랜치 전체 수정의 본체다. pickExplicit 은
+// res.Bundle·res.PathCheck·res.Overlaps·res.Setup 을 전부 채우면서 CloseDeclared 만
+// 비워 뒀었다 — 같은 함수의 Bundle 필드 주석(pick.go:340-360 부근)이 "안 채우면
+// 렌더가 신선한 온라인 응답에 거짓 원인을 찍는다"고 Bundle 축에 대해 이미 적어
+// 둔 실패를, 이 브랜치가 새 축에는 적용하지 않았던 것이다. `res.CloseDeclared`
+// 를 지우면(변이) 이 시험만 붉어져야 한다 — pickRecommend 를 잠근 ⑩은 이 경로를
+// 원리적으로 못 잰다(추천은 선점이 아니다).
+func TestPickExplicitClaimCarriesCloseDeclared(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Mode != PickClaimed {
+		t.Fatalf("사전 조건이 깨졌다 — 새 선점이어야 한다: mode=%q", res.Mode)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("item_id 지정 선점이 종료 선언 축을 안 실었다 — pickExplicit 이 이 축을 안 읽는다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("선점 응답의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+}
+
+// ⑬ **재개**(이미 내 선점을 다시 부른 갈래) — 이 사고의 **시점 B 그 자체**다:
+// 롤백 → 사람이 회수 → 항목이 open → 세션이 `pick item_id=X` 로 **직접** 다시
+// 집으면(이미 자기 선점이라) pickExplicit 의 재개 갈래를 탄다. 새 선점(⑫)과 코드
+// 경로가 완전히 갈린다 — 재개는 아무것도 안 쓰고 조기 반환한다(pick.go 의 `if resume`
+// 블록). 그래서 ⑫가 초록이어도 이 갈래가 비어 있을 수 있다.
+func TestPickResumeCarriesCloseDeclared(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID}); err != nil {
+		t.Fatalf("첫 선점 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if res.Mode != PickResumed {
+		t.Fatalf("사전 조건이 깨졌다 — 재개 경로여야 한다: mode=%q", res.Mode)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("재개 응답이 종료 선언 축을 안 실었다 — 회수 뒤 다시 집은 세션이 경고를 한 번도 못 본다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("재개 응답의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+}
+
+// ⑭ 묶음 **구성원**도 종료 선언 축을 싣는다(item_ids 로 지정해 집는 경로) — ⑥이
+// PathCheck 에 대해 잠근 것과 같은 형태다. `m.CloseDeclared = sub.CloseDeclared`
+// 한 줄이 빠지면 형제 축(PathCheck)은 실리는데 이 축만 조용히 사라진다.
+func TestPickBundleMemberCarriesCloseDeclaredOnTheClaimPath(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	mem := addItem(t, s, "p", "mem", []string{"services/mem.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, mem.ID, "dropped", mem.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 집혔어야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.CloseDeclared == nil {
+		t.Fatal("묶음 구성원의 종료 선언이 안 실렸다 — PathCheck 은 나르는데 이 축만 비었다")
+	}
+	if m.CloseDeclared.Count() != 1 || m.CloseDeclared.Dropped != 1 {
+		t.Fatalf("구성원의 선언이 자기 것이 아니다: %+v", m.CloseDeclared)
+	}
+	// 선두는 선언이 없었다 — 구성원 것을 선두가 받아 가지 않았다는 것도 함께 본다.
+	if res.CloseDeclared == nil || res.CloseDeclared.Count() != 0 {
+		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
+	}
+}

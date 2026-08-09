@@ -93,11 +93,20 @@ type PickResult struct {
 	//	non-nil, 0건   = 읽었고 선언이 없다
 	//	non-nil, n건   = 읽었고 n번 닫히려다 롤백됐다
 	//
-	// 왜 읽었는데 못 읽는 갈래가 있나 — 원장 조회가 실패했을 때다. 그 사실은 항목마다
-	// 반복하지 않고 Bundle.Scope 가 한 번 말한다(bundleScope 의 closeRead).
+	// 왜 읽었는데 못 읽는 갈래가 있나 — 원장 조회가 실패했을 때다. 추천 경로
+	// (pickRecommend)는 그 사실을 항목마다 반복하지 않고 Bundle.Scope 가 한 번
+	// 말한다(bundleScope 의 closeRead). item_id 지정 선점·재개·묶음 구성원은
+	// 후보 집합 자체가 없어 그런 Scope 절이 없으므로, 이 포인터 하나가 그 경로들의
+	// 유일한 신호다.
 	//
-	// **추천 경로에서만 채운다.** item_id 지정 선점·재개(pickExplicit)는 후보 집합을
-	// 안 만들어 이 축을 안 돌린다 — 거기서 nil 은 "안 읽었다"로 정확히 읽힌다.
+	// **다섯 갈래 전부에서 채운다**(추천 선두·구성원, item_id 선점·재개, 묶음
+	// 선두·구성원 — PathCheck 과 같은 계약이다). 한때는 추천 경로에서만 채웠다 —
+	// pickExplicit(:339 부근)의 주석이 그 실패를 이미 Bundle 축에 대해 적어 뒀는데
+	// ("pick 다섯 갈래 중 셋이 이 자리를 지나므로 여기서 안 채우면 신선한 온라인
+	// 응답에 거짓 원인이 붙는다") 이 브랜치가 같은 규율을 새 축(CloseDeclared)에는
+	// 걸지 않았다. 세션이 회수된 항목을 `pick item_id=X` 로 **직접** 집으면
+	// pickExplicit 을 타므로 그 세 갈래에서 경고를 한 번도 못 봤다 — 그 구멍을
+	// 여기서 닫는다.
 	//
 	// ★ 이 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다(store/store.go:366 의
 	// flushDeferred 가 트랜잭션의 ctx 를 그대로 쓴다). 문구가 그렇게 말해야 한다.
@@ -365,6 +374,14 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 종료 선언 축 — 위 Bundle 주석이 이미 적어 둔 그 실패를 여기서도 반복하지
+	// 않는다. closeDeclarations 는 후보 슬라이스를 받아 앵커(생성 시각 이후·동시각
+	// 제외 — pick.go:805 부근의 그 함수 자신의 doc)를 건다. 그 규칙을 여기서
+	// 다시 적으면 규칙이 두 벌이 되므로, 항목 하나짜리 후보 슬라이스를 만들어
+	// **같은 함수를 재사용**한다(closeDeclarations 자체는 항목 수에 무관하게
+	// 원장 전체를 한 번 읽고 여기서 거르므로, 후보가 하나뿐이어도 안전하다).
+	closed, closeRead := s.closeDeclarations(ctx, proj.ID, []judge.Candidate{{Item: item}})
+	res.CloseDeclared = closeDeclaredOf(closed, item.ID, closeRead)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
@@ -590,6 +607,10 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 		// "집었다"는 동사를 쓰려면 실제로 쓰기가 일어났어야 한다.
 		m.Item, m.Claimed = *sub.Item, true
 		m.Notes, m.PathCheck = sub.Notes, sub.PathCheck
+		// ★ 형제 축(PathCheck)과 같은 모양이다 — sub 는 pickExplicit 이 이미 이
+		// 구성원 자기 것으로 채워 왔다. 여기서 안 나르면 PathCheck 은 실리는데
+		// 이 축만 조용히 사라진다.
+		m.CloseDeclared = sub.CloseDeclared
 		heldMembers++
 		if sub.Mode == PickClaimed {
 			newMembers++

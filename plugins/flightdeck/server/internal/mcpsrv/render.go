@@ -1332,6 +1332,14 @@ func renderPathCheck(v *judge.ItemPathVerdict, itemID string) string {
 // ★ 접두를 `종료 선언:` 으로 새로 판 이유는 기존 접두들에 개수·절 분할 시험이 물려
 // 있기 때문이다(`경로 실재: ` 4개 · `fd move ` 1개 · `브랜치: ` 1개 · 구성원 표식 3종).
 //
+// ★ nil 갈래 문구는 **원인 중립**이다. pick.go 의 세 서비스 경로(추천·item_id
+// 선점재개·묶음)가 이제 전부 이 축을 채우므로(pickExplicit 이 closeDeclarations 를
+// 재사용한다), 신선한 온라인 응답에서 nil 이 남는 길은 원인이 **셋**이다 —
+// 구서버(이 필드를 모른다) · 옛 캐시(필드가 생기기 전에 굳었다) · 이번 조회 자체의
+// 실패(closeRead=false). 문구가 그중 둘만 대면 셋째(조회 실패)가 실제로 난 날에도
+// 거짓 원인을 찍는다 — QueueOpen 이 같은 이유로 원인 중립 문장을 쓴다(render.go:975
+// 부근, "지어낸 원인보다 정확하다"). 그래서 여기서도 어느 것인지 단정하지 않는다.
+//
 // ★ 수는 **하한이다.** store 의 CloseDeclarationsByItem doc 이 못박은 계약이다
 // (event.go:255-258 — flushDeferred 가 트랜잭션 ctx 를 그대로 쓰고 LogEvent 는 쓰기
 // 실패를 WARN 으로 삼키므로 안 써진 마무리가 있을 수 있다). 그래서 0건 갈래에서도
@@ -1348,7 +1356,8 @@ func renderCloseDeclared(d *model.CloseDeclaration, indent string) string {
 	// 이어지는 줄은 "종료 선언: " 만큼 민다 — renderPathCheck 의 되돌리기 줄과 같은 모양이다.
 	const cont = "           "
 	if d == nil {
-		return indent + "종료 선언: 이 응답은 이 축을 안 읽었다 — 낡은 캐시이거나 서버가 이 축을 모르는 판이다.\n"
+		return indent + "종료 선언: 이 응답은 이 축을 안 읽었다 — " +
+			"구서버이거나 옛 캐시이거나 이번 조회가 실패했을 수 있다(이 응답만으로는 못 가른다).\n"
 	}
 	if d.Count() == 0 {
 		return indent + "종료 선언: 원장에서 하나도 못 봤다 — 이 항목을 닫으려다 롤백된 시도가 관측되지 않았다.\n" +
