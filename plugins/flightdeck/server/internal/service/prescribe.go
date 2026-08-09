@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -25,24 +26,52 @@ import (
 const (
 	eventPrescribe    = "prescribe"
 	eventPrescribeAck = "prescribe_ack"
+	// eventPrescribeFolded 는 **접힌 턴에만** 남는다. 발화가 아니라 계측이라 이름이 갈린다.
+	//
+	// ★ 이 kind 가 따로인 것이 설계의 조건이다. `emittedKeys` 는 `kind='prescribe'` 로
+	// 거르고 `store/prescribe_reach.go` 는 `kind IN ('prescribe','prescribe_ack')` 로 거른다 —
+	// 둘 다 명시 목록이라 이 이벤트는 **억제 축에도 확인율에도 안 섞인다.** 같은 값을
+	// `prescribe` payload 에 얹었다면 그 격리가 payload 해석에 걸리게 되고, 접힘을 세려는
+	// 질의가 억제를 읽는 질의와 같은 행을 공유하게 된다.
+	eventPrescribeFolded = "prescribe_folded"
 )
 
 // PrescribeResult 는 한 턴의 처방이다.
 //
-// ★ **원장에 남는 것은 Shown 뿐이다**(2026-08-06 개정. 아래 Prescriptions 의 기록 루프).
+// ★ **발화로 남는 것은 Shown 뿐이다**(2026-08-06 개정. 아래 Prescriptions 의 기록 루프).
 // 세 필드가 서로 다른 것을 세므로 셋을 같은 뜻으로 읽으면 안 된다 — 특히 `All` 은
 // `POST /api/v1/sessions/{id}/prescriptions` 의 `all` 로 서버 밖에 나가는데 비시험
 // 소비자가 0건이라, 이 주석이 그 필드의 유일한 계약이다.
+//
+// ★ **"원장에 안 남는다"와 "발화로 안 센다"는 다르다**(2026-08-09 개정). 접힌 것은 여전히
+// `prescribe` 로 안 남지만 — 그래서 `suppressed` 가 안 누르고 다음 턴에 올라온다 —
+// 접혔다는 **사실 자체**는 `prescribe_folded` 로 남는다. 앞선 판이 이 자리에 "원장에
+// 안 남는다"고 적었고, 그 한 문장이 접힘 빈도를 측정 불가로 만든 결함의 요약이었다.
 type PrescribeResult struct {
-	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax) — **이것만 event 에 남는다**
-	Folded int                  `json:"folded"` // 요약으로 접힌 수 — 원장에 안 남는다(아래 ★)
-	All    []judge.Prescription `json:"all"`    // 이번 턴에 판정된 전부(표시분 + 접힌 것). 기록되는 것은 Shown 뿐이다
+	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax) — **발화로 세는 것은 이것뿐이다**
+	Folded int                  `json:"folded"` // 요약으로 접힌 수 — 발화로는 안 세고 prescribe_folded 로 남는다
+	All    []judge.Prescription `json:"all"`    // 이번 턴에 판정된 전부(표시분 + 접힌 것). 발화로 세는 것은 Shown 뿐이다
 }
 
 // prescribePayload 는 event.payload 의 모양이다.
 type prescribePayload struct {
 	Key    string `json:"key"`
 	Reason string `json:"reason"`
+}
+
+// prescribeFoldedPayload 는 접힌 턴 하나의 흔적이다. **재측이 읽는 것이 이 모양 전부다.**
+//
+// 접힌 수와 총 처방 수는 **안 싣는다** — 각각 `len(keys)` 와 `shown + len(keys)` 로 파생된다
+// (설계 §1 ①의 정신. 두 벌로 두면 어긋난 행이 원장에 영구히 남는데 event 는 추가 전용이다).
+// 그래서 `shown` 은 파생 불가한 유일한 축으로 남는다: `PrescribeMax` 를 나중에 바꿔도
+// **옛 행의 총 처방 수를 그 시점 상한으로 되짚을 수 없기 때문에** 그때의 값이 필요하다.
+type prescribeFoldedPayload struct {
+	Keys  []string `json:"keys"`  // 접힌 키 — 축 분포를 다시 재는 재료다
+	Shown int      `json:"shown"` // 그 턴에 표시된 수
+	// Since 는 그 턴이 본 창의 시작이다. **계측이 아니라 배선이다** — 다음 턴이 이 값을
+	// 물려받아 밀린 처방이 돌아올 자리를 만든다(Prescriptions 의 창 물려받기 문단).
+	// 계측용으로도 읽을 수 있다: 접힘이 몇 턴 이어졌나는 같은 Since 를 공유한 행의 수다.
+	Since time.Time `json:"since"`
 }
 
 // Prescriptions 는 이 세션이 지금 받아야 할 처방을 내고, 낸 것을 event 에 기록한다.
@@ -60,6 +89,34 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		return PrescribeResult{}, err
 	}
 	in.Emitted = emitted
+
+	// ★ **접힌 턴이 마지막이면 그 턴의 창을 물려받는다(2026-08-09 개정).**
+	//
+	// 2026-08-06 이 접힌 것을 발화로 안 세게 만들어 영구 소실을 순환으로 바꿨는데, 그 순환에
+	// 조건이 하나 남아 있었다: 아래 TurnPaths 가 `f.LastAt.After(since)` 로 뽑히고 since 가
+	// **마지막 발화 시각**이라, 밀린 축은 세션이 **그 경로를 다시 만져야만** 돈다.
+	// 그래서 한 턴에 몰아친 다발은 세션이 다른 일로 가는 순간 그대로 사라졌다 —
+	// 하필 PrescribeMax 가 애초에 겨냥한 시나리오다.
+	//
+	// 걸리는 축은 outside 만이 아니다. overlap 은 OverlapPairs 가 빈 TurnPaths 에 0쌍을 내고
+	// unclaimed 는 `len(in.TurnPaths)==0` 이면 첫 가드에서 반환한다. 2026-08-06 재측의 접힘
+	// 분포로 보면 사라지던 28건 중 **24건**이 이 셋이다(overlap 11 · unclaimed 11 · outside 2).
+	// silent 만 무관하다 — NewPaths 는 LastJudgment 기준이라 이 창을 안 탄다.
+	//
+	// ★ **억제는 안 건드린다.** 창만 되돌리므로 이미 표시된 키는 여전히 suppressed 가 누른다.
+	// 그래서 되돌아오는 것은 밀린 것뿐이고, 접힘이 끝난 턴에는 창이 정상적으로 밀린다 —
+	// 그 두 경계를 TestFoldedTurnKeepsTheWindowUntilTheBacklogDrains 가 세 턴으로 잠근다.
+	// 창을 안 미는 쪽으로 잘못 만들면 그것이 설계 §4 의 상시 점등이다.
+	foldedAt, foldedSince, hasFolded, err := s.foldedWindow(ctx, sessionID, sess.OpenedAt)
+	if err != nil {
+		return PrescribeResult{}, err
+	}
+	// **동시각이면 물려받는다.** 접힘 이벤트는 그 턴의 발화 기록 **뒤에** 쓰이므로 정상 경로에서
+	// foldedAt >= since 이고, 같은 초로 접히는 것도 같은 턴이다. Before 로 가르면 그 경계에서
+	// 창이 밀려 밀린 처방이 다시 사라진다.
+	if hasFolded && !foldedAt.Before(since) && !foldedSince.IsZero() {
+		since = foldedSince
+	}
 
 	// 선점 항목과 각자의 선언 경로.
 	claimed, err := s.st.ClaimedItems(ctx, sessionID)
@@ -92,6 +149,11 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	// 이 구간에 반납한 항목 — "한 번도 안 집었다"와 "방금 제대로 끝냈다"를 가르는 축이다.
 	// **TurnPaths 와 같은 since 를 쓴다.** 두 창이 갈리면 "이번 턴에 만진 경로"와
 	// "이번 턴에 끝낸 항목"이 서로 다른 구간을 가리키게 되고, 그 어긋남은 화면에 안 뜬다.
+	//
+	// ★ **그래서 창을 물려받으면 이쪽도 함께 넓어진다 — 그것이 맞다.** 접힌 턴의 창을 되돌린
+	// 뒤 여기만 좁게 두면 방금 위에서 막은 어긋남이 정확히 그 턴에 생긴다: 밀린 outside 는
+	// 다시 판정되는데 그 경로를 덮던 Closed 항목은 창 밖으로 나가 있어, **제대로 마무리한
+	// 세션이 접힘 때문에 잔소리를 듣는다**(uncoveredByClosed 가 막으라고 있는 바로 그 결과).
 	released, err := s.st.ReleasedItems(ctx, sessionID, since)
 	if err != nil {
 		return PrescribeResult{}, err
@@ -167,26 +229,42 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	// 남는다. 사라지는 것이 `outside`(남이 보는 겹침 입력이 낡았다) 나 `unclaimed` 면
 	// 그 사실을 아무도 못 듣는다.
 	//
-	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 표시된 셋만 눌리므로, **그 축의 입력이
-	// 다시 생기는 턴**에 넷째가 첫 칸으로 올라온다. 다만 그 조건이 전부는 아니다:
-	// 세션이 그 경로를 다시 안 만지면 안 올라온다(`TurnPaths` 는 `f.LastAt.After(since)` 로
-	// 뽑고 `since` 는 **마지막 발화 시각**이다). 그래서 **한 턴에 몰아친 outside 다발은
-	// 여전히 소실**이고, 그것은 이 개정이 아니라 상한 자체의 한계다(후속:
-	// fd-folded-outside-burst-still-lost). 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴
-	// 반복)과는 다르다 — 눌리는 것은 표시된 것뿐이다.
+	// ★ 상한은 무의미해지지 않는다 — **순환한다.** 표시된 셋만 눌리므로 넷째가 다음 턴에
+	// 첫 칸으로 올라온다. 설계 §4 가 고발한 "상시 점등"(같은 것이 매 턴 반복)과는
+	// 다르다 — 눌리는 것은 표시된 것뿐이다.
+	//
+	// ★ **그 순환에 붙어 있던 조건을 2026-08-09 에 없앴다.** 앞선 판은 여기에 "세션이 그
+	// 경로를 다시 안 만지면 안 올라온다 — 그래서 한 턴에 몰아친 outside 다발은 여전히
+	// 소실이고, 그것은 상한 자체의 한계다"를 적고 후속 항목 이름을 달아 뒀다. 그 항목이
+	// 이것이고, 한계가 아니라 **창의 문제**였다: 접힌 턴이 자기가 본 창을 물려주면
+	// 조건 없이 순환한다(위 창 물려받기 문단). 걸려 있던 축은 outside 만이 아니었다.
 	//
 	// ★ 재측(2026-08-06): 처방이 뜬 턴 129개 중 접힌 턴 **15개**(11.6%)이고 한 턴 최대는
 	// **7건**이다. 접혀서 사라지던 축은 overlap 11 · unclaimed 11 · silent 4 · outside 2 —
 	// 앞선 판의 "35턴 중 2개"는 **표본이 4배가 되기 전** 값이다(lane-turn 은 원장에 전 기간
 	// 0건이라 그 축의 효과가 아니다. PrescribeMax 주석의 재측 문단).
 	//
-	// ★ **이 커밋 뒤로 접힘 빈도는 원장에서 못 잰다.** 표시분만 기록하므로 한 턴의 prescribe
-	// 이벤트 수가 구조적으로 PrescribeMax 를 못 넘고, `folded` 는 slog 와 화면 문구에만 남는다.
-	// 위 129/15 는 **마지막으로 잴 수 있었던 값**이고, 다시 재려면 folded 를 원장에 실어야
-	// 한다(후속: fd-folded-count-left-no-ledger-trace).
+	// ★ **접힘은 자기 이벤트로 잰다(2026-08-09 개정).** 앞선 판은 여기에 "이 커밋 뒤로
+	// 접힘 빈도는 원장에서 못 잰다 — 다시 재려면 folded 를 원장에 실어야 한다"를 적고
+	// 후속 항목 이름을 달아 뒀다. 그 항목이 이것이다.
+	//
+	// 옛 재측 레시피("턴 = 같은 세션·같은 초의 prescribe 이벤트 묶음, len>3 이면 접힌 턴")는
+	// **위 루프가 표시분만 도는 한 영구히 0을 낸다** — 상한이 구조적으로 3을 넘기지 못하게
+	// 막기 때문이다. 그래서 접힌 턴이 자기 이름의 이벤트 하나를 남기고, 그때부터 재측은
+	// `kind='prescribe_folded'` 를 세는 일이 된다(위 129/15 를 그 축으로 다시 만든다).
 	for _, p := range shown {
 		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID,
 			prescribePayload{Key: p.Key, Reason: p.Reason})
+	}
+	if folded > 0 {
+		keys := make([]string, 0, folded)
+		for _, p := range all[len(shown):] {
+			keys = append(keys, p.Key)
+		}
+		// since 는 위에서 물려받기를 거친 값이다 — 접힘이 이어지는 동안 같은 창이 계속
+		// 실려 나가고, 그래서 밀린 것이 다 나갈 때까지 창이 안 밀린다.
+		s.st.LogEvent(ctx, eventPrescribeFolded, sess.Project, sessionID,
+			prescribeFoldedPayload{Keys: keys, Shown: len(shown), Since: since})
 	}
 	if len(all) > 0 {
 		s.log.InfoContext(ctx, "처방 발화",
@@ -269,24 +347,22 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 	return out, since, nil
 }
 
-// ackPrescriptions 는 지금 열려 있는 처방 전부를 닫는다.
+// ackPrescriptions 는 **판단을 남기는 경로**(note·finish)가 닫는 것을 닫는다.
 //
-// ★ note 한 번이 전부를 닫는 이유: 처방 문구가 무엇을 쓸지 지정하므로 보통 판단 하나가
+// ★ note 한 번이 (거의) 전부를 닫는 이유: 처방 문구가 무엇을 쓸지 지정하므로 보통 판단 하나가
 // 그것을 덮는다. 처방마다 대응 판단을 요구하면 세션이 형식적 note 를 양산하고,
 // 그러면 건수는 오르는데 판단 바이트는 안 오른다 — 설계 §10 이 그 둘을 함께 보라고 한 이유다.
 //
+// ★ **"전부"에서 하나가 빠진다(2026-08-09 개정).** 행동이 판단이 아닌 처방은 판단으로 안
+// 닫힌다 — `judge.AckedByLand` 가 가리는 `lane-turn` 이다. 그전까지 이 함수는 키를 안 가려서
+// 확인이 그 축에 대해 **정확히 반대 신호**를 쟀다: 처방대로 랜딩한 세션은 미확인으로 남고,
+// 레인과 아무 상관 없는 note 한 줄을 남긴 세션이 확인으로 잡혔다. 그 사실을 잠그고 있던
+// 시험(`…AckMeasuresJudgmentsNotTheLandItPrescribed`)이 스스로 "통로를 뚫으면 여기가 먼저
+// 빨개진다, 그때 고칠 것은 시험이 아니라 여기 적힌 사실"이라고 적어 뒀고, 이것이 그 개정이다.
+// 지금 그 자리를 잠그는 것은 `TestLaneTurnIsClosedByLandAndUnrelatedJudgmentsLeaveItOpen` 이다.
+//
 // ★ **실패해도 판단 저장을 되돌리지 않는다.** 판단이 재생성 불가한 자산이고 ack 은 계측이다.
 // 다만 삼키지 않는다 — WARN 으로 남긴다.
-//
-// ★ **이 통로를 지나는 것은 판단을 남기는 경로뿐이다(note·finish). `land` 는 안 지난다.**
-// 그래서 행동이 `land()` 인 처방(`lane-turn`)에 대해 확인은 **정확히 반대 신호**를 잰다 —
-// 처방대로 랜딩한 세션은 미확인으로 남고, 처방을 무시하고 상관없는 판단만 남긴 세션이
-// 확인으로 잡힌다. 위 "note 한 번이 전부를 닫는다"가 그 뒤집힘을 완성한다: 키를 안 가리므로
-// 레인과 아무 상관 없는 note 한 줄이 `lane-turn:<행>` 까지 닫는다.
-//
-// 이것은 **계약이 아니라 현재 사실**이고 `TestLaneTurnAckMeasuresJudgmentsNotTheLandItPrescribed`
-// 가 그대로 잠갔다 — 통로를 뚫으면(land 가 자기가 응답한 키만 골라 ack) 그 시험이 먼저
-// 빨개진다. 그때 고칠 것은 시험이 아니라 여기 적힌 사실이다.
 //
 // ★ 이 축과 `AckReach`(board.go)를 섞지 마라. 저쪽은 키를 안 보고 **대화 단위**로 센다
 // (machine + cc_session_id. 카드가 갈려도 한 번 센다) — 반면 이 함수는 **카드 하나**의
@@ -294,6 +370,29 @@ func (s *Service) emittedKeys(ctx context.Context, sessionID string, openedAt ti
 // 분모에는 들어가면서 분자에는 안 들어간다. 그 차이가 지금 확인율이 100%가 아닌 이유다.
 // 키별 확인율을 내는 코드는 없다 — 설계 §10 의 "overlap 0/31" 은 사람이 따로 잰 값이다.
 func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID string) {
+	s.ackPrescriptionsMatching(ctx, project, sessionID, func(k string) bool {
+		return !judge.AckedByLand(k)
+	})
+}
+
+// ackLaneTurn 은 land 가 **자기가 방금 응답한 줄 행**의 차례 처방을 닫는다.
+//
+// ★ 접두가 아니라 그 행 하나다. 차례를 흘리고 다시 선 세션은 서로 다른 행의 lane-turn 을
+// 여럿 열어 둘 수 있고(억제 키에 행 번호가 실린 이유다), 접두로 닫으면 **아직 응답하지
+// 않은 차례**까지 확인 처리된다 — 그러면 확인율은 다시 행동이 아니라 접두 일치를 잰다.
+// TestLandAcksOnlyTheRowItAnswered 가 그 자리를 잠근다.
+func (s *Service) ackLaneTurn(ctx context.Context, project, sessionID string, rowID int64) {
+	key := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, rowID)
+	s.ackPrescriptionsMatching(ctx, project, sessionID, func(k string) bool { return k == key })
+}
+
+// ackPrescriptionsMatching 은 열려 있는 처방 중 want 가 고른 것을 닫는다.
+//
+// ★ 술어를 밖에서 받는다 — 어느 경로가 어느 키를 닫는가는 **부르는 쪽의 성질**이지
+// 이 함수의 성질이 아니다. 두 호출자(판단 경로 · land 경로)가 각자 본문을 복사했다면
+// 그때부터 "빈 ack 을 안 남긴다" 같은 규율이 두 벌이 된다.
+func (s *Service) ackPrescriptionsMatching(
+	ctx context.Context, project, sessionID string, want func(string) bool) {
 	sess, err := s.st.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "ack: 세션을 못 읽었다", "session_id", sessionID, "error", err.Error())
@@ -311,7 +410,7 @@ func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID strin
 	}
 	var keys []string
 	for k := range open {
-		if !acked[k] {
+		if !acked[k] && want(k) {
 			keys = append(keys, k)
 		}
 	}
@@ -320,6 +419,33 @@ func (s *Service) ackPrescriptions(ctx context.Context, project, sessionID strin
 	}
 	sort.Strings(keys) // 같은 입력에 같은 payload
 	s.st.LogEvent(ctx, eventPrescribeAck, project, sessionID, map[string]any{"keys": keys})
+}
+
+// foldedWindow 는 **마지막 접힌 턴**의 시각과 그 턴이 본 창을 낸다. ok 는 접힌 턴이 있었나다.
+//
+// ★ 해석 실패를 조용히 버리지 않는다. 버리면 그 턴이 물려줄 창이 사라져 밀린 처방이
+// 그대로 소실되는데(이 개정이 막으려는 바로 그 결과), 화면에는 아무것도 안 뜬다 —
+// emittedKeys 가 같은 이유로 WARN 을 남기는 것과 같은 규율이다.
+//
+// ★ 세션 카드 하나만 본다. 형제 카드에서 접힌 턴은 여기 안 잡히는데, 그것이 맞다 —
+// 창의 단위인 footprint 도 카드 단위다(store.Footprints 가 session_id 로 뽑는다).
+func (s *Service) foldedWindow(ctx context.Context, sessionID string, openedAt time.Time) (at, window time.Time, ok bool, err error) {
+	evs, err := s.st.ListSessionEvents(ctx, sessionID, eventPrescribeFolded, openedAt)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	for _, e := range evs {
+		var p prescribeFoldedPayload
+		if uerr := json.Unmarshal([]byte(e.Payload), &p); uerr != nil {
+			s.log.WarnContext(ctx, "접힘 이벤트 payload 해석 실패(그 턴의 창을 못 물려받는다)",
+				"session_id", sessionID, "payload", e.Payload)
+			continue
+		}
+		if !ok || e.At.After(at) {
+			at, window, ok = e.At, p.Since, true
+		}
+	}
+	return at, window, ok, nil
 }
 
 // ackedKeys 는 이미 확인된 키다.

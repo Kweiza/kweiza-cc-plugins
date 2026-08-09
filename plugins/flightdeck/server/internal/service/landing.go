@@ -185,6 +185,19 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 			"error", err.Error())
 		return LandResult{}, err
 	}
+	// ★ **처방이 지정한 행동을 여기서 닫는다(2026-08-09).** `lane-turn` 이 시키는 것은
+	//   `land()` 이고 그 확인이 지나는 통로는 이 한 줄뿐이다 — note·finish 는 이 키를
+	//   일부러 안 닫는다(judge.AckedByLand). 그 전까지 이 축은 정확히 반대 신호를 쟀다.
+	//
+	//   **커밋 뒤에 부른다.** ack 은 계측이고 줄 서기는 정합이라, 계측 하나가 실패했다고
+	//   줄 행과 순번을 되돌리면 이 파일이 가장 조심하는 사고가 된다(finish.go 의 같은 규율).
+	//   판정은 service/prescribe.go 에 있다 — 이 파일은 자기가 응답한 행 번호만 넘긴다.
+	//
+	//   재진입(이미 내가 쥔 채 다시 부른 경우)도 turn 이라 여기 온다. 그때는 그 키가 이미
+	//   닫혀 있어 빈 ack 이 안 남는다(ackPrescriptionsMatching 의 "열린 것만" 규율).
+	if out.State == "turn" && out.RowID > 0 {
+		s.ackLaneTurn(ctx, in.Project, in.SessionID, out.RowID)
+	}
 	s.log.InfoContext(ctx, "랜딩 줄",
 		"project", in.Project, "session_id", in.SessionID,
 		"mode", out.State, "count", out.Position)
