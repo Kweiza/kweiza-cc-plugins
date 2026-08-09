@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -220,6 +221,109 @@ func (s *Store) QueueReproduction(ctx context.Context, project string, n int) (R
 		WHERE project = ? AND kind = 'item.add' AND id >= ?`,
 		project, sinceID).Scan(&out.Adds); err != nil {
 		return Reproduction{}, fmt.Errorf("추가 이벤트 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	return out, nil
+}
+
+// closeDeclarationScanLimit 는 CloseDeclarationsByItem 이 한 번에 훑는 item.finish 행의 상한이다.
+//
+// ★ 근거를 수로 적는다(실측 2026-08-09 · ~/.flightdeck/fd.db). item.finish 는 384건이고
+// 프로젝트별 최대 속도는 context-platform 의 245건/5.26일 = 46.6건/일 이다. 5000건은 그
+// 속도로 **107일**이다. 이 축이 겨냥하는 인구는 "롤백된 뒤 아직 열려 있는 항목"이고, 열린
+// 항목 나이의 실측 최대는 9.6일 · 사고 사례는 42시간이었다 — 107일은 그 11배다.
+//
+// ★ **성능 손잡이가 아니다.** EXPLAIN QUERY PLAN 은 event_by_kind(kind=?) 를 타고
+// kind='item.finish' 행 전부를 훑은 뒤 project 로 거른다 — 훑는 양은 LIMIT 이 아니라 원장의
+// 크기가 정한다(실측 384행에 1.2ms, LIMIT 500~20000 사이에 차이가 없다). LIMIT 이 실제로 무는
+// 것은 정렬 버퍼와 JSON 파싱 횟수뿐이다. 그래서 넉넉히 잡되, 이 수가 실제로 물리기 시작하는
+// 때(원장이 지금의 13배)를 상한을 다시 잴 신호로 남긴다.
+const closeDeclarationScanLimit = 5000
+
+// CloseDeclarationsByItem 은 이 프로젝트에서 "이 항목을 닫는다"고 선언된 이력을 항목별로 접는다.
+//
+// ★ 무엇을 긁나. kind='item.finish' 하나다. 그 이벤트는 Finish 가 트랜잭션의 **첫 문장**에서
+// 예약하고(service/finish.go) Tx.LogEvent 는 롤백 갈래에서도 흘러가므로(store.go 의 flushDeferred),
+// 이 원장에는 **성공한 마무리와 롤백된 마무리가 같이** 들어 있다. 둘을 가르는 것은 항목의
+// 상태이고 그 판정은 여기서 하지 않는다 — 이 함수는 원자료만 낸다.
+//
+// ★ **앵커도 항목 존재 판정도 여기서 하지 않는다.** 시간 앵커(그 항목 CreatedAt 이후의 선언만
+// 센다)와 후보 목록에 없는 id 버리기는 service 가 한다. 그쪽은 이미 items 를 손에 쥐고 있어
+// 추가 조회가 0이고, 여기서 하려면 json_extract 를 조인 조건에 넣어야 하는데 그 선례가 이
+// 저장소에 0건이다. 그래서 이 반환값에는 **좌표가 어긋난 선언(실측 3건: 다른 프로젝트에서 친
+// finish)과 지웠다 다시 만든 id 의 옛 선언이 그대로 들어 있다.**
+//
+// ★ **이 수는 정확한 수가 아니라 하한이다.** flushDeferred 는 트랜잭션이 물던 ctx 를 그대로 쓰고
+// LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로, 클라이언트가 끊겨 ctx 가 취소되면 행이 안 써진다.
+// BeginTx 자체가 실패하면 클로저를 안 부르므로 이벤트가 아예 안 남는다. 소비자의 문구가
+// "정확히 N건"이 아니라 "적어도 N건"으로 말해야 한다.
+//
+// ★ payload 를 못 읽은 행은 **안 센다**(eventItemID · QueueReproduction 과 같은 규율).
+// payload 는 자유 JSON 이라 스키마가 없고, 못 읽은 것을 세면 어느 항목의 것인지 모르는 채로
+// 수만 늘어 화면이 관측하지 않은 것을 단정하게 된다.
+func (s *Store) CloseDeclarationsByItem(ctx context.Context, project string) (map[string]model.CloseDeclaration, error) {
+	return s.closeDeclarationsByItem(ctx, project, closeDeclarationScanLimit)
+}
+
+// closeDeclarationsByItem 은 상한을 받는 속살이다. 상한을 시험이 못 밟으면 그 수는 근거가
+// 아니라 장식이다 — 5000행을 심는 시험은 너무 느리므로 여기로 인자를 연다.
+func (s *Store) closeDeclarationsByItem(ctx context.Context, project string, limit int) (map[string]model.CloseDeclaration, error) {
+	if limit <= 0 {
+		return map[string]model.CloseDeclaration{}, nil
+	}
+	// ★ 창을 id 로 자른다. event 인덱스는 (kind,at)·(session_id,at) 뿐이고, at 은 마이크로초
+	// 해상도라 한 턴에 몰린 이벤트가 같은 값을 가질 수 있다. id 는 AUTOINCREMENT 라 단조이고
+	// 유일하다 — QueueReproduction 이 같은 이유로 같은 선택을 했다.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT at, session_id, payload FROM event
+		WHERE project = ? AND kind = 'item.finish'
+		ORDER BY id DESC LIMIT ?`, project, limit)
+	if err != nil {
+		return nil, fmt.Errorf("종료 선언 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]model.CloseDeclaration)
+	for rows.Next() {
+		var at string
+		var session sql.NullString
+		var payload string
+		if err := rows.Scan(&at, &session, &payload); err != nil {
+			return nil, fmt.Errorf("종료 선언 행 해석 실패: %w", err)
+		}
+		var p struct {
+			Item string `json:"item"`
+			Mode string `json:"mode"`
+		}
+		if json.Unmarshal([]byte(payload), &p) != nil {
+			continue
+		}
+		item := strings.TrimSpace(p.Item)
+		if item == "" {
+			continue
+		}
+		d := out[item]
+		switch p.Mode {
+		case string(model.ItemDone):
+			d.Done++
+		case string(model.ItemDropped):
+			d.Dropped++
+		default:
+			// mode 를 모르면 안 센다. 처방이 mode 로 갈리므로 모르는 값을 한쪽에 몰면
+			// 화면이 관측하지 않은 원인을 단정한다.
+			continue
+		}
+		// ORDER BY id DESC 라 이 항목을 **처음** 만나는 행이 가장 최근 선언이다.
+		if d.LastMode == "" {
+			t, err := parseTime(at)
+			if err != nil {
+				return nil, err
+			}
+			d.Last, d.LastSession, d.LastMode = t, str(session), p.Mode
+		}
+		out[item] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("종료 선언 순회 실패: %w", err)
 	}
 	return out, nil
 }
