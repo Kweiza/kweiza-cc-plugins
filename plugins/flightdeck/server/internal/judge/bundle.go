@@ -465,7 +465,12 @@ func sortedCands(m map[string]Candidate) []Candidate {
 	return out
 }
 
-// lessBundle 은 추천 순서다. 조정할 상수가 하나도 없다.
+// lessBundle 은 추천 순서다. **이 함수 안에는** 조정할 상수가 없다 — 비교자는 필드만 읽는다.
+//
+// ★ 그러나 순서 전체가 무상수인 것은 아니다. 축 하나(Starved)는 바깥의 실측 상수
+// StarvationAge 가 정하고, 또 하나(CloseDeclared)는 원장 관측이 정한다. 이 문장을
+// "상수가 0"으로 읽으면 안 된다 — 앞선 판이 그렇게 적혀 있었고, 그 사이 상수가
+// 하나 생겼는데 아무도 못 봤다(sort_axis_doc_test.go 가 그래서 섰다).
 //
 //	①  의존자 수 합 ↓ — 이걸 풀어야 남이 움직이는 정도
 //	①′ 기아          — 굶은 쪽이 먼저(임계는 StarvationAge 하나)
