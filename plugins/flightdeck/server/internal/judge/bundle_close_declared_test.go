@@ -275,19 +275,28 @@ func TestEligibleBundleNotTopLedgersWhyCloseDeclared(t *testing.T) {
 // 안 남기면 `c.Item.ID` 를 `best.Lead.Item.ID` 로 바꿔치기 변이가 통과한다 —
 // 교차오염(한 후보의 줄에 다른 후보의 값이 보기)을 못 잡는다.
 //
-// ★ 처방 문구가 갈려야 교차오염이 문자열로 드러난다. done 은 "이미 랜딩됐을 수 있다" 이고
-// dropped 는 "이미 버리기로 판정됐을 수 있다"라 둘이 다르다(closeDeclaredDetail 참고).
+// ★ 선두도 CloseDeclarations 맵에 있어야 한다. 없으면 변이가 "조각 없음"으로 보이고
+// 음성 단정이 실행되지 않는다. 선두에 자기 선언이 있으면 변이 시 "남의 값이 실린다"로
+// 나타나고, 음성 단정이 실제로 그것을 잡는다. 선두 선언은 not-top 둘과 달라야 한다
+// (예: 수를 다르게). 그래야 "선두 값이 실렸다"가 문자열로 뚜렷하게 드러난다.
+//
+// ★ 축은 강등 축이라 선언이 있는 후보는 전부 강등된다. 셋 다 선언을 주면 셋 다
+// 강등되므로 순위는 그 아래 축으로 정해진다. 여기선 의존자(0)·Starved·CloseDeclared
+// (다 같음) → 묶음 크기(다 단독) → 최고령(다 같음) → 선두 id 가 정하는데,
+// id 사전순으로 "a-done-decl" < "b-dropped-decl" < "z-lead" 이므로
+// a-done-decl 이 선두가 된다.
 func TestEligibleBundleNotTopEachLedgerCarriesOwnDeclaration(t *testing.T) {
 	in := EligibleInput{
 		Self: "S1",
 		Candidates: []Candidate{
-			cand("a-done-decl", 0, nil),
+			cand("a-lead", 0, nil), // 선두가 될 것(done 2)
 			cand("b-dropped-decl", 1, nil),
-			cand("z-lead", 2, nil),
+			cand("z-done-decl", 2, nil),
 		},
 		CloseDeclarations: map[string]model.CloseDeclaration{
-			"a-done-decl":    decl(1, 0, "done"),
+			"a-lead":         decl(2, 0, "done"), // 선두: done 2개(not-top 둘과 다르게)
 			"b-dropped-decl": decl(0, 1, "dropped"),
+			"z-done-decl":    decl(1, 0, "done"),
 		},
 		CloseDeclarationsRead: true,
 	}
@@ -301,27 +310,33 @@ func TestEligibleBundleNotTopEachLedgerCarriesOwnDeclaration(t *testing.T) {
 		}
 	}
 
-	// a-done-decl 의 줄: done 처방 있어야 하고, dropped 처방은 없어야 한다.
-	aDoneDetail := rejByID["a-done-decl"]
-	if aDoneDetail == "" {
-		t.Fatalf("a-done-decl 의 not-top 줄이 없다: %v", rej)
-	}
-	if !strings.Contains(aDoneDetail, "이미 랜딩됐을 수 있다") {
-		t.Fatalf("a-done-decl 줄에 done 처방이 없다: %q", aDoneDetail)
-	}
-	if strings.Contains(aDoneDetail, "이미 버리기로 판정됐을 수 있다") {
-		t.Fatalf("a-done-decl 줄에 dropped 처방이 섞였다 — 교차오염이다: %q", aDoneDetail)
-	}
-
-	// b-dropped-decl 의 줄: dropped 처방 있어야 하고, done 처방은 없어야 한다.
+	// b-dropped-decl 의 줄: dropped 1건 처방 있어야 하고, done 은 없어야 한다.
 	bDroppedDetail := rejByID["b-dropped-decl"]
 	if bDroppedDetail == "" {
 		t.Fatalf("b-dropped-decl 의 not-top 줄이 없다: %v", rej)
 	}
-	if !strings.Contains(bDroppedDetail, "이미 버리기로 판정됐을 수 있다") {
-		t.Fatalf("b-dropped-decl 줄에 dropped 처방이 없다: %q", bDroppedDetail)
+	if !strings.Contains(bDroppedDetail, "dropped 1") {
+		t.Fatalf("b-dropped-decl 줄에 dropped 1건이 없다: %q", bDroppedDetail)
 	}
 	if strings.Contains(bDroppedDetail, "이미 랜딩됐을 수 있다") {
 		t.Fatalf("b-dropped-decl 줄에 done 처방이 섞였다 — 교차오염이다: %q", bDroppedDetail)
+	}
+	if strings.Contains(bDroppedDetail, "done 2") {
+		t.Fatalf("b-dropped-decl 줄에 선두의 done 2건이 섞였다 — 교차오염이다: %q", bDroppedDetail)
+	}
+
+	// z-done-decl 의 줄: done 1건 처방 있어야 하고, dropped 나 done 2건은 없어야 한다.
+	zDoneDetail := rejByID["z-done-decl"]
+	if zDoneDetail == "" {
+		t.Fatalf("z-done-decl 의 not-top 줄이 없다: %v", rej)
+	}
+	if !strings.Contains(zDoneDetail, "done 1") {
+		t.Fatalf("z-done-decl 줄에 done 1건이 없다: %q", zDoneDetail)
+	}
+	if strings.Contains(zDoneDetail, "이미 버리기로 판정됐을 수 있다") {
+		t.Fatalf("z-done-decl 줄에 dropped 처방이 섞였다 — 교차오염이다: %q", zDoneDetail)
+	}
+	if strings.Contains(zDoneDetail, "done 2") {
+		t.Fatalf("z-done-decl 줄에 선두의 done 2건이 섞였다 — 교차오염이다: %q", zDoneDetail)
 	}
 }
