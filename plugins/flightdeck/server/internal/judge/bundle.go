@@ -277,6 +277,15 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 					age.Round(time.Minute), StarvationAge)
 			}
 		}
+		// 종료 선언 판정도 여기서만 한다 — bundleAround 는 원장을 안 받는 순수 조립이다.
+		// CloseDeclarationsRead 가 false 면 블록을 통째로 건너뛴다(Now.IsZero() 가 기아를
+		// 건너뛰는 것과 같은 모양). 보는 것은 **선두 하나**다: 이 축은 "이 항목을 지금
+		// 새로 집어도 되나"에 답하고, 그 질문의 주어는 브랜치를 받는 선두다.
+		if d, ok := closeDeclarationOf(in, lead.Item.ID); ok {
+			b.CloseDeclared = true
+			b.CloseDeclaredDetail = closeDeclaredDetail(d)
+			b.Reason += " · ★" + b.CloseDeclaredDetail
+		}
 		bundles = append(bundles, b)
 	}
 	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
@@ -312,6 +321,50 @@ func flatten(order []string, byItem map[string][]model.Rejection) []model.Reject
 		out = append(out, byItem[id]...)
 	}
 	return out
+}
+
+// closeDeclarationOf 는 이 항목의 종료 선언을 낸다.
+// 두 번째 반환값이 false 면 **강등하지 않는다** — 축을 안 읽었거나
+// (CloseDeclarationsRead=false), 이 항목에 선언이 없거나, 키는 있는데 수가 0인
+// 세 경우가 전부 여기로 접힌다. 세 경우의 처분이 같으므로 접는 것이 맞다.
+func closeDeclarationOf(in EligibleInput, id string) (model.CloseDeclaration, bool) {
+	if !in.CloseDeclarationsRead {
+		return model.CloseDeclaration{}, false
+	}
+	d, ok := in.CloseDeclarations[id]
+	if !ok || d.Count() == 0 {
+		return model.CloseDeclaration{}, false
+	}
+	return d, true
+}
+
+// closeDeclaredDetail 은 강등 근거 한 조각이다. Bundle.Reason 과 RejectNotTop 의
+// Detail 이 이 **한 문자열**을 함께 쓴다 — 두 자리에서 따로 조립하면 화면이 말하는
+// 이유와 원장이 남기는 이유가 조용히 갈린다.
+//
+// ★ 수는 **하한이다.** flushDeferred 는 트랜잭션이 물고 있던 ctx 를 그대로 쓰고
+// LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로, 클라이언트가 끊긴 마무리는 원장에
+// 아예 안 남는다. 문구가 "이상"이라고 말하는 이유가 그것이다 — 정확한 수로 읽히면
+// "0건이니 안전하다"가 관측이 아니라 추측이 된다.
+//
+// ★ mode 를 안 합친다. done 은 "이미 랜딩됐을 수 있다"이고 dropped 는 "이미 버리기로
+// 판정됐을 수 있다"라 **처방이 갈린다**(실측 383건 중 dropped 76건, 20%).
+// 합치면 사람이 무엇을 확인해야 하는지가 문장에서 사라진다.
+//
+// Last·LastSession·LastMode 는 store 가 실제 행에서 읽은 값이다 — 못 읽은 행은
+// 애초에 안 센다(CloseDeclarationsByItem 의 계약). 그래서 여기서 zero 를 따로
+// 방어하지 않는다. 방어하면 "관측했는데 비었다"와 "안 셌다"가 다시 한 값으로 접힌다.
+func closeDeclaredDetail(d model.CloseDeclaration) string {
+	verdict := "이미 끝난 일일 수 있다"
+	switch d.LastMode {
+	case "done":
+		verdict = "이미 랜딩됐을 수 있다"
+	case "dropped":
+		verdict = "이미 버리기로 판정됐을 수 있다"
+	}
+	return fmt.Sprintf("종료 선언 %d건 이상(done %d · dropped %d · 마지막 %s 세션 %s mode=%s) — %s. 연결된 판단부터 읽어라",
+		d.Count(), d.Done, d.Dropped,
+		d.Last.UTC().Format("2006-01-02 15:04:05"), d.LastSession, d.LastMode, verdict)
 }
 
 // bundleAround 는 선두 하나를 중심으로 직접 이웃만 모은다.

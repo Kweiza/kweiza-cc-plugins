@@ -93,6 +93,20 @@ type EligibleInput struct {
 	// 이 저장소의 규율 그대로다(judgeMissingFollowups 의 fail-open 과 같은 모양).
 	// Eligible(단일 추천)은 이 값을 아예 안 본다.
 	Now time.Time
+	// CloseDeclarations 는 항목 id → 그 항목을 닫으려다 롤백된 선언이다.
+	//
+	// ★ 여기 담긴 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다.
+	// 없는 키와 Count()==0 은 둘 다 "강등하지 않는다"로 접힌다.
+	CloseDeclarations map[string]model.CloseDeclaration
+	// CloseDeclarationsRead 가 false 면 이 축이 **아예 안 돈다**.
+	//
+	// ★ nil 맵을 "안 읽음"으로 쓰지 않는다. 같은 구조체의 HeldResources 가
+	// "비어 있으면 아무도 안 쥠"이라는 **정반대** 계약이라, 한 구조체에 nil 의 뜻이
+	// 반대인 맵 둘이 나란히 서게 된다. 그리고 Go 의 nil 맵 조회는 zero 를 내므로
+	// nil 과 빈 맵이 바이트 단위로 같은 출력이 되어, 순수 함수 시험이 두 상태를
+	// 가를 관측점을 하나도 못 갖는다. service/pick.go 의 siblingIndex 가 같은 이유로
+	// (값, bool) 두 반환값을 골랐다 — 그 모양을 그대로 쓴다.
+	CloseDeclarationsRead bool
 }
 
 // Eligible 은 지금 집을 수 있는 항목 하나를 고르고, **고르지 않은 전부의 사유**를 돌려준다.

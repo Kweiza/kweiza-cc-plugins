@@ -1,9 +1,20 @@
 package judge
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kweiza/flightdeck/internal/model"
 )
+
+// decl 은 시험용 종료 선언이다. mode 는 마지막 선언의 것이다.
+func decl(done, dropped int, mode string) model.CloseDeclaration {
+	return model.CloseDeclaration{
+		Done: done, Dropped: dropped,
+		Last: t0.Add(-time.Hour), LastSession: "01KZ785T-OLD", LastMode: mode,
+	}
+}
 
 // 정렬 축(강등)을 lessBundle 을 직접 불러 확인한다 — **안 굶은 묶음끼리**.
 //
@@ -83,5 +94,136 @@ func TestLessBundleStarvedBeatsCloseDeclared(t *testing.T) {
 	}
 	if lessBundle(cleanFresh, declaredStarved) {
 		t.Fatalf("역방향이 대칭이 아니다")
+	}
+}
+
+// EligibleBundle 이 두 필드를 실제로 채우는지 — 배선이 이어져 있는지 본다.
+//
+// ★ lessBundle 단위 시험만 있으면 CloseDeclared 를 **아무도 안 채우는** 상태가
+// 통과한다. 이 저장소가 여러 번 겪은 실패 모양이다(계산은 되는데 읽는 쪽이 0건) —
+// TestEligibleBundleMarksStarvation 이 같은 이유로 서 있다.
+//
+// 그리고 **강등은 탈락이 아니다.** 단독 후보 하나로 부르면 그 항목은 여전히
+// 추천된다 — 거르면 선점 표류 아닌 이유로 롤백된 항목까지 큐에서 사라진다(설계 §3).
+func TestEligibleBundleMarksCloseDeclared(t *testing.T) {
+	only := cand("a-declared", 0, nil)
+	best, rej := EligibleBundle(EligibleInput{
+		Self:                  "S1",
+		Candidates:            []Candidate{only},
+		CloseDeclarations:     map[string]model.CloseDeclaration{"a-declared": decl(1, 0, "done")},
+		CloseDeclarationsRead: true,
+	}, SiblingIndex{})
+	if best == nil {
+		t.Fatalf("강등이 탈락으로 샜다 — 추천이 nil 이다(사유 %v)", rej)
+	}
+	if best.Lead.Item.ID != "a-declared" {
+		t.Fatalf("선두가 %q 다", best.Lead.Item.ID)
+	}
+	if !best.CloseDeclared {
+		t.Fatalf("선언이 있는데 CloseDeclared 가 false 다 — 배선이 끊겼다")
+	}
+	// 사유 문구는 넷을 다 말해야 한다: 수가 하한이라는 것 · 마지막 세션 · mode ·
+	// done 의 처방. 하나라도 없으면 사람이 무엇을 확인해야 하는지 모른다.
+	for _, want := range []string{"종료 선언 1건 이상", "01KZ785T-OLD", "mode=done", "이미 랜딩됐을 수 있다"} {
+		if !strings.Contains(best.CloseDeclaredDetail, want) {
+			t.Fatalf("근거 조각에 %q 가 없다: %q", want, best.CloseDeclaredDetail)
+		}
+		if !strings.Contains(best.Reason, want) {
+			t.Fatalf("Reason 이 %q 를 안 싣는다 — 왜 강등했는지 답 못 하는 추천이 된다: %q", want, best.Reason)
+		}
+	}
+	// mode 를 안 합친다 — dropped 의 처방은 done 과 다르다.
+	dropBest, _ := EligibleBundle(EligibleInput{
+		Self:                  "S1",
+		Candidates:            []Candidate{cand("a-declared", 0, nil)},
+		CloseDeclarations:     map[string]model.CloseDeclaration{"a-declared": decl(0, 1, "dropped")},
+		CloseDeclarationsRead: true,
+	}, SiblingIndex{})
+	if !strings.Contains(dropBest.CloseDeclaredDetail, "이미 버리기로 판정됐을 수 있다") {
+		t.Fatalf("dropped 의 처방이 done 과 같은 문장으로 접혔다: %q", dropBest.CloseDeclaredDetail)
+	}
+}
+
+// 강등된 항목은 **밀리되 사라지지 않는다.**
+//
+// ★ 거르면 선점 표류 아닌 이유로 롤백된 항목까지 큐에서 사라진다(설계 §3).
+// Overlaps 가 "거르지 않고 알린다"로 선 것과 같은 자리다.
+//
+// 배치: 둘 다 단독·동나이·의존자 0이라 ①②③이 전부 동점이고, 선언이 없으면
+// ④(id 사전순)로 a-declared 가 이긴다. 선언 하나만으로 승자가 뒤집혀야 한다.
+func TestEligibleBundleCloseDeclaredDemotesButDoesNotDrop(t *testing.T) {
+	best, rej := EligibleBundle(EligibleInput{
+		Self:                  "S1",
+		Candidates:            []Candidate{cand("a-declared", 0, nil), cand("z-clean", 0, nil)},
+		CloseDeclarations:     map[string]model.CloseDeclaration{"a-declared": decl(1, 0, "done")},
+		CloseDeclarationsRead: true,
+	}, SiblingIndex{})
+	if best == nil {
+		t.Fatalf("추천이 nil 이다(사유 %v)", rej)
+	}
+	if best.Lead.Item.ID != "z-clean" {
+		t.Fatalf("선두가 %q 다 — 선언이 붙은 a-declared 가 밀렸어야 한다", best.Lead.Item.ID)
+	}
+	if best.CloseDeclared {
+		t.Fatalf("선언이 없는 z-clean 이 강등으로 찍혔다 — 선두가 아닌 항목의 선언을 읽었다")
+	}
+	// 사라지지 않는다: 원장에 not-top 으로 남는다.
+	if !contains(codesFor(rej, "a-declared"), RejectNotTop) {
+		t.Fatalf("강등된 항목의 사유가 %v 다 — not-top 으로 원장에 남아야 한다", codesFor(rej, "a-declared"))
+	}
+}
+
+// CloseDeclarationsRead 가 false 면 이 축은 **아예 안 돈다** — 맵이 채워져 있어도.
+//
+// ★ 이것이 nil 맵을 "안 읽음"으로 안 쓴 이유다. 조회가 실패했는데 그 실패가
+// "선언 0건"으로 접히면, 축을 못 읽은 pick 이 사고를 낸 그 항목을 다시 1순위로
+// 낸다 — 그런데 응답은 아무 말도 안 한다. 관측을 못 하면 판정하지 않는다.
+func TestEligibleBundleWithoutCloseDeclarationsReadDoesNotDemote(t *testing.T) {
+	in := EligibleInput{
+		Self:              "S1",
+		Candidates:        []Candidate{cand("a-declared", 0, nil), cand("z-clean", 0, nil)},
+		CloseDeclarations: map[string]model.CloseDeclaration{"a-declared": decl(1, 0, "done")},
+		// CloseDeclarationsRead 를 일부러 안 켠다.
+	}
+	best, rej := EligibleBundle(in, SiblingIndex{})
+	if best == nil {
+		t.Fatalf("추천이 nil 이다(사유 %v)", rej)
+	}
+	if best.Lead.Item.ID != "a-declared" {
+		t.Fatalf("축을 안 읽었는데 순서가 바뀌었다 — 선두가 %q 다", best.Lead.Item.ID)
+	}
+	if best.CloseDeclared {
+		t.Fatalf("축을 안 읽었는데 강등으로 찍혔다")
+	}
+	if strings.Contains(best.Reason, "종료 선언") {
+		t.Fatalf("축을 안 읽었는데 Reason 이 선언을 말한다: %q", best.Reason)
+	}
+	for _, r := range rej {
+		if strings.Contains(r.Detail, "종료 선언") {
+			t.Fatalf("축을 안 읽었는데 원장에 근거가 남았다: %q", r.Detail)
+		}
+	}
+}
+
+// 키는 있는데 수가 0인 선언은 강등하지 않는다.
+//
+// ★ 지금 store 가 그런 항목을 안 만들지만, 이 필드는 판정의 **입력 계약**이고
+// 계약은 호출부 하나가 지금 어떻게 짜여 있는지와 별개로 서 있어야 한다
+// (TestEmptyResourceHolderDoesNotBlock 이 같은 이유로 서 있다). 0건을 강등으로
+// 읽으면 "선언이 있었다"가 아니라 "맵에 키가 있었다"가 큐 순서를 바꾼다.
+func TestEligibleBundleZeroCountCloseDeclarationDoesNotDemote(t *testing.T) {
+	best, rej := EligibleBundle(EligibleInput{
+		Self:       "S1",
+		Candidates: []Candidate{cand("a-declared", 0, nil), cand("z-clean", 0, nil)},
+		CloseDeclarations: map[string]model.CloseDeclaration{
+			"a-declared": {Last: t0, LastSession: "S-EMPTY"}, // Count()==0
+		},
+		CloseDeclarationsRead: true,
+	}, SiblingIndex{})
+	if best == nil {
+		t.Fatalf("추천이 nil 이다(사유 %v)", rej)
+	}
+	if best.Lead.Item.ID != "a-declared" || best.CloseDeclared {
+		t.Fatalf("0건 선언으로 강등했다 — 선두 %q, CloseDeclared=%v", best.Lead.Item.ID, best.CloseDeclared)
 	}
 }
