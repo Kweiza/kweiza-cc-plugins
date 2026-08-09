@@ -316,6 +316,31 @@ type Event struct {
 	Payload   string // JSON
 }
 
+// CloseDeclaration 은 이 항목을 닫으려다 롤백된 선언이다.
+//
+// ★ 뜻은 "일이 끝났다"가 아니라 **"이 항목은 닫혀야 한다는 판단이 본문과 함께 내려졌다"**이다.
+// 원장의 item.finish 는 트랜잭션 첫 문장에서 예약되고 롤백 갈래에서도 흘러가므로, 그 이벤트가
+// 있는데 항목이 아직 열려 있다면 그 시도는 죽은 것이다 — 그리고 그때 쓰인 판단 본문도 함께
+// 죽었다(실측 10300·5421·5060·3032 바이트).
+//
+// ★ 이 타입이 **model 에 있는 이유.** store 도 judge 도 이것을 손에 쥐는데 둘 사이에는 의존이
+// 없다(store 는 judge 를 import 하지 않고, judge 의 import 는 model 하나뿐이다). 어느 한쪽에
+// 두면 없던 방향의 의존이 새로 생긴다. Rejection 이 같은 모양의 선례다 — judge 가 만들고
+// store 가 저장한다.
+//
+// ★ Done 과 Dropped 을 **합쳐 담지 않는다.** 처방이 갈린다 — done 은 "이미 랜딩됐을 수 있다",
+// dropped 는 "이미 버리기로 판정됐을 수 있다"이고, 실측 384건 중 dropped 가 76건(20%)이다.
+type CloseDeclaration struct {
+	Done        int       // mode=done 인 선언 수
+	Dropped     int       // mode=dropped 인 선언 수
+	Last        time.Time // 마지막 선언 시각
+	LastSession string    // 마지막 선언을 한 세션 id
+	LastMode    string    // 마지막 선언의 mode ("done" | "dropped")
+}
+
+// Count 는 mode 를 가리지 않은 선언 수다. "몇 번 선언됐나"는 합이다.
+func (d CloseDeclaration) Count() int { return d.Done + d.Dropped }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 조회 결과 — 화면과 도구가 쓰는 조립 타입
 // ─────────────────────────────────────────────────────────────────────────────
