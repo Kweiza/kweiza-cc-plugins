@@ -270,3 +270,58 @@ func TestEligibleBundleNotTopLedgersWhyCloseDeclared(t *testing.T) {
 		}
 	}
 }
+
+// 강등된 후보가 둘 이상이고 각자 다른 선언을 가졌을 때, 각 줄이 제 값을 다는지 본다.
+// 안 남기면 `c.Item.ID` 를 `best.Lead.Item.ID` 로 바꿔치기 변이가 통과한다 —
+// 교차오염(한 후보의 줄에 다른 후보의 값이 보기)을 못 잡는다.
+//
+// ★ 처방 문구가 갈려야 교차오염이 문자열로 드러난다. done 은 "이미 랜딩됐을 수 있다" 이고
+// dropped 는 "이미 버리기로 판정됐을 수 있다"라 둘이 다르다(closeDeclaredDetail 참고).
+func TestEligibleBundleNotTopEachLedgerCarriesOwnDeclaration(t *testing.T) {
+	in := EligibleInput{
+		Self: "S1",
+		Candidates: []Candidate{
+			cand("a-done-decl", 0, nil),
+			cand("b-dropped-decl", 1, nil),
+			cand("z-lead", 2, nil),
+		},
+		CloseDeclarations: map[string]model.CloseDeclaration{
+			"a-done-decl":    decl(1, 0, "done"),
+			"b-dropped-decl": decl(0, 1, "dropped"),
+		},
+		CloseDeclarationsRead: true,
+	}
+	_, rej := EligibleBundle(in, SiblingIndex{})
+
+	// 각 후보의 not-top 줄을 찾는다.
+	rejByID := make(map[string]string)
+	for _, r := range rej {
+		if r.Reason == RejectNotTop {
+			rejByID[r.Item] = r.Detail
+		}
+	}
+
+	// a-done-decl 의 줄: done 처방 있어야 하고, dropped 처방은 없어야 한다.
+	aDoneDetail := rejByID["a-done-decl"]
+	if aDoneDetail == "" {
+		t.Fatalf("a-done-decl 의 not-top 줄이 없다: %v", rej)
+	}
+	if !strings.Contains(aDoneDetail, "이미 랜딩됐을 수 있다") {
+		t.Fatalf("a-done-decl 줄에 done 처방이 없다: %q", aDoneDetail)
+	}
+	if strings.Contains(aDoneDetail, "이미 버리기로 판정됐을 수 있다") {
+		t.Fatalf("a-done-decl 줄에 dropped 처방이 섞였다 — 교차오염이다: %q", aDoneDetail)
+	}
+
+	// b-dropped-decl 의 줄: dropped 처방 있어야 하고, done 처방은 없어야 한다.
+	bDroppedDetail := rejByID["b-dropped-decl"]
+	if bDroppedDetail == "" {
+		t.Fatalf("b-dropped-decl 의 not-top 줄이 없다: %v", rej)
+	}
+	if !strings.Contains(bDroppedDetail, "이미 버리기로 판정됐을 수 있다") {
+		t.Fatalf("b-dropped-decl 줄에 dropped 처방이 없다: %q", bDroppedDetail)
+	}
+	if strings.Contains(bDroppedDetail, "이미 랜딩됐을 수 있다") {
+		t.Fatalf("b-dropped-decl 줄에 done 처방이 섞였다 — 교차오염이다: %q", bDroppedDetail)
+	}
+}
