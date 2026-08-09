@@ -85,12 +85,22 @@ type LivePanel struct {
 	Folded string
 }
 
-// ClaimTarget 은 회수 가능한 선점 하나다. **근거를 함께 낸다**(설계 §4 의 다섯 축 중 표시분).
+// ClaimTarget 은 회수 가능한 선점 하나다. **근거를 함께 낸다**(설계 §4 의 여섯 축 중 표시분).
+//
+// ★ 여섯째가 종료 선언이다 — "이 항목을 닫으려다 롤백된 적이 있다". 앞의 다섯(신호 나이·
+// 발자국·선점 시각·브랜치·ahead)은 전부 **세션**에 대한 사실이고, 이것만 **항목**에 대한
+// 사실이다. 그래서 카드가 아니라 이 줄에 실린다.
 type ClaimTarget struct {
 	ItemID string
+	Title  string // 회수 폼 줄은 이것이 전부다 — 제목이 없으면 무엇을 회수하는지 id 로만 판단한다
 	Holder string
 	Since  string
 	Live   string // 그 세션이 창 안에 있나 — 판정이 아니라 사실 표기다
+
+	// CloseDeclared 는 ItemRow 와 **같은 규약**이다(빈 문자열=선언 없음, CloseDeclUnread=못 읽음).
+	// 여기서 다시 계산하지 않고 ItemRow 에서 그대로 옮긴다 — 두 자리에서 따로 세면
+	// 같은 이름이 표면마다 다른 사실을 내는 어긋남이 재현된다(설계 §4-⑤).
+	CloseDeclared string
 }
 
 // UnackedPanel 은 섹션 ② 다.
@@ -118,6 +128,19 @@ type ItemRow struct {
 	Dependents int
 	Holder     string
 	Since      string
+
+	// CloseDeclared 는 이 항목을 닫으려다 롤백된 선언의 표기다(format.go 의 CloseDeclaredLabel).
+	//
+	// **빈 문자열 = 선언 없음 · CloseDeclUnread("?") = 이 축을 못 읽었다.** 셋째 상태를
+	// 0으로 접지 않는 것이 이 층의 규율이고, 같은 구조체의 Dependents = -1 이 선례다.
+	//
+	// ★ 사실을 **여기 하나에** 싣는다. buildPage 가 회수 폼의 원천을 큐 Items 로 삼으므로
+	// (p.Live.Targets = p.Queue.claimTargets(board)) 큐 표·회수 폼·폐기 폼 셋이 배선 없이
+	// 같은 문장을 얻는다. 표면마다 따로 계산하면 같은 이름이 다른 사실을 낸다.
+	//
+	// ★ ④ 랜딩 이력의 ItemRow 는 이 값을 안 채운다(빈 문자열). 그쪽은 이미 닫힌 항목이라
+	// 이 축이 겨냥하는 인구가 아니다 — 롤백된 선언은 항목이 **아직 열려 있을 때만** 사고다.
+	CloseDeclared string
 }
 
 // QueuePanel 은 섹션 ③ 이다.
@@ -128,7 +151,11 @@ type QueuePanel struct {
 	Stats    RejectionStats
 	StatsErr string
 	Window   string
-	Targets  []string // 항목 폐기 폼의 선택지
+
+	// Targets 는 항목 폐기 폼의 선택지다. **줄 전체를 나른다** — id 만 나르면 폐기 폼이
+	// 같은 사실을 다시 계산해야 하고, 두 자리에서 따로 계산하는 순간 같은 이름이
+	// 표면마다 다른 사실을 내는 어긋남이 재현된다(설계 §4-⑤).
+	Targets []ItemRow
 }
 
 // SnapshotRow 는 섹션 ④ 의 스냅숏 한 줄이다. 낡음 판정이 붙는다.
@@ -593,8 +620,20 @@ func (h *handler) queuePanel(ctx context.Context, project string, board service.
 	if boardErr != nil {
 		pan.Err = "열린 항목을 못 읽었다: " + Clip(boardErr.Error(), 400)
 	}
+	// 종료 선언 축은 **여기서 한 번만** 읽는다. 줄마다 읽으면 큐 길이만큼 원장을 긁는다.
+	//
+	// ★ 실패를 pan.Err 에 담지 않는다. 이유 둘 —
+	//   ① pan.Err 은 ③의 머리말이라 **회수 폼(섹션 ①)에는 원리적으로 안 닿는다.** 이 축은
+	//      그 폼의 <option> 에도 실리는데, 배너로만 두면 되돌릴 수 없는 그 한 줄이 침묵한 채
+	//      "선언 없음"과 구분되지 않는다.
+	//   ② pan.Err 이 차면 아래 `len(pan.Items) == 0 && pan.Err == ""` 가 막혀 "큐가 비었다"라는
+	//      **참인 문장**이 사라진다. 원장 한 축을 못 읽은 것이 큐가 비었다는 사실까지 지우면
+	//      안 된다.
+	// 대신 줄마다 센티널(CloseDeclUnread)을 싣고 사유 전문은 서버 로그에 남긴다.
+	decls, declsRead := h.closeDeclarations(ctx, st, project)
+
 	for _, it := range board.OpenItems {
-		pan.Items = append(pan.Items, h.itemRow(ctx, st, it, "", time.Time{}))
+		pan.Items = append(pan.Items, h.itemRow(ctx, st, it, "", time.Time{}, decls, declsRead))
 	}
 
 	// 선점된 항목은 ListOpen 에 안 들어온다(state='claimed'). 빼면 진행 중인 일이
@@ -611,11 +650,11 @@ func (h *handler) queuePanel(ctx context.Context, project string, board service.
 				Clip(hd.ItemID, 64), Clip(err.Error(), 200)))
 			continue
 		}
-		pan.Items = append(pan.Items, h.itemRow(ctx, st, it, hd.SessionID, hd.At))
+		pan.Items = append(pan.Items, h.itemRow(ctx, st, it, hd.SessionID, hd.At, decls, declsRead))
 	}
 
 	for _, it := range pan.Items {
-		pan.Targets = append(pan.Targets, it.ID)
+		pan.Targets = append(pan.Targets, it)
 	}
 	if len(pan.Items) == 0 && pan.Err == "" {
 		pan.Empty = "큐가 비었다 — 열린 항목도 선점된 항목도 없다."
@@ -639,12 +678,36 @@ func (h *handler) queuePanel(ctx context.Context, project string, board service.
 	return pan
 }
 
+// closeDeclarations 는 종료 선언 축을 한 번 읽는다.
+//
+// 두 번째 반환값이 false 면 **못 읽은 것**이고, 그때 화면은 0건이 아니라 센티널을 낸다.
+// (값, bool) 두 반환값을 고른 이유는 nil 맵이 Go 에서 zero 를 내기 때문이다 — nil 을
+// "안 읽음"으로 쓰면 빈 맵과 바이트 단위로 같은 출력이 되어 가를 관측점이 없어진다.
+// service/pick.go 가 SiblingIndex 에서 같은 판단을 이미 내렸다.
+func (h *handler) closeDeclarations(ctx context.Context, st *store.Store,
+	project string) (map[string]model.CloseDeclaration, bool) {
+
+	d, err := st.CloseDeclarationsByItem(ctx, project)
+	if err != nil {
+		// 삼키지 않는다. 다만 이 한 축 때문에 큐 표를 통째로 버리지도 않는다 —
+		// 역인덱스 실패가 항목 줄을 안 버리는 것과 같은 자리다.
+		h.log.WarnContext(ctx, "종료 선언 축 조회 실패",
+			"project", Clip(project, 64), "error", err.Error())
+		return nil, false
+	}
+	return d, true
+}
+
 func (h *handler) itemRow(ctx context.Context, st *store.Store, it model.Item,
-	holder string, since time.Time) ItemRow {
+	holder string, since time.Time,
+	decls map[string]model.CloseDeclaration, declsRead bool) ItemRow {
 
 	r := ItemRow{
 		ID: it.ID, Title: it.Title, Body: Clip(it.Body, 300),
 		State: string(it.State), Paths: it.Paths, Labels: it.Labels, Holder: holder,
+		// ★ 앵커는 여기서 건다. store 는 원자료만 내고 "지웠다 다시 만든 id 의 옛 선언이
+		// 그대로 들어 있다"고 doc 에 적어 뒀다 — 그 판정은 items 를 손에 쥔 이쪽 일이다.
+		CloseDeclared: CloseDeclaredLabel(decls[it.ID], declsRead, it.CreatedAt),
 	}
 	if !since.IsZero() {
 		r.Since = since.Format("01-02 15:04")
@@ -679,7 +742,10 @@ func (q QueuePanel) claimTargets(board service.BoardView) []ClaimTarget {
 		if it.Holder == "" {
 			continue
 		}
-		t := ClaimTarget{ItemID: it.ID, Holder: it.Holder, Since: it.Since, Live: "창 밖 세션"}
+		// ★ 여기서 다시 계산하지 않는다. ItemRow 가 정본이고 이 줄은 옮기기만 한다 —
+		//   두 표면이 같은 이름으로 다른 사실을 내는 것이 이 항목이 고치는 병이다.
+		t := ClaimTarget{ItemID: it.ID, Title: it.Title, Holder: it.Holder, Since: it.Since,
+			Live: "창 밖 세션", CloseDeclared: it.CloseDeclared}
 		if label, ok := live[it.Holder]; ok {
 			t.Holder, t.Live = label, "창 안 세션"
 		}

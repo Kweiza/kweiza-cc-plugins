@@ -11,9 +11,14 @@ import (
 
 // 묶음 판정 — pick 이 함께 갈 항목을 고르는 자리.
 //
-// 이 파일의 함수는 전부 순수 함수다. 그리고 **기존 판정을 하나도 안 고친다** —
-// Eligible·PathsOverlap·lessCandidate 는 다른 질문에 답하고 있고,
-// 같은 함수를 두 질문에 쓰면 한쪽을 고칠 때 다른 쪽이 조용히 바뀐다.
+// 이 파일의 함수는 전부 순수 함수다. 원장·git·시계를 여기서 읽지 않는다 —
+// 필요한 사실은 호출부가 EligibleInput 에 찍어 넣고(Now · CloseDeclarations)
+// 판정은 그 값만 본다. 그래야 시험이 판정 규칙을 직접 부를 수 있다.
+//
+// 그리고 **Eligible·PathsOverlap·lessCandidate 는 하나도 안 고친다** — 셋은 다른
+// 질문에 답하고 있고, 같은 함수를 두 질문에 쓰면 한쪽을 고칠 때 다른 쪽이 조용히
+// 바뀐다. lessBundle 은 이 파일의 것이라 여기서 자란다(기아 축과 종료 선언 축이
+// 그렇게 붙었다). "하나도 안 고친다"를 lessBundle 까지로 읽으면 그 문장이 거짓이 된다.
 
 // SamePaths 는 두 경로 집합에서 **정확히 같은** 토큰을 낸다. 순수 함수다.
 //
@@ -166,18 +171,54 @@ type Bundle struct {
 	// Reason 은 네 키의 **실제 값**이다. 감추면 "왜 하필 이 브랜치 이름인가"에
 	// 답할 수 없고, 답 못 하는 자동 선택은 두 번째 세션부터 무시된다.
 	Reason string
+	// CloseDeclared 는 **이 묶음의 선두**를 닫으려다 롤백된 선언이 원장에 있다는 사실이다.
+	//
+	// zero(false)가 "강등 안 함"이다. 이 필드를 안 찍는 호출부(judge 를 직접 부르는
+	// 시험·아직 안 배선된 경로)가 큐 순서를 뒤집지 않게 하는 것이 그 방향의 이유다.
+	//
+	// EligibleInput.CloseDeclarationsRead 가 false 면 **언제나 false** 다 —
+	// "축을 안 읽었다"와 "선언이 없다"가 여기서 한 값으로 접히지만, 그 접힘은
+	// 안전한 쪽이다(기존 순서가 그대로 산다). 둘을 갈라 보여줘야 하는 표면은
+	// service 가 (값, bool) 두 반환값으로 따로 나른다.
+	CloseDeclared bool
+	// CloseDeclaredDetail 은 그 사실을 사람이 읽는 한 조각이다.
+	// Reason 과 RejectNotTop 의 Detail 이 **같은 문자열**을 싣는다 — 화면이 말하는
+	// 이유와 원장이 남기는 이유가 갈리면 어느 쪽이 참인지 되짚을 길이 없다.
+	CloseDeclaredDetail string
 }
 
 // StarvationAge 는 묶음 크기를 이기기 시작하는 나이다.
 //
-// ★ 임의의 값이 아니다. 리드타임 실측(kweiza-cc-plugins · done 81건 · created→closed)이
-// 정한다:
+// ★ 임의의 값이 아니다. 리드타임 실측(kweiza-cc-plugins · created→closed)이 정한다.
+// **두 시점을 나란히 적는다 — 날짜 없는 실측은 언제 거짓이 됐는지 아무도 못 본다**(첫
+// 실측에는 날짜가 없어서 사흘 뒤 결론이 거짓이 되는 것을 아무도 못 봤다):
 //
-//	중앙값 3.4h · 평균 6.7h · p90 16.3h · 최대 42.2h
+//	2026-08-06  done  81건 — 중앙값 3.4h · 평균  6.7h · p90 16.3h · 최대 42.2h
+//	2026-08-09  done 127건 — 중앙값 6.1h · 평균 12.0h · p90 33.8h · 최대 80.1h
 //
-// 24h 는 p90(16.3h) 바깥이라 **정상 작업이 안 걸린다.** 이 값을 p90 아래로 내리면
-// 평시 항목이 줄줄이 기아로 판정돼 묶음 기능이 사실상 죽는다 — 그때는 기아 축이
-// 예외가 아니라 새 기본값이 되고, 이 상수를 넣은 이유가 사라진다.
+// ★★ **첫 실측의 결론은 지금 거짓이다.** 그 실측은 "24h 는 p90(16.3h) 바깥이라
+// 평시 작업이 안 걸린다"였다. 둘째 실측에서 p90 이 33.8h 로 올라 24h 를 이미 넘었고,
+// 잔량은 더 심하다 — 2026-08-09 실측으로 **열린 30건 중 26건**(티클러 1건을 빼면
+// 25건)이 24h 를 넘겼고 열린 항목 나이의 중앙값이 67.4h · 최대 79.9h 다. 앞 표가 재는
+// 것은 이미 끝난 일의 리드타임이고 큐에 남은 것은 정의상 그 분포에서 빠진 꼬리다 —
+// 둘을 같은 것으로 읽은 것이 "평시 작업이 안 걸린다"가 한동안 거짓인 채 남아 있던
+// 이유다. **기아는 예외가 아니라 현재 기본값이다.**
+//
+// **그런데도 값을 안 올린다.** 임계를 리드타임 p90 에 자동 추종시키면 큐가 나빠질수록
+// 경고가 사라진다 — 설계 §4 가 고발한 상시 점등의 정확한 거울상(상시 소등)이다.
+// 올라간 p90 은 임계를 따라 올릴 근거가 아니라 **소화가 안 된다는 관측 그 자체**다.
+//
+// 그래서 이 상수를 얼마로 두느냐보다 중요한 것이 기아 영역 **안에서**의 순서다.
+// lessBundle 의 굶김 전용 갈래는 무조건 return 하므로, 그 뒤에 놓인 축은 큐의
+// 26/30 에 대해 무동작이 된다 — 축을 더할 때마다 그 자리를 먼저 정해야 한다.
+//
+// **이 값을 다시 정할 근거는 리드타임이 아니라 잔량이다** — 열린 항목 나이의
+// 중앙값이 24h 아래로 내려오면 그때 이 상수가 다시 "예외를 고르는" 일을 하게 된다.
+// 그 시점에 위 표에 셋째 줄을 더해 판정한다.
+//
+// 재측 방법: `python3` stdlib `sqlite3` 로 `file:/home/<사용자>/.flightdeck/fd.db?mode=ro`
+// 를 **직접** 연다(WAL 은 열린 커넥션끼리 공유돼 값이 그대로 보인다). db 파일 하나만
+// `cp` 로 뜨면 아직 체크포인트 안 된 WAL 분량이 빠져 조용히 낮은 수가 나온다.
 //
 // "하루가 지나도 아무도 안 집었다"가 사람에게 설명 가능한 문장이라는 것도 값의
 // 일부다. 원장이 낸 순위를 사람이 못 읽으면 두 번째 세션부터 무시된다.
@@ -250,6 +291,15 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 					age.Round(time.Minute), StarvationAge)
 			}
 		}
+		// 종료 선언 판정도 여기서만 한다 — bundleAround 는 원장을 안 받는 순수 조립이다.
+		// CloseDeclarationsRead 가 false 면 블록을 통째로 건너뛴다(Now.IsZero() 가 기아를
+		// 건너뛰는 것과 같은 모양). 보는 것은 **선두 하나**다: 이 축은 "이 항목을 지금
+		// 새로 집어도 되나"에 답하고, 그 질문의 주어는 브랜치를 받는 선두다.
+		if d, ok := closeDeclarationOf(in, lead.Item.ID); ok {
+			b.CloseDeclared = true
+			b.CloseDeclaredDetail = closeDeclaredDetail(d)
+			b.Reason += " · ★" + b.CloseDeclaredDetail
+		}
 		bundles = append(bundles, b)
 	}
 	sort.SliceStable(bundles, func(i, j int) bool { return lessBundle(bundles[i], bundles[j]) })
@@ -268,10 +318,20 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 		if picked[c.Item.ID] {
 			continue
 		}
-		rejByItem[c.Item.ID] = append(rejByItem[c.Item.ID], model.Rejection{
-			Item: c.Item.ID, Reason: RejectNotTop,
-			Detail: fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
-				best.Lead.Item.ID, len(best.Members)+1)})
+		detail := fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
+			best.Lead.Item.ID, len(best.Members)+1)
+		// ★ 이 축이 무엇을 몇 번 밀어냈는지는 여기에만 남는다. 안 남기면 pick_eval 의
+		// not-top 줄이 "밀렸다"만 말하고 "왜"를 안 말해, 강등이 실제로 발화했는지를
+		// 사후에 셀 방법이 하나도 없다 — 그러면 "조용히 버리는 것이 하나도 없다"가
+		// 형식만 지켜지고 목적은 안 지켜진다.
+		//
+		// 싣는 것은 **이 후보 자신**의 선언이다(승자의 것이 아니다). fit 의 모든
+		// 원소는 각자 묶음의 선두였으므로, 그것이 곧 이 축이 밀어낸 항목이다.
+		if d, ok := closeDeclarationOf(in, c.Item.ID); ok {
+			detail += " · " + closeDeclaredDetail(d)
+		}
+		rejByItem[c.Item.ID] = append(rejByItem[c.Item.ID],
+			model.Rejection{Item: c.Item.ID, Reason: RejectNotTop, Detail: detail})
 	}
 	return &best, flatten(order, rejByItem)
 }
@@ -285,6 +345,50 @@ func flatten(order []string, byItem map[string][]model.Rejection) []model.Reject
 		out = append(out, byItem[id]...)
 	}
 	return out
+}
+
+// closeDeclarationOf 는 이 항목의 종료 선언을 낸다.
+// 두 번째 반환값이 false 면 **강등하지 않는다** — 축을 안 읽었거나
+// (CloseDeclarationsRead=false), 이 항목에 선언이 없거나, 키는 있는데 수가 0인
+// 세 경우가 전부 여기로 접힌다. 세 경우의 처분이 같으므로 접는 것이 맞다.
+func closeDeclarationOf(in EligibleInput, id string) (model.CloseDeclaration, bool) {
+	if !in.CloseDeclarationsRead {
+		return model.CloseDeclaration{}, false
+	}
+	d, ok := in.CloseDeclarations[id]
+	if !ok || d.Count() == 0 {
+		return model.CloseDeclaration{}, false
+	}
+	return d, true
+}
+
+// closeDeclaredDetail 은 강등 근거 한 조각이다. Bundle.Reason 과 RejectNotTop 의
+// Detail 이 이 **한 문자열**을 함께 쓴다 — 두 자리에서 따로 조립하면 화면이 말하는
+// 이유와 원장이 남기는 이유가 조용히 갈린다.
+//
+// ★ 수는 **하한이다.** flushDeferred 는 트랜잭션이 물고 있던 ctx 를 그대로 쓰고
+// LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로, 클라이언트가 끊긴 마무리는 원장에
+// 아예 안 남는다. 문구가 "이상"이라고 말하는 이유가 그것이다 — 정확한 수로 읽히면
+// "0건이니 안전하다"가 관측이 아니라 추측이 된다.
+//
+// ★ mode 를 안 합친다. done 은 "이미 랜딩됐을 수 있다"이고 dropped 는 "이미 버리기로
+// 판정됐을 수 있다"라 **처방이 갈린다**(실측 383건 중 dropped 76건, 20%).
+// 합치면 사람이 무엇을 확인해야 하는지가 문장에서 사라진다.
+//
+// Last·LastSession·LastMode 는 store 가 실제 행에서 읽은 값이다 — 못 읽은 행은
+// 애초에 안 센다(CloseDeclarationsByItem 의 계약). 그래서 여기서 zero 를 따로
+// 방어하지 않는다. 방어하면 "관측했는데 비었다"와 "안 셌다"가 다시 한 값으로 접힌다.
+func closeDeclaredDetail(d model.CloseDeclaration) string {
+	verdict := "이미 끝난 일일 수 있다"
+	switch d.LastMode {
+	case "done":
+		verdict = "이미 랜딩됐을 수 있다"
+	case "dropped":
+		verdict = "이미 버리기로 판정됐을 수 있다"
+	}
+	return fmt.Sprintf("종료 선언 %d건 이상(done %d · dropped %d · 마지막 %s 세션 %s mode=%s) — %s. 연결된 판단부터 읽어라",
+		d.Count(), d.Done, d.Dropped,
+		d.Last.UTC().Format("2006-01-02 15:04:05"), d.LastSession, d.LastMode, verdict)
 }
 
 // bundleAround 는 선두 하나를 중심으로 직접 이웃만 모은다.
@@ -375,12 +479,19 @@ func sortedCands(m map[string]Candidate) []Candidate {
 	return out
 }
 
-// lessBundle 은 추천 순서다. 조정할 상수가 하나도 없다.
+// lessBundle 은 추천 순서다. **이 함수 안에는** 조정할 상수가 없다 — 비교자는 필드만 읽는다.
 //
-//	① 의존자 수 합 ↓ — 이걸 풀어야 남이 움직이는 정도
-//	② 묶음 크기   ↓ — 한 번에 더 많이 푸는 쪽이 이긴다
-//	③ 최고령      ↑ — 오래 방치된 것을 먼저
-//	④ 선두 id     사전순 — 동점 처리. 없으면 같은 입력에 다른 답이 나온다
+// ★ 그러나 순서 전체가 무상수인 것은 아니다. 축 하나(Starved)는 바깥의 실측 상수
+// StarvationAge 가 정하고, 또 하나(CloseDeclared)는 원장 관측이 정한다. 이 문장을
+// "상수가 0"으로 읽으면 안 된다 — 앞선 판이 그렇게 적혀 있었고, 그 사이 상수가
+// 하나 생겼는데 아무도 못 봤다(sort_axis_doc_test.go 가 그래서 섰다).
+//
+//	①  의존자 수 합 ↓ — 이걸 풀어야 남이 움직이는 정도
+//	①′ 기아          — 굶은 쪽이 먼저(임계는 StarvationAge 하나)
+//	①″ 종료 선언     — 닫히려다 롤백된 항목은 **뒤로**. 거르지는 않는다
+//	②  묶음 크기   ↓ — 한 번에 더 많이 푸는 쪽이 이긴다
+//	③  최고령      ↑ — 오래 방치된 것을 먼저
+//	④  선두 id     사전순 — 동점 처리. 없으면 같은 입력에 다른 답이 나온다
 //
 // ★ ②가 없으면 이 기능이 **발화하지 않는다.** 실측에서 열린 16건 전부 의존자 0이라
 // ①이 상수이고, 그 상태에서 ③이 실질 1차 키가 되는데 최고령이 단독이었다(설계 §0.2).
@@ -403,12 +514,33 @@ func sortedCands(m map[string]Candidate) []Candidate {
 // ★ 기아 영역 **안에서는 ②를 안 본다.** 다시 넣으면 굶은 단독이 굶은 묶음에 밀리는,
 // 똑같은 함정이 그 안에서 재현된다. 예외 상태에서 방어 가능한 규칙은
 // "가장 오래 굶은 것부터" 하나뿐이다.
+//
+// ★★★ ①″(종료 선언)의 자리는 **①′ 바로 아래, 굶김 전용 갈래보다 위**다. 둘 다
+// 근거가 있다.
+//
+//	· 왜 ①′ 아래인가. 이 강등에는 유효기간이 없다(설계 §3 — 항목을 위험하게 만든
+//	  조건은 시간이 지난다고 낫지 않는다. 기한 만료는 곧 사고 재현이다). 그러면
+//	  강등된 항목이 영영 안 나오는 루프가 걱정인데, 기아를 위에 두는 것이 그것을
+//	  구조적으로 끊는다 — 강등된 항목도 굶는 순간 안 굶은 묶음 전부를 이긴다.
+//	  조정 상수를 하나도 안 들이고 끊는다.
+//	· 왜 굶김 전용 갈래보다 위인가. 그 갈래는 **무조건 return** 하므로 뒤에 놓인
+//	  축은 굶은 묶음끼리 영영 안 읽힌다. 지금 큐는 열린 30건 중 26건이 굶었고
+//	  사고 항목도 회수 시점에 42시간이었다(StarvationAge 주석의 ★★ 참고) —
+//	  뒤에 두면 이 축이 겨냥한 인구 **전체**에 대해 무동작이 된다.
+//	  TestLessBundleCloseDeclaredSinksAmongStarvedToo 가 그 배치를 못박는다.
+//
+// lessCandidate 에는 **안 넣는다.** 제품이 부르는 것은 EligibleBundle 하나이고
+// (judge.Eligible 은 저장소 전체에서 호출자가 0건이다), 거기 넣은 축은 묶음 구성원의
+// 표시 순서만 바꾼다(설계 §4-②).
 func lessBundle(a, b Bundle) bool {
 	if a.Dependents != b.Dependents {
 		return a.Dependents > b.Dependents
 	}
 	if a.Starved != b.Starved {
 		return a.Starved
+	}
+	if a.CloseDeclared != b.CloseDeclared {
+		return !a.CloseDeclared
 	}
 	if a.Starved { // 둘 다 굶었다 — 묶음 크기를 건너뛰고 최고령순으로만 푼다
 		if !a.Oldest.Equal(b.Oldest) {

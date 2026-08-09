@@ -81,6 +81,37 @@ type PickResult struct {
 	// 적격 0건(PickNone)에도 nil 이다 — 항목이 없으면 관측할 대상이 없다.
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
 
+	// CloseDeclared 는 이 항목을 닫으려다 **롤백된** 선언이다(원장의 item.finish 인데
+	// 항목은 done/dropped 이 아니다).
+	//
+	// ★ **포인터다.** PathCheck 과 같은 이유이고, 그 상태가 실제로 난다: 구서버 + 신
+	// 클라이언트, 그리고 이 필드가 생기기 전에 굳은 오프라인 캐시가 그대로 재생된다.
+	// 값 타입이면 그 상황이 "선언 0건"으로 접혀 **관측한 적 없는 사실을 단정한다** —
+	// 하필 그 단정이 "이 항목은 깨끗하다"라서, 이 축이 막으려는 사고를 그대로 통과시킨다.
+	//
+	//	nil            = 이 응답은 그 축을 안 읽었다
+	//	non-nil, 0건   = 읽었고 선언이 없다
+	//	non-nil, n건   = 읽었고 n번 닫히려다 롤백됐다
+	//
+	// 왜 읽었는데 못 읽는 갈래가 있나 — 원장 조회가 실패했을 때다. 추천 경로
+	// (pickRecommend)는 그 사실을 항목마다 반복하지 않고 Bundle.Scope 가 한 번
+	// 말한다(bundleScope 의 closeRead). item_id 지정 선점·재개·묶음 구성원은
+	// 후보 집합 자체가 없어 그런 Scope 절이 없으므로, 이 포인터 하나가 그 경로들의
+	// 유일한 신호다.
+	//
+	// **다섯 갈래 전부에서 채운다**(추천 선두·구성원, item_id 선점·재개, 묶음
+	// 선두·구성원 — PathCheck 과 같은 계약이다). 한때는 추천 경로에서만 채웠다 —
+	// pickExplicit(:339 부근)의 주석이 그 실패를 이미 Bundle 축에 대해 적어 뒀는데
+	// ("pick 다섯 갈래 중 셋이 이 자리를 지나므로 여기서 안 채우면 신선한 온라인
+	// 응답에 거짓 원인이 붙는다") 이 브랜치가 같은 규율을 새 축(CloseDeclared)에는
+	// 걸지 않았다. 세션이 회수된 항목을 `pick item_id=X` 로 **직접** 집으면
+	// pickExplicit 을 타므로 그 세 갈래에서 경고를 한 번도 못 봤다 — 그 구멍을
+	// 여기서 닫는다.
+	//
+	// ★ 이 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다(store/store.go:366 의
+	// flushDeferred 가 트랜잭션의 ctx 를 그대로 쓴다). 문구가 그렇게 말해야 한다.
+	CloseDeclared *model.CloseDeclaration `json:"close_declared,omitempty"`
+
 	// Bundle 은 이 응답이 낸 묶음이다.
 	//
 	// ★ **포인터다.** QueueOpen·PathCheck 과 같은 이유이고, 그 상태가 실제로 난다:
@@ -124,7 +155,13 @@ type BundleMember struct {
 	Item      model.Item             `json:"item"`
 	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
-	Notes     []model.Judgment       `json:"notes,omitempty"` // 집었을 때만 전문
+	// CloseDeclared 는 이 구성원을 닫으려다 롤백된 선언이다. 계약은 PickResult 쪽과
+	// 글자 그대로 같다(nil = 그 축을 안 읽었다 · non-nil 0건 = 읽었고 없다).
+	//
+	// ★ 선두와 **양쪽 다** 있어야 한다. renderBundle 은 BundleInfo 하나만 받고 Members
+	// 는 정의상 선두 제외라 선두를 모르는데, 이 사고의 항목은 정확히 선두였다.
+	CloseDeclared *model.CloseDeclaration `json:"close_declared,omitempty"`
+	Notes         []model.Judgment        `json:"notes,omitempty"` // 집었을 때만 전문
 	// Claimed 는 이 구성원이 실제로 선점됐는가다.
 	//
 	// ★ 태스크 8이 예고했던 세 번째 상태("채택 시도했지만 실패")가 실제로 생겼다
@@ -337,6 +374,14 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 종료 선언 축 — 위 Bundle 주석이 이미 적어 둔 그 실패를 여기서도 반복하지
+	// 않는다. closeDeclarations 는 후보 슬라이스를 받아 앵커(생성 시각 이후·동시각
+	// 제외 — pick.go:805 부근의 그 함수 자신의 doc)를 건다. 그 규칙을 여기서
+	// 다시 적으면 규칙이 두 벌이 되므로, 항목 하나짜리 후보 슬라이스를 만들어
+	// **같은 함수를 재사용**한다(closeDeclarations 자체는 항목 수에 무관하게
+	// 원장 전체를 한 번 읽고 여기서 거르므로, 후보가 하나뿐이어도 안전하다).
+	closed, closeRead := s.closeDeclarations(ctx, proj.ID, []judge.Candidate{{Item: item}})
+	res.CloseDeclared = closeDeclaredOf(closed, item.ID, closeRead)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
@@ -562,6 +607,10 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 		// "집었다"는 동사를 쓰려면 실제로 쓰기가 일어났어야 한다.
 		m.Item, m.Claimed = *sub.Item, true
 		m.Notes, m.PathCheck = sub.Notes, sub.PathCheck
+		// ★ 형제 축(PathCheck)과 같은 모양이다 — sub 는 pickExplicit 이 이미 이
+		// 구성원 자기 것으로 채워 왔다. 여기서 안 나르면 PathCheck 은 실리는데
+		// 이 축만 조용히 사라진다.
+		m.CloseDeclared = sub.CloseDeclared
 		heldMembers++
 		if sub.Mode == PickClaimed {
 			newMembers++
@@ -737,6 +786,83 @@ func (s *Service) siblingIndex(ctx context.Context, project string, cands []judg
 	return judge.SiblingIndex(links), true
 }
 
+// closeDeclarations 는 후보들에 걸린 **롤백된 종료 선언**을 항목별로 모은다.
+//
+// siblingIndex 와 같은 모양이다. 실패해도 pick 을 실패시키지 않는다 — 이 축 하나
+// 때문에 추천을 통째로 잃는 것이 더 나쁘고, 축이 없어도 나머지 판정은 그대로 돈다.
+// 못 읽은 사실은 **derive 에 안 넣는다**. 바로 위 siblingIndex 가 같은 함수에서 같은
+// 판단을 이미 내렸다 — "못 읽은 사실은 derive 에 안 넣는다(derive 에 넣으면
+// FreshnessOf 가 git 축을 낡음으로 접는다). 대신 로그에 남기고, **두 번째 반환값**으로
+// 호출부에 그대로 넘긴다." pick 은 git 읽기가 실제로 도는 경로라 예외가 안 선다.
+// 호출부는 그 bool 을 EligibleInput.CloseDeclarationsRead 와 Bundle.Scope 문장에
+// 태워야 한다 — 안 그러면 "선언 0건"(진짜로 없다)과 "이 축을 아예 못 읽었다"가
+// 같은 값(빈 맵)으로 접힌다.
+//
+// ★ 원장이 낸 수를 그대로 안 쓴다. 관문 둘을 **여기서** 건다(store 는 원장만 읽는다 —
+// SQL 조인을 쓰면 json_extract 를 조인 조건에 넣어야 하는데 그 선례가 저장소에 0건이다):
+//
+//  1. **시간 앵커.** 항목의 CreatedAt **이후**의 선언만 남긴다. item 의 PK 가
+//     (project, id) 라 지워졌다 다시 만들어진 id, 프로젝트를 옮겨 비워진 뒤 재사용된
+//     id 가 옛 화신의 선언을 물려받는다. 두 값 다 이미 손에 있어 추가 조회가 없다.
+//     ★ 앵커는 **접힌 값 단위**로 건다. store 가 항목별로 접어 주므로 여기 오는 시각은
+//     마지막 선언(Last) 하나뿐이다 — 그것조차 생성 이전이면 그 접힘은 통째로 옛 화신의
+//     것이라 버린다. 생성 시각을 걸치는 접힘은 남는데, 그 상태는 같은 id 가 지워졌다
+//     다시 만들어진 **뒤에 또** 롤백된 finish 가 나야 성립한다(실측 0건). 그 갈래에서
+//     수가 실제보다 커지는 것은 아는 한계다.
+//     같은 시각은 **안 센다** — 항목이 있어야 닫을 수 있으니 동시각은 이 화신의 선언일
+//     수 없고, 애매한 쪽은 하한으로 접는 것이 이 축의 규율이다.
+//
+//  2. **좌표 어긋남은 표류와 가른다.** 후보 목록에 없는 id 의 선언은 **버린다**.
+//     실측 3건이 그 모양이다(context-platform 에서 친 finish 인데 항목은
+//     kweiza-cc-plugins 에 있다 — fd-session-row-fanout·fd-ci-timing-baseline·
+//     fd-prescribe-unclaimed-fires-after-finish). 그것은 좌표 오류지 표류가 아니다.
+//
+// ★ 이 수는 **하한이다.** flushDeferred 가 트랜잭션의 ctx 를 그대로 쓰고
+// (store/store.go:366) LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로(store/event.go:28-34),
+// 원장에 안 써진 마무리가 있을 수 있다. 문구가 그렇게 말해야 한다.
+func (s *Service) closeDeclarations(ctx context.Context, project string,
+	cands []judge.Candidate) (map[string]model.CloseDeclaration, bool) {
+
+	all, err := s.st.CloseDeclarationsByItem(ctx, project)
+	if err != nil {
+		s.log.WarnContext(ctx, "종료 선언 조회 실패 — 이 축 없이 판정한다",
+			"project", clip(project, 64), "count", len(cands), "error", err.Error())
+		return nil, false
+	}
+	out := make(map[string]model.CloseDeclaration, len(cands))
+	for _, c := range cands {
+		d, ok := all[c.Item.ID]
+		if !ok || d.Count() == 0 {
+			continue
+		}
+		if !d.Last.After(c.Item.CreatedAt) {
+			continue
+		}
+		out[c.Item.ID] = d
+	}
+	return out, true
+}
+
+// closeDeclaredOf 는 항목 하나의 종료 선언을 응답에 실을 포인터로 바꾼다. 순수 함수다.
+//
+// ★ **포인터의 뜻은 PathCheck 의 규약 그대로다**(PickResult.PathCheck 의 주석):
+// nil 은 "이 응답은 그 축을 안 읽었다"이고, 그 상태가 실제로 난다 — 구서버 + 신
+// 클라이언트, 그리고 이 필드가 생기기 전에 굳은 오프라인 캐시가 그것을 만든다.
+// 그래서 **읽었으면 선언이 0건이어도 non-nil 을 싣는다**(zero 값 = 읽었고 0건).
+// 값 타입이나 "있을 때만 채움"으로 두면 그 두 상태가 한 값으로 접히고, 그러면
+// 원장을 못 읽은 응답이 "이 항목은 깨끗하다"를 관측 없이 단정한다 —
+// checkItemPaths 가 "절대 nil 을 돌려주지 않는다"로 선 것과 같은 자리다.
+//
+// read 가 false 면 맵을 아예 안 본다. 그때 못 읽었다는 사실은 Bundle.Scope 가 말한다
+// (bundleScope 의 closeRead 인자) — 항목마다 같은 고백을 반복하지 않는다.
+func closeDeclaredOf(m map[string]model.CloseDeclaration, id string, read bool) *model.CloseDeclaration {
+	if !read {
+		return nil
+	}
+	d := m[id] // 없으면 zero — "읽었고 0건"이다. 맵 원소의 주소는 못 잡으므로 복사본을 낸다
+	return &d
+}
+
 // bundleScope 는 Bundle.Scope 문장을 만든다. 순수 함수다 — 시험이 DB 없이 문구를 고정한다.
 //
 // ★ total 은 **적격 여부와 무관하게 후보 전부를 센 수**(len(cands))다. EligibleBundle
@@ -748,12 +874,21 @@ func (s *Service) siblingIndex(ctx context.Context, project string, cands []judg
 // sibRead 가 false 면 형제 축을 못 읽었다는 사실을 문장에 남긴다. 키 부재를 값으로
 // 접지 않는다는 전역 규율이 이 한 줄에서도 지켜져야 한다 — 안 남기면 이 묶음이
 // "형제가 진짜로 없다"인지 "형제 축을 아예 못 봤다"인지 응답만으로 못 가른다.
-func bundleScope(total int, sibRead bool) string {
+//
+// closeRead 도 같은 규율이고 **따로 적는다.** 하나로 뭉치면 "형제는 읽었고 종료 선언만
+// 못 읽었다"가 화면에서 "둘 다 못 읽었다"와 같아진다. 이쪽은 항목마다 낼 수도 있지만
+// 그러면 같은 고백이 후보 수만큼 반복되므로, 축의 상태는 축의 자리(범위 문장)에서
+// 한 번만 말한다 — 항목별 값은 PickResult.CloseDeclared 가 나른다.
+func bundleScope(total int, sibRead, closeRead bool) string {
 	sc := fmt.Sprintf("관찰한 후보는 전체 %d건이다(적격 여부와 무관하게 센 수다). "+
 		"그 중 선두와 형제·선행 축으로 **직접** 이어진 것만 묶었다(전이 없음)", total)
 	if !sibRead {
 		sc += " · 형제 축(같은 판단에 함께 걸린 형제)은 이번에 못 읽었다 — " +
 			"이 묶음은 선행·경로 축만 보고 나온 결과다"
+	}
+	if !closeRead {
+		sc += " · 이 후보들이 이미 닫히려다 롤백된 적이 있는지(원장의 item.finish)는 " +
+			"이번에 못 읽었다 — 이 순위는 그 축 없이 나온 결과다"
 	}
 	return sc
 }
@@ -773,8 +908,16 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	}
 
 	sib, sibRead := s.siblingIndex(ctx, proj.ID, cands)
+	closed, closeRead := s.closeDeclarations(ctx, proj.ID, cands)
 	best, rejected := judge.EligibleBundle(judge.EligibleInput{
 		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
+		// ★ 맵과 bool 을 **함께** 싣는다. 빈 맵 하나로 접으면 "선언 0건"과 "이 축을 아예
+		// 못 읽었다"가 judge 안에서 같은 값이 되고, Go 의 nil 맵 조회는 zero 를 내므로
+		// 순수 함수 시험이 두 상태를 가를 관측점을 하나도 못 갖는다. 같은 구조체의
+		// HeldResources 가 "비어 있으면 아무도 안 쥠"이라는 정반대 계약이라 nil 을
+		// "안 읽음"으로 재활용할 수도 없다.
+		CloseDeclarations:     closed,
+		CloseDeclarationsRead: closeRead,
 		// Now 는 기아 축(judge.StarvationAge)에만 쓴다. 주입된 시계를 그대로 넘긴다 —
 		// 여기서 time.Now() 를 부르면 시험이 가짜 시계를 밀어도 이 축만 실시계로
 		// 판정한다(fd-lane-timestamps-ignore-injected-clock 이 고발한 그 모양이다).
@@ -820,6 +963,9 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	res.Overlaps = best.Lead.Overlaps
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 선두에도 싣는다. renderBundle 은 Members(선두 제외)만 받아 선두를 모르므로,
+	// 구성원 자리에만 심으면 이 사고를 낳은 그 항목에 대해 응답이 통째로 침묵한다.
+	res.CloseDeclared = closeDeclaredOf(closed, item.ID, closeRead)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
@@ -830,12 +976,16 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	// id 를 가리키게 된다(경로 겹침·부재는 항목 단위 사실이다).
 	res.Bundle = &BundleInfo{
 		Reason: best.Reason,
-		Scope:  bundleScope(len(cands), sibRead),
+		Scope:  bundleScope(len(cands), sibRead, closeRead),
 	}
 	for i, m := range best.Members {
 		res.Bundle.Members = append(res.Bundle.Members, BundleMember{
 			Item: m.Item, Link: best.Links[i],
 			PathCheck: s.checkItemPaths(ctx, proj, m.Item.Paths),
+			// ★ 종료 선언도 구성원마다 **자기 것**을 싣는다. 합치거나 선두 것을 빌려주면
+			// 화면이 엉뚱한 항목을 "이미 닫히려 했다"고 지목한다 — PathCheck 을 항목
+			// 단위로 가른 것과 같은 이유다(둘 다 항목 단위 사실이다).
+			CloseDeclared: closeDeclaredOf(closed, m.Item.ID, closeRead),
 			// Notes 는 안 싣는다 — 추천은 아직 안 집은 것이라
 			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
 		})

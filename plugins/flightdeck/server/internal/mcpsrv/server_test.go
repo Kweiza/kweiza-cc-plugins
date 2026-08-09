@@ -397,6 +397,9 @@ func TestPickResponseHasBranchAndWorktreeCommands(t *testing.T) {
 }
 
 // TestPickRefusesSteal 은 설계 §4("회수는 사람만")를 응답 문자열로 단정한다.
+//
+// ★ 수 낱말의 **일치**는 여기가 아니라 reclaim_axes_test.go 가 본다. 이 시험은
+// 존재만 보므로 문서가 여섯이 되고 문구가 다섯인 상태를 못 잡았다 — 실제로 그랬다.
 func TestPickRefusesSteal(t *testing.T) {
 	repo := newRepo(t)
 	svc, st := newSvc(t)
@@ -410,7 +413,7 @@ func TestPickRefusesSteal(t *testing.T) {
 	if !isErr {
 		t.Fatalf("steal_reason 이 조용히 무시됐다:\n%s", text)
 	}
-	if !strings.Contains(text, "회수하지 않는다") || !strings.Contains(text, "다섯 축") {
+	if !strings.Contains(text, "회수하지 않는다") || !strings.Contains(text, "여섯 축") {
 		t.Fatalf("회수 거절의 사유가 응답에 없다:\n%s", text)
 	}
 	// 조용히 무시하지도, 몰래 선점하지도 않았다.

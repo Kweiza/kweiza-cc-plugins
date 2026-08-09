@@ -1128,7 +1128,7 @@ func TestSiblingIndexReturnsEmptyOnQueryFailure(t *testing.T) {
 // 적격 여부와 무관하게 후보 전부를 센 수다). 리뷰 라운드 1 finding 2: 실측에서
 // 후보 5·적격 3 인데 "이웃 후보는 적격 항목 5건이다"라고 낸 적이 있다.
 func TestBundleScopeDoesNotClaimEligibleCount(t *testing.T) {
-	got := bundleScope(5, true)
+	got := bundleScope(5, true, true)
 	if strings.Contains(got, "적격 항목") {
 		t.Fatalf("적격 여부와 무관한 수인데 '적격 항목'이라고 주장한다: %q", got)
 	}
@@ -1141,13 +1141,33 @@ func TestBundleScopeDoesNotClaimEligibleCount(t *testing.T) {
 // 안 남기면 "구성원 0건"(형제가 진짜로 없다)과 "형제 축을 아예 못 읽었다"가 응답에서
 // 같은 값으로 접힌다. 키 부재를 값으로 접지 않는다는 전역 규율이 이 문장에도 적용된다.
 func TestBundleScopeNamesUnreadSiblingAxis(t *testing.T) {
-	read := bundleScope(5, true)
+	read := bundleScope(5, true, true)
 	if strings.Contains(read, "못 읽") {
 		t.Fatalf("다 읽었는데 못 읽었다고 말한다: %q", read)
 	}
-	unread := bundleScope(5, false)
+	unread := bundleScope(5, false, true)
 	if !strings.Contains(unread, "못 읽") {
 		t.Fatalf("형제 축을 못 읽었다는 사실이 문장에 없다: %q", unread)
+	}
+}
+
+// bundleScope 는 **종료 선언 축**을 못 읽었다는 사실도 따로 남긴다.
+//
+// ★ 축마다 따로 적는다. 하나로 뭉치면 "형제는 읽었고 종료 선언만 못 읽었다"가
+// 화면에서 "둘 다 못 읽었다"와 같아지고, 그러면 이 순위를 얼마나 믿어도 되는지가
+// 응답만으로 안 갈린다. 두 축은 서로 다른 표를 읽으므로 실제로 따로 죽는다
+// (judgment_link vs event).
+func TestBundleScopeNamesUnreadCloseDeclarationAxis(t *testing.T) {
+	read := bundleScope(5, true, true)
+	if strings.Contains(read, "item.finish") {
+		t.Fatalf("다 읽었는데 종료 선언 축을 못 읽었다고 말한다: %q", read)
+	}
+	unread := bundleScope(5, true, false)
+	if !strings.Contains(unread, "item.finish") {
+		t.Fatalf("종료 선언 축을 못 읽었다는 사실이 문장에 없다: %q", unread)
+	}
+	if strings.Contains(unread, "형제 축") {
+		t.Fatalf("종료 선언 축만 못 읽었는데 형제 축까지 고백한다: %q", unread)
 	}
 }
 
@@ -1998,7 +2018,7 @@ func TestPickRecommendScopeDoesNotConfessAnAxisItRead(t *testing.T) {
 	}
 	// 문장 전체를 그 축의 순수 함수 결과와 맞춘다 — 후보 수(2건)와 읽음 여부(true)가
 	// **둘 다** 실제 관측값으로 들어갔는지를 한 번에 본다.
-	if want := bundleScope(2, true); res.Bundle.Scope != want {
+	if want := bundleScope(2, true, true); res.Bundle.Scope != want {
 		t.Fatalf("묶음 범위가 실제 관측과 갈렸다:\n 났다: %q\n 기대: %q", res.Bundle.Scope, want)
 	}
 }

@@ -93,6 +93,20 @@ type EligibleInput struct {
 	// 이 저장소의 규율 그대로다(judgeMissingFollowups 의 fail-open 과 같은 모양).
 	// Eligible(단일 추천)은 이 값을 아예 안 본다.
 	Now time.Time
+	// CloseDeclarations 는 항목 id → 그 항목을 닫으려다 롤백된 선언이다.
+	//
+	// ★ 여기 담긴 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다.
+	// 없는 키와 Count()==0 은 둘 다 "강등하지 않는다"로 접힌다.
+	CloseDeclarations map[string]model.CloseDeclaration
+	// CloseDeclarationsRead 가 false 면 이 축이 **아예 안 돈다**.
+	//
+	// ★ nil 맵을 "안 읽음"으로 쓰지 않는다. 같은 구조체의 HeldResources 가
+	// "비어 있으면 아무도 안 쥠"이라는 **정반대** 계약이라, 한 구조체에 nil 의 뜻이
+	// 반대인 맵 둘이 나란히 서게 된다. 그리고 Go 의 nil 맵 조회는 zero 를 내므로
+	// nil 과 빈 맵이 바이트 단위로 같은 출력이 되어, 순수 함수 시험이 두 상태를
+	// 가를 관측점을 하나도 못 갖는다. service/pick.go 의 siblingIndex 가 같은 이유로
+	// (값, bool) 두 반환값을 골랐다 — 그 모양을 그대로 쓴다.
+	CloseDeclarationsRead bool
 }
 
 // Eligible 은 지금 집을 수 있는 항목 하나를 고르고, **고르지 않은 전부의 사유**를 돌려준다.
@@ -104,6 +118,14 @@ type EligibleInput struct {
 //
 // 정렬은 의존자 수 많은 것 → 오래된 것 → id 사전순이다. 마지막 축은 동점 처리이고,
 // 없으면 같은 입력에 다른 답이 나올 수 있다(입력 순서에 의존하게 된다).
+//
+// ★ **기아도 종료 선언도 이 함수에는 없다 — 일부러다.** 둘 다 EligibleBundle 이
+// Bundle 에 찍고 lessBundle 이 읽는다(bundle.go). 여기 사본을 만들지 않은 이유는
+// 이 함수를 제품이 **안 부르기** 때문이다: 비시험 호출자가 저장소 전체에서 0건이고
+// (2026-08-09 전수) 제품 경로는 EligibleBundle 하나뿐이다. 그러니 여기 축을 더해도
+// 바뀌는 것은 judge 시험이 보는 값뿐이고, 대신 같은 규칙이 두 벌이 되어 조용히
+// 표류한다 — 이 패키지가 이미 그 이유로 SamePaths 를 PathsOverlap 에서 갈라 뒀다
+// (bundle.go). 이 함수 자체의 처분은 큐 항목 fd-eligible-dead-function-disposal 이 정한다.
 func Eligible(in EligibleInput) (picked *Candidate, rejected []model.Rejection) {
 	var fit []Candidate
 	for _, c := range in.Candidates {
@@ -197,6 +219,13 @@ func rejectionsFor(c Candidate, in EligibleInput) []model.Rejection {
 //
 // 순수 함수로 빼 둔 이유는 시험이 정렬 규칙을 **직접** 부를 수 있게 하기 위해서다.
 // 정렬이 Eligible 본문에 있으면 시험이 그 규칙의 사본을 단정하게 된다.
+//
+// ★ **강등 축(Bundle.CloseDeclared)은 여기 안 들어간다.** 이 비교자가 제품에서
+// 살아 있는 자리는 EligibleBundle 의 fit 정렬 하나뿐이고(bundle.go 의
+// sort.SliceStable), 그 순서가 흘러가는 곳은 묶음 **구성원의 표시 순서**다 —
+// 무엇을 추천하느냐는 lessBundle 이 정한다(그쪽은 선두 id 로 끝나는 전순서라
+// 안정 정렬의 입력 순서가 결과를 못 바꾼다). 여기 넣으면 강등이 두 곳에서 나고,
+// 그러면 "강등을 한 번 했나 두 번 했나"를 화면에서 가를 관측점이 사라진다.
 func lessCandidate(a, b Candidate) bool {
 	if a.Dependents != b.Dependents {
 		return a.Dependents > b.Dependents

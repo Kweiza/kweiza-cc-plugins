@@ -45,6 +45,9 @@ nav a.on { font-weight:700; text-decoration:underline; }
 .badge.quiet { color:var(--warn); }
 .paths { font-size:12px; margin:6px 0 0; padding-left:16px; }
 .none { color:var(--warn); font-size:12px; }
+/* 종료 선언 — 닫으려다 롤백된 시도. 경고색보다 세게 낸다: 이 표기가 붙은 항목은
+   "아직 안 한 일"이 아니라 "이미 끝났다고 선언됐던 일"이다. */
+.decl { color:var(--crit); font-weight:600; font-size:12px; }
 table { border-collapse:collapse; width:100%; font-size:13px; }
 th, td { text-align:left; border-bottom:1px solid var(--line); padding:5px 8px; vertical-align:top; }
 th { color:var(--dim); font-weight:600; font-size:12px; }
@@ -146,7 +149,9 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>회수할 선점
       <select name="item" required {{if not .Live.Targets}}disabled{{end}}>
-        {{range .Live.Targets}}<option value="{{.ItemID}}">{{.ItemID}} ← {{.Holder}} ({{.Live}}{{if .Since}}, {{.Since}}부터{{end}})</option>{{end}}
+        {{/* 제목과 종료 선언을 **뒤에** 붙인다. `{{.ItemID}} ← ` 접두는 actions_test.go 가
+             선점의 생사를 재는 자리라(회수 전/후 두 번) 그 모양을 안 건드린다. */}}
+        {{range .Live.Targets}}<option value="{{.ItemID}}">{{.ItemID}} ← {{.Holder}} ({{.Live}}{{if .Since}}, {{.Since}}부터{{end}}){{with .Title}} · {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
         {{if not .Live.Targets}}<option>회수할 선점이 없다</option>{{end}}
       </select>
     </label>
@@ -155,7 +160,8 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
              placeholder="무엇을 보고 회수하는가 — 신호 나이·발자국·선점 시각을 근거로">
     </label>
     <button type="submit" {{if not .Live.Targets}}disabled{{end}}>선점 회수</button>
-    <span class="k">근거 다섯 축은 위 카드에 있다. 회수는 사람만 하고, 사유는 원장에 남는다.</span>
+    <span class="k">근거 다섯 축은 위 카드에 있고, 여섯째(종료 선언)는 이 줄에 있다.
+      회수는 사람만 하고, 사유는 원장에 남는다.</span>
   </form>
 </section>
 
@@ -187,6 +193,12 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <h2>③ 큐 <span class="count">{{len .Queue.Items}}건</span></h2>
     <span class="derived">{{.Queue.Derived}}</span>
   </div>
+  {{/* 행마다 이 경고를 달지 않는다 — 30행에 같은 문구가 붙으면 상시 점등된 경고가 되어
+       판별력이 0이 된다(judge/eligible.go 의 OverlapsWithLive 주석과 같은 규율). 대신
+       여기 한 번만 적는다: 종료 선언 축의 수는 하한이다 — 원장에 안 써진 마무리는
+       배지 없음과 구분되지 않는다(빈 칸이 "선언 없음"과 "유실"을 가르지 못한다). */}}
+  <p class="k">종료 선언 배지가 붙은 항목의 수는 하한이다. 배지가 없는 항목도 원장에
+    안 써진 마무리가 있었을 수 있다 — 이 축에서는 영영 0으로 보인다.</p>
   {{template "pfail" .Queue.Panel}}
   {{with .Queue.Empty}}<p class="empty">{{.}}</p>{{end}}
   {{if .Queue.Items}}
@@ -197,7 +209,9 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
       <td class="mono">{{.ID}}</td>
       <td>{{.Title}}<div class="k">{{.Body}}</div>
         {{if .Labels}}<div class="k">라벨: {{join ", " .Labels}}</div>{{end}}</td>
-      <td>{{.State}}</td>
+      {{/* 상태 칸에 붙인다 — 이 배지는 "open 인데 이미 닫으려던 적이 있다"라는
+           상태에 대한 단서지 별개의 축이 아니다. 열을 늘리면 표가 옆으로 터진다. */}}
+      <td>{{.State}}{{with .CloseDeclared}}<div class="decl">{{template "declText" .}}</div>{{end}}</td>
       <td class="mono">{{if .Holder}}{{.Holder}}{{if .Since}}<div class="k">{{.Since}}부터</div>{{end}}{{else}}—{{end}}</td>
       <td class="mono">{{if .Paths}}{{join " · " .Paths}}{{else}}<span class="none">경로 선언 없음</span>{{end}}</td>
       <td>{{if .After}}{{range .After}}<div>{{.}}</div>{{end}}{{else}}<span class="dim">없음</span>{{end}}</td>
@@ -228,7 +242,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>폐기할 항목
       <select name="item" required {{if not .Queue.Targets}}disabled{{end}}>
-        {{range .Queue.Targets}}<option value="{{.}}">{{.}}</option>{{end}}
+        {{range .Queue.Targets}}<option value="{{.ID}}">{{.ID}}{{with .Title}} — {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
         {{if not .Queue.Targets}}<option>폐기할 항목이 없다</option>{{end}}
       </select>
     </label>
@@ -237,6 +251,10 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
              placeholder="왜 안 하기로 했는가 — 이 문장이 나중에 유일한 근거다">
     </label>
     <button type="submit" {{if not .Queue.Targets}}disabled{{end}}>항목 폐기</button>
+    {{/* 이 한 줄이 위 배지의 뜻을 정한다. 배지만 있고 뜻이 없으면 사람은 그것을 장식으로 읽는다. */}}
+    <span class="k">★ <b>종료 선언</b>이 붙은 항목은 이미 한 번 닫으려다 롤백된 것이다 —
+      연결된 판단부터 읽어라(그 본문은 롤백과 함께 사라졌다). 그 수는 하한이다: 원장에
+      안 써진 마무리가 있을 수 있다.</span>
   </form>
 </section>
 
@@ -451,3 +469,10 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   <div class="body">{{.Body}}</div>
 </div>
 {{end}}
+
+{{/* declText 는 CloseDeclared 한 값의 표기다. 값의 규약은 format.go 의 CloseDeclaredLabel 이
+     정한다 — 빈 문자열은 "선언 없음"이라 호출부의 {{with}} 가 이미 걸러 여기 안 온다.
+     "?" 는 CloseDeclUnread 다. **여기 한 자리에서만** 문장으로 옮긴다 — 세 표면(큐 표·
+     회수 폼·폐기 폼)이 같은 사실을 다르게 말하면 그 자체가 이 항목이 고치는 병이다.
+     한 줄로 쓴다: <option> 안에 들어가므로 줄바꿈이 그대로 새어 나간다. */}}
+{{define "declText"}}{{if eq . "?"}}종료 선언 축을 못 읽었다 — 없다는 뜻이 아니다{{else}}{{.}}{{end}}{{end}}

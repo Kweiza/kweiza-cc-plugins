@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 이 파일은 **판정을 먹이는 배선**을 본다. 판정 자체는 judge 가, 화면은 mcpsrv 가 본다.
@@ -216,5 +218,356 @@ func TestPickBundleMemberCarriesItsPathVerdictOnTheClaimPath(t *testing.T) {
 	if res.PathCheck != nil && res.Bundle.Members[0].PathCheck.Summary == res.PathCheck.Summary {
 		t.Fatalf("구성원이 선두의 판정을 받았다: 선두=%q 구성원=%q",
 			res.PathCheck.Summary, res.Bundle.Members[0].PathCheck.Summary)
+	}
+}
+
+// seedCloseDeclaration 은 롤백된 종료 선언 하나를 원장에 **손으로** 심는다.
+//
+// ★ 왜 손으로 심나. 실물 원장에는 지금 `open`+`item.finish` 조합이 0건이다 — 두 번째
+// finish 가 성공하면 항목이 done 이 되어 후보에서 아예 빠지기 때문이다. 실물 경로로는
+// 이 상태를 못 밟는다. 그리고 앵커(항목 생성 **이전**의 이벤트)를 밟으려면 at 을 우리가
+// 골라야 하는데 store.LogEvent 는 언제나 time.Now() 를 찍는다.
+//
+// 표기는 store 의 timeLayout 과 같아야 한다 — 폭 고정이라야 사전순 정렬이 시간순과
+// 일치한다(그 상수는 store 안에 있어 여기서는 같은 문자열을 적는다).
+func seedCloseDeclaration(t *testing.T, st *store.Store, project, sessionID, itemID, mode string, at time.Time) {
+	t.Helper()
+	payload := fmt.Sprintf(`{"item":%q,"mode":%q,"bytes":10300,"count":0}`, itemID, mode)
+	if _, err := st.DB().ExecContext(ctx(),
+		`INSERT INTO event(at, project, session_id, kind, payload) VALUES (?, ?, ?, 'item.finish', ?)`,
+		at.UTC().Format("2006-01-02T15:04:05.000000Z"), project, sessionID, payload); err != nil {
+		t.Fatalf("종료 선언 심기 실패(item=%s mode=%s): %v", itemID, mode, err)
+	}
+}
+
+// hideEvent 는 원장 표를 **이름만 숨긴다**(hideJudgmentLink 과 같은 방식).
+// 지우면 추가 전용 트리거까지 함께 흔들려 무엇이 실패했는지가 흐려진다.
+func hideEvent(t *testing.T, st *store.Store) {
+	t.Helper()
+	if _, err := st.DB().ExecContext(ctx(),
+		`ALTER TABLE event RENAME TO event_hidden`); err != nil {
+		t.Fatalf("event 숨기기 실패: %v", err)
+	}
+}
+
+// ⑦ 원장이 낸 수를 **그대로 안 믿는다** — 앵커와 존재 판정이 service 에서 걸린다.
+//
+// ★ 이 둘이 없으면 무엇이 깨지나. item 의 PK 가 (project, id) 라 지워졌다 다시 만들어진
+// id 가 옛 화신의 선언을 물려받고, 실측 3건은 finish 를 친 프로젝트와 항목이 사는
+// 프로젝트가 갈린 **좌표 오류**다 — 그것을 표류로 세면 이 축이 애먼 항목을 강등한다.
+// 두 관문 다 store 가 아니라 여기 있다: candidates() 가 이미 items 를 손에 쥐고 있고,
+// SQL 조인으로 하려면 json_extract 를 조인 조건에 넣어야 하는데 그 선례가 0건이다.
+func TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates(t *testing.T) {
+	cases := []struct {
+		name    string
+		item    string // 빈 문자열이면 이 항목 자신
+		offset  time.Duration
+		wantHit bool
+	}{
+		{"생성 이후의 선언은 센다", "", time.Minute, true},
+		{"생성 이전의 선언은 옛 화신의 것이라 안 센다", "", -time.Hour, false},
+		{"생성과 같은 시각은 안 센다 — 애매한 쪽은 하한으로 접는다", "", 0, false},
+		{"후보에 없는 id 의 선언은 좌표 어긋남이라 버린다", "ghost-item", time.Minute, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, st := newSvc(t)
+			repo := newRepo(t)
+			me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+			it := addItem(t, s, "p", "anchored", []string{"services/a.go"}, nil)
+
+			id := c.item
+			if id == "" {
+				id = it.ID
+			}
+			seedCloseDeclaration(t, st, "p", me.Session.ID, id, "done", it.CreatedAt.Add(c.offset))
+
+			got, read := s.closeDeclarations(ctx(), "p", []judge.Candidate{{Item: it}})
+			if !read {
+				t.Fatalf("원장을 읽을 수 있는데 못 읽었다고 한다: %+v", got)
+			}
+			d, hit := got[it.ID]
+			if hit != c.wantHit {
+				t.Fatalf("이 항목의 선언 유무가 %v 다(기대 %v) — 맵: %+v", hit, c.wantHit, got)
+			}
+			if c.wantHit && d.Count() != 1 {
+				t.Fatalf("선언 수가 %d 다(기대 1): %+v", d.Count(), d)
+			}
+			if _, ghost := got["ghost-item"]; ghost {
+				t.Fatalf("후보에 없는 id 가 맵에 남았다 — 좌표 오류를 표류로 셌다: %+v", got)
+			}
+		})
+	}
+}
+
+// ⑧ pickRecommend 가 EligibleInput 에 종료 선언 맵을 **실제로** 싣는다.
+//
+// ★ judge 시험은 EligibleInput 을 손으로 조립하므로 이 배선을 원리적으로 못 잰다.
+// 그리고 이 축은 관측 가능한 출력이 순위 하나뿐이다 — 그래서 나이 축이 반대편을
+// 가리키도록 깔았다: 선언된 쪽을 **먼저** 만들어(최고령) 축이 안 물리면 그쪽이 이긴다.
+// 실측 기준선이 정확히 그 값이다(선두 a-rolled-back).
+func TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	older := addItem(t, s, "p", "a-rolled-back", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "b-clean", []string{"services/b.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, older.ID, "done", older.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Mode != PickRecommended || res.Item == nil {
+		t.Fatalf("사전 조건이 깨졌다 — 추천 경로여야 한다: mode=%q item=%+v", res.Mode, res.Item)
+	}
+	if res.Item.ID != "b-clean" {
+		t.Fatalf("닫히려다 롤백된 항목이 여전히 1순위다 — service 가 이 축을 judge 에 안 먹였다: 선두=%q", res.Item.ID)
+	}
+
+	// 상시 점등이면 판별력이 0이다. 반대 방향을 짝으로 못박는다.
+	t.Run("선언이 없으면 나이순 그대로다", func(t *testing.T) {
+		s, _ := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "a-rolled-back", []string{"services/a.go"}, nil)
+		addItem(t, s, "p", "b-clean", []string{"services/b.go"}, nil)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.Item.ID != "a-rolled-back" {
+			t.Fatalf("선언이 하나도 없는데 순서가 뒤집혔다 — 이 축이 상시 점등이면 판별력이 0이다: 선두=%q", res.Item.ID)
+		}
+	})
+}
+
+// ⑨ 원장을 못 읽으면 **그 사실이 Scope 에 남고**, derive 에는 안 들어간다.
+//
+// ★ derive 에 넣으면 무엇이 깨지나: FreshnessOf 가 failures>0 을 **git 축** Stale 로
+// 접기 때문에, 원장 카운트 한 번이 실패했을 뿐인데 세션이 브랜치·HEAD·조상 판정이
+// 낡았다고 읽는다. pick.go 의 siblingIndex 가 같은 판단을 이미 내려 뒀다.
+//
+// ★ 반대로 침묵도 안 된다. 안 남기면 이 순위가 "롤백된 항목이 진짜로 없다"인지
+// "그 축을 아예 못 봤다"인지 응답만으로 못 가른다.
+func TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+
+	hideEvent(t, st)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("원장을 못 읽는다고 추천을 통째로 버렸다: %v", err)
+	}
+	if res.Mode != PickRecommended || res.Item == nil || res.Item.ID != "solo" {
+		t.Fatalf("추천이 안 실렸다 — mode=%q item=%+v", res.Mode, res.Item)
+	}
+	if res.Bundle == nil {
+		t.Fatal("묶음 축이 nil 이다")
+	}
+	if !strings.Contains(res.Bundle.Scope, "item.finish") {
+		t.Fatalf("종료 선언 축을 못 읽었다는 고백이 Scope 에 없다: %q", res.Bundle.Scope)
+	}
+	if len(res.Failures) != 0 {
+		t.Fatalf("종료 선언 축의 실패를 derive 에 실었다 — FreshnessOf 가 git 축을 낡음으로 접는다: %+v", res.Failures)
+	}
+}
+
+// ⑩ **선두**가 자기 종료 선언을 싣는다 — 이 사고의 항목이 정확히 선두였다.
+//
+// ★ renderBundle 은 BundleInfo 하나만 받고 Members 는 정의상 선두 제외라 선두를
+// 모른다. 구성원 자리에만 심으면 사고를 낳은 그 항목에 대해 응답이 침묵한다.
+//
+// ★ 세 상태를 다 잰다. nil 의 뜻이 "안 읽었다" 하나로 서려면 "읽었고 0건"이 반드시
+// non-nil 이어야 하고, 그 짝이 없으면 원장을 못 읽은 응답이 관측 없이 "이 항목은
+// 깨끗하다"를 단정하게 된다(checkItemPaths 가 절대 nil 을 안 내는 것과 같은 자리).
+func TestPickResultCarriesCloseDeclarationForTheLead(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("선두의 종료 선언이 안 실렸다 — 사고를 낳은 그 항목이 정확히 선두다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("선두의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+	if res.CloseDeclared.LastMode != "done" || res.CloseDeclared.LastSession != me.Session.ID {
+		t.Fatalf("마지막 선언의 좌표(세션·mode)가 안 실렸다: %+v", res.CloseDeclared)
+	}
+
+	t.Run("선언이 없어도 읽었으면 non-nil 이다", func(t *testing.T) {
+		s, _ := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.CloseDeclared == nil {
+			t.Fatal("읽었는데 nil 이다 — nil 은 '이 축을 안 읽었다'라서 0건과 접히면 안 된다")
+		}
+		if res.CloseDeclared.Count() != 0 {
+			t.Fatalf("선언이 없는데 수가 %d 다: %+v", res.CloseDeclared.Count(), res.CloseDeclared)
+		}
+	})
+
+	t.Run("축을 못 읽었으면 nil 이다", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+		hideEvent(t, st)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.CloseDeclared != nil {
+			t.Fatalf("못 읽었는데 값을 실었다 — 관측한 적 없는 사실을 단정한다: %+v", res.CloseDeclared)
+		}
+	})
+}
+
+// ⑪ **구성원**이 자기 종료 선언을 싣는다. 선두 것을 빌려주면 안 된다.
+//
+// ★ 값을 서로 다르게 깐다(구성원=dropped 1건, 선두=0건). 같은 값으로 깔면 선두 것을
+// 그대로 복사하는 변이가 초록으로 지나간다 — 구성원 PathCheck 이 같은 함정을 이미
+// 밟았고(TestPickBundleMemberPathCheckIsPerItemNotLead) 같은 방식으로 막는다.
+func TestPickBundleMemberCarriesItsOwnCloseDeclaration(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	declared := addItem(t, s, "p", "a1-declared", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "z9-clean", []string{"services/z.go"}, nil)
+	makeSiblings(t, st, "p", "a1-declared", "z9-clean")
+	seedCloseDeclaration(t, st, "p", me.Session.ID, declared.ID, "dropped", declared.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 형제 하나가 구성원이어야 한다: %+v", res.Bundle)
+	}
+	if res.Item.ID != "z9-clean" || res.Bundle.Members[0].Item.ID != "a1-declared" {
+		t.Fatalf("선언된 쪽이 여전히 선두다 — 선두=%q 구성원=%q",
+			res.Item.ID, res.Bundle.Members[0].Item.ID)
+	}
+	m := res.Bundle.Members[0]
+	if m.CloseDeclared == nil {
+		t.Fatal("구성원의 종료 선언이 안 실렸다 — 화면이 그 항목에 대해 침묵한다")
+	}
+	if m.CloseDeclared.Count() != 1 || m.CloseDeclared.Dropped != 1 || m.CloseDeclared.LastMode != "dropped" {
+		t.Fatalf("구성원의 선언이 자기 것이 아니다: %+v", m.CloseDeclared)
+	}
+	if res.CloseDeclared == nil || res.CloseDeclared.Count() != 0 {
+		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
+	}
+}
+
+// ⑫ item_id 지정 **선점**(pickExplicit 의 새 선점 갈래)도 종료 선언 축을 싣는다.
+//
+// ★ 이 시험이 잠그는 것이 이 브랜치 전체 수정의 본체다. pickExplicit 은
+// res.Bundle·res.PathCheck·res.Overlaps·res.Setup 을 전부 채우면서 CloseDeclared 만
+// 비워 뒀었다 — 같은 함수의 Bundle 필드 주석(pick.go:340-360 부근)이 "안 채우면
+// 렌더가 신선한 온라인 응답에 거짓 원인을 찍는다"고 Bundle 축에 대해 이미 적어
+// 둔 실패를, 이 브랜치가 새 축에는 적용하지 않았던 것이다. `res.CloseDeclared`
+// 를 지우면(변이) 이 시험만 붉어져야 한다 — pickRecommend 를 잠근 ⑩은 이 경로를
+// 원리적으로 못 잰다(추천은 선점이 아니다).
+func TestPickExplicitClaimCarriesCloseDeclared(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Mode != PickClaimed {
+		t.Fatalf("사전 조건이 깨졌다 — 새 선점이어야 한다: mode=%q", res.Mode)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("item_id 지정 선점이 종료 선언 축을 안 실었다 — pickExplicit 이 이 축을 안 읽는다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("선점 응답의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+}
+
+// ⑬ **재개**(이미 내 선점을 다시 부른 갈래) — 이 사고의 **시점 B 그 자체**다:
+// 롤백 → 사람이 회수 → 항목이 open → 세션이 `pick item_id=X` 로 **직접** 다시
+// 집으면(이미 자기 선점이라) pickExplicit 의 재개 갈래를 탄다. 새 선점(⑫)과 코드
+// 경로가 완전히 갈린다 — 재개는 아무것도 안 쓰고 조기 반환한다(pick.go 의 `if resume`
+// 블록). 그래서 ⑫가 초록이어도 이 갈래가 비어 있을 수 있다.
+func TestPickResumeCarriesCloseDeclared(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	if _, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID}); err != nil {
+		t.Fatalf("첫 선점 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID, ItemID: it.ID})
+	if err != nil {
+		t.Fatalf("재개 실패: %v", err)
+	}
+	if res.Mode != PickResumed {
+		t.Fatalf("사전 조건이 깨졌다 — 재개 경로여야 한다: mode=%q", res.Mode)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("재개 응답이 종료 선언 축을 안 실었다 — 회수 뒤 다시 집은 세션이 경고를 한 번도 못 본다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("재개 응답의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+}
+
+// ⑭ 묶음 **구성원**도 종료 선언 축을 싣는다(item_ids 로 지정해 집는 경로) — ⑥이
+// PathCheck 에 대해 잠근 것과 같은 형태다. `m.CloseDeclared = sub.CloseDeclared`
+// 한 줄이 빠지면 형제 축(PathCheck)은 실리는데 이 축만 조용히 사라진다.
+func TestPickBundleMemberCarriesCloseDeclaredOnTheClaimPath(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	mem := addItem(t, s, "p", "mem", []string{"services/mem.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, mem.ID, "dropped", mem.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "mem"}})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 || !res.Bundle.Members[0].Claimed {
+		t.Fatalf("사전 조건이 깨졌다 — 구성원이 집혔어야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.CloseDeclared == nil {
+		t.Fatal("묶음 구성원의 종료 선언이 안 실렸다 — PathCheck 은 나르는데 이 축만 비었다")
+	}
+	if m.CloseDeclared.Count() != 1 || m.CloseDeclared.Dropped != 1 {
+		t.Fatalf("구성원의 선언이 자기 것이 아니다: %+v", m.CloseDeclared)
+	}
+	// 선두는 선언이 없었다 — 구성원 것을 선두가 받아 가지 않았다는 것도 함께 본다.
+	if res.CloseDeclared == nil || res.CloseDeclared.Count() != 0 {
+		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
 	}
 }

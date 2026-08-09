@@ -421,3 +421,67 @@ func Clip(s string, n int) string {
 	}
 	return string(rs[:n]) + "…"
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 종료 선언 — 닫으려다 롤백된 시도
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CloseDeclUnread 는 "이 축을 못 읽었다"는 센티널이다.
+//
+// ★ 빈 문자열과 **반드시 갈라야 한다.** 빈 문자열은 "원장을 읽었고 선언이 0건이다"이고
+// 이것은 "원장을 아예 못 읽었다"다. 둘을 한 값으로 접으면 조회가 죽은 화면이 그 항목을
+// "깨끗하다"고 말하게 되고, 그 거짓말이 정확히 이 축이 막으려는 사고다.
+// 같은 층의 선례가 ItemRow.Dependents 의 -1 이다(page.go 의 역인덱스 조회 실패 갈래).
+const CloseDeclUnread = "?"
+
+// CloseDeclaredLabel 은 항목 한 줄의 종료 선언 표기다. 순수 함수다.
+//
+// 규약 셋:
+//   - read=false → CloseDeclUnread. **0건으로 접지 않는다.**
+//   - 선언 0건 → 빈 문자열. 화면에 아무것도 안 낸다(없는 것에 자리를 주지 않는다).
+//   - 그 밖 → "최소 N건"으로 쓴다. store 가 낸 수는 정확한 수가 아니라 **하한**이다 —
+//     flushDeferred 가 트랜잭션의 ctx 를 그대로 쓰고 LogEvent 는 쓰기 실패를 WARN 으로만
+//     삼키므로, 클라이언트가 끊기면 행이 안 써진다. 문구가 그 사실을 말해야 한다.
+//
+// ★ created 이전의 선언은 **버린다.** item 의 PK 가 (project, id) 라 지웠다 다시 만든 id 가
+// 옛 이벤트를 물려받는다. store.CloseDeclarationsByItem 이 그 앵커를 일부러 안 걸고
+// 호출자에게 넘긴다고 doc 에 적어 뒀다("이 함수는 원자료만 낸다").
+//
+// ★ 앵커는 Last 하나로만 건다. 집계가 이미 mode 별 수로 접혀 있어 그보다 정밀하게 못 자른다 —
+// **되살아난 id 에 옛 선언이 섞여 수만 부푼 경우는 이 함수가 못 가른다.** 정직하게 적는다:
+// 안 적으면 다음 세션이 이 축을 완전한 것으로 믿는다.
+//
+// ★ 시각을 못 읽은 선언에는 앵커를 안 건다. 그것을 "항목보다 옛것"으로 몰면 관측하지 않은
+// 사실을 단정하는 것이다 — 그때는 버리지 않고 시각만 미상으로 낸다. (이 규율은 아래
+// 동시각 규율과 **다른** 규율이다 — Last 가 zero 인 갈래와 Last 가 created 와 같은
+// 갈래를 같은 조건으로 묶지 않는다.)
+//
+// ★ 경계는 **동시각 포함**이다 — service.closeDeclarations(pick.go:817)와 글자로
+// 맞춘다: `!d.Last.After(c.Item.CreatedAt)` 면 버린다. 항목이 있어야 닫을 수 있으니
+// 동시각은 이 화신의 선언일 수 없고, 애매한 쪽은 하한으로 접는 것이 이 축의 규율이다
+// (pick_wiring_test.go:269 의 "생성과 같은 시각은 안 센다" 가 그 경계를 이름 붙여
+// 못박았다). 예전에는 여기가 `Before` 로만 걸러 동시각을 남겼다 — 같은 사실에
+// service 와 web 두 표면이 다른 답을 내는 병이었다.
+func CloseDeclaredLabel(d model.CloseDeclaration, read bool, created time.Time) string {
+	if !read {
+		return CloseDeclUnread
+	}
+	if d.Count() == 0 {
+		return ""
+	}
+	if !created.IsZero() && !d.Last.IsZero() && !d.Last.After(created) {
+		return ""
+	}
+	last, mode, sess := "마지막 시각 미상", "mode 미상", "세션 미상"
+	if !d.Last.IsZero() {
+		last = "마지막 " + d.Last.Format("01-02 15:04")
+	}
+	if d.LastMode != "" {
+		mode = "mode=" + Clip(d.LastMode, 16)
+	}
+	if d.LastSession != "" {
+		sess = "세션 " + short(Clip(d.LastSession, 64))
+	}
+	return fmt.Sprintf("종료 선언 최소 %d건(done %d · dropped %d) — %s · %s · %s",
+		d.Count(), d.Done, d.Dropped, last, mode, sess)
+}
