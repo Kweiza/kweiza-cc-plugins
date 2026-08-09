@@ -1214,6 +1214,15 @@ func renderBundle(bi *service.BundleInfo) string {
 			mark = markRejected
 		}
 		fmt.Fprintf(&b, "\n  %s %s — %s [%s]\n", mark, m.Item.ID, m.Item.Title, m.Item.State)
+		// ★ 종료 선언은 **머리줄 바로 밑**에 찍는다. 아래 못 집은 갈래는 continue 로 절을
+		// 끊으므로 이 줄을 그 뒤에 두면 못 집은 구성원에게 영영 안 나온다 — 그런데
+		// "이미 닫으려던 항목"과 "지금 못 집었다"는 겹쳐서 나는 사실이고, 못 집은 구성원이야말로
+		// 다음 세션이 다시 집으러 오는 자리다. 그래서 사유 줄보다 위다.
+		//
+		// 값은 **그 구성원의 것**이다. 선두의 r.CloseDeclared 를 여기 넘기면 다섯 항목이
+		// 같은 사실을 말하게 되고, 그 변이는 전체 문자열 Contains 로는 안 죽는다
+		// (경로 축이 실제로 그렇게 죽어 있었다 — render_test.go:1326-1333).
+		b.WriteString(renderCloseDeclared(m.CloseDeclared, "    "))
 		if m.Rejection != nil {
 			fmt.Fprintf(&b, "    못 집었다: %-16s %s\n",
 				m.Rejection.Reason, clip(m.Rejection.Detail, 160))

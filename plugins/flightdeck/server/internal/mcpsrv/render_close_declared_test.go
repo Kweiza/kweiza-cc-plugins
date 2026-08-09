@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
@@ -236,5 +237,141 @@ func TestRenderPickOmitsCloseDeclarationWhenThereIsNoItem(t *testing.T) {
 
 	if strings.Contains(got, "종료 선언:") {
 		t.Fatalf("항목이 없는데 종료 선언 줄이 나왔다:\n%s", got)
+	}
+}
+
+// TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration 은 구성원마다 **제 값**을
+// 받는지를 절 안에서 단정한다. render_test.go:1372 의 경로 축 시험과 같은 좌표계다 —
+// 전체 문자열에 대한 strings.Contains 는 **출력을 넓히는 모든 변경을 통과시킨다.**
+// 실측으로 확인된 것도 그것이다: renderPathCheck 의 인자를 Members[0] 것으로 바꿔도
+// 전 스위트가 초록이었다. 그래서 다섯 값을 **서로 다르게** 깔고 bundleMemberSegment 로
+// 잘라 그 안에서만 본다 — 선두 것을 구성원에 복사하는 변이가 여기서 죽는다.
+//
+// ★ 못 집은 구성원(Rejection≠nil)을 반드시 하나 넣는다. 그 갈래는 render.go:1215 의
+// continue 로 절을 끊으므로, 줄을 continue 아래에 두는 구현은 **여기서만** 죽는다.
+// 그리고 그 자리가 중요한 이유가 있다: 못 집은 구성원이야말로 다음 세션이 다시
+// 집으러 오는 항목이다.
+//
+// ★ 오등록 시험이 Members[1] 에 값을 둔 것과 같은 이유로, 여기서도 값이 다른 구성원을
+// Members[0] 아닌 자리에 섞는다 — Members[0] 만 쓰는 변이가 정답과 구별되게.
+func TestRenderPickGivesEachBundleMemberItsOwnCloseDeclaration(t *testing.T) {
+	var (
+		leadAt    = time.Date(2026, 8, 4, 23, 54, 37, 0, time.UTC)
+		doneAt    = time.Date(2026, 8, 5, 1, 0, 0, 0, time.UTC)
+		droppedAt = time.Date(2026, 8, 6, 2, 0, 0, 0, time.UTC)
+	)
+	const (
+		leadOwn    = "롤백된 마무리 선언 적어도 2건(done 2 · dropped 0) — 마지막 2026-08-04 23:54 · 세션 01LEADSE… · mode=done"
+		doneOwn    = "롤백된 마무리 선언 적어도 1건(done 1 · dropped 0) — 마지막 2026-08-05 01:00 · 세션 01MEMDON… · mode=done"
+		droppedOwn = "롤백된 마무리 선언 적어도 3건(done 0 · dropped 3) — 마지막 2026-08-06 02:00 · 세션 01MEMDRO… · mode=dropped"
+		cleanOwn   = "원장에서 하나도 못 봤다"
+		unreadOwn  = "이 응답은 이 축을 안 읽었다"
+	)
+	res := service.PickResult{
+		Mode: service.PickClaimed, Reason: "선두를 선점했다", Branch: "lead",
+		Item: &model.Item{ID: "lead", Title: "선두", State: model.ItemClaimed, CreatedAt: t0},
+		CloseDeclared: &model.CloseDeclaration{
+			Done: 2, Last: leadAt, LastSession: "01LEADSESSION", LastMode: "done",
+		},
+		Bundle: &service.BundleInfo{
+			Reason: "의존자 합 0 · 묶음 5건 · 선두 lead",
+			Members: []service.BundleMember{
+				{
+					Item:    model.Item{ID: "m-done", Title: "done 선언", State: model.ItemClaimed, CreatedAt: t0},
+					Claimed: true,
+					CloseDeclared: &model.CloseDeclaration{
+						Done: 1, Last: doneAt, LastSession: "01MEMDONE01", LastMode: "done",
+					},
+				},
+				{
+					// 못 집은 구성원 — continue 갈래. 여기 줄이 없으면 이 시험만 붉어진다.
+					Item:      model.Item{ID: "m-dropped", Title: "dropped 선언", State: model.ItemClaimed, CreatedAt: t0},
+					Rejection: &model.Rejection{Item: "m-dropped", Reason: judge.RejectClaimed, Detail: "세션 S2 가 선점했다"},
+					CloseDeclared: &model.CloseDeclaration{
+						Dropped: 3, Last: droppedAt, LastSession: "01MEMDROP01", LastMode: "dropped",
+					},
+				},
+				{
+					// 축은 읽었고 이 항목엔 선언이 없다 — nil 과 **다른 사실**이다.
+					Item:          model.Item{ID: "m-clean", Title: "선언 없음", State: model.ItemOpen, CreatedAt: t0},
+					Link:          judge.Link{Item: "m-clean", Detail: "세션이 함께 지정했다"},
+					CloseDeclared: &model.CloseDeclaration{},
+				},
+				{
+					// 축 자체를 안 읽었다 — 구서버·옛 캐시.
+					Item:    model.Item{ID: "m-unread", Title: "축 못 읽음", State: model.ItemClaimed, CreatedAt: t0},
+					Claimed: true,
+				},
+			},
+		},
+	}
+	got := RenderPick(res, t0)
+
+	// ① 선두 1 + 구성원 4 = 다섯. ("nil 이면 건너뛴다" 변이와 줄 삭제 변이가 여기서 죽는다.)
+	if n := strings.Count(got, "종료 선언: "); n != 5 {
+		t.Fatalf("종료 선언 줄이 %d개다 — 선두 1 + 구성원 4 = 5여야 한다:\n%s", n, got)
+	}
+	// ② 선두는 0칸이다. 구성원 줄(4칸)이 이 단정을 대신 통과시키지 못한다.
+	if !strings.Contains(got, "\n종료 선언: "+leadOwn+"\n") {
+		t.Fatalf("선두의 종료 선언이 0칸 들여쓰기로 제 값을 안 낸다:\n%s", got)
+	}
+
+	// ③ 각자 **제 것**이다. 자기 절 안에 자기 값이 4칸으로 있고, 남의 값은 없다.
+	segs := map[string]string{
+		"m-done":    bundleMemberSegment(t, got, "m-done"),
+		"m-dropped": bundleMemberSegment(t, got, "m-dropped"),
+		"m-clean":   bundleMemberSegment(t, got, "m-clean"),
+		"m-unread":  bundleMemberSegment(t, got, "m-unread"),
+	}
+	own := map[string]string{
+		"m-done": doneOwn, "m-dropped": droppedOwn, "m-clean": cleanOwn, "m-unread": unreadOwn,
+	}
+	all := []string{leadOwn, doneOwn, droppedOwn, cleanOwn, unreadOwn}
+	for id, seg := range segs {
+		if !strings.Contains(seg, "\n    종료 선언: "+own[id]) {
+			t.Fatalf("구성원 %s 의 절에 자기 종료 선언이 4칸 들여쓰기로 없다:\n%s\n전체:\n%s", id, seg, got)
+		}
+		for _, other := range all {
+			if other == own[id] {
+				continue
+			}
+			if strings.Contains(seg, other) {
+				t.Fatalf("구성원 %s 의 절에 남의 종료 선언이 붙었다(%q):\n%s\n전체:\n%s", id, other, seg, got)
+			}
+		}
+	}
+
+	// ④ 처방은 mode 로 갈린다. 둘을 맞바꾸는 변이는 ③ 으로는 안 죽는다 —
+	//    수와 시각만 봐도 ③ 은 통과하기 때문이다.
+	if !strings.Contains(segs["m-done"], "done 1건: 이미 랜딩됐을 수 있다.") ||
+		strings.Contains(segs["m-done"], "이미 버리기로 판정됐을 수 있다") {
+		t.Fatalf("done 구성원의 처방이 틀렸다:\n%s\n전체:\n%s", segs["m-done"], got)
+	}
+	if !strings.Contains(segs["m-dropped"], "dropped 3건: 이미 버리기로 판정됐을 수 있다.") ||
+		strings.Contains(segs["m-dropped"], "이미 랜딩됐을 수 있다") {
+		t.Fatalf("dropped 구성원의 처방이 틀렸다:\n%s\n전체:\n%s", segs["m-dropped"], got)
+	}
+
+	// ⑤ 못 집은 구성원에게도 나온다 — render.go:1215 의 continue **위**여야 한다.
+	if !strings.Contains(segs["m-dropped"], "못 집었다: ") {
+		t.Fatalf("전제 실패 — m-dropped 가 못 집은 구성원이 아니다:\n%s", segs["m-dropped"])
+	}
+
+	// ⑥ 기존 개수 단정을 **같은 출력에서** 함께 본다. 새 줄이 절 경계나 개수를
+	//    밟았는지는 순수 함수 시험으로는 못 잰다 — 밟히는 자리가 renderBundle 의
+	//    조립 결과이기 때문이다.
+	//
+	//    `경로 실재:` 는 못 집은 구성원(m-dropped)에서는 안 나온다 — render.go 의
+	//    continue 가 그 축(renderPathCheck, line ~1250)까지 끊기 때문이다. 이건
+	//    이 태스크가 손댄 자리가 아니라 원래부터 그런 동작이라, 여기서는
+	//    선두 1 + **집어 본** 구성원 3(m-done · m-clean · m-unread) = 4 다.
+	if n := strings.Count(got, "경로 실재: "); n != 4 {
+		t.Fatalf("경로 실재 줄이 %d개다 — 선두 1 + 못 집은 것 뺀 구성원 3 = 4여야 한다(새 줄이 그 축을 밟았다):\n%s", n, got)
+	}
+	heads := strings.Count(got, "\n  "+markClaimed+" ") +
+		strings.Count(got, "\n  "+markRejected+" ") +
+		strings.Count(got, "\n  "+markProposed+" ")
+	if heads != 4 {
+		t.Fatalf("구성원 머리줄이 %d개다 — 새 줄이 구성원 절 경계를 밟았다:\n%s", heads, got)
 	}
 }
