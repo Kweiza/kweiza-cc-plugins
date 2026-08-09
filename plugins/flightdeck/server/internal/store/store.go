@@ -359,11 +359,76 @@ func (s *Store) Tx(ctx context.Context, fn func(*Tx) error) error {
 	return nil
 }
 
+// DeferredFlushBudget 는 flushDeferred 가 예약 이벤트 **전부**를 흘리는 데 쓰는 상한이다.
+//
+// 왜 상한이 필요한가. flushDeferred 는 트랜잭션의 ctx 에서 취소를 뗀 ctx 로 쓰는데,
+// context.WithoutCancel 은 취소만이 아니라 **마감도 같이 버린다**(값만 남는다).
+// 그러면 남는 대기가 둘 다 무제한이 된다: database/sql 의 커넥션 대기(MaxOpenConns=8 이
+// 다 찼을 때, 자기 마감이 없는 요청은 자리가 날 때까지 영원히 선다)와 드라이버의 잠금
+// 대기다. 거기 매달리면 계측 하나 때문에 상위 응답이 멈추는데, 그것은 LogEvent 가
+// "계측이 기능을 죽이면 안 된다"로 세운 규율의 정반대다.
+//
+// **8초는 잰 값이 아니라 부등식 둘이 가둔 값이다. 양끝이 둘 다 이 저장소의 상수다.**
+//
+// busy_timeout(5s) < DeferredFlushBudget(8s) < api.ShutdownGrace(10s)
+//
+// 아래쪽 5초는 SQLite 가 잠금 하나를 기다리는 최댓값이다(dsn 의 busy_timeout).
+// 예산이 그보다 작거나 같으면 정상적으로 줄 선 쓰기를 예산이 먼저 자른다 —
+// 고치려던 유실을 다른 사유로 다시 만드는 것이다.
+// 위쪽 10초는 종료 유예다(api.ShutdownGrace). 그 유예를 넘긴 인플라이트는 끊기고
+// 곧 store 가 닫히므로, 예산이 그보다 크면 남는 시간에 할 수 있는 일이 "닫힌 DB 에
+// 매달리기"뿐이다. 예산이 유예 안에서 끝나야 마지막 흘리기가 열린 DB 를 본다.
+//
+// 그 구간에서 8초를 고른 것은 아래로 3초, 위로 2초를 남기는 값이라서다.
+// 두 부등식은 시험이 지킨다 — 아래쪽은 store(event_flush_detached_ctx_test.go), 위쪽은
+// api(flush_budget_test.go). 자리가 갈리는 이유는 import 방향이다(api → store).
+//
+// ★ **공개인 이유가 그 위쪽 부등식이다.** ShutdownGrace 가 공개인 이유와 같다 —
+// 여기서만 알면 그쪽이 같은 숫자를 다시 적게 되고, 두 벌은 반드시 표류한다.
+const DeferredFlushBudget = 8 * time.Second
+
+// flushCtx 는 예약 이벤트를 흘릴 ctx 를 만든다. 트랜잭션의 ctx 에서 취소와 마감만 떼고
+// 값은 남긴 뒤 예산을 다시 건다.
+//
+// ★ 순수하게 판정 가능한 자리로 뺀다. 이 세 성질(값 보존 · 취소 비전파 · 마감 존재)을
+// 동작으로만 재려면 store 안에 관측점이 없다 — 이 패키지는 ctx 값을 아무 데서도 안 읽고,
+// 예산은 8초라 동작 시험이 그 시간을 통째로 쓴다. 판정을 순수 함수로 빼고 시험이 그
+// 함수를 직접 부르는 것은 이 패키지의 규율이다(패키지 독 코멘트).
+func flushCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), DeferredFlushBudget)
+}
+
 // flushDeferred 는 예약된 계측 이벤트를 별도 커넥션으로 흘린다.
 // 트랜잭션이 끝난 뒤에만 불린다 — 그 전에 부르면 쓰기 잠금 때문에 교착한다.
+//
+// ★ **트랜잭션의 ctx 를 그대로 안 쓴다.** 그 ctx 는 요청의 것이고, 이 자리에 오는 가장 흔한
+// 갈래가 바로 "그 요청이 끊겨서 트랜잭션이 죽었다"이다. 그대로 쓰면 취소된 ctx 로 INSERT 를
+// 걸게 되어 database/sql 이 문을 보내기도 전에 되돌린다(실측: 롤백 갈래 기록 0건 ·
+// `이벤트 기록 실패(…): context canceled` WARN 한 줄). 즉 **끊긴 시도일수록 원장에 안
+// 남았다** — 남겨야 할 이유가 가장 큰 것이 정확히 그것이다. middleware.go 의 멱등 기록
+// 저장이 같은 이유로 같은 관용구를 쓴다("끊는 클라이언트일수록 멱등 기억이 안 남는다 —
+// 재시도하는 쪽이 정확히 그 클라이언트다").
+//
+// ★ 값은 남긴다. context.Background() 로 갈아타면 api 의 요청 상관 정보(reqInfo)가 끊겨,
+// 이 층이 나중에 WarnContext 로 옮겨도 그 상관키가 안 붙는다.
+//
+// ★ 예산은 **한 번**이다(DeferredFlushBudget). 예약 이벤트마다 걸면 이벤트 수만큼 곱해져
+// (Finish 는 후속마다 한 건을 예약할 수 있다) 상한이 사실상 사라진다.
+//
+// ★ 그래도 안 남는 갈래가 있다. BeginTx 가 실패하면 클로저를 아예 안 부르므로 예약 자체가
+// 없고(TestTxBeginFailureLeavesNothingReserved), 쓰기가 실패하면 LogEvent 가 WARN 으로
+// 삼키고, 프로세스가 여기 닿기 전에 죽으면 버퍼가 메모리째 사라진다. 클로저 안 패닉도
+// 마찬가지다 — 이 호출들이 defer 가 아닌 이유는 패닉 되감기 시점에는 롤백이 아직 안 돼
+// 쓰기 잠금이 살아 있고, 그때 별도 커넥션으로 쓰면 위 교착에 그대로 빠지기 때문이다.
+// 그래서 이 수를 읽는 표면의 "하한이다" 단서는 이 수정 뒤에도 안 뗀다.
 func (t *Tx) flushDeferred() {
+	if len(t.deferred) == 0 {
+		return
+	}
+	ctx, cancel := flushCtx(t.ctx)
+	defer cancel()
 	for _, e := range t.deferred {
-		t.s.LogEvent(t.ctx, e.kind, e.project, e.sessionID, e.payload)
+		t.s.LogEvent(ctx, e.kind, e.project, e.sessionID, e.payload)
 	}
 	t.deferred = nil
 }
