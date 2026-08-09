@@ -491,7 +491,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 			"dropped", len(outside), "first_path", clip(outside[0], 200))
 	}
 	if err != nil {
-		s.logFail(ctx, "item.claim", proj.ID, in.SessionID, err)
+		s.logFail(ctx, "item.claim", proj.ID, in.SessionID, err, failAbout{Item: item.ID})
 		s.log.ErrorContext(ctx, "선점 실패",
 			"project", proj.ID, "session_id", clip(in.SessionID, 64), "item", clip(item.ID, 64),
 			"error", err.Error())
@@ -1317,7 +1317,7 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 		return t.AddItem(it)
 	})
 	if err != nil {
-		s.logFail(ctx, "item.add", in.Project, in.SessionID, err)
+		s.logFail(ctx, "item.add", in.Project, in.SessionID, err, failAbout{Item: in.ID})
 		s.log.ErrorContext(ctx, "항목 등록 실패",
 			"project", clip(in.Project, 64), "item", clip(in.ID, 64), "error", err.Error())
 		return model.Item{}, err

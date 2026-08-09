@@ -430,7 +430,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "item.finish", in.Project, in.SessionID, err)
+		s.logFail(ctx, "item.finish", in.Project, in.SessionID, err, finishAbout(in))
 		s.log.ErrorContext(ctx, "마무리 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"item", clip(in.ItemID, 64), "error", err.Error())
@@ -609,7 +609,8 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "judgment.note", in.Project, in.SessionID, err)
+		s.logFail(ctx, "judgment.note", in.Project, in.SessionID, err,
+			failAbout{Item: in.ItemID, Mode: string(in.Kind)})
 		s.log.ErrorContext(ctx, "판단 저장 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"mode", string(in.Kind), "error", err.Error())
