@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -57,6 +58,51 @@ func TestFlushDeferredSurvivesCancelledTxCtx(t *testing.T) {
 			t.Errorf("%s 이벤트가 %d건이다 — 1건이어야 한다. "+
 				"flushDeferred 가 트랜잭션의 죽은 ctx 를 타면 끊긴 시도가 원장에서 사라진다", kind, n)
 		}
+	}
+}
+
+// TestFlushCtxKeepsValuesAndDropsCancelAndBoundsWait 는 흘리기 ctx 의 성질 셋을 직접 잰다.
+//
+// 동작으로만 재려면 관측점이 없다 — store 는 ctx 값을 아무 데서도 안 읽으므로 "값이
+// 보존됐다"를 밖에서 볼 길이 없고, 예산은 8초라 동작 시험으로 밟으면 시험이 8초를 쓴다.
+// 그래서 판정을 순수 함수로 빼고 시험이 그 함수를 직접 부른다(패키지 독 코멘트의 규율).
+func TestFlushCtxKeepsValuesAndDropsCancelAndBoundsWait(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "req-42"))
+	cancel() // 요청은 이미 죽었다
+
+	ctx, done := flushCtx(parent)
+	defer done()
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("부모의 취소가 그대로 넘어왔다: %v — 그러면 INSERT 가 문을 보내기도 전에 죽는다", err)
+	}
+	if got, _ := ctx.Value(key{}).(string); got != "req-42" {
+		t.Fatalf("값이 %q 다 — 상관 정보가 끊겼다. context.Background() 로 갈아탄 것과 같다", got)
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("마감이 없다 — 취소를 떼면 마감도 떨어지므로 여기서 다시 걸어야 한다")
+	}
+	if left := time.Until(dl); left <= 0 || left > DeferredFlushBudget {
+		t.Fatalf("남은 마감이 %v 다 — (0, %v] 여야 한다", left, DeferredFlushBudget)
+	}
+}
+
+// TestDeferredFlushBudgetExceedsBusyTimeout 은 부등식의 **아래쪽**을 붙든다.
+//
+// 예산이 busy_timeout 보다 작거나 같으면, 정상적으로 줄 선 쓰기를 예산이 먼저 자른다 —
+// 고치려던 유실을 다른 사유로 다시 만드는 것이다. 위쪽 부등식(< api.ShutdownGrace)은
+// store 가 api 를 못 import 하므로 그쪽 패키지에 있다(api/flush_budget_test.go).
+func TestDeferredFlushBudgetExceedsBusyTimeout(t *testing.T) {
+	ms, err := strconv.Atoi(wantPragmas["busy_timeout"])
+	if err != nil {
+		t.Fatalf("busy_timeout 을 못 읽었다(%q) — 이 시험의 좌표가 틀렸다: %v", wantPragmas["busy_timeout"], err)
+	}
+	busy := time.Duration(ms) * time.Millisecond
+	if DeferredFlushBudget <= busy {
+		t.Fatalf("예산 %s 가 busy_timeout %s 보다 크지 않다 — "+
+			"잠금을 정상적으로 기다리는 쓰기를 예산이 먼저 자른다", DeferredFlushBudget, busy)
 	}
 }
 
