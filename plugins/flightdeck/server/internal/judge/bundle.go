@@ -304,10 +304,20 @@ func EligibleBundle(in EligibleInput, sib SiblingIndex) (*Bundle, []model.Reject
 		if picked[c.Item.ID] {
 			continue
 		}
-		rejByItem[c.Item.ID] = append(rejByItem[c.Item.ID], model.Rejection{
-			Item: c.Item.ID, Reason: RejectNotTop,
-			Detail: fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
-				best.Lead.Item.ID, len(best.Members)+1)})
+		detail := fmt.Sprintf("적격이지만 추천 묶음에 없다(추천 선두는 %s, 묶음 %d건)",
+			best.Lead.Item.ID, len(best.Members)+1)
+		// ★ 이 축이 무엇을 몇 번 밀어냈는지는 여기에만 남는다. 안 남기면 pick_eval 의
+		// not-top 줄이 "밀렸다"만 말하고 "왜"를 안 말해, 강등이 실제로 발화했는지를
+		// 사후에 셀 방법이 하나도 없다 — 그러면 "조용히 버리는 것이 하나도 없다"가
+		// 형식만 지켜지고 목적은 안 지켜진다.
+		//
+		// 싣는 것은 **이 후보 자신**의 선언이다(승자의 것이 아니다). fit 의 모든
+		// 원소는 각자 묶음의 선두였으므로, 그것이 곧 이 축이 밀어낸 항목이다.
+		if d, ok := closeDeclarationOf(in, c.Item.ID); ok {
+			detail += " · " + closeDeclaredDetail(d)
+		}
+		rejByItem[c.Item.ID] = append(rejByItem[c.Item.ID],
+			model.Rejection{Item: c.Item.ID, Reason: RejectNotTop, Detail: detail})
 	}
 	return &best, flatten(order, rejByItem)
 }

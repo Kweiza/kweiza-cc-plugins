@@ -227,3 +227,46 @@ func TestEligibleBundleZeroCountCloseDeclarationDoesNotDemote(t *testing.T) {
 		t.Fatalf("0건 선언으로 강등했다 — 선두 %q, CloseDeclared=%v", best.Lead.Item.ID, best.CloseDeclared)
 	}
 }
+
+// 이 축이 **무엇을 몇 번 밀어냈는지**가 원장에 남는지 본다.
+//
+// ★ 안 남기면 pick_eval 의 not-top 줄이 "밀렸다"만 말하고 "왜"는 안 말한다.
+// 그러면 이 축이 실제로 발화한 상태와 아예 안 도는 상태가 원장에서 같아 보이고,
+// "조용히 버리는 것이 하나도 없다"가 형식만 지켜지고 목적은 안 지켜진다.
+//
+// ★ 대조를 함께 둔다 — 선언이 **없는** 항목의 not-top 줄에 이 조각이 붙으면,
+// 원장에서 세는 수가 축의 발화 수가 아니라 그냥 not-top 수가 된다.
+func TestEligibleBundleNotTopLedgersWhyCloseDeclared(t *testing.T) {
+	in := EligibleInput{
+		Self:                  "S1",
+		Candidates:            []Candidate{cand("a-declared", 0, nil), cand("z-clean", 0, nil)},
+		CloseDeclarations:     map[string]model.CloseDeclaration{"a-declared": decl(1, 0, "done")},
+		CloseDeclarationsRead: true,
+	}
+	_, rej := EligibleBundle(in, SiblingIndex{})
+	var detail string
+	for _, r := range rej {
+		if r.Item == "a-declared" && r.Reason == RejectNotTop {
+			detail = r.Detail
+		}
+	}
+	if detail == "" {
+		t.Fatalf("전제가 깨졌다 — 강등된 항목의 not-top 줄이 없다: %v", rej)
+	}
+	// 기존 문장은 그대로 살아 있어야 한다. 덮어쓰면 "누구에게 밀렸나"가 사라진다.
+	for _, want := range []string{"적격이지만 추천 묶음에 없다", "종료 선언 1건 이상", "mode=done"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("not-top 사유가 %q 를 안 싣는다: %q", want, detail)
+		}
+	}
+
+	// 대조: 선언이 하나도 없으면 어느 not-top 줄에도 이 조각이 안 붙는다.
+	clean := in
+	clean.CloseDeclarations = map[string]model.CloseDeclaration{}
+	_, rej2 := EligibleBundle(clean, SiblingIndex{})
+	for _, r := range rej2 {
+		if strings.Contains(r.Detail, "종료 선언") {
+			t.Fatalf("선언이 없는데 근거가 붙었다(%s): %q", r.Item, r.Detail)
+		}
+	}
+}
