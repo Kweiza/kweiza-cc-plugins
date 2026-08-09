@@ -589,11 +589,29 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 			// 자기가 이미 읽은 항목을 실패와 함께 버린다. 화면에 빈 줄(id="")로 뜨지
 			// 않도록 한 번 더 읽는다. 이 조회조차 실패하면 id 가 애초에 없는 것이므로
 			// State 는 정직하게 비우고 ID 만 남긴다(BundleMember.Item 의 계약 참고).
+			var cands []judge.Candidate
 			if it, ierr := s.st.GetItem(ctx, proj.ID, id); ierr == nil {
 				m.Item = it
+				cands = []judge.Candidate{{Item: it}}
 			} else {
 				m.Item.ID = id
 			}
+			// ★ 종료 선언 축은 **못 집은 구성원에게도** 낸다. 렌더가 이 줄을 사유 줄
+			// **위**에 일부러 올려 뒀는데(renderBundle 의 그 주석 — 못 집은 구성원이야말로
+			// 다음 세션이 다시 집으러 오는 자리라서), 이 자리가 안 채우고 있어서 그 줄이
+			// 항상 "이 응답은 이 축을 안 읽었다"였다. 신선한 온라인 응답에 거짓 원인을
+			// 붙이는 그 실패를 이 축이 이미 두 번 겪었다(Bundle · CloseDeclared).
+			//
+			// 재조회조차 실패한 갈래(큐에 없는 id)는 후보가 비어 "읽었고 0건"이 나간다.
+			// 정확히는 **앵커를 걸 대상이 없다**는 뜻이다 — 항목이 없으면 CreatedAt 이
+			// 없고, 이 축의 앵커 규칙(선언이 항목 생성 뒤여야 센다)을 매길 수가 없다.
+			// 그래도 nil 보다 이쪽을 고른다: nil 은 화면에서 원인 셋(구서버 · 옛 캐시 ·
+			// 이번 조회 실패)을 대는데 신선한 온라인 응답에서 셋 다 거짓이고, 0건의
+			// 오차는 "왜 0인가"에 그친다. 없는 항목에 가짜 CreatedAt 을 주는 길은 더
+			// 나쁘다 — zero 시각이면 앵커가 무조건 통과해 남의 선언을 이 id 에 붙인다.
+			// 원장 자체를 못 읽으면 closeRead=false 라 nil 이 그대로 남는다.
+			closed, closeRead := s.closeDeclarations(ctx, proj.ID, cands)
+			m.CloseDeclared = closeDeclaredOf(closed, id, closeRead)
 			s.log.WarnContext(ctx, "묶음 구성원 선점 실패 — 나머지를 진행한다",
 				"project", proj.ID, "session_id", in.SessionID, "item", clip(id, 64),
 				"error", serr.Error())

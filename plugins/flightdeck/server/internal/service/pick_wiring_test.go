@@ -571,3 +571,64 @@ func TestPickBundleMemberCarriesCloseDeclaredOnTheClaimPath(t *testing.T) {
 		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
 	}
 }
+
+// ⑮ **못 집은** 묶음 구성원도 종료 선언 축을 싣는다.
+//
+// ★ 이 갈래가 이 축에서 유일하게 비어 있던 자리다(pick_axis_wiring_test.go 의 격자가
+// 찾아냈다). 그런데 렌더는 이 줄을 못 집은 구성원에게 **일부러** 사유 줄 위로 올려 뒀다
+// (renderBundle: "못 집은 구성원이야말로 다음 세션이 다시 집으러 오는 자리다"). 즉
+// 화면이 가장 보여주고 싶어 한 자리에서 이 축이 항상 "이 응답은 이 축을 안 읽었다"였다 —
+// 신선한 온라인 응답에 거짓 원인을 붙이는, 이 축이 이미 두 번 겪은 그 실패다.
+func TestPickBundleRejectedMemberCarriesCloseDeclared(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+	gone := addItem(t, s, "p", "gone", []string{"services/gone.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, gone.ID, "done", gone.CreatedAt.Add(time.Minute))
+	if err := st.SetItemState(ctx(), "p", "gone", model.ItemDropped, "버린다"); err != nil {
+		t.Fatalf("항목 폐기 실패: %v", err)
+	}
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+		ItemIDs: []string{"lead", "gone"}})
+	if err != nil {
+		t.Fatalf("선두가 성립해야 한다: %v", err)
+	}
+	if len(res.Bundle.Members) != 1 {
+		t.Fatalf("구성원이 한 줄로 남아야 한다: %+v", res.Bundle.Members)
+	}
+	m := res.Bundle.Members[0]
+	if m.Claimed || m.Rejection == nil {
+		t.Fatalf("사전 조건이 깨졌다 — 못 집은 구성원이어야 한다: %+v", m)
+	}
+	if m.CloseDeclared == nil {
+		t.Fatal("못 집은 구성원의 종료 선언 축이 nil 이다 — 화면이 그 자리에서 " +
+			"'이 축을 안 읽었다'를 찍는데, 서버는 읽을 수 있었다")
+	}
+	if m.CloseDeclared.Count() != 1 || m.CloseDeclared.Done != 1 {
+		t.Fatalf("못 집은 구성원의 선언이 자기 것이 아니다: %+v", m.CloseDeclared)
+	}
+
+	t.Run("선언이 없어도 읽었으면 non-nil 이다", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "lead", []string{"services/lead.go"}, nil)
+		addItem(t, s, "p", "gone", []string{"services/gone.go"}, nil)
+		if err := st.SetItemState(ctx(), "p", "gone", model.ItemDropped, "버린다"); err != nil {
+			t.Fatalf("항목 폐기 실패: %v", err)
+		}
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID,
+			ItemIDs: []string{"lead", "gone"}})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		m := res.Bundle.Members[0]
+		if m.CloseDeclared == nil || m.CloseDeclared.Count() != 0 {
+			t.Fatalf("읽었는데 nil 이거나 수가 0이 아니다 — nil 은 '안 읽었다'라서 "+
+				"0건과 접히면 안 된다: %+v", m.CloseDeclared)
+		}
+	})
+}
