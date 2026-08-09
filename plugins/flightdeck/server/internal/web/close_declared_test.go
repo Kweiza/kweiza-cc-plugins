@@ -172,3 +172,25 @@ func TestUnreadAxisDoesNotEraseTheEmptyQueueSentence(t *testing.T) {
 	mustContain(t, queueTableOf(t, html), "큐가 비었다 — 열린 항목도 선점된 항목도 없다",
 		"종료 선언 축을 못 읽은 것이 '큐가 비었다'는 참인 문장을 지웠다 — 그래서 이 실패는 pan.Err 이 아니다")
 }
+
+// ─────────────────────────── 절 머리 — 사람이 낸 판정의 가드 ───────────────────────────
+
+// 리뷰에서 "Count()==0 이면 배지가 빈 문자열이라 진짜 0건과 원장 유실이 똑같이
+// 보인다"가 Important 로 나왔다. 사람의 처방은 **행별 배지가 아니라 절 머리 한 줄**이다:
+// 30행에 같은 경고를 달면 상시 점등된 경고가 되어 판별력이 0이 된다(judge/eligible.go 의
+// OverlapsWithLive 주석과 같은 규율). 그래서 그 문장은 dashboard.gohtml 의 코드에만
+// 있고 잡는 시험이 없었다 — 이 시험이 그 자리를 채운다.
+//
+// `TestReclaimFormNamesTheRolledBackFinish` 의 "그 수는 하한이다" 는 **다른 문장**이다
+// (폐기 폼 꼬리, 이미 선언된 항목의 count 가 하한이라는 것). 여기서 잠그는 것은 절
+// 머리의 두 번째 문장 — "배지가 없어도 유실일 수 있다" — 이다. 첫 문장("배지가 붙은
+// 항목의 수는 하한이다")은 행별 라벨의 "최소 N건"과 뜻이 겹쳐 시험이 굳이 안 잡는다.
+func TestQueueSectionHeadNamesTheLowerBoundOnce(t *testing.T) {
+	f, _ := declared(t, "it-rolled")
+
+	_, html := f.get("")
+	table := queueTableOf(t, html)
+
+	mustContain(t, table, "이 축에서는 영영 0으로 보인다",
+		"절 머리에 하한 문장이 없다 — 배지 없는 항목이 유실인지 진짜 0건인지 화면이 말을 안 한다")
+}
