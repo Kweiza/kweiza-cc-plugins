@@ -12,9 +12,10 @@ import (
 // 독립 add 53건을 낳아 R=1.30 이다. 사이클 1회마다 큐가 +0.29 이고, 그래서 **pickup 을 더
 // 돌려서는 큐가 안 준다**. 그 사실을 세션이 마무리하는 그 자리에서 볼 수 있어야 한다.
 //
-// ★ 그 1.30 의 시점은 **2026-08-06 무렵**이다(원장의 88번째 kweiza 마무리가 08-06T00:40 ·
-// 재현 확인 2026-08-09 22:19 KST 사본). 창 88 이 아니라 원장이 88건이던 날의 전 기간 값이라,
-// 지금 다시 재면 다른 수가 나온다 — event.go 의 같은 ★ 가 현재값을 함께 적는다.
+// ★ 그 1.30 의 시점은 **2026-08-06 무렵**이다(원장의 88번째 kweiza 마무리가 id 13002 ·
+// 08-06T00:40Z(KST 09:40) · 재현 확인 2026-08-10 01:58 KST · mode=ro). 창 88 이 아니라 원장이
+// 88건이던 날의 전 기간 값이라, 지금 다시 재면 다른 수가 나온다 — event.go 의 같은 ★ 가
+// 현재값과 나머지 인용 자리를 함께 적는다.
 func TestQueueReproductionCountsFollowupsAndAdds(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -80,7 +81,9 @@ func TestQueueReproductionWindowCutsAddsToo(t *testing.T) {
 }
 
 // 프로젝트를 넘지 않는다. 한 DB 에 프로젝트가 여럿이고 R 은 프로젝트마다 갈린다
-// (실측: kweiza-cc-plugins 1.30 vs context-platform 0.79).
+// (실측: kweiza-cc-plugins 1.30 vs context-platform 0.79 — 둘 다 2026-08-06 무렵의 전 기간
+// 값이다. 2026-08-10 01:58 KST 에 mode=ro 로 다시 재면 최근 20 창 기준 0.80 vs 2.15 로
+// **순서가 뒤집혀 있다.** 갈린다는 사실이 이 시험의 논지이고, 어느 쪽이 큰지는 시점이 정한다).
 func TestQueueReproductionIsPerProject(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
