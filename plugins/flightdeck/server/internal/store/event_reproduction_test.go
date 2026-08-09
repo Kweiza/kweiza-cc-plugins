@@ -11,6 +11,10 @@ import (
 // ★ 왜 이 축이 필요한가. 실측(kweiza-cc-plugins · event 원장): finish 88건이 followups 61건과
 // 독립 add 53건을 낳아 R=1.30 이다. 사이클 1회마다 큐가 +0.29 이고, 그래서 **pickup 을 더
 // 돌려서는 큐가 안 준다**. 그 사실을 세션이 마무리하는 그 자리에서 볼 수 있어야 한다.
+//
+// ★ 그 1.30 의 시점은 **2026-08-06 무렵**이다(원장의 88번째 kweiza 마무리가 08-06T00:40 ·
+// 재현 확인 2026-08-09 22:19 KST 사본). 창 88 이 아니라 원장이 88건이던 날의 전 기간 값이라,
+// 지금 다시 재면 다른 수가 나온다 — event.go 의 같은 ★ 가 현재값을 함께 적는다.
 func TestQueueReproductionCountsFollowupsAndAdds(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
