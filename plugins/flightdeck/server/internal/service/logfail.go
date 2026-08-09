@@ -149,3 +149,41 @@ func (s *Service) logFail(ctx context.Context, kind, project, sessionID string, 
 		"cause": string(failCause(err)),
 	}, about))
 }
+
+// FinishGate 는 **트랜잭션 진입 전에** 마무리를 끊은 관문의 이름이다. 열거다.
+//
+// 값 하나가 return 자리 하나에 1:1 로 붙는다. 이름을 안 실으면 거절이 한 덩어리가 되어
+// "어느 문이 실제로 무나"에 답하지 못하고, 그 질문에 못 답하면 관문을 늘릴지 풀지를
+// 사람의 인상으로 정하게 된다.
+type FinishGate string
+
+const (
+	GateJudge              FinishGate = "judge"               // item_id·outcome·body·close_reason
+	GateFollowupsPending   FinishGate = "followups-pending"   // 바닥에 떨어뜨린 후속이 있다
+	GateFollowupID         FinishGate = "followup-id"         // 후속 id 가 브랜치 이름 규칙 밖이다
+	GateFollowupDuplicate  FinishGate = "followup-duplicate"  // 같은 후속 id 가 한 호출에 두 번
+	GateFollowupIneligible FinishGate = "followup-ineligible" // 이을 자격이 없거나 존재를 못 읽었다
+	GateFollowupBody       FinishGate = "followup-body"       // 새로 만들 후속에 제목·본문이 없다
+	GateFollowupPaths      FinishGate = "followup-paths"      // 후속 경로가 좌표계 밖이다
+)
+
+// logFinishRefused 는 **트랜잭션에 들어가기도 전에** 끊긴 시도를 원장에 남긴다.
+//
+// ★ 왜 필요한가. 이 거절들은 지금 WARN 로그로만 나가고 원장에는 자국이 0이다. 그래서
+// "몇 번 시도해서 몇 번 끊겼나"의 **분모가 원리적으로 없다** — 관문의 효과를 사후에 재는
+// 방법이 사람의 신고뿐이 된다. 이 저장소가 후속 관문을 세우며 실측으로 기댄 것이 정확히
+// 그 종류의 수치였다.
+//
+// ★ kind 를 `item.finish` 와 **가른다. 이 분리가 안전 축의 전부다.** 그 kind 는 표류
+// 탐지(store.CloseDeclarationsByItem)와 재생산율(store.QueueReproduction)의 재료이고,
+// 둘 다 `kind = 'item.finish'` 로 정확히 거른다(store/event.go). 거절을 그 kind 로 남기면
+// 쓰지도 않은 종료 선언이 두 축에 들어가 멀쩡한 항목이 "롤백된 종료 선언"으로 강등된다.
+// 접미가 붙은 kind 는 그 두 질의에 원리적으로 안 걸린다 — 시험이 그 사실을 단정한다.
+//
+// ★ 좌표는 finishAbout 로 조립한다. 실패(.fail)와 거절(.refused)이 같은 값을 써야 원장에서
+// 그 둘을 같은 항목으로 이을 수 있다. outcome 이 열거 밖 값이어도 그대로 싣는다 —
+// **호출자가 보낸 것**이고, 지어낸 값보다 받은 값이 조사에 쓸모 있다(clip 이 길이를 문다).
+func (s *Service) logFinishRefused(ctx context.Context, in FinishInput, gate FinishGate) {
+	s.st.LogEvent(ctx, "item.finish.refused", in.Project, in.SessionID,
+		aboutPayload(map[string]any{"gate": string(gate)}, finishAbout(in)))
+}
