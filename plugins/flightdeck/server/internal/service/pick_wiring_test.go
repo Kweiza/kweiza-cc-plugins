@@ -376,3 +376,104 @@ func TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive(t *test
 		t.Fatalf("종료 선언 축의 실패를 derive 에 실었다 — FreshnessOf 가 git 축을 낡음으로 접는다: %+v", res.Failures)
 	}
 }
+
+// ⑩ **선두**가 자기 종료 선언을 싣는다 — 이 사고의 항목이 정확히 선두였다.
+//
+// ★ renderBundle 은 BundleInfo 하나만 받고 Members 는 정의상 선두 제외라 선두를
+// 모른다. 구성원 자리에만 심으면 사고를 낳은 그 항목에 대해 응답이 침묵한다.
+//
+// ★ 세 상태를 다 잰다. nil 의 뜻이 "안 읽었다" 하나로 서려면 "읽었고 0건"이 반드시
+// non-nil 이어야 하고, 그 짝이 없으면 원장을 못 읽은 응답이 관측 없이 "이 항목은
+// 깨끗하다"를 단정하게 된다(checkItemPaths 가 절대 nil 을 안 내는 것과 같은 자리).
+func TestPickResultCarriesCloseDeclarationForTheLead(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	it := addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, it.ID, "done", it.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.CloseDeclared == nil {
+		t.Fatal("선두의 종료 선언이 안 실렸다 — 사고를 낳은 그 항목이 정확히 선두다")
+	}
+	if res.CloseDeclared.Count() != 1 || res.CloseDeclared.Done != 1 {
+		t.Fatalf("선두의 선언 수가 틀렸다: %+v", res.CloseDeclared)
+	}
+	if res.CloseDeclared.LastMode != "done" || res.CloseDeclared.LastSession != me.Session.ID {
+		t.Fatalf("마지막 선언의 좌표(세션·mode)가 안 실렸다: %+v", res.CloseDeclared)
+	}
+
+	t.Run("선언이 없어도 읽었으면 non-nil 이다", func(t *testing.T) {
+		s, _ := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.CloseDeclared == nil {
+			t.Fatal("읽었는데 nil 이다 — nil 은 '이 축을 안 읽었다'라서 0건과 접히면 안 된다")
+		}
+		if res.CloseDeclared.Count() != 0 {
+			t.Fatalf("선언이 없는데 수가 %d 다: %+v", res.CloseDeclared.Count(), res.CloseDeclared)
+		}
+	})
+
+	t.Run("축을 못 읽었으면 nil 이다", func(t *testing.T) {
+		s, st := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+		hideEvent(t, st)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.CloseDeclared != nil {
+			t.Fatalf("못 읽었는데 값을 실었다 — 관측한 적 없는 사실을 단정한다: %+v", res.CloseDeclared)
+		}
+	})
+}
+
+// ⑪ **구성원**이 자기 종료 선언을 싣는다. 선두 것을 빌려주면 안 된다.
+//
+// ★ 값을 서로 다르게 깐다(구성원=dropped 1건, 선두=0건). 같은 값으로 깔면 선두 것을
+// 그대로 복사하는 변이가 초록으로 지나간다 — 구성원 PathCheck 이 같은 함정을 이미
+// 밟았고(TestPickBundleMemberPathCheckIsPerItemNotLead) 같은 방식으로 막는다.
+func TestPickBundleMemberCarriesItsOwnCloseDeclaration(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	declared := addItem(t, s, "p", "a1-declared", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "z9-clean", []string{"services/z.go"}, nil)
+	makeSiblings(t, st, "p", "a1-declared", "z9-clean")
+	seedCloseDeclaration(t, st, "p", me.Session.ID, declared.ID, "dropped", declared.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Bundle == nil || len(res.Bundle.Members) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 형제 하나가 구성원이어야 한다: %+v", res.Bundle)
+	}
+	if res.Item.ID != "z9-clean" || res.Bundle.Members[0].Item.ID != "a1-declared" {
+		t.Fatalf("선언된 쪽이 여전히 선두다 — 선두=%q 구성원=%q",
+			res.Item.ID, res.Bundle.Members[0].Item.ID)
+	}
+	m := res.Bundle.Members[0]
+	if m.CloseDeclared == nil {
+		t.Fatal("구성원의 종료 선언이 안 실렸다 — 화면이 그 항목에 대해 침묵한다")
+	}
+	if m.CloseDeclared.Count() != 1 || m.CloseDeclared.Dropped != 1 || m.CloseDeclared.LastMode != "dropped" {
+		t.Fatalf("구성원의 선언이 자기 것이 아니다: %+v", m.CloseDeclared)
+	}
+	if res.CloseDeclared == nil || res.CloseDeclared.Count() != 0 {
+		t.Fatalf("선두가 구성원의 선언을 받아 갔다: %+v", res.CloseDeclared)
+	}
+}

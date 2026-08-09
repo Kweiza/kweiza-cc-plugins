@@ -81,6 +81,28 @@ type PickResult struct {
 	// 적격 0건(PickNone)에도 nil 이다 — 항목이 없으면 관측할 대상이 없다.
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
 
+	// CloseDeclared 는 이 항목을 닫으려다 **롤백된** 선언이다(원장의 item.finish 인데
+	// 항목은 done/dropped 이 아니다).
+	//
+	// ★ **포인터다.** PathCheck 과 같은 이유이고, 그 상태가 실제로 난다: 구서버 + 신
+	// 클라이언트, 그리고 이 필드가 생기기 전에 굳은 오프라인 캐시가 그대로 재생된다.
+	// 값 타입이면 그 상황이 "선언 0건"으로 접혀 **관측한 적 없는 사실을 단정한다** —
+	// 하필 그 단정이 "이 항목은 깨끗하다"라서, 이 축이 막으려는 사고를 그대로 통과시킨다.
+	//
+	//	nil            = 이 응답은 그 축을 안 읽었다
+	//	non-nil, 0건   = 읽었고 선언이 없다
+	//	non-nil, n건   = 읽었고 n번 닫히려다 롤백됐다
+	//
+	// 왜 읽었는데 못 읽는 갈래가 있나 — 원장 조회가 실패했을 때다. 그 사실은 항목마다
+	// 반복하지 않고 Bundle.Scope 가 한 번 말한다(bundleScope 의 closeRead).
+	//
+	// **추천 경로에서만 채운다.** item_id 지정 선점·재개(pickExplicit)는 후보 집합을
+	// 안 만들어 이 축을 안 돌린다 — 거기서 nil 은 "안 읽었다"로 정확히 읽힌다.
+	//
+	// ★ 이 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다(store/store.go:366 의
+	// flushDeferred 가 트랜잭션의 ctx 를 그대로 쓴다). 문구가 그렇게 말해야 한다.
+	CloseDeclared *model.CloseDeclaration `json:"close_declared,omitempty"`
+
 	// Bundle 은 이 응답이 낸 묶음이다.
 	//
 	// ★ **포인터다.** QueueOpen·PathCheck 과 같은 이유이고, 그 상태가 실제로 난다:
@@ -124,7 +146,13 @@ type BundleMember struct {
 	Item      model.Item             `json:"item"`
 	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
-	Notes     []model.Judgment       `json:"notes,omitempty"` // 집었을 때만 전문
+	// CloseDeclared 는 이 구성원을 닫으려다 롤백된 선언이다. 계약은 PickResult 쪽과
+	// 글자 그대로 같다(nil = 그 축을 안 읽었다 · non-nil 0건 = 읽었고 없다).
+	//
+	// ★ 선두와 **양쪽 다** 있어야 한다. renderBundle 은 BundleInfo 하나만 받고 Members
+	// 는 정의상 선두 제외라 선두를 모르는데, 이 사고의 항목은 정확히 선두였다.
+	CloseDeclared *model.CloseDeclaration `json:"close_declared,omitempty"`
+	Notes         []model.Judgment        `json:"notes,omitempty"` // 집었을 때만 전문
 	// Claimed 는 이 구성원이 실제로 선점됐는가다.
 	//
 	// ★ 태스크 8이 예고했던 세 번째 상태("채택 시도했지만 실패")가 실제로 생겼다
@@ -914,6 +942,9 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	res.Overlaps = best.Lead.Overlaps
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 선두에도 싣는다. renderBundle 은 Members(선두 제외)만 받아 선두를 모르므로,
+	// 구성원 자리에만 심으면 이 사고를 낳은 그 항목에 대해 응답이 통째로 침묵한다.
+	res.CloseDeclared = closeDeclaredOf(closed, item.ID, closeRead)
 	if res.Setup == nil {
 		d.note("setup:"+clip(item.ID, 64),
 			"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않아 워크트리 준비 명령을 만들지 않았다")
@@ -930,6 +961,10 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 		res.Bundle.Members = append(res.Bundle.Members, BundleMember{
 			Item: m.Item, Link: best.Links[i],
 			PathCheck: s.checkItemPaths(ctx, proj, m.Item.Paths),
+			// ★ 종료 선언도 구성원마다 **자기 것**을 싣는다. 합치거나 선두 것을 빌려주면
+			// 화면이 엉뚱한 항목을 "이미 닫히려 했다"고 지목한다 — PathCheck 을 항목
+			// 단위로 가른 것과 같은 이유다(둘 다 항목 단위 사실이다).
+			CloseDeclared: closeDeclaredOf(closed, m.Item.ID, closeRead),
 			// Notes 는 안 싣는다 — 추천은 아직 안 집은 것이라
 			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
 		})
