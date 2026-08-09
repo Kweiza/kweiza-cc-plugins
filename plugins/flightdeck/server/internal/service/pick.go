@@ -825,12 +825,21 @@ func closeDeclaredOf(m map[string]model.CloseDeclaration, id string, read bool) 
 // sibRead 가 false 면 형제 축을 못 읽었다는 사실을 문장에 남긴다. 키 부재를 값으로
 // 접지 않는다는 전역 규율이 이 한 줄에서도 지켜져야 한다 — 안 남기면 이 묶음이
 // "형제가 진짜로 없다"인지 "형제 축을 아예 못 봤다"인지 응답만으로 못 가른다.
-func bundleScope(total int, sibRead bool) string {
+//
+// closeRead 도 같은 규율이고 **따로 적는다.** 하나로 뭉치면 "형제는 읽었고 종료 선언만
+// 못 읽었다"가 화면에서 "둘 다 못 읽었다"와 같아진다. 이쪽은 항목마다 낼 수도 있지만
+// 그러면 같은 고백이 후보 수만큼 반복되므로, 축의 상태는 축의 자리(범위 문장)에서
+// 한 번만 말한다 — 항목별 값은 PickResult.CloseDeclared 가 나른다.
+func bundleScope(total int, sibRead, closeRead bool) string {
 	sc := fmt.Sprintf("관찰한 후보는 전체 %d건이다(적격 여부와 무관하게 센 수다). "+
 		"그 중 선두와 형제·선행 축으로 **직접** 이어진 것만 묶었다(전이 없음)", total)
 	if !sibRead {
 		sc += " · 형제 축(같은 판단에 함께 걸린 형제)은 이번에 못 읽었다 — " +
 			"이 묶음은 선행·경로 축만 보고 나온 결과다"
+	}
+	if !closeRead {
+		sc += " · 이 후보들이 이미 닫히려다 롤백된 적이 있는지(원장의 item.finish)는 " +
+			"이번에 못 읽었다 — 이 순위는 그 축 없이 나온 결과다"
 	}
 	return sc
 }
@@ -850,8 +859,16 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	}
 
 	sib, sibRead := s.siblingIndex(ctx, proj.ID, cands)
+	closed, closeRead := s.closeDeclarations(ctx, proj.ID, cands)
 	best, rejected := judge.EligibleBundle(judge.EligibleInput{
 		Self: in.SessionID, SelfCC: selfCC, Candidates: cands, Live: live, Facts: facts, HeldResources: held,
+		// ★ 맵과 bool 을 **함께** 싣는다. 빈 맵 하나로 접으면 "선언 0건"과 "이 축을 아예
+		// 못 읽었다"가 judge 안에서 같은 값이 되고, Go 의 nil 맵 조회는 zero 를 내므로
+		// 순수 함수 시험이 두 상태를 가를 관측점을 하나도 못 갖는다. 같은 구조체의
+		// HeldResources 가 "비어 있으면 아무도 안 쥠"이라는 정반대 계약이라 nil 을
+		// "안 읽음"으로 재활용할 수도 없다.
+		CloseDeclarations:     closed,
+		CloseDeclarationsRead: closeRead,
 		// Now 는 기아 축(judge.StarvationAge)에만 쓴다. 주입된 시계를 그대로 넘긴다 —
 		// 여기서 time.Now() 를 부르면 시험이 가짜 시계를 밀어도 이 축만 실시계로
 		// 판정한다(fd-lane-timestamps-ignore-injected-clock 이 고발한 그 모양이다).
@@ -907,7 +924,7 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	// id 를 가리키게 된다(경로 겹침·부재는 항목 단위 사실이다).
 	res.Bundle = &BundleInfo{
 		Reason: best.Reason,
-		Scope:  bundleScope(len(cands), sibRead),
+		Scope:  bundleScope(len(cands), sibRead, closeRead),
 	}
 	for i, m := range best.Members {
 		res.Bundle.Members = append(res.Bundle.Members, BundleMember{

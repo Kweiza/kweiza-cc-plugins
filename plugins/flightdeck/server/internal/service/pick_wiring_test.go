@@ -299,3 +299,80 @@ func TestCloseDeclarationsAnchorsOnCreationAndDropsNonCandidates(t *testing.T) {
 		})
 	}
 }
+
+// ⑧ pickRecommend 가 EligibleInput 에 종료 선언 맵을 **실제로** 싣는다.
+//
+// ★ judge 시험은 EligibleInput 을 손으로 조립하므로 이 배선을 원리적으로 못 잰다.
+// 그리고 이 축은 관측 가능한 출력이 순위 하나뿐이다 — 그래서 나이 축이 반대편을
+// 가리키도록 깔았다: 선언된 쪽을 **먼저** 만들어(최고령) 축이 안 물리면 그쪽이 이긴다.
+// 실측 기준선이 정확히 그 값이다(선두 a-rolled-back).
+func TestPickRecommendDemotesTheItemWhoseCloseWasRolledBack(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	older := addItem(t, s, "p", "a-rolled-back", []string{"services/a.go"}, nil)
+	addItem(t, s, "p", "b-clean", []string{"services/b.go"}, nil)
+	seedCloseDeclaration(t, st, "p", me.Session.ID, older.ID, "done", older.CreatedAt.Add(time.Minute))
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("pick 실패: %v", err)
+	}
+	if res.Mode != PickRecommended || res.Item == nil {
+		t.Fatalf("사전 조건이 깨졌다 — 추천 경로여야 한다: mode=%q item=%+v", res.Mode, res.Item)
+	}
+	if res.Item.ID != "b-clean" {
+		t.Fatalf("닫히려다 롤백된 항목이 여전히 1순위다 — service 가 이 축을 judge 에 안 먹였다: 선두=%q", res.Item.ID)
+	}
+
+	// 상시 점등이면 판별력이 0이다. 반대 방향을 짝으로 못박는다.
+	t.Run("선언이 없으면 나이순 그대로다", func(t *testing.T) {
+		s, _ := newSvc(t)
+		repo := newRepo(t)
+		me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+		addItem(t, s, "p", "a-rolled-back", []string{"services/a.go"}, nil)
+		addItem(t, s, "p", "b-clean", []string{"services/b.go"}, nil)
+
+		res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+		if err != nil {
+			t.Fatalf("pick 실패: %v", err)
+		}
+		if res.Item.ID != "a-rolled-back" {
+			t.Fatalf("선언이 하나도 없는데 순서가 뒤집혔다 — 이 축이 상시 점등이면 판별력이 0이다: 선두=%q", res.Item.ID)
+		}
+	})
+}
+
+// ⑨ 원장을 못 읽으면 **그 사실이 Scope 에 남고**, derive 에는 안 들어간다.
+//
+// ★ derive 에 넣으면 무엇이 깨지나: FreshnessOf 가 failures>0 을 **git 축** Stale 로
+// 접기 때문에, 원장 카운트 한 번이 실패했을 뿐인데 세션이 브랜치·HEAD·조상 판정이
+// 낡았다고 읽는다. pick.go 의 siblingIndex 가 같은 판단을 이미 내려 뒀다.
+//
+// ★ 반대로 침묵도 안 된다. 안 남기면 이 순위가 "롤백된 항목이 진짜로 없다"인지
+// "그 축을 아예 못 봤다"인지 응답만으로 못 가른다.
+func TestPickRecommendConfessesUnreadCloseAxisWithoutFoldingItIntoDerive(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	me := openSession(t, s, "p", repo, repo, "cc-1", "나")
+	addItem(t, s, "p", "solo", []string{"services/a.go"}, nil)
+
+	hideEvent(t, st)
+
+	res, err := s.Pick(ctx(), PickInput{Project: "p", SessionID: me.Session.ID})
+	if err != nil {
+		t.Fatalf("원장을 못 읽는다고 추천을 통째로 버렸다: %v", err)
+	}
+	if res.Mode != PickRecommended || res.Item == nil || res.Item.ID != "solo" {
+		t.Fatalf("추천이 안 실렸다 — mode=%q item=%+v", res.Mode, res.Item)
+	}
+	if res.Bundle == nil {
+		t.Fatal("묶음 축이 nil 이다")
+	}
+	if !strings.Contains(res.Bundle.Scope, "item.finish") {
+		t.Fatalf("종료 선언 축을 못 읽었다는 고백이 Scope 에 없다: %q", res.Bundle.Scope)
+	}
+	if len(res.Failures) != 0 {
+		t.Fatalf("종료 선언 축의 실패를 derive 에 실었다 — FreshnessOf 가 git 축을 낡음으로 접는다: %+v", res.Failures)
+	}
+}
