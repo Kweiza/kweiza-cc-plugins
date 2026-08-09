@@ -19,9 +19,27 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+
+# ★ **이 컨텍스트에는 git 이 없다.** 빌드 컨텍스트가 `./server` 라 `.git` 은 애초에 안
+#   들어온다 — 그래서 go 의 VCS 스탬프가 한 줄도 안 붙는다. 실측(2026-08-06)에서 살아 있는
+#   :7420 이 `/healthz` 에 `build.known=false` 를 냈다. 서버가 자기 판을 못 말하면
+#   클라이언트와의 대조가 통째로 성립하지 않는다.
+#
+# ★ 그래서 **소스 지문**을 박는다. 런처 `bin/fd` 가 플러그인 캐시에서 계산하는 것과
+#   **같은 규칙 · 같은 범위**(둘 다 `server/` 트리, 상대경로)여서 sha 없이도 두 판이
+#   같은 소스인지 정확히 대조된다. 목록이 한쪽만 바뀌면 그 대조가 조용히 거짓이 되므로,
+#   아래 `-name` 목록은 `bin/fd` 의 `src_inputs` 와 **글자 그대로 같아야 한다.**
+#
 # -trimpath: 빌드 머신의 경로가 바이너리에 안 박힌다(재현 가능성 + 정보 노출).
 # -s -w: 디버그 심볼 제거. 진단은 구조화 로그가 하지 스택 심볼이 하지 않는다.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/fd ./cmd/fd
+RUN set -eu; \
+    pkg=github.com/kweiza/flightdeck/internal/buildinfo; \
+    fp="$(find . -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' -o -name '*.sql' -o -name '*.gohtml' \) \
+          | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"; \
+    at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+      -ldflags="-s -w -X $pkg.injectedFingerprint=$fp -X $pkg.injectedTime=$at" \
+      -o /out/fd ./cmd/fd
 
 # ── 헬스체크용 최소 도구 ──────────────────────────────────────────────────
 # 셸도 wget 도 쓰지 않는다. HEALTHCHECK 를 **바이너리 자신**이 한다:
