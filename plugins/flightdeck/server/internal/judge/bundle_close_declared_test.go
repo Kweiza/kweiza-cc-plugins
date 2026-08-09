@@ -276,15 +276,15 @@ func TestEligibleBundleNotTopLedgersWhyCloseDeclared(t *testing.T) {
 // 교차오염(한 후보의 줄에 다른 후보의 값이 보기)을 못 잡는다.
 //
 // ★ 선두도 CloseDeclarations 맵에 있어야 한다. 없으면 변이가 "조각 없음"으로 보이고
-// 음성 단정이 실행되지 않는다. 선두에 자기 선언이 있으면 변이 시 "남의 값이 실린다"로
-// 나타나고, 음성 단정이 실제로 그것을 잡는다. 선두 선언은 not-top 둘과 달라야 한다
-// (예: 수를 다르게). 그래야 "선두 값이 실렸다"가 문자열로 뚜렷하게 드러난다.
+// 양성 단정이 실패한다. 선두에 자기 선언이 있으면 변이 시 "남의 값이 실린다"로
+// 나타나고, 양성 단정(제 값 확인)이 실제로 그 교차오염을 잡는다. 선두 선언은 not-top 둘과
+// 달라야 한다(예: 수를 다르게). 그래야 "선두 값이 실렸다"가 문자열로 뚜렷하게 드러난다.
 //
 // ★ 축은 강등 축이라 선언이 있는 후보는 전부 강등된다. 셋 다 선언을 주면 셋 다
 // 강등되므로 순위는 그 아래 축으로 정해진다. 여기선 의존자(0)·Starved·CloseDeclared
-// (다 같음) → 묶음 크기(다 단독) → 최고령(다 같음) → 선두 id 가 정하는데,
-// id 사전순으로 "a-done-decl" < "b-dropped-decl" < "z-lead" 이므로
-// a-done-decl 이 선두가 된다.
+// (셋 다 선언 있으므로 다 같음) → 묶음 크기(다 단독) → 최고령 이 결정한다.
+// a-lead(minutes=0) · b-dropped-decl(minutes=1) · z-done-decl(minutes=2)이므로
+// a-lead 가 가장 먼저 생성되어 Oldest 가 가장 오래되고, 따라서 a-lead 가 선두가 된다.
 func TestEligibleBundleNotTopEachLedgerCarriesOwnDeclaration(t *testing.T) {
 	in := EligibleInput{
 		Self: "S1",
