@@ -104,6 +104,27 @@ func (e *ClaimRefusedError) Error() string {
 	return fmt.Sprintf("항목 %s/%s 선점 거절: %s", e.Project, e.ItemID, e.Reason)
 }
 
+// ItemClosedError 는 이미 종료된 항목을 다시 열려 했을 때의 오류다.
+//
+// NotFound 로 접지 않는다. 그 항목은 **있다** — 없다고 말하면 조사하는 쪽이 항목 id 오타를
+// 먼저 의심하고, 실제로 일어난 일(누군가 종료를 되돌리려 했다)은 어디에도 안 남는다.
+// notfound.go 첫 주석이 고치려던 합류가 정확히 이것이다.
+//
+// 지금 상태와 되돌리려던 상태를 **둘 다** 담는다. 하나만으로는 무엇이 어긋났는지
+// 재구성할 수 없다 — done 을 open 으로 되돌리려 한 것과 dropped 를 claimed 로
+// 되돌리려 한 것은 처방이 다르다.
+type ItemClosedError struct {
+	Project string
+	ItemID  string
+	State   model.ItemState // 지금 상태(done 또는 dropped)
+	Want    model.ItemState // 되돌리려던 상태
+}
+
+func (e *ItemClosedError) Error() string {
+	return fmt.Sprintf("항목 %s/%s 는 이미 %s 다 — %s 로 되돌리지 않는다(종료는 되돌리지 않는다)",
+		e.Project, e.ItemID, e.State, e.Want)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // item
 // ─────────────────────────────────────────────────────────────────────────────
@@ -486,14 +507,43 @@ func ValidateFinish(outcome model.ItemState, closeReason string) error {
 func (t *Tx) SetItemState(project, itemID string, state model.ItemState, closeReason string) error {
 	switch state {
 	case model.ItemOpen, model.ItemClaimed:
+		// ★ 종료된 항목은 이 갈래로 다시 열리지 않는다.
+		//
+		// 술어가 없으면 이 UPDATE 가 done/dropped 행에도 그대로 닿아 상태를 되돌리고
+		// close_reason·closed_at 을 NULL 로 지운다. 실측했다 — dropped 항목에
+		// SetItemState(…, ItemOpen, "") 를 부르면 폐기 사유 "중복이라 접었다" 가 통째로
+		// 사라지고 state=open 이 된다. 0행이 아니라 1행이라 affectedOne 도 통과한다.
+		// 즉 원장이 조용히 거짓이 되고 되돌렸다는 자취조차 안 남는다.
+		//
+		// 이 갈래의 유일한 호출부는 ClaimItem 이고, 그 앞의 JudgeClaim 이 done/dropped 를
+		// 먼저 거절한다(48-58줄). 그러나 그것은 상태에서 유추하는 **인프로세스 추론**이라
+		// 회귀하면 그대로 뚫린다. JudgeClaim 이 종료 상태를 점유자 축보다 먼저 보는 이유와
+		// 같은 규율이다 — 방어는 두 겹이어야 한다(53줄). 여기가 그 둘째 겹이고, 쓰기
+		// 자리에 붙어 있어서 새 호출부가 생겨도 함께 따라간다.
+		//
+		// 같은 술어가 이미 반납 경로 둘에 있다(ReleaseClaim·ForceReleaseClaim 의
+		// `AND state = 'claimed'`). item.state 를 쓰는 자리 중 여기만 술어가 없었다 —
+		// affectedOne 주석과 같은 논법이다: 비대칭이 결함의 자리를 가리킨다.
 		res, err := t.tx.ExecContext(t.ctx,
-			`UPDATE item SET state = ?, close_reason = NULL, closed_at = NULL WHERE project = ? AND id = ?`,
+			`UPDATE item SET state = ?, close_reason = NULL, closed_at = NULL
+			 WHERE project = ? AND id = ? AND state IN ('open', 'claimed')`,
 			string(state), project, itemID)
 		if err != nil {
 			return fmt.Errorf("항목 상태 갱신 실패(project=%q id=%q state=%q): %w",
 				clip(project, 64), clip(itemID, 64), state, err)
 		}
-		return affectedOne(res, NFItem, project, itemID)
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("항목 상태 갱신 결과 확인 실패(project=%q id=%q): %w",
+				clip(project, 64), clip(itemID, 64), err)
+		}
+		if n == 0 {
+			// affectedOne 을 그냥 쓰면 여기가 전부 NFItem 이 된다. 술어가 붙은 지금은
+			// 0행의 사유가 둘이라(없는 항목 · 이미 끝난 항목) 가르지 않으면 그 둘이
+			// 같은 화면이 된다.
+			return t.closedOrMissing(project, itemID, state)
+		}
+		return nil
 	case model.ItemDone, model.ItemDropped:
 		if err := ValidateFinish(state, closeReason); err != nil {
 			return err
@@ -581,6 +631,30 @@ func affectedOne(res sql.Result, what NotFoundKind, project, id string) error {
 		return notFound(what, project, id)
 	}
 	return nil
+}
+
+// closedOrMissing 은 0행이 "없는 항목"인지 "이미 끝난 항목"인지 가른다.
+//
+// 상태 가드가 붙은 UPDATE 는 0행의 사유가 둘이다. affectedOne 처럼 한 덩이로 접으면
+// 항목 id 오타와 종료 되돌리기 시도가 글자 그대로 같은 오류가 되고, 그러면 조사가
+// 다시 사용자 신고 충실도에 의존한다(notfound.go 가 고치려던 바로 그 합류다).
+//
+// 읽기를 한 번 더 하는 비용은 0행일 때만 든다 — 정상 갈래는 이 함수에 안 온다.
+func (t *Tx) closedOrMissing(project, itemID string, want model.ItemState) error {
+	var cur string
+	switch err := t.tx.QueryRowContext(t.ctx,
+		`SELECT state FROM item WHERE project = ? AND id = ?`, project, itemID).Scan(&cur); {
+	case errors.Is(err, sql.ErrNoRows):
+		return notFound(NFItem, project, itemID)
+	case err != nil:
+		return fmt.Errorf("항목 상태 재확인 실패(project=%q id=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	// 좌표는 응답에 실린다(api.ClassifyError). notFound 와 같은 규율로 원천에서 자른다.
+	return &ItemClosedError{
+		Project: clip(project, 64), ItemID: clip(itemID, 200),
+		State: model.ItemState(cur), Want: want,
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

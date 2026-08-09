@@ -108,8 +108,9 @@ type PickResult struct {
 	// pickExplicit 을 타므로 그 세 갈래에서 경고를 한 번도 못 봤다 — 그 구멍을
 	// 여기서 닫는다.
 	//
-	// ★ 이 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다(store/store.go:366 의
-	// flushDeferred 가 트랜잭션의 ctx 를 그대로 쓴다). 문구가 그렇게 말해야 한다.
+	// ★ 이 수는 **하한이다.** 원장에 안 써진 마무리가 있을 수 있다 — BeginTx 가 실패한
+	// 트랜잭션은 이벤트를 예약조차 안 하고, 쓰기 실패는 WARN 으로 삼킨다
+	// (store.CloseDeclarationsByItem 의 doc 이 남는 사유 셋을 센다). 문구가 그렇게 말해야 한다.
 	CloseDeclared *model.CloseDeclaration `json:"close_declared,omitempty"`
 
 	// Bundle 은 이 응답이 낸 묶음이다.
@@ -491,7 +492,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 			"dropped", len(outside), "first_path", clip(outside[0], 200))
 	}
 	if err != nil {
-		s.logFail(ctx, "item.claim", proj.ID, in.SessionID, err)
+		s.logFail(ctx, "item.claim", proj.ID, in.SessionID, err, failAbout{Item: item.ID})
 		s.log.ErrorContext(ctx, "선점 실패",
 			"project", proj.ID, "session_id", clip(in.SessionID, 64), "item", clip(item.ID, 64),
 			"error", err.Error())
@@ -588,11 +589,29 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 			// 자기가 이미 읽은 항목을 실패와 함께 버린다. 화면에 빈 줄(id="")로 뜨지
 			// 않도록 한 번 더 읽는다. 이 조회조차 실패하면 id 가 애초에 없는 것이므로
 			// State 는 정직하게 비우고 ID 만 남긴다(BundleMember.Item 의 계약 참고).
+			var cands []judge.Candidate
 			if it, ierr := s.st.GetItem(ctx, proj.ID, id); ierr == nil {
 				m.Item = it
+				cands = []judge.Candidate{{Item: it}}
 			} else {
 				m.Item.ID = id
 			}
+			// ★ 종료 선언 축은 **못 집은 구성원에게도** 낸다. 렌더가 이 줄을 사유 줄
+			// **위**에 일부러 올려 뒀는데(renderBundle 의 그 주석 — 못 집은 구성원이야말로
+			// 다음 세션이 다시 집으러 오는 자리라서), 이 자리가 안 채우고 있어서 그 줄이
+			// 항상 "이 응답은 이 축을 안 읽었다"였다. 신선한 온라인 응답에 거짓 원인을
+			// 붙이는 그 실패를 이 축이 이미 두 번 겪었다(Bundle · CloseDeclared).
+			//
+			// 재조회조차 실패한 갈래(큐에 없는 id)는 후보가 비어 "읽었고 0건"이 나간다.
+			// 정확히는 **앵커를 걸 대상이 없다**는 뜻이다 — 항목이 없으면 CreatedAt 이
+			// 없고, 이 축의 앵커 규칙(선언이 항목 생성 뒤여야 센다)을 매길 수가 없다.
+			// 그래도 nil 보다 이쪽을 고른다: nil 은 화면에서 원인 셋(구서버 · 옛 캐시 ·
+			// 이번 조회 실패)을 대는데 신선한 온라인 응답에서 셋 다 거짓이고, 0건의
+			// 오차는 "왜 0인가"에 그친다. 없는 항목에 가짜 CreatedAt 을 주는 길은 더
+			// 나쁘다 — zero 시각이면 앵커가 무조건 통과해 남의 선언을 이 id 에 붙인다.
+			// 원장 자체를 못 읽으면 closeRead=false 라 nil 이 그대로 남는다.
+			closed, closeRead := s.closeDeclarations(ctx, proj.ID, cands)
+			m.CloseDeclared = closeDeclaredOf(closed, id, closeRead)
 			s.log.WarnContext(ctx, "묶음 구성원 선점 실패 — 나머지를 진행한다",
 				"project", proj.ID, "session_id", in.SessionID, "item", clip(id, 64),
 				"error", serr.Error())
@@ -817,9 +836,11 @@ func (s *Service) siblingIndex(ctx context.Context, project string, cands []judg
 //     kweiza-cc-plugins 에 있다 — fd-session-row-fanout·fd-ci-timing-baseline·
 //     fd-prescribe-unclaimed-fires-after-finish). 그것은 좌표 오류지 표류가 아니다.
 //
-// ★ 이 수는 **하한이다.** flushDeferred 가 트랜잭션의 ctx 를 그대로 쓰고
-// (store/store.go:366) LogEvent 는 쓰기 실패를 WARN 으로만 삼키므로(store/event.go:28-34),
-// 원장에 안 써진 마무리가 있을 수 있다. 문구가 그렇게 말해야 한다.
+// ★ 이 수는 **하한이다.** LogEvent 가 쓰기 실패를 WARN 으로만 삼키고(store/event.go 의
+// LogEvent), BeginTx 가 실패한 트랜잭션은 이벤트를 예약조차 안 하므로, 원장에 안 써진
+// 마무리가 있을 수 있다. 문구가 그렇게 말해야 한다.
+// (예전에는 "flushDeferred 가 트랜잭션의 ctx 를 그대로 쓴다"가 첫 사유였다. 그 갈래는
+// 닫혔다 — store.flushCtx 가 취소를 떼고 예산을 다시 건다.)
 func (s *Service) closeDeclarations(ctx context.Context, project string,
 	cands []judge.Candidate) (map[string]model.CloseDeclaration, bool) {
 
@@ -1317,7 +1338,7 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 		return t.AddItem(it)
 	})
 	if err != nil {
-		s.logFail(ctx, "item.add", in.Project, in.SessionID, err)
+		s.logFail(ctx, "item.add", in.Project, in.SessionID, err, failAbout{Item: in.ID})
 		s.log.ErrorContext(ctx, "항목 등록 실패",
 			"project", clip(in.Project, 64), "item", clip(in.ID, 64), "error", err.Error())
 		return model.Item{}, err

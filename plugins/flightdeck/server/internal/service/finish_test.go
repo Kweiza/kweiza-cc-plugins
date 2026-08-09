@@ -660,7 +660,7 @@ func TestFinishWritesNothingWhenAFollowupIsIneligible(t *testing.T) {
 		t.Fatalf("거절인데 판단이 %d건 남았다 — 트랜잭션 진입 전이라 반쪽 상태가 없어야 한다", n)
 	}
 	// 'open' 이 아니라 'claimed' 다 — 위 claimed() 가 Pick 을 거쳐 ClaimItem 을 부르고,
-	// ClaimItem(store/item.go:645)이 항목 상태를 open→claimed 로 이미 옮겨 놨다.
+	// ClaimItem(store/item.go:719)이 항목 상태를 open→claimed 로 이미 옮겨 놨다.
 	// 여기서 볼 것은 "거절이 그 상태를 건드리지 않았다" 이지 "아직 open 이다" 가 아니다.
 	if n := countRows(t, st, `SELECT count(*) FROM item WHERE id = 'batch7' AND state = 'claimed'`); n != 1 {
 		t.Fatalf("거절인데 항목이 여전히 이 세션 손에 있지 않다 — 그 후속만 빼고 그대로 다시 부를 수 있어야 한다")

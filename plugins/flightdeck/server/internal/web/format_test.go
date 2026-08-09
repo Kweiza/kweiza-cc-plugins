@@ -486,9 +486,10 @@ func TestCloseDeclaredLabel(t *testing.T) {
 
 // 문구가 **하한이라고 말하는지**를 따로 잠근다.
 //
-// ★ flushDeferred 는 트랜잭션이 물던 ctx 를 그대로 쓰고 LogEvent 는 쓰기 실패를 WARN 으로만
-// 삼키므로, 클라이언트가 끊기면 행이 안 써진다. "정확히 N건"으로 쓰면 화면이 관측하지 않은
-// 것을 단정하는 셈이고, 그 문구는 위 표의 want 문자열 안에 묻혀 조용히 지워질 수 있다.
+// ★ LogEvent 는 쓰기 실패를 WARN 으로만 삼키고 BeginTx 가 실패한 트랜잭션은 이벤트를
+// 예약조차 안 하므로, 원장에 안 써진 마무리가 있을 수 있다. "정확히 N건"으로 쓰면 화면이
+// 관측하지 않은 것을 단정하는 셈이고, 그 문구는 위 표의 want 문자열 안에 묻혀 조용히
+// 지워질 수 있다.
 func TestCloseDeclaredLabelSaysTheCountIsALowerBound(t *testing.T) {
 	got := CloseDeclaredLabel(model.CloseDeclaration{
 		Done: 1, Last: time.Date(2026, 8, 4, 23, 54, 0, 0, time.UTC),

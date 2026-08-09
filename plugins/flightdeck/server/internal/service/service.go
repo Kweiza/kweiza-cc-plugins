@@ -229,20 +229,6 @@ func New(st *store.Store, log *slog.Logger, opts ...Option) *Service {
 	return s
 }
 
-// logFail 은 실패한 시도의 **사유**를 원장에 덧붙인다.
-//
-// 시도 자체는 트랜잭션 안에서 Tx.LogEvent 로 먼저 예약되므로 롤백돼도 남는다.
-// 다만 그 시점에는 결과를 모르므로 "왜 실패했나"를 여기서 따로 남긴다 —
-// 원장에 시도만 있고 사유가 없으면 실패율은 세지되 무엇을 고쳐야 하는지는 답하지 못한다.
-func (s *Service) logFail(ctx context.Context, kind, project, sessionID string, err error) {
-	if err == nil {
-		return
-	}
-	s.st.LogEvent(ctx, kind+".fail", project, sessionID, map[string]any{
-		"error": clip(err.Error(), 400),
-	})
-}
-
 // Store 는 저장 계층 핸들이다. 표면(REST·MCP)이 이 계층을 거치지 않고 쓰라는 뜻이 아니라,
 // 서버 기동·진단이 같은 핸들을 공유하기 위한 자리다.
 func (s *Service) Store() *store.Store { return s.st }

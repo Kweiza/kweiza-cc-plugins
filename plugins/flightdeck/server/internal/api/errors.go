@@ -89,6 +89,21 @@ func ClassifyError(err error) Classified {
 		}
 	}
 
+	// 종료된 항목을 되돌리려 한 것이다. 500 으로 접지 않는 이유가 이 자리의 전부다 —
+	// store 의 상태 가드는 판정 회귀를 **드러내려고** 서 있는데, 응답이 "서버 내부 오류"면
+	// 정확히 그 회귀가 일어난 날 아무것도 안 보인다.
+	// 실리는 값은 호출자가 보낸 항목 id 와 스키마 열거값 둘뿐이라 내부가 새지 않는다.
+	var closed *store.ItemClosedError
+	if errors.As(err, &closed) {
+		return Classified{
+			Status: http.StatusConflict,
+			Code:   "item_closed",
+			Message: fmt.Sprintf("항목 %s 는 이미 %s 다 — %s 로 되돌릴 수 없다",
+				closed.ItemID, closed.State, closed.Want),
+			Guidance: "종료는 되돌리지 않는다. 이어서 할 일이 있으면 후속 항목을 새로 만들어라.",
+		}
+	}
+
 	var resHeld *store.ResourceHeldError
 	if errors.As(err, &resHeld) {
 		return Classified{

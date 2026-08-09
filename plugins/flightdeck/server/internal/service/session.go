@@ -216,7 +216,7 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "session.open", in.Project, "", err)
+		s.logFail(ctx, "session.open", in.Project, "", err, failAbout{})
 		s.log.ErrorContext(ctx, "세션 열기 실패",
 			"project", clip(in.Project, 64), "worktree", clip(in.Worktree, 200), "error", err.Error())
 		return res, err
@@ -419,7 +419,7 @@ func (s *Service) Beat(ctx context.Context, sessionID string, kind model.SignalK
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "session.beat", "", sessionID, err)
+		s.logFail(ctx, "session.beat", "", sessionID, err, failAbout{Mode: string(kind)})
 		s.log.ErrorContext(ctx, "신호 기록 실패",
 			"session_id", clip(sessionID, 64), "kind", string(kind), "error", err.Error())
 		return err
@@ -469,7 +469,7 @@ func (s *Service) SetState(ctx context.Context, sessionID string, st model.Sessi
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "session.state", "", sessionID, err)
+		s.logFail(ctx, "session.state", "", sessionID, err, failAbout{Mode: string(st)})
 		s.log.ErrorContext(ctx, "세션 상태 변경 실패",
 			"session_id", clip(sessionID, 64), "state", string(st), "error", err.Error())
 	}
@@ -493,7 +493,7 @@ func (s *Service) Rekey(ctx context.Context, sessionID, ccSessionID string) (mod
 	}
 	out, err := s.st.Rekey(ctx, sessionID, ccSessionID)
 	if err != nil {
-		s.logFail(ctx, "session.rekey", "", sessionID, err)
+		s.logFail(ctx, "session.rekey", "", sessionID, err, failAbout{})
 		return model.Session{}, err
 	}
 	return out, nil

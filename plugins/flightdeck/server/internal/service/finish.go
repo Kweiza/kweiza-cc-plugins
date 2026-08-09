@@ -152,6 +152,7 @@ func JudgeFinish(outcome model.ItemState, itemID, body, closeReason string) Fini
 // 그 반쪽 상태가 기존 도구에서 "핸드오프는 했는데 후속이 유입되지 않은" 결함이었다.
 func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, error) {
 	if v := JudgeFinish(in.Outcome, in.ItemID, in.Body, in.CloseReason); !v.OK {
+		s.logFinishRefused(ctx, in, GateJudge)
 		s.log.WarnContext(ctx, "마무리 거절",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"item", clip(in.ItemID, 64), "reason", v.Reason)
@@ -161,6 +162,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	// body 관문(위 JudgeFinish)과 같은 자리·같은 모양이다: 빠진 것을 그 자리에서 말한다.
 	if len(in.Followups) == 0 {
 		if refused := s.judgeMissingFollowups(ctx, in); refused != nil {
+			s.logFinishRefused(ctx, in, GateFollowupsPending)
 			s.log.WarnContext(ctx, "마무리 거절 — 후속이 안 실렸다",
 				"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 				"item", clip(in.ItemID, 64))
@@ -174,11 +176,13 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	seen := make(map[string]bool, len(in.Followups))
 	for i, f := range in.Followups {
 		if err := ValidateItemID(f.ID); err != nil {
+			s.logFinishRefused(ctx, in, GateFollowupID)
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason:   fmt.Sprintf("%d번째 후속: %v", i+1, err),
 				Guidance: "후속 항목 id 도 브랜치 이름으로 그대로 쓰인다."}
 		}
 		if seen[f.ID] {
+			s.logFinishRefused(ctx, in, GateFollowupDuplicate)
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason:   fmt.Sprintf("%d번째 후속(%s)이 같은 호출에 두 번 실렸다", i+1, clip(f.ID, 64)),
 				Guidance: "같은 항목을 두 번 만들 수도, 두 번 이을 수도 없다 — 한 번만 실어라."}
@@ -189,6 +193,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	//    아무것도 안 쓴다. 자격 정의와 사유는 finish_followups.go 에 있다.
 	plan, refused := s.classifyFollowups(ctx, in)
 	if refused != nil {
+		s.logFinishRefused(ctx, in, GateFollowupIneligible)
 		s.log.WarnContext(ctx, "마무리 거절 — 이을 자격이 없는 후속",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"item", clip(in.ItemID, 64))
@@ -200,6 +205,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	for _, c := range plan.Create {
 		f := c.Item
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
+			s.logFinishRefused(ctx, in, GateFollowupBody)
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason: fmt.Sprintf("%d번째 후속(%s)에 제목이나 본문이 없다", c.Index, clip(f.ID, 64)),
 				Guidance: "후속은 다음 세션이 집을 항목이다 — 제목만 있으면 " +
@@ -216,6 +222,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// ★ 이제 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 경로를 안 건드리므로
 		// 통과시킬 우회 문 자체가 없다(store 에 그 항목의 paths 를 덮을 메서드가 없다).
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
+			s.logFinishRefused(ctx, in, GateFollowupPaths)
 			return FinishResult{}, &RefusedError{What: "finish",
 				Reason: fmt.Sprintf("%d번째 후속(%s)의 %s", c.Index, clip(f.ID, 64), err),
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
@@ -232,9 +239,16 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		//   그러면 §10 의 "세션당 쓰기 호출 수"가 실패를 못 본다.
 		t.LogEvent("item.finish", in.Project, in.SessionID, map[string]any{
 			"item": in.ItemID, "mode": string(in.Outcome),
-			// ★ count 는 **만들 것의 수**다. 잇기를 여기 세면 store.QueueReproduction
-			//   (store/event.go:203)이 만들지도 않은 항목을 재생산율 R 의 분자로 더한다 —
-			//   DESIGN §10 이 R 을 이 설계의 판정 축으로 세운 자리라 조용히 거짓이 된다.
+			// ★ count 는 **만들 것의 수**다. 잇기를 여기 세면 store.QueueReproduction 이
+			//   만들지도 않은 항목을 재생산율 R 의 분자로 더한다 — DESIGN §10 이 R 을 이 설계의
+			//   판정 축으로 세운 자리라 조용히 거짓이 된다.
+			//
+			// ★ 같은 부류의 **롤백 갈래는 여기가 아니라 저장층이 막는다.** 이 줄이 예약한
+			//   이벤트는 tx 가 롤백돼도 흘러가고(store.go 의 flushDeferred), 그때 payload 에
+			//   결말이 찍혀(store.TxOutcomeKey) QueueReproduction 이 분모·분자에서 뺀다.
+			//   그러므로 이 자리의 count 는 "만들려 한 수"이지 "만들어진 수"가 아니다 —
+			//   그 구분을 여기서 지우지 마라. 롤백된 시도의 count 를 0으로 적으면 무엇을
+			//   시도했는지가 원장에서 사라지고, 그것이 이 이벤트의 존재 이유다.
 			"count": len(plan.Create), "linked": len(plan.Link),
 			"bytes": len(in.Body), // §10 "세션당 판단 바이트" — 0 에 수렴하면 위험 신호다
 		})
@@ -336,7 +350,11 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 					})
 					continue
 				}
-				return fmt.Errorf("후속 항목 %s 등록 실패: %w", clip(it.ID, 64), err)
+				// ★ 타입 있는 껍데기다. 나르는 것은 **단계**이고, 그 단계를 원장의 갈래가
+				//   읽는다(service/logfail.go 의 failCause). fmt.Errorf 로 감싸면 leaf 오류의
+				//   종류만 남아 "후속 인자가 틀렸다"가 "끝내려는 항목이 없다"로 굳는다.
+				//   문구는 앞 판과 글자 그대로 같다 — 그것을 단정하는 시험이 있다.
+				return &followupWriteError{ID: it.ID, Err: err}
 			}
 			out.Followups = append(out.Followups, it)
 		}
@@ -430,7 +448,7 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "item.finish", in.Project, in.SessionID, err)
+		s.logFail(ctx, "item.finish", in.Project, in.SessionID, err, finishAbout(in))
 		s.log.ErrorContext(ctx, "마무리 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"item", clip(in.ItemID, 64), "error", err.Error())
@@ -609,7 +627,8 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 		return nil
 	})
 	if err != nil {
-		s.logFail(ctx, "judgment.note", in.Project, in.SessionID, err)
+		s.logFail(ctx, "judgment.note", in.Project, in.SessionID, err,
+			failAbout{Item: in.ItemID, Mode: string(in.Kind)})
 		s.log.ErrorContext(ctx, "판단 저장 실패",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"mode", string(in.Kind), "error", err.Error())
