@@ -79,6 +79,11 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
           border:1px solid currentColor; background:transparent; color:inherit; cursor:pointer; opacity:.8; }
   .more:hover { opacity:1; }
   .count { opacity:.65; font-weight:400; font-size:.85em; }
+  /* 프로젝트 줄 접기 — JS 없이 <details> 하나로 닫는다. */
+  details.pfold { display:inline-block; vertical-align:baseline; margin-left:6px; }
+  details.pfold > summary { cursor:pointer; color:var(--dim); font-size:12px; }
+  details.pfold[open] { display:block; margin:6px 0 0; }
+  details.pfold a { margin-right:10px; }
 </style>
 </head>
 <body>
@@ -88,7 +93,22 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   <div class="derived">{{.Now}} · {{.HealthLine}} · 디스크: <span class="lv-{{.Disk.Level}}">{{.Disk.Text}}</span></div>
   {{if .Projects}}
   <nav>프로젝트:
-    {{range .Projects}}<a class="{{if eq .ID $.Project.ID}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a>{{end}}
+    {{range .Nav.Shown}}<a class="{{if .On}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a>{{end}}
+    {{with .Nav.NoPins}}<span class="k">{{.}}</span>{{end}}
+    {{/* 접기는 <details> 다 — JS 를 안 쓴다. 이 페이지의 다른 접기(.fold/.more)는 스크립트로
+         접어서 JS 가 없으면 전부 펴지는데, 그 폴백은 긴 목록에는 옳지만 이 줄에는 반대다:
+         스크립트가 없어도 접혀 있어야 이 축이 성립한다. */}}
+    {{with .Nav.FoldedLine}}
+    <details class="pfold"><summary>{{.}}</summary>
+      {{range $.Nav.Folded}}<a href="?project={{.ID}}">{{.ID}}</a>{{end}}
+      {{if $.Nav.Archived}}
+      <div class="k">보관:
+        {{range $.Nav.Archived}}<a class="dim" href="?project={{.ID}}">{{.ID}}</a>
+          <span class="k">({{.LastSession}})</span>{{end}}
+      </div>
+      {{end}}
+    </details>
+    {{end}}
   </nav>
   {{end}}
   {{/* ★ POST 다. GET 링크로 두면 브라우저·확장의 링크 프리페치가 눌러서 로그아웃이

@@ -293,6 +293,31 @@ type SearchPanel struct {
 	Empty   string
 }
 
+// ProjectRow 는 프로젝트 줄의 한 칸이다.
+type ProjectRow struct {
+	ID       string
+	On       bool // 지금 보고 있는 것
+	Pinned   bool
+	Archived bool
+	// LastSession 은 마지막 세션의 나이다("3일 전"). 보관 목록에서만 쓴다 —
+	// 보관해 둔 것이 다시 돌기 시작하면 그 사실이 보여야 사람이 풀 수 있다.
+	LastSession string
+}
+
+// ProjectNav 는 헤더의 프로젝트 줄 전부다.
+//
+// ★ 접는 것과 지우는 것은 다르다. 접힌 것도 Folded·Archived 에 그대로 실려 HTML 에
+// 나가고 <details> 가 닫아 둘 뿐이다 — 열면 보이고, ?project= 로는 언제나 열린다.
+type ProjectNav struct {
+	Shown    []ProjectRow // 핀 + 지금 보고 있는 것
+	Folded   []ProjectRow // 핀도 보관도 아닌 것
+	Archived []ProjectRow
+	// FoldedLine 은 "나머지 3 (보관 1 포함)" 이다. 비면 접을 것이 없다는 뜻이다.
+	FoldedLine string
+	// NoPins 는 핀이 하나도 없을 때의 안내다. 그때는 아무것도 안 접는다.
+	NoPins string
+}
+
 // Page 는 렌더 한 장의 전부다.
 type Page struct {
 	Now string
@@ -301,6 +326,8 @@ type Page struct {
 	RenderedAt int64
 	Title      string
 	Projects   []model.Project
+	// Nav 는 위 Projects 를 화면 모양으로 접은 것이다. 템플릿은 이쪽만 읽는다.
+	Nav        ProjectNav
 	Project    model.Project
 	HasProject bool
 	Notice     string
@@ -333,6 +360,88 @@ func (p Page) WriteKey(kind string) string {
 	return "web:" + kind + ":" + strconv.FormatInt(p.RenderedAt, 10)
 }
 
+// buildProjectNav 는 프로젝트 목록을 화면 모양으로 접는다. 순수 함수다.
+//
+// ★ 핀이 0이면 아무것도 안 접는다. 이것이 이 화면의 정직함이다 — 핀이 없다는 사실을
+// 자동 판정(활동이 있는 것만 편다)으로 덮으면, 사람이 접은 것과 규칙이 접은 것이 화면에서
+// 같은 모양이 되고 "왜 사라졌나"에 답할 수 없다.
+//
+// ★ 지금 보고 있는 것은 핀이 아니어도 편다. 안 그러면 화면이 자기 위치를 안 말한다.
+func buildProjectNav(projects []model.Project, current string, ages map[string]string) ProjectNav {
+	var nav ProjectNav
+	pinned := 0
+	for _, p := range projects {
+		if !p.PinnedAt.IsZero() {
+			pinned++
+		}
+	}
+
+	for _, p := range projects {
+		row := ProjectRow{
+			ID:          p.ID,
+			On:          p.ID == current,
+			Pinned:      !p.PinnedAt.IsZero(),
+			Archived:    !p.ArchivedAt.IsZero(),
+			LastSession: ages[p.ID],
+		}
+		switch {
+		case pinned == 0:
+			nav.Shown = append(nav.Shown, row)
+		case row.Pinned || row.On:
+			nav.Shown = append(nav.Shown, row)
+		case row.Archived:
+			nav.Archived = append(nav.Archived, row)
+		default:
+			nav.Folded = append(nav.Folded, row)
+		}
+	}
+
+	if pinned == 0 {
+		nav.NoPins = "핀이 없다 — ★ 로 남길 것을 고르면 나머지가 접힌다"
+		return nav
+	}
+	if n := len(nav.Folded) + len(nav.Archived); n > 0 {
+		nav.FoldedLine = fmt.Sprintf("나머지 %d", n)
+		if a := len(nav.Archived); a > 0 {
+			nav.FoldedLine += fmt.Sprintf(" (보관 %d 포함)", a)
+		}
+	}
+	return nav
+}
+
+// archivedSessionAges 는 **보관된 프로젝트만** 마지막 세션 나이를 읽는다.
+//
+// ★ 전건을 안 읽는다. 이 줄은 페이지 머리라 매 렌더 도는데, 프로젝트가 늘수록 질의가
+// 함께 느는 자리를 머리에 두면 화면 전체가 그 비용을 문다. 보관 목록에만 필요한 값이다 —
+// 보관해 둔 것이 다시 돌기 시작하면 사람이 그것을 보고 풀어야 하기 때문이다.
+func (h *handler) archivedSessionAges(ctx context.Context, projects []model.Project,
+	now time.Time) map[string]string {
+
+	ages := map[string]string{}
+	for _, p := range projects {
+		if p.ArchivedAt.IsZero() {
+			continue
+		}
+		at, err := h.svc.Store().LastSessionAt(ctx, p.ID)
+		if err != nil {
+			h.log.ErrorContext(ctx, "마지막 세션 시각 조회 실패",
+				"project", Clip(p.ID, 64), "error", err.Error())
+			ages[p.ID] = "모름"
+			continue
+		}
+		if at.IsZero() {
+			ages[p.ID] = "세션 없음"
+			continue
+		}
+		// ★ 여기서 " 전" 을 덧붙이지 않는다. web.Age 는 이미 "3일 전" 처럼 접미사를
+		// 포함해서 낸다(format.go:64) — 밖에서 다시 붙이면 "3일 전 전" 이 된다.
+		// 이 페이지의 다른 나이 표시(OpenedAge·Signal·Held 등)도 전부 Age 를 이렇게
+		// 그대로 쓴다. 새 관례를 만들지 않는다.
+		ages[p.ID] = Age(now.Sub(at))
+	}
+	return ages
+}
+
 // buildPage 는 화면 한 장을 조립한다.
 //
 // ★ 한 축이 실패해도 나머지는 낸다. 조정 화면이 파생 실패로 통째로 사라지면
@@ -357,6 +466,10 @@ func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 		return p
 	}
 	p.Projects = projects
+	// Nav 는 프로젝트 목록·건강·개별 조회의 성패와 무관하게 항상 만든다 — 프로젝트가
+	// 0건이거나 요청한 프로젝트를 못 찾아 아래에서 일찍 return 하는 갈래에서도
+	// 헤더의 프로젝트 줄은 그대로 나가야 한다.
+	p.Nav = buildProjectNav(projects, req.project, h.archivedSessionAges(ctx, projects, now))
 
 	// 건강은 프로젝트와 무관하게 항상 낸다 — 프로젝트가 하나도 없을 때가
 	// 오히려 "서버는 사는데 아무도 안 붙었다"를 확인해야 하는 순간이다.

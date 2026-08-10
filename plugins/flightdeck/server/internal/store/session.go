@@ -398,6 +398,27 @@ func (s *Store) ListSessions(ctx context.Context, project string) ([]model.Sessi
 	return out, nil
 }
 
+// LastSessionAt 은 이 프로젝트에서 마지막으로 열린 세션의 시각이다. 없으면 제로값이다.
+//
+// ★ 이 조회의 유일한 소비자는 웹 화면의 보관된 프로젝트 줄이다(page.go 의
+// archivedSessionAges) — 보관해 둔 것이 다시 돌기 시작하면 그 사실을 사람이 보고
+// 풀어야 한다. 그래서 "마지막으로 세션이 **열린** 시각"이지 "마지막 신호 시각"이
+// 아니다 — 신호(session_signal)는 세션 하나에 매인 값이라 프로젝트 단위로 묶으려면
+// 조인이 하나 더 필요하고, 이 화면이 묻는 질문("다시 붙은 사람이 있나")에는
+// 세션이 열린 사실 하나로 이미 충분하다.
+func (s *Store) LastSessionAt(ctx context.Context, project string) (time.Time, error) {
+	var at sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT max(opened_at) FROM session WHERE project = ?`, project).Scan(&at)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("마지막 세션 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	if !at.Valid || strings.TrimSpace(at.String) == "" {
+		return time.Time{}, nil
+	}
+	return parseTime(at.String)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // session_workspace
 // ─────────────────────────────────────────────────────────────────────────────
