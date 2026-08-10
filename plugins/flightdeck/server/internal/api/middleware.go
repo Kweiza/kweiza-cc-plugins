@@ -139,7 +139,11 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 		if IsLoopback(r.RemoteAddr) {
 			s.loopbackSeen.Store(true)
 		}
-		d := JudgeAuth(r.RemoteAddr, r.Header.Get("Authorization"), s.opt.Token, s.opt.RequireTokenOnLoopback)
+		d := JudgeAuth(AuthRequest{
+			RemoteAddr: r.RemoteAddr,
+			AuthHeader: r.Header.Get("Authorization"),
+			ScreenPath: JudgeScreenPath(r.URL.Path),
+		}, s.opt.Token, s.opt.RequireTokenOnLoopback)
 		if !d.OK {
 			s.met.incUnauthorized()
 			// 로그 줄 없음(위 규율). 사유는 응답에만 싣는다 — 그 문구는 전부 이 계층이 쓴 것이다.

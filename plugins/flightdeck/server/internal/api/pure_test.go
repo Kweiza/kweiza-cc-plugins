@@ -22,40 +22,58 @@ func TestJudgeAuth(t *testing.T) {
 	const tok = "s3cret"
 	cases := []struct {
 		name       string
-		remote     string
-		header     string
+		req        AuthRequest
 		token      string
 		strictLoop bool
 		wantOK     bool
 		wantAnon   bool
 		reasonHas  string
 	}{
-		{"토큰 일치", "203.0.113.9:1", "Bearer " + tok, tok, false, true, false, "일치한다"},
-		{"토큰 불일치", "203.0.113.9:1", "Bearer nope", tok, false, false, false, "일치하지 않는다"},
-		{"헤더 없음 원격", "203.0.113.9:1", "", tok, false, false, false, "헤더가 없다"},
-		{"헤더 없음 루프백", "127.0.0.1:1", "", tok, false, true, true, "루프백"},
-		{"헤더 없음 IPv6 루프백", "[::1]:1", "", tok, false, true, true, "루프백"},
-		{"루프백 면제 끔", "127.0.0.1:1", "", tok, true, false, false, "루프백에도 토큰을 요구한다"},
-		{"서버 토큰 미설정", "203.0.113.9:1", "", "", false, true, true, "설정되지 않았다"},
-		{"형식 위반", "127.0.0.1:1", "Bearer a b", tok, false, false, false, "형식이 아니다"},
-		{"방식이 Basic", "127.0.0.1:1", "Basic abcd", tok, false, false, false, "Bearer 가 아니다"},
+		{"토큰 일치", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer " + tok}, tok, false, true, false, "일치한다"},
+		{"토큰 불일치", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer nope"}, tok, false, false, false, "일치하지 않는다"},
+		{"헤더 없음 원격", AuthRequest{RemoteAddr: "203.0.113.9:1"}, tok, false, false, false, "헤더가 없다"},
+		{"헤더 없음 루프백", AuthRequest{RemoteAddr: "127.0.0.1:1"}, tok, false, true, true, "루프백"},
+		{"헤더 없음 IPv6 루프백", AuthRequest{RemoteAddr: "[::1]:1"}, tok, false, true, true, "루프백"},
+		{"루프백 면제 끔", AuthRequest{RemoteAddr: "127.0.0.1:1"}, tok, true, false, false, "루프백에도 토큰을 요구한다"},
+		{"서버 토큰 미설정", AuthRequest{RemoteAddr: "203.0.113.9:1"}, "", false, true, true, "설정되지 않았다"},
+		{"형식 위반", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Bearer a b"}, tok, false, false, false, "형식이 아니다"},
+		{"방식이 Basic", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Basic abcd"}, tok, false, false, false, "Bearer 가 아니다"},
+		{"루프백인데 토큰이 틀림", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Bearer wrong"}, tok, false, false, false, "일치하지 않는다"},
+		{"토큰 미설정 + 헤더 있음", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer whatever"}, "", false, true, true, "대조할 기준이 없다"},
+		{"RemoteAddr 이 이상함", AuthRequest{RemoteAddr: "@unix-socket"}, tok, false, false, false, "헤더가 없다"},
+		{"소문자 bearer", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "bearer " + tok}, tok, false, true, false, "일치한다"},
+		{"토큰 대소문자 다름", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer S3CRET"}, tok, false, false, false, "일치하지 않는다"},
 
-		// ── 표 밖 ────────────────────────────────────────────────────────────
-		// ① 틀린 토큰은 **루프백이어도** 거절한다. 면제로 덮으면 클라이언트의
-		//    토큰 오설정이 영영 안 보인다.
-		{"루프백인데 토큰이 틀림", "127.0.0.1:1", "Bearer wrong", tok, false, false, false, "일치하지 않는다"},
-		// ② 서버에 토큰이 없는데 헤더가 온 경우 — 대조할 기준이 없으므로 통과하되 **무인증**이다.
-		{"토큰 미설정 + 헤더 있음", "203.0.113.9:1", "Bearer whatever", "", false, true, true, "대조할 기준이 없다"},
-		// ③ RemoteAddr 이 해석 불가면 루프백이 아니다(못 읽은 것을 면제로 접지 않는다).
-		{"RemoteAddr 이 이상함", "@unix-socket", "", tok, false, false, false, "헤더가 없다"},
-		// ④ 소문자 스킴도 받는다(HTTP 규약상 대소문자 무시).
-		{"소문자 bearer", "203.0.113.9:1", "bearer " + tok, tok, false, true, false, "일치한다"},
-		// ⑤ 대소문자가 다른 토큰 값은 다른 토큰이다.
-		{"토큰 대소문자 다름", "203.0.113.9:1", "Bearer S3CRET", tok, false, false, false, "일치하지 않는다"},
+		// ── 쿠키 축 ──────────────────────────────────────────────────────────
+		// ① 화면 경로의 맞는 쿠키는 통과한다. 브라우저가 들어오는 유일한 길이다.
+		{"쿠키 일치 + 화면", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: tok, ScreenPath: true},
+			tok, false, true, false, "쿠키"},
+		// ② ★ 같은 쿠키가 REST 에서는 통과하지 못한다. 이 줄이 설계 전체를 붙든다 —
+		//    빠지면 REST 쓰기의 CSRF 방어가 SameSite 하나로 줄어든다.
+		{"쿠키 일치 + REST", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: tok, ScreenPath: false},
+			tok, false, false, false, "화면이 아니다"},
+		// ③ 틀린 쿠키는 거절한다. 사유가 "헤더가 없다"로 접히면 옛 쿠키를 든 브라우저의
+		//    처방("다시 로그인해라")이 안 나온다.
+		{"쿠키 불일치 + 화면", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: "nope", ScreenPath: true},
+			tok, false, false, false, "쿠키의 토큰이 일치하지 않는다"},
+		// ④ 틀린 쿠키는 **루프백이어도** 거절한다. 틀린 헤더와 같은 규율이다.
+		{"쿠키 불일치 + 루프백", AuthRequest{RemoteAddr: "127.0.0.1:1", CookieToken: "nope", ScreenPath: true},
+			tok, false, false, false, "일치하지 않는다"},
+		// ⑤ ★ 헤더가 이긴다. 헤더를 실을 수 있는 클라이언트가 쿠키로 조용히 뒤집히면
+		//    무엇이 인증했는지가 요청마다 달라진다.
+		{"헤더 틀림 + 쿠키 맞음", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer wrong", CookieToken: tok, ScreenPath: true},
+			tok, false, false, false, "일치하지 않는다"},
+		// ⑥ ★ 쿠키가 있어도 루프백 면제는 살아 있어야 한다. 쿠키 갈래를 면제보다 위에서
+		//    거절로 끝내면 이 줄이 깨진다 — 즉 기존 배포의 루프백 클라이언트가 죽는다.
+		{"비화면 쿠키 + 루프백 면제", AuthRequest{RemoteAddr: "127.0.0.1:1", CookieToken: tok, ScreenPath: false},
+			tok, false, true, true, "루프백"},
+		// ⑦ 서버에 토큰이 없으면 쿠키도 대조할 기준이 없다.
+		{"토큰 미설정 + 쿠키", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: "whatever", ScreenPath: true},
+			"", false, true, true, "설정되지 않았다"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := JudgeAuth(c.remote, c.header, c.token, c.strictLoop)
+			got := JudgeAuth(c.req, c.token, c.strictLoop)
 			if got.OK != c.wantOK || got.Anonymous != c.wantAnon {
 				t.Fatalf("판정이 다르다: OK=%v Anonymous=%v (기대 OK=%v Anonymous=%v) 사유=%q",
 					got.OK, got.Anonymous, c.wantOK, c.wantAnon, got.Reason)

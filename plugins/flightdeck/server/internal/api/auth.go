@@ -27,18 +27,39 @@ type AuthDecision struct {
 	Reason    string // 항상 채운다
 }
 
+// AuthRequest 는 인증 판정에 필요한 요청 사실 전부다.
+//
+// ★ 구조체인 이유. 인자로 풀면 문자열 셋과 불리언 둘이 연속해서, 호출부에서 순서가
+// 뒤집혀도 컴파일이 통과한다. ScreenPath 와 requireTokenOnLoopback 이 뒤바뀌면
+// **REST 에 쿠키가 열리는데** 그 사고는 시험이 그 조합을 명시로 짚기 전에는 안 보인다.
+type AuthRequest struct {
+	RemoteAddr  string // net/http 가 준 "host:port"
+	AuthHeader  string // Authorization 헤더 원문
+	CookieToken string // 로그인 쿠키에서 읽은 값. 없으면 빈 문자열
+	// ScreenPath 는 이 경로가 화면인가다 — **쿠키를 인정하는 유일한 조건**이다.
+	// 판정하는 것은 JudgeScreenPath 이고, 미들웨어가 그 값을 여기 실어 준다.
+	ScreenPath bool
+}
+
 // JudgeAuth 는 요청 하나가 게이트를 통과하는지 판정한다. 순수 함수다.
 //
-//   - remoteAddr: net/http 가 준 "host:port"
-//   - authHeader: Authorization 헤더 원문
 //   - token: 서버에 설정된 토큰. 빈 문자열이면 **인증이 꺼져 있다**
 //   - requireTokenOnLoopback: 루프백 면제를 끌 것인가
 //
-// 순서가 중요하다. **틀린 토큰은 루프백이어도 거절한다** — 명시적으로 잘못된
-// 자격증명을 면제로 덮으면 클라이언트의 토큰 오설정이 영영 안 보인다.
-func JudgeAuth(remoteAddr, authHeader, token string, requireTokenOnLoopback bool) AuthDecision {
-	header := strings.TrimSpace(authHeader)
-	loopback := IsLoopback(remoteAddr)
+// 순서가 중요하다.
+//
+//  1. **헤더가 있으면 헤더만 본다.** 쿠키는 쳐다보지 않는다 — 헤더를 실을 수 있는
+//     클라이언트가 쿠키로 조용히 뒤집히면 무엇이 인증했는지가 요청마다 달라진다
+//     (withScreenWrite 가 Idempotency-Key 에 대해 세운 규율과 같다).
+//  2. **틀린 자격증명은 루프백이어도 거절한다** — 헤더든 쿠키든. 명시적으로 잘못된
+//     자격증명을 면제로 덮으면 클라이언트의 토큰 오설정이 영영 안 보인다.
+//  3. **쿠키를 든 비화면 요청은 아래로 흘려보낸다.** 여기서 거절로 끝내면 루프백 면제가
+//     죽는다 — 쿠키를 가진 브라우저가 있는 머신에서 REST 를 치던 클라이언트가 통째로
+//     막히고, 그 회귀는 쿠키를 안 굽던 시절의 시험으로는 안 잡힌다.
+func JudgeAuth(req AuthRequest, token string, requireTokenOnLoopback bool) AuthDecision {
+	header := strings.TrimSpace(req.AuthHeader)
+	cookie := strings.TrimSpace(req.CookieToken)
+	loopback := IsLoopback(req.RemoteAddr)
 
 	if header != "" {
 		scheme, value, ok := splitBearer(header)
@@ -49,7 +70,6 @@ func JudgeAuth(remoteAddr, authHeader, token string, requireTokenOnLoopback bool
 			return AuthDecision{Reason: "Authorization 인증 방식이 Bearer 가 아니다"}
 		}
 		if token == "" {
-			// 검사할 기준이 없다. 헤더가 왔다는 이유로 통과시키되 확인은 안 됐다고 말한다.
 			return AuthDecision{OK: true, Anonymous: true,
 				Reason: "서버에 토큰이 설정되지 않아 대조할 기준이 없다 — 무인증으로 통과했다"}
 		}
@@ -63,12 +83,27 @@ func JudgeAuth(remoteAddr, authHeader, token string, requireTokenOnLoopback bool
 		return AuthDecision{OK: true, Anonymous: true,
 			Reason: "서버에 토큰이 설정되지 않았다 — 전 요청이 무인증으로 통과한다"}
 	}
+
+	// 화면 경로의 쿠키. 브라우저가 자격증명을 내놓는 유일한 길이다.
+	if cookie != "" && req.ScreenPath {
+		if subtle.ConstantTimeCompare([]byte(cookie), []byte(token)) == 1 {
+			return AuthDecision{OK: true, Reason: "화면 쿠키의 토큰이 일치한다"}
+		}
+		return AuthDecision{Reason: "화면 쿠키의 토큰이 일치하지 않는다 — 토큰이 바뀌었으면 다시 로그인해라"}
+	}
+
 	if loopback && !requireTokenOnLoopback {
 		return AuthDecision{OK: true, Anonymous: true,
 			Reason: "루프백 요청이라 토큰 없이 통과했다"}
 	}
 	if loopback {
 		return AuthDecision{Reason: "루프백이지만 이 서버는 루프백에도 토큰을 요구한다"}
+	}
+	// ★ 쿠키를 들고 REST 를 친 경우가 여기로 온다. 사유를 "헤더가 없다"로 접으면
+	// 브라우저에서 REST 를 부르는 도구를 만드는 사람이 원인을 영영 못 찾는다.
+	if cookie != "" {
+		return AuthDecision{Reason: "쿠키가 있지만 이 경로는 화면이 아니다 — " +
+			"/api/v1 은 Authorization 헤더만 받는다"}
 	}
 	return AuthDecision{Reason: "Authorization 헤더가 없다"}
 }
