@@ -719,6 +719,9 @@ func liveOf(cards []service.SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// 규모도 함께 넘긴다. 이 변환이 두 자리(service.liveFor · 여기)에 있는데,
+			// 한쪽만 고치면 board 와 pick 중 한쪽에서만 규모가 뜬다.
+			Delta: c.View.PathDelta,
 			// ★ 대화 id 를 함께 넘긴다 — 없으면 형제 카드가 남으로 보여 자기 자신과
 			// 겹친다고 알린다. 판정은 judge.OverlapsWithLive 한 자리에만 있다.
 			CCSessionID: c.View.Session.CCSessionID,

@@ -279,6 +279,72 @@ func TestNoOverlapWhenPathsAreUnrelated(t *testing.T) {
 	}
 }
 
+func TestOverlapsCarryTheirDelta(t *testing.T) {
+	live := []LiveSession{{
+		ID: "s-1", CCSessionID: "cc-other", Paths: []string{"a.go", "b.bin"},
+		Delta: map[string]model.LineDelta{"a.go": {Added: 47, Removed: 1}},
+	}}
+	got := OverlapsWithLive([]string{"a.go", "b.bin"}, live, "me", "cc-me")
+	if len(got) != 1 {
+		t.Fatalf("겹침 1건을 기대했는데 %d건이다", len(got))
+	}
+	if d, want := got[0].TheirDelta["a.go"], (model.LineDelta{Added: 47, Removed: 1}); d != want {
+		t.Errorf("a.go: %+v 를 기대했는데 %+v 다", want, d)
+	}
+	// ★ 상대가 규모를 안 준 경로는 **키가 없어야** 한다. 0 이 아니다.
+	if d, ok := got[0].TheirDelta["b.bin"]; ok {
+		t.Errorf("b.bin 의 규모 키가 생겼다(%+v) — 상대가 못 잰 것은 키가 없어야 한다", d)
+	}
+}
+
+func TestOverlapsSortBiggestFirstAndUnknownOnTop(t *testing.T) {
+	mk := func(id string, d map[string]model.LineDelta) LiveSession {
+		return LiveSession{ID: id, CCSessionID: "cc-" + id, Paths: []string{"a.go"}, Delta: d}
+	}
+	live := []LiveSession{
+		mk("s-small", map[string]model.LineDelta{"a.go": {Added: 3}}),
+		mk("s-unknown", nil), // 규모를 못 읽었다
+		mk("s-big", map[string]model.LineDelta{"a.go": {Added: 47, Removed: 1}}),
+		mk("s-zero", map[string]model.LineDelta{"a.go": {Added: 0, Removed: 0}}),
+	}
+	got := OverlapsWithLive([]string{"a.go"}, live, "me", "cc-me")
+
+	var order []string
+	for _, o := range got {
+		order = append(order, o.SessionID)
+	}
+	want := []string{"s-unknown", "s-big", "s-small", "s-zero"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("순서 %q 를 기대했는데 %q 다", want, order)
+	}
+}
+
+// ★ 이 시험이 이 태스크의 논지를 지킨다. 못 읽은 것을 0 으로 접으면
+// s-unknown 이 s-zero 옆으로 내려가고 절단될 때 제일 먼저 사라진다.
+func TestUnknownSizeOutranksAMeasuredZero(t *testing.T) {
+	live := []LiveSession{
+		{ID: "s-zero", CCSessionID: "cc-a", Paths: []string{"a.go"},
+			Delta: map[string]model.LineDelta{"a.go": {}}},
+		{ID: "s-unknown", CCSessionID: "cc-b", Paths: []string{"a.go"}},
+	}
+	got := OverlapsWithLive([]string{"a.go"}, live, "me", "cc-me")
+	if got[0].SessionID != "s-unknown" {
+		t.Fatalf("못 읽은 것이 맨 위여야 한다 — %q 가 먼저다. 아래로 밀면 절단될 때 "+
+			"제일 먼저 사라지는 것이 못 잰 것이 된다", got[0].SessionID)
+	}
+}
+
+func TestOverlapSortIsDeterministicOnTies(t *testing.T) {
+	mk := func(id string) LiveSession {
+		return LiveSession{ID: id, CCSessionID: "cc-" + id, Paths: []string{"a.go"},
+			Delta: map[string]model.LineDelta{"a.go": {Added: 5}}}
+	}
+	got := OverlapsWithLive([]string{"a.go"}, []LiveSession{mk("s-b"), mk("s-a")}, "me", "cc-me")
+	if got[0].SessionID != "s-a" || got[1].SessionID != "s-b" {
+		t.Errorf("동점은 세션 id 오름차순이어야 한다: %q, %q", got[0].SessionID, got[1].SessionID)
+	}
+}
+
 func TestSelfClaimIsItsOwnCode(t *testing.T) {
 	_, rejected := EligibleBundle(EligibleInput{
 		Self:       "S1",

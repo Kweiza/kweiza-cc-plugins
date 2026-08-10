@@ -565,6 +565,9 @@ func liveFor(cards []SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
+			// 규모도 함께 넘긴다 — 이 자리가 git 파생을 이미 돈 유일한 자리다.
+			// 안 넘기면 꼬리 겹침이 규모를 원리적으로 못 낸다.
+			Delta: c.View.PathDelta,
 			// ★ 대화 id 를 함께 넘긴다. 카드 id 만으로는 형제 카드(같은 대화, 다른 카드)를
 			// 남으로 보고 **자기 자신과 겹친다**고 알린다. prescribe 쪽이 먼저 같은 사고를
 			// 겪고 같은 한 줄로 고쳤다(service/prescribe.go 의 Others 조립부).

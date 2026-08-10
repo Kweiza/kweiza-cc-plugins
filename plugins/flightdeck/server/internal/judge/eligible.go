@@ -2,6 +2,7 @@ package judge
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -56,6 +57,20 @@ type Overlap struct {
 	SessionID string      // 상대 세션 id
 	Label     string      // 표시 전용. 판정에 안 쓴다
 	Pairs     [][2]string // [0]=이 항목의 경로, [1]=상대 세션의 경로
+
+	// TheirDelta 는 Pairs[i][1](**상대 세션의 경로**)의 증감이다.
+	//
+	// ★ **키가 없으면 0 이 아니라 "못 읽었다"** 다.
+	//
+	// ★ **왼쪽에는 규모를 안 싣는다.** 이 타입을 채우는 자리가 둘인데 왼쪽에 넣는 것이
+	// 서로 다르다 — board 는 내 발자국, pick 은 항목의 **선언 경로**(아직 diff 가 아니다).
+	// 왼쪽에 규모를 실으면 pick 에서 `(+0/-0)` 이라는 거짓말을 하거나 두 표면의 문구가
+	// 갈린다. 그리고 내 규모는 내가 이미 안다 — 알아야 하는 것은 상대 쪽이다.
+	//
+	// ★ **Pairs 와 합치지 않는다.** Pairs 를 만드는 OverlapPairs 는 처방
+	// (overlapPrescriptions)도 쓰는데 그 경로는 턴마다 돌아 git 을 안 탄다(설계 §6) —
+	// 즉 이 값을 **원리적으로** 못 채운다. 합쳤다면 그쪽에 영원히 빈 필드가 생긴다.
+	TheirDelta map[string]model.LineDelta
 }
 
 // LiveSession 은 지금 살아 있는 세션의 경로 발자국이다.
@@ -65,6 +80,12 @@ type LiveSession struct {
 	ID    string
 	Label string
 	Paths []string
+	// Delta 는 Paths 중 규모를 잰 것의 증감이다. **없는 키는 0 이 아니라 "못 읽었다"** 다.
+	//
+	// 채우는 자리는 git 파생을 이미 도는 경로 하나뿐이다(service.sessionCardsAndRoots).
+	// 처방 경로(service.Prescriptions)는 이것을 **비운 채로** 넘긴다 — 그 경로가 git 을
+	// 안 도는 것이 설계 §6 판정이라, 여기서 채우려 하면 모든 턴 종료에 저장소 전수 훑기가 붙는다.
+	Delta map[string]model.LineDelta
 	// CCSessionID 는 이 카드가 속한 **대화**의 id 다.
 	//
 	// ★ 카드 id 로는 "이게 나인가"를 못 가른다. 정체가 3중키(머신·워크트리·cc)라
@@ -235,7 +256,70 @@ func OverlapsWithLive(paths []string, live []LiveSession, self, selfCC string) [
 		if len(pairs) == 0 {
 			continue
 		}
-		out = append(out, Overlap{SessionID: s.ID, Label: s.Label, Pairs: pairs})
+		o := Overlap{SessionID: s.ID, Label: s.Label, Pairs: pairs}
+		// 상대 경로에 대해 **아는 것만** 싣는다. 모르는 것은 키를 안 만든다.
+		for _, p := range pairs {
+			d, ok := s.Delta[p[1]]
+			if !ok {
+				continue
+			}
+			if o.TheirDelta == nil {
+				o.TheirDelta = map[string]model.LineDelta{}
+			}
+			o.TheirDelta[p[1]] = d
+		}
+		out = append(out, o)
 	}
+	SortOverlapsBySize(out)
 	return out
+}
+
+// SortOverlapsBySize 는 상대 규모가 큰 순으로 세운다(제자리). 순수 함수다.
+//
+// ★ **못 읽은 것은 `+∞` 다 — 맨 위다.** 아래로 밀면 화면이 절단될 때
+// (mcpsrv.tailOverlapLimit) **제일 먼저 사라지는 것이 못 잰 것**이 된다. 이 저장소가
+// 반복해서 고발한 침묵이 정확히 그 모양이고, 같은 규율이 세 자리에 이미 적혀 있다 —
+// judge/prescribe.go 의 comparablePath("못 읽었다는 없다가 아니다") · sameConversation
+// ("빈 값끼리는 같지 않다") · service/board.go 의 HasFootprint("발자국이 없다는 사실을
+// 침묵하지 않는다"). 모르는 것은 클 수 있으니 크게 친다.
+//
+// ★ **계층을 두지 않는다.** "못 읽은 것은 안 잘린다"를 따로 보장하려면 규칙이 둘이 되고,
+// 그 둘이 어긋나는 경계(못 읽은 것이 상한보다 많을 때)에서 답이 없다. 규칙 하나로 접는다.
+//
+// ★ **laneTurnPrescription 의 선례를 일부러 안 따랐다.** 거기서는 "0 은 차례 아님이고
+// 못 읽었을 때도 0 이다 — 둘을 안 가르는 것이 맞다"라고 적혀 있다. 방향이 반대이기
+// 때문이다: 거기서는 못 읽은 것을 펴면 세션을 반드시 실패할 자리로 보내고, 여기서는
+// 접으면 정보가 사라지고 펴면 조율이 한 번 더 일어날 뿐이다.
+//
+// 동점은 세션 id 오름차순이다 — 같은 입력에 같은 출력이어야 시험이 순서를 단정한다.
+func SortOverlapsBySize(os []Overlap) {
+	sort.SliceStable(os, func(i, j int) bool {
+		ui, si := overlapWeight(os[i])
+		uj, sj := overlapWeight(os[j])
+		if ui != uj {
+			return ui // 못 읽은 쪽이 위
+		}
+		if si != sj {
+			return si > sj
+		}
+		return os[i].SessionID < os[j].SessionID
+	})
+}
+
+// overlapWeight 는 정렬 키다 — (못 읽은 쌍이 하나라도 있나, 아는 쌍 중 최대 증감합).
+//
+// ★ 합이 아니라 **최대**다. 겹침이 여럿일 때 알아야 하는 것은 "제일 큰 것이 얼마나 큰가"이지
+// 총량이 아니다 — 작은 파일 열 개가 47줄 개정 하나보다 위로 오면 안 된다.
+func overlapWeight(o Overlap) (unknown bool, max int) {
+	for _, p := range o.Pairs {
+		d, ok := o.TheirDelta[p[1]]
+		if !ok {
+			unknown = true
+			continue
+		}
+		if s := d.Added + d.Removed; s > max {
+			max = s
+		}
+	}
+	return unknown, max
 }
