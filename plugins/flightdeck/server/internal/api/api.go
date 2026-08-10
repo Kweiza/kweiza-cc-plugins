@@ -343,6 +343,12 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
+	// 화면 로그인. **게이트 앞에서 갈라진다**(withAuth·withIdempotency 가 함께 보는
+	// JudgePreSessionPath) — 로그인이 게이트 뒤에 있으면 로그인하려면 이미 로그인돼 있어야 한다.
+	mux.HandleFunc("GET /login", s.handleLogin)
+	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /logout", s.handleLogout)
+
 	// 못 맞춘 요청. Fallback 이 있으면 그쪽으로 넘기고, 없으면 JSON 404 다.
 	// 기본 404 는 평문이라 클라이언트가 오류 본문을 파싱하는 경로가 두 벌이 된다.
 	//
