@@ -21,6 +21,13 @@ type ProjectSummary struct {
 	Judgments     int       `json:"judgments"`
 	Events        int       `json:"events"`
 	LastSessionAt time.Time `json:"last_session_at"`
+
+	// ForeignJudgments 는 다른 프로젝트의 판단이 이 프로젝트의 세션을 가리키는 수다
+	// (store.ProjectRefCounts 의 "judgment_foreign", 삭제를 막는 셋째 축 — DESIGN §6).
+	// Judgments(이 프로젝트 소유 판단) 가 0이어도 이 값이 0이 아니면 여전히 못 지운다 —
+	// `fd project rm` 이 그 자리에서야 알려주면 "쳐 보기 전에 안다"는 ls 의 존재 이유가
+	// 정확히 이 축에서만 성립하지 않는다(최종 리뷰 Important-2).
+	ForeignJudgments int `json:"foreign_judgments"`
 }
 
 // ListProjectSummaries 는 전 프로젝트의 요약이다.
@@ -48,7 +55,8 @@ func (s *Service) ListProjectSummaries(ctx context.Context) ([]ProjectSummary, e
 			Pinned: !p.PinnedAt.IsZero(), Archived: !p.ArchivedAt.IsZero(),
 			Items: counts["item"], Sessions: counts["session"],
 			Judgments: counts["judgment"], Events: counts["event"],
-			LastSessionAt: last,
+			ForeignJudgments: counts["judgment_foreign"],
+			LastSessionAt:    last,
 		})
 	}
 	return out, nil

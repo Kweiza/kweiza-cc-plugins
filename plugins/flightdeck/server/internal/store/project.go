@@ -111,10 +111,15 @@ func getProject(ctx context.Context, q dbtx, id string) (model.Project, error) {
 		FROM project WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return p, notFound(NFProject, "", id)
+		// ★ p 대신 model.Project{} 를 낸다 — scanProject 가 이미 그 관례다(오류면 항상
+		// 제로값을 낸다). NoRows 갈래에서는 p 도 어차피 scanProject 의 제로값이라 지금은
+		// 결과가 같지만, 호출자가 "오류면 p 를 안 본다"는 계약을 오류 반환값만 보고
+		// 믿을 수 있어야 한다(최종 리뷰 Minor-9) — p 를 그대로 돌려주면 다음 사람이
+		// "여기 오류인데 뭔가 값이 실려 있나" 하고 다시 확인해야 한다.
+		return model.Project{}, notFound(NFProject, "", id)
 	}
 	if err != nil {
-		return p, fmt.Errorf("프로젝트 조회 실패(id=%q): %w", clip(id, 64), err)
+		return model.Project{}, fmt.Errorf("프로젝트 조회 실패(id=%q): %w", clip(id, 64), err)
 	}
 	return p, nil
 }

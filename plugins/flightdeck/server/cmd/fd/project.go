@@ -70,9 +70,17 @@ func (a *App) runProjectLs(ctx context.Context, args []string, out io.Writer) in
 	// "프로젝트"가 38칸, 데이터 "junk"가 34칸 — 4칸 밀림. env.go 의 padDisplay 주석에
 	// 그 계산을 적어 뒀다). padDisplay/padDisplayRight 는 표시 폭으로 채워서 헤더와
 	// 행이 같은 계산을 탄다.
+	//
+	// ★ "교차판단" 열을 판단 열 옆에 더했다(최종 리뷰 Important-2). ProjectSummary.Judgments
+	// (이 프로젝트가 project 컬럼으로 소유한 판단)가 0이어도 다른 프로젝트의 판단이
+	// judgment.session_id 로 이 프로젝트의 세션을 가리키면 여전히 못 지운다(DESIGN §6 의
+	// 셋째 한계, ProjectRefCounts 의 judgment_foreign). 이 열이 없으면 항목 0·판단 0 인
+	// 프로젝트를 보고 "지울 수 있다"고 읽은 사람이 `rm` 에서야 셋째 한계를 만난다 —
+	// "쳐 보기 전에 안다"는 이 명령의 존재 이유가 정확히 그 축에서만 성립하지 않았다.
 	fmt.Fprintln(out, strings.Join([]string{
 		padDisplay("프로젝트", 34), padDisplay("상태", 6),
 		padDisplayRight("항목", 6), padDisplayRight("세션", 8), padDisplayRight("판단", 8),
+		padDisplayRight("교차판단", 10),
 		"마지막 세션",
 	}, " "))
 	for _, p := range resp.Projects {
@@ -88,17 +96,28 @@ func (a *App) runProjectLs(ctx context.Context, args []string, out io.Writer) in
 			// ★ humanAge 는 이미 "…전" 을 붙여 낸다(env.go) — 여기서 또 붙이면 "3초 전 전"이 된다.
 			last = humanAge(time.Since(p.LastSessionAt))
 		}
+		// ★ 0이면 빈 칸이다("0" 을 안 찍는다) — 이 축은 대개 0이고, 매 행마다 "0"을 찍으면
+		// 정작 걸리는 소수의 행이 표에서 눈에 안 띈다(브리프의 "0 아닌 프로젝트만 드러낸다").
+		foreign := ""
+		if p.ForeignJudgments > 0 {
+			foreign = strconv.Itoa(p.ForeignJudgments)
+		}
 		fmt.Fprintln(out, strings.Join([]string{
 			padDisplay(clip(p.ID, 34), 34), padDisplay(state, 6),
 			padDisplayRight(strconv.Itoa(p.Items), 6),
 			padDisplayRight(strconv.Itoa(p.Sessions), 8),
 			padDisplayRight(strconv.Itoa(p.Judgments), 8),
+			padDisplayRight(foreign, 10),
 			last,
 		}, " "))
 	}
 	// ★ 지울 수 있는지를 여기서 말한다 — 사람이 rm 을 쳐 보고서야 알게 두지 않는다.
-	// 판단이 못 지워지는 이유는 정책이 아니라 원장이 정한 제약이다(judgment_no_delete 트리거).
-	fmt.Fprintln(out, "\n항목이나 판단이 있는 프로젝트는 지울 수 없다(판단은 원장이라 삭제 금지다).")
+	// DESIGN §6 이 못박은 한계 셋을 글자 그대로 다 말한다 — 항목(정책) · 판단(원장) ·
+	// 교차판단(원장, 위 표의 그 열)이다. 예전엔 앞의 둘만 말했다 — 셋째가 태스크 5(rm)에서
+	// 발견됐는데 태스크 4(ls)가 이미 랜딩한 뒤라 이 꼬리 문장에 안 되먹여졌다(최종 리뷰
+	// Important-2).
+	fmt.Fprintln(out, "\n다음 셋 중 하나라도 있으면 지울 수 없다: ① 항목(정책) · ② 판단(원장·삭제 금지 트리거) · "+
+		"③ 다른 프로젝트의 판단이 이 프로젝트의 세션을 가리킴(원장, 위 표의 교차판단 열).")
 	fmt.Fprintln(out, "줄에서만 빼려면 대시보드에서 보관하라 — 되돌릴 수 있다.")
 	return 0
 }
@@ -130,7 +149,11 @@ func (a *App) runProjectRm(ctx context.Context, args []string, out io.Writer) in
 	if strings.TrimSpace(user) == "" {
 		user, _ = a.env("LOGNAME")
 	}
-	res, err := a.cli.Write(ctx, "project-remove",
+	// ★ 리터럴 "project-remove" 대신 CmdProjectRemove 를 쓴다(최종 리뷰 Important-3) —
+	// offline.go 의 JudgeOffline·outbox.go 의 IdempotencyStable 이 이 이름으로 명시 갈래를
+	// 잡아 뒀다. 여기서 오타를 내면(예: "project_remove") 그 갈래를 못 타고 표 밖 기본값으로
+	// 조용히 떨어지는데, 상수를 쓰면 그 오타가 컴파일 오류가 된다.
+	res, err := a.cli.Write(ctx, CmdProjectRemove,
 		"/api/v1/projects/"+urlPath(*project)+"/remove", projectRemoveReq{
 			Actor: user, Reason: *reason, Confirm: *yes,
 		})
@@ -151,7 +174,11 @@ func (a *App) runProjectRm(ctx context.Context, args []string, out io.Writer) in
 	fmt.Fprintf(out, "프로젝트 %s 에 묶인 것:\n", rr.Project)
 	for _, k := range sortedKeys(rr.Counts) {
 		if rr.Counts[k] > 0 {
-			fmt.Fprintf(out, "  %-20s %d\n", k, rr.Counts[k])
+			// ★ %-20s 대신 padDisplay 를 쓴다 — runProjectLs 가 이미 그 관례다(위 함수의
+			// 그 주석: 한글은 터미널에서 2칸을 먹어 룬 수 기반 폭 지정이 어긋난다). 표 이름은
+			// 지금 전부 ASCII(session·item·claim…)라 %-20s 로도 안 밀리지만, 한 파일 안에
+			// 두 관례가 공존하면 다음 사람이 한글 키를 넣는 날 이 줄만 밀린다(최종 리뷰 Minor-5).
+			fmt.Fprintf(out, "  %s %d\n", padDisplay(k, 20), rr.Counts[k])
 		}
 	}
 	// ★ event 는 지워지지 않는다는 사실을 여기서 말한다. 안 그러면 사람이 "다 지웠다"고

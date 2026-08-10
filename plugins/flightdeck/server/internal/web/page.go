@@ -377,10 +377,16 @@ func (p Page) WriteKey(kind string) string {
 // ★ 지금 보고 있는 것은 핀이 아니어도 편다. 안 그러면 화면이 자기 위치를 안 말한다.
 func buildProjectNav(projects []model.Project, current string, ages map[string]string) ProjectNav {
 	var nav ProjectNav
-	pinned := 0
+	// ★ archived 도 이 첫 루프에서 함께 센다. pinned == 0 갈래는 아래에서 전원을
+	// nav.Shown 으로 보내므로(row.Archived 를 안 본다) 렌더된 행만 보고는 몇 건이
+	// 보관 상태인지 되짚을 수 없다 — 이 카운트가 그 유일한 자리다(최종 리뷰 Minor-1).
+	pinned, archived := 0, 0
 	for _, p := range projects {
 		if !p.PinnedAt.IsZero() {
 			pinned++
+		}
+		if !p.ArchivedAt.IsZero() {
+			archived++
 		}
 	}
 
@@ -413,6 +419,15 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 
 	if pinned == 0 {
 		nav.NoPins = "핀이 없다 — ★ 로 남길 것을 고르면 나머지가 접힌다"
+		// ★ 이 화면의 규율은 "0건과 접힘을 침묵으로 뭉개지 않는다"이고 OutOfWindow·Folded
+		// 가 이미 그것을 지킨다(FoldedLine 의 그 계산). 핀이 0이면 위 switch 가 보관된
+		// 프로젝트까지 전원 nav.Shown 으로 펴는데, 그 사실을 이 문구가 안 말하면 사람이
+		// 보관을 걸어 둔 뒤 핀을 전부 풀었을 때 보관해 둔 것들이 아무 표시 없이 되돌아온
+		// 것처럼 보인다(최종 리뷰 Minor-1). 보관이 0건이면 괄호 자체를 안 붙인다 — 없는
+		// 사실을 있는 것처럼 괄호로 강조할 이유가 없다.
+		if archived > 0 {
+			nav.NoPins += fmt.Sprintf("(보관 %d건도 지금은 함께 펴져 있다)", archived)
+		}
 		return nav
 	}
 	if n := len(nav.Folded) + len(nav.Archived); n > 0 {

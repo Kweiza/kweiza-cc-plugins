@@ -53,6 +53,29 @@ func TestProjectNavShowsAllWhenNoPins(t *testing.T) {
 	}
 }
 
+// TestProjectNavNoPinsMentionsArchivedCount 는 핀이 0일 때 보관된 프로젝트가 **조용히**
+// 줄에 섞이지 않는다는 단정이다(최종 리뷰 Minor-1).
+//
+// ★ pinned == 0 이면 buildProjectNav 의 switch 가 row.Archived 를 안 보고 전원을
+// nav.Shown 으로 보낸다 — 사람이 보관을 걸어 둔 뒤 핀을 전부 풀면 보관해 둔 것들이
+// 아무 표시 없이 되돌아온 것처럼 보이는 자리다. OutOfWindow·Folded 가 이미 지키는
+// "0건과 접힘을 침묵으로 뭉개지 않는다"는 규율을 이 축에도 건다.
+func TestProjectNavNoPinsMentionsArchivedCount(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	f.addProject(testProject)
+	f.addProject("was-archived")
+	f.archive("was-archived") // 핀은 전부 풀린 상태 — pinned == 0.
+
+	_, html := f.get("")
+	nav := navOf(t, html)
+
+	mustContain(t, nav, "핀이 없다", "핀이 0이라는 사실은 그대로 말해야 한다")
+	mustContain(t, nav, "보관 1건", "보관된 것이 조용히 펴졌다는 사실을 말해야 한다")
+	if !strings.Contains(nav, "was-archived") {
+		t.Fatal("보관된 프로젝트가 줄에서 사라졌다 — 핀 0이면 전부 편다는 규율과 어긋난다")
+	}
+}
+
 // TestProjectNavFoldsUnpinnedAndSaysHowMany 는 접은 수를 반드시 말한다는 단정이다.
 //
 // ★ §웹UI 가 OutOfWindow·Folded 에 이미 건 규율과 같은 것이다 — 몇 건인지를 감추면

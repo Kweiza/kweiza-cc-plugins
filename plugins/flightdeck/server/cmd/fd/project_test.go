@@ -46,14 +46,72 @@ func TestProjectLsPrintsAxisAndCounts(t *testing.T) {
 	}
 	// ★ 지울 수 있는지를 출력이 말해야 한다. 안 그러면 사람이 rm 을 쳐 보고서야 안다.
 	//
-	// "판단" 이 아니라 "지울 수 없다" 로 잰다 — "판단" 은 표 헤더(project.go:62 의 "판단"
-	// 열 이름)에도 있어서, 이 삭제-한계 꼬리 문장 두 줄(project.go:81-82)을 통째로 지워도
-	// 헤더의 "판단" 하나로 이 단정이 계속 통과했다(리뷰가 지적: 이 단정이 공회전했다).
-	// "지울 수 없다" 는 꼬리 문장에만 있고 헤더·행 어디에도 안 나온다 — 검출력을
-	// 실측으로 확인했다(아래 report 의 "돌린 명령" 절, project.go 의 81-82행을 지우고
-	// 이 시험이 실제로 빨개지는지 봤다).
+	// "판단" 이 아니라 "지울 수 없다" 로 잰다 — "판단" 은 표 헤더(project.go:82 의 "판단"
+	// 열 이름)에도 있어서, 이 삭제-한계 꼬리 문장(project.go:119-121, Fprintln 둘)을
+	// 통째로 지워도 헤더의 "판단" 하나로 이 단정이 계속 통과했다(리뷰가 지적: 이 단정이
+	// 공회전했다). "지울 수 없다" 는 꼬리 문장에만 있고 헤더·행 어디에도 안 나온다 —
+	// 검출력을 실측으로 확인했다(아래 report 의 "돌린 명령" 절, project.go 의 119-121행을
+	// 지우고 이 시험이 실제로 빨개지는지 봤다).
+	//
+	// ★ 좌표는 최종 리뷰 Important-2 로 "교차판단" 열과 한계 셋을 다 말하는 꼬리 문장이
+	// 생기면서 다시 움직였다 — 이 주석을 고칠 때마다 실물을 열어 줄번호를 확인해라
+	// (최종 리뷰 Minor-4, 이 저장소가 관문까지 세워 이미 두 번 청소한 부류다).
 	if !strings.Contains(out, "지울 수 없다") {
 		t.Fatalf("출력이 삭제의 한계를 안 말한다\n%s", out)
+	}
+	// ★ 최종 리뷰 Important-2: 교차 판단(judgment_foreign) 축도 이 표가 실제로 드러내는지
+	// 잰다. h.project 의 세션을 "other" 프로젝트의 판단이 가리키게 만들어 ForeignJudgments
+	// 를 1로 만든다 — internal/store/project_remove_test.go 의
+	// TestRemoveProjectRefusesRaceViaInternalRejudge 픽스처(다른 프로젝트의 판단이 이
+	// 프로젝트의 세션을 가리키게 만드는 것)와 같은 모양이다.
+	if err := h.st.UpsertProject(ctx, model.Project{
+		ID: "other", Path: "/tmp/other", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("프로젝트 등록 실패: %v", err)
+	}
+	if err := h.st.UpsertMachine(ctx, model.Machine{ID: "m1", Hostname: "h"}); err != nil {
+		t.Fatalf("머신 등록 실패: %v", err)
+	}
+	sess, _, err := h.st.OpenSession(ctx, h.project, "m1", "/tmp/"+h.project, "cc1", "", time.Time{})
+	if err != nil {
+		t.Fatalf("세션 열기 실패: %v", err)
+	}
+	if _, err := h.st.AddJudgment(ctx, model.Judgment{
+		Project: "other", SessionID: sess.ID, Kind: model.JudgmentDecision,
+		Body: h.project + " 의 세션을 가리키는 남의 판단",
+	}); err != nil {
+		t.Fatalf("교차 판단 저장 실패: %v", err)
+	}
+
+	code, out = h.run("", "project", "ls")
+	if code != 0 {
+		t.Fatalf("종료코드 %d, 기대 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "교차판단") {
+		t.Fatalf("교차 판단 열 이름이 표에 없다\n%s", out)
+	}
+	// ★ 정규식으로 "1" 하나를 줄 어디서나 찾지 않는다 — 세션도 이미 1건이라(위에서 연 것)
+	// 값만 보면 어느 열의 1인지 안 갈린다. 열 순서(project.go 의 join 순서: id·상태·항목·
+	// 세션·판단·교차판단)대로 필드를 갈라 여섯째 칸을 직접 짚는다.
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, h.project+" ") {
+			continue // 접두만 같은 다른 id(예: "testproj2")를 피한다
+		}
+		f := strings.Fields(line)
+		if len(f) < 6 {
+			t.Fatalf("%s 행의 칸 수가 %d 다 — 6개(id·상태·항목·세션·판단·교차판단) 이상을 기대했다\n%s",
+				h.project, len(f), line)
+		}
+		if f[5] != "1" {
+			t.Fatalf("%s 행의 교차판단 칸이 %q 다 — 1을 기대했다(항목·판단은 0이어도 남의 판단이 "+
+				"이 프로젝트의 세션을 가리키면 여전히 못 지운다)\n%s", h.project, f[5], line)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("%s 의 표 행을 못 찾았다\n%s", h.project, out)
 	}
 }
 

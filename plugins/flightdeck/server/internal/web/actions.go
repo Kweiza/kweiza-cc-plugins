@@ -461,31 +461,52 @@ func (h *handler) projectView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 지금 값을 읽어 바꿀 축 하나만 갈아 끼운다 — 다른 축을 덮지 않는다.
-	cur, err := st.GetProject(ctx, in.Target)
-	if err != nil {
-		h.log.ErrorContext(ctx, "프로젝트 조회 실패",
-			"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
-		http.Error(w, "프로젝트를 읽지 못했다.", http.StatusInternalServerError)
-		return
-	}
-	pinned, archived := cur.PinnedAt, cur.ArchivedAt
+	//
+	// ★ 읽기(GetProject)와 쓰기(SetProjectView)를 **같은 Tx 안**에서 한다. store/project.go:167-172
+	// 의 SetProjectView 계약이 그것을 명시로 요구한다 — "한 축만 바꾸고 싶으면 이 함수를
+	// 부르기 전에 같은 Tx 안에서 GetProject 로 다른 축의 현재 값을 읽어 그대로 함께 실어야
+	// 한다." 예전엔 이 둘을 별도 트랜잭션(st.GetProject · st.SetProjectView)으로 불렀다 —
+	// 읽기와 쓰기 사이에 다른 클릭(이 저장소는 20~30 동시 세션이 돈다)이 끼면 그 클릭이
+	// 정한 축이 이 쓰기의 SetProjectView 에 조용히 덮여 사라졌다. 손실은 작지만(표시 축,
+	// 클릭 하나로 복구) 주석이 참이 아닌 불변을 서술한 채로 남는 것이 더 큰 문제였다
+	// (최종 리뷰 Important-1). 원자성 자체를 재는 경합 시험은 안 만든다 — 비싸고, 여기서
+	// 잠그려는 것은 "같은 Tx 를 쓰는가"라는 구조이지 SQLite 잠금 타이밍이 아니다.
 	now := h.now()
-	switch in.Axis {
-	case "pin":
-		pinned = now
-		// ★ 핀과 보관은 함께 설 수 없다. 핀은 "줄에 남긴다"이고 보관은 "줄에서 뺀다"라
-		//   둘 다 켜지면 화면이 둘 중 하나를 말없이 이긴다. 핀을 찍으면 보관이 풀린다.
-		archived = time.Time{}
-	case "unpin":
-		pinned = time.Time{}
-	case "archive":
-		archived = now
-		pinned = time.Time{}
-	case "unarchive":
-		archived = time.Time{}
-	}
-
-	if err := st.SetProjectView(ctx, in.Target, pinned, archived); err != nil {
+	err = st.Tx(ctx, func(t *store.Tx) error {
+		cur, err := t.GetProject(in.Target)
+		if err != nil {
+			return err
+		}
+		pinned, archived := cur.PinnedAt, cur.ArchivedAt
+		switch in.Axis {
+		case "pin":
+			pinned = now
+			// ★ 핀과 보관은 함께 설 수 없다. 핀은 "줄에 남긴다"이고 보관은 "줄에서 뺀다"라
+			//   둘 다 켜지면 화면이 둘 중 하나를 말없이 이긴다. 핀을 찍으면 보관이 풀린다.
+			archived = time.Time{}
+		case "unpin":
+			pinned = time.Time{}
+		case "archive":
+			archived = now
+			pinned = time.Time{}
+		case "unarchive":
+			archived = time.Time{}
+		}
+		return t.SetProjectView(in.Target, pinned, archived)
+	})
+	if err != nil {
+		// ★ "없는 대상"과 "서버 결함"은 처방이 다르다(h.fail 의 같은 규율). GetProject·
+		// SetProjectView 둘 다 실패하면 store.NotFoundError 를 낸다(둘 다 notFound(NFProject,…)
+		// 로 보낸다) — JudgeProjectView 가 이미 known 목록으로 존재를 확인했으므로 여기서
+		// 나는 NotFound 는 그 확인과 이 Tx 사이에 프로젝트가 지워진 경합뿐이다. 클라이언트가
+		// 들고 있던 목록이 낡았다는 뜻이라 400 이 맞다 — 서버 결함이 아니다.
+		var nf *store.NotFoundError
+		if errors.As(err, &nf) {
+			h.log.ErrorContext(ctx, "프로젝트 조회 실패",
+				"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
+			http.Error(w, "프로젝트를 읽지 못했다: "+Clip(err.Error(), 200), http.StatusBadRequest)
+			return
+		}
 		h.log.ErrorContext(ctx, "표시 축 갱신 실패",
 			"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
 		http.Error(w, "표시 축을 바꾸지 못했다.", http.StatusInternalServerError)
