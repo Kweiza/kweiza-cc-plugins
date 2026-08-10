@@ -5,7 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,5 +335,38 @@ func TestSelfUpdateStatusOfLosesNoFieldAcrossTheLine(t *testing.T) {
 			t.Fatalf("api.SelfUpdateStatus.%s 에 대응하는 cmd/fd 필드가 없다 — "+
 				"이 키는 영원히 영값으로 나간다(읽는 쪽은 그것을 사실로 읽는다)", name)
 		}
+	}
+}
+
+// TestServeAPIOptionsWiresLoginScreen 은 배선 누락을 잡는다.
+//
+// ★ 이 시험이 없으면 배선 빠짐이 **조용하다.** LoginScreen 이 nil 이면 api 는 JSON 401 로
+// 접히므로 서버는 멀쩡히 뜨고 REST 도 다 돌고, 오직 브라우저에서만 폼 대신 JSON 이 뜬다.
+// serve.go 가 조립을 순수 함수로 뽑아둔 근거가 정확히 이것이다.
+func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
+	opt := serveAPIOptions("tok", 60, slog.Default(), false, nil, nil)
+	if opt.LoginScreen == nil {
+		t.Fatal("LoginScreen 이 nil 이다 — 브라우저가 폼 대신 JSON 401 을 본다")
+	}
+
+	// 실제로 폼을 그리는지 본다. nil 아님만 재면 func(...){} 빈 몸통도 통과한다.
+	rec := httptest.NewRecorder()
+	opt.LoginScreen(rec, httptest.NewRequest("GET", "/", nil),
+		api.LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=x"})
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("상태가 %d 다 — 401 이어야 한다", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="token"`) {
+		t.Fatal("토큰 입력이 없다")
+	}
+	// ★ 두 LoginView 사이에서 필드가 뒤바뀌지 않았는지 본다. 같은 타입의 문자열 둘이라
+	// Error 와 Next 를 맞바꿔도 컴파일이 통과한다.
+	if !strings.Contains(body, "토큰이 일치하지 않는다") {
+		t.Fatal("사유가 안 실렸다 — 어댑터가 Error 를 잘못 옮겼다")
+	}
+	if !strings.Contains(body, `value="/?project=x"`) {
+		t.Fatal("돌아갈 자리가 안 실렸다 — 어댑터가 Next 를 잘못 옮겼다")
 	}
 }
