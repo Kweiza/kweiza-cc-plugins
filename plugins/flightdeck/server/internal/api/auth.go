@@ -155,8 +155,18 @@ func JudgeScreenPath(path string) bool {
 	case "/", "/events":
 		return true
 	}
-	return strings.HasPrefix(path, "/actions/")
+	return strings.HasPrefix(path, screenActionPrefix)
 }
+
+// screenActionPrefix 는 대시보드 쓰기 라우트의 뿌리다. web 패키지의 라우트와 같은 값이며,
+// 접두어로 보는 이유는 api 가 web 패키지를 import 하지 않기 때문이다
+// (api → web 은 의존 방향이 거꾸로다. Fallback 은 인터페이스로만 온다).
+//
+// ★ **상수가 하나다.** 앞선 판은 JudgeScreenPath 와 JudgeScreenWrite 가 같은 사실을
+// 리터럴로 따로 적었다. 그 둘이 갈리면 "쿠키를 인정하는 경로"와 "출처를 대조하는 경로"가
+// 어긋나고, 그 틈은 **쿠키는 통하는데 CSRF 대조는 안 하는 경로**라 정확히 이 설계가
+// 막으려던 구멍이다. 한 자리에 두면 갈릴 수가 없다.
+const screenActionPrefix = "/actions/"
 
 // JudgeLoginScreen 은 이 401 에 HTML 폼을 낼 것인가다. 순수 함수다.
 //

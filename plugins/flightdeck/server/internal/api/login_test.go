@@ -241,6 +241,34 @@ func TestLogoutAfterLoginIsNotConflated(t *testing.T) {
 	}
 }
 
+// TestLoginBodyIsCapped 는 무인증 표면이 본문 상한을 타는지 본다.
+//
+// ★ /login 은 세션 이전 경로라 withIdempotency 를 통째로 건너뛴다 — MaxBodyBytes 를
+// 거는 자리가 거기뿐이라, 인증을 통과한 모든 REST 쓰기가 1MiB 인데 **아무나 칠 수 있는
+// 이 경로 하나만 ParseForm 의 기본값 10MiB** 를 받고 있었다. 상한이 큰 쪽이 무인증인
+// 것은 방향이 거꾸로다.
+//
+// 맞는 토큰을 실은 채로 상한을 넘긴다. 상한이 안 걸려 있으면 폼이 그대로 파싱돼
+// **로그인이 성공한다** — 그래서 이 시험은 "거절됐나"가 아니라 "통과했나"로 갈린다.
+func TestLoginBodyIsCapped(t *testing.T) {
+	h := NewServer(nil, Options{Token: "s3cret", MaxBodyBytes: 1024})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginPost(t, "/login", url.Values{
+		"token": {"s3cret"},
+		"pad":   {strings.Repeat("x", 4096)},
+	}))
+
+	if rec.Code == http.StatusSeeOther {
+		t.Fatal("상한(1KiB)의 네 배짜리 본문이 통과해 로그인이 성공했다")
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("상한을 넘은 본문에 쿠키를 구웠다")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("상태가 %d 다 — 폼을 못 읽었으니 401 이어야 한다", rec.Code)
+	}
+}
+
 // TestLoginFormActionReachesLoginRoute 는 **렌더된 폼과 로그인 라우트를 잇는다.**
 //
 // ★ 정확히 이 시험이 없어서 결함이 여덟 태스크를 통과했다. 폼 시험(web)은 action

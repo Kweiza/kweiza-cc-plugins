@@ -70,17 +70,17 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	// ★ 출처 대조를 **직접** 부른다. withScreenWrite 는 게이트 사슬에서 withAuth 안쪽이라
-	// 이 경로(게이트 앞에서 갈라진다)에는 안 걸린다.
-	if v := JudgeScreenOrigin(r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Site"), r.Host); !v.OK {
-		s.writeError(w, r, Classified{
-			Status: http.StatusForbidden, Code: "cross_site_write_refused",
-			Message:  "로그인의 출처가 이 화면이 아니다 — " + v.Reason,
-			Guidance: "대시보드 화면의 폼에서 제출해라.",
-		})
+	if s.refusedCrossSite(w, r, "로그인", "대시보드 화면의 폼에서 제출해라.") {
 		return
 	}
+	// ★ 본문 상한을 **손으로** 건다. 이 경로는 세션 이전이라 withIdempotency 를 통째로
+	// 건너뛰는데(멱등 키를 만들 세션이 없다) MaxBodyBytes 를 거는 자리가 거기뿐이다.
+	// 안 걸면 ParseForm 의 기본값 10MiB 가 서고, 그러면 **아무나 칠 수 있는 무인증
+	// 표면 하나가 인증을 통과한 REST 쓰기 전부의 10배**를 받는다 — 방향이 거꾸로다.
+	r.Body = http.MaxBytesReader(w, r.Body, s.opt.MaxBodyBytes)
 	if err := r.ParseForm(); err != nil {
+		// 상한 초과도 여기로 온다. 사유를 나누지 않는 이유: 이 응답을 받는 것은 브라우저이고
+		// 처방이 "다시 제출해라"로 같다. 크기 축은 /metrics 의 unauthorized 로 센다.
 		s.loginRefused(w, r, "폼을 읽을 수 없다", "/")
 		return
 	}
@@ -101,9 +101,37 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.loginRefused(w, r, "토큰이 일치하지 않는다", next)
 		return
 	}
-	http.SetCookie(w, LoginCookie(s.opt.Token, loginCookieMaxAge,
-		JudgeCookieSecure(r.TLS != nil, r.Header.Get("X-Forwarded-Proto"))))
+	s.putLoginCookie(w, r, s.opt.Token, loginCookieMaxAge)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// refusedCrossSite 는 출처를 대조하고, 아니면 403 을 내고 **참**을 돌려준다.
+//
+// ★ 출처 대조를 **직접** 부르는 이유. withScreenWrite 는 게이트 사슬에서 withAuth
+// 안쪽이라 이 두 경로(게이트 **앞**에서 갈라진다)에는 안 걸린다.
+//
+// ★ 헬퍼로 접은 이유. 로그인과 로그아웃이 문구 둘만 다른 같은 블록을 각자 갖고 있었다.
+// 사본이 둘이면 한쪽만 고쳐지고, CSRF 방어가 한쪽만 열린 상태는 "잠겨 있다"고 믿게
+// 만들어서 안 잠근 것보다 나쁘다(api.go 의 Fallback 주석이 세운 그 규율).
+func (s *server) refusedCrossSite(w http.ResponseWriter, r *http.Request, what, guidance string) bool {
+	v := JudgeScreenOrigin(r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Site"), r.Host)
+	if v.OK {
+		return false
+	}
+	s.writeError(w, r, Classified{
+		Status: http.StatusForbidden, Code: "cross_site_write_refused",
+		Message:  what + "의 출처가 이 화면이 아니다 — " + v.Reason,
+		Guidance: guidance,
+	})
+	return true
+}
+
+// putLoginCookie 는 이 요청의 스킴에 맞는 쿠키를 굽는다. 지우는 것도 같은 자리다
+// (값 없음 · MaxAge<0). Secure 판정이 두 자리에 살면 한쪽만 고쳐지고, 그러면
+// 로그아웃이 로그인과 **다른 속성**의 쿠키를 내 브라우저가 원본을 안 지운다.
+func (s *server) putLoginCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
+	http.SetCookie(w, LoginCookie(value, maxAge,
+		JudgeCookieSecure(r.TLS != nil, r.Header.Get("X-Forwarded-Proto"))))
 }
 
 // handleLogout 은 쿠키를 지운다.
@@ -112,17 +140,11 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 토큰을 무효화하는 길은 FD_TOKEN 을 바꾸고 서버를 다시 띄우는 것뿐이고, 이 제품에
 // 그것 말고 다른 길을 만들지 않는다(사용자 1명, 토큰 1개, 역할 없음 — 설계 §6).
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if v := JudgeScreenOrigin(r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Site"), r.Host); !v.OK {
-		s.writeError(w, r, Classified{
-			Status: http.StatusForbidden, Code: "cross_site_write_refused",
-			Message:  "로그아웃의 출처가 이 화면이 아니다 — " + v.Reason,
-			Guidance: "대시보드 화면의 버튼을 눌러라.",
-		})
+	if s.refusedCrossSite(w, r, "로그아웃", "대시보드 화면의 버튼을 눌러라.") {
 		return
 	}
 	// MaxAge<0 이 삭제다. 값도 비운다 — 둘 중 하나만 하면 브라우저에 따라 남는다.
-	http.SetCookie(w, LoginCookie("", -1,
-		JudgeCookieSecure(r.TLS != nil, r.Header.Get("X-Forwarded-Proto"))))
+	s.putLoginCookie(w, r, "", -1)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
