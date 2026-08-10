@@ -151,7 +151,7 @@ func anyJudgmentHasSession(js []store.LedgerJudgment) bool {
 // diffLedgerDumps 는 reflect.DeepEqual 이 false 일 때만 부른다(실패 경로 전용, 통과 경로는
 // 안 돈다).
 //
-// ★ 왜 필요한가. `LedgerJudgment` 8필드 중 4개, `LedgerProject` 7개 중 3개, `LedgerSnapshot`
+// ★ 왜 필요한가. `LedgerJudgment` 8필드 중 4개, `LedgerProject` 9필드 중 5개, `LedgerSnapshot`
 // 7개 중 2개가 `*string` 이다. `%+v` 로 그대로 찍으면 리뷰가 실측한 대로 주소가 나온다
 // (`Title:0x33fcac0a5400`) — 값이 다른데 값을 못 보여주면 다음 사람이 원인을 못 좇는다.
 // 이미 import 한 `ledger.Encode` 를 그대로 쓴다 — 그것이 포인터를 JSON null/문자열로

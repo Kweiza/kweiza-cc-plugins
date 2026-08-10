@@ -111,6 +111,11 @@ func makeV1DB(t *testing.T, path string) {
 		// 004 증분이 pick_eval 에 더한 컬럼. v1 은 이 표를 갖고 있었지만(schema.sql)
 		// 그 컬럼은 없었다 — 안 걷으면 재열기에서 같은 컬럼을 또 만들려다 죽는다.
 		`ALTER TABLE pick_eval DROP COLUMN picked_with`,
+		// 007 증분이 project 에 더한 컬럼 둘. 같은 이유로 걷는다 — 이 함수는 첫 Open 에서
+		// 이미 SchemaVersion(지금은 7)까지 물리적으로 올라간 뒤 버전 기록만 1로 되돌리므로,
+		// 컬럼을 안 걷으면 재열기가 007 을 다시 돌려다 "duplicate column name" 으로 죽는다.
+		`ALTER TABLE project DROP COLUMN pinned_at`,
+		`ALTER TABLE project DROP COLUMN archived_at`,
 		`DELETE FROM schema_version WHERE version > 1`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
@@ -226,6 +231,11 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 		`INSERT INTO pick_eval(project, session_id, at, picked, rejected)
 		   VALUES ('P','S1','2026-08-01T00:00:00.000000Z','old-lead','[]')`,
 		`ALTER TABLE pick_eval DROP COLUMN picked_with`,
+		// 007 증분(project.pinned_at·archived_at)이 prev(3) 뒤에 온다. 위의 첫 Open 이
+		// 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로 만들어 뒀으므로, 안 걷으면
+		// 재열기가 007 을 다시 돌려다 "duplicate column name" 으로 죽는다.
+		`ALTER TABLE project DROP COLUMN pinned_at`,
+		`ALTER TABLE project DROP COLUMN archived_at`,
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev),
 	} {
 		if _, err := s.db.Exec(q); err != nil {

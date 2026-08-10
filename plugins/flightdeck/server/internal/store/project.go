@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -21,7 +22,7 @@ import (
 // projectCols 는 프로젝트 조회의 컬럼 목록이다.
 // judgmentCols·sessionCols 와 같은 이유로 상수다 — 목록을 손으로 다시 적으면
 // 순서가 어긋나는 순간 Scan 이 조용히 엉뚱한 값을 채운다(전부 문자열이라 타입 오류도 안 난다).
-const projectCols = `id, path, remote_url, default_branch, config, config_from_sha, created_at`
+const projectCols = `id, path, remote_url, default_branch, config, config_from_sha, created_at, pinned_at, archived_at`
 
 // machineCols 는 머신 조회의 컬럼 목록이다.
 const machineCols = `id, hostname, first_seen, last_seen`
@@ -30,6 +31,11 @@ const machineCols = `id, hostname, first_seen, last_seen`
 //
 // created_at 은 첫 등록 시각을 보존한다 — 재등록이 나이를 0으로 되돌리면
 // "언제부터 있던 프로젝트인가"가 사라진다.
+//
+// ★ pinned_at·archived_at 도 같은 이유로 **갱신 목록 밖**이다. 이 함수는 세션이 열릴 때마다
+// 돌고(service/session.go 의 자동 등록), 목록에 넣으면 훅이 세션을 열 때마다 사람이 고른
+// 표시 축이 날아간다. 그 손실은 어느 화면에도 안 뜬다 — 다음에 볼 때 그냥 안 켜져 있을 뿐이다.
+// 그 축을 쓰는 문은 SetProjectView 하나뿐이다.
 func (t *Tx) UpsertProject(p model.Project) error {
 	if p.ID == "" {
 		return errors.New("프로젝트 id 가 비었다")
@@ -62,23 +68,53 @@ func (s *Store) UpsertProject(ctx context.Context, p model.Project) error {
 	return s.Tx(ctx, func(t *Tx) error { return t.UpsertProject(p) })
 }
 
-func getProject(ctx context.Context, q dbtx, id string) (model.Project, error) {
+// scanProject 는 projectCols 순서의 한 행을 읽는다.
+//
+// ★ ListProjects 와 getProject 가 이것을 공유한다. Scan 목록이 두 벌이면 컬럼을 더할 때
+// 한쪽만 고쳐지고, 전부 문자열이라 타입 오류도 안 난다 — projectCols 주석이 경고하는 실패다.
+func scanProject(sc interface{ Scan(...any) error }) (model.Project, error) {
 	var p model.Project
-	var remote, config, fromSHA sql.NullString
+	var remote, config, fromSHA, pinned, archived sql.NullString
 	var created string
-	err := q.QueryRowContext(ctx, `
+	if err := sc.Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch, &config, &fromSHA,
+		&created, &pinned, &archived); err != nil {
+		return model.Project{}, err
+	}
+	p.RemoteURL, p.Config, p.ConfigFromSHA = str(remote), str(config), str(fromSHA)
+	var err error
+	if p.CreatedAt, err = parseTime(created); err != nil {
+		return model.Project{}, err
+	}
+	// ★ store.go 의 parseNullTime 은 *time.Time 을 낸다(landing.go·item.go 의 포인터
+	//   필드가 그것을 그대로 받는다). PinnedAt·ArchivedAt 은 포인터가 아니라 값 필드라
+	//   nil 을 제로값으로 편다 — 그 자체가 이미 "NULL == 아님"이다.
+	pinnedAt, err := parseNullTime(pinned)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if pinnedAt != nil {
+		p.PinnedAt = *pinnedAt
+	}
+	archivedAt, err := parseNullTime(archived)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if archivedAt != nil {
+		p.ArchivedAt = *archivedAt
+	}
+	return p, nil
+}
+
+func getProject(ctx context.Context, q dbtx, id string) (model.Project, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT `+projectCols+`
-		FROM project WHERE id = ?`, id).
-		Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch, &config, &fromSHA, &created)
+		FROM project WHERE id = ?`, id)
+	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, notFound(NFProject, "", id)
 	}
 	if err != nil {
 		return p, fmt.Errorf("프로젝트 조회 실패(id=%q): %w", clip(id, 64), err)
-	}
-	p.RemoteURL, p.Config, p.ConfigFromSHA = str(remote), str(config), str(fromSHA)
-	if p.CreatedAt, err = parseTime(created); err != nil {
-		return p, err
 	}
 	return p, nil
 }
@@ -105,15 +141,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 
 	var out []model.Project
 	for rows.Next() {
-		var p model.Project
-		var remote, config, fromSHA sql.NullString
-		var created string
-		if err := rows.Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch, &config, &fromSHA, &created); err != nil {
+		p, err := scanProject(rows)
+		if err != nil {
 			return nil, fmt.Errorf("프로젝트 행 해석 실패: %w", err)
-		}
-		p.RemoteURL, p.Config, p.ConfigFromSHA = str(remote), str(config), str(fromSHA)
-		if p.CreatedAt, err = parseTime(created); err != nil {
-			return nil, err
 		}
 		out = append(out, p)
 	}
@@ -121,6 +151,43 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 		return nil, fmt.Errorf("프로젝트 목록 순회 실패: %w", err)
 	}
 	return out, nil
+}
+
+// SetProjectView 는 프로젝트의 표시 축(핀·보관)을 정한다. 제로값은 NULL 이다.
+//
+// ★ 이 축은 표시 계층이라 사유를 안 받는다. 이 화면에서 사유가 필수인 셋(선점 회수 ·
+// 항목 폐기 · 줄 회수)은 전부 남의 일을 뺏거나 되돌릴 수 없는 것인데, 핀과 보관은 둘 다
+// 아니다 — 내 판이고 클릭 하나로 돌아온다. 되짚을 거리는 시각과 event 가 남긴다.
+func (t *Tx) SetProjectView(id string, pinned, archived time.Time) error {
+	res, err := t.tx.ExecContext(t.ctx, `
+		UPDATE project SET pinned_at = ?, archived_at = ? WHERE id = ?`,
+		nullTime(pinned), nullTime(archived), id)
+	if err != nil {
+		return fmt.Errorf("프로젝트 표시 축 갱신 실패(id=%q): %w", clip(id, 64), err)
+	}
+	// ★ UPDATE 는 0행이어도 성공한다. 확인하지 않으면 프로젝트 id 오타가 조용히 성공하고,
+	//   화면은 "눌렀는데 아무 일도 안 일어난다"가 된다 — 그 증상에서 원인이 안 보인다.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("프로젝트 표시 축 갱신 결과 확인 실패(id=%q): %w", clip(id, 64), err)
+	}
+	if n == 0 {
+		return fmt.Errorf("프로젝트 %q: %w", clip(id, 64), ErrNotFound)
+	}
+	return nil
+}
+
+// SetProjectView 는 단발 트랜잭션으로 감싼 것이다.
+func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived time.Time) error {
+	return s.Tx(ctx, func(t *Tx) error { return t.SetProjectView(id, pinned, archived) })
+}
+
+// nullTime 은 제로값을 NULL 로 낸다.
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return fmtTime(t)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

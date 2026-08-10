@@ -47,9 +47,12 @@ var migrationFootprintPurge string
 //go:embed migrations/006_footprint_worktree_prefix_backfill.sql
 var migrationWorktreePrefixPurge string
 
+//go:embed migrations/007_project_view_axis.sql
+var migrationProjectViewAxis string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -76,6 +79,7 @@ var migrations = []Migration{
 	{To: 4, Name: "pick_eval 이 묶음을 담는다", SQL: migrationPickBundle},
 	{To: 5, Name: "절대경로 발자국을 지운다", SQL: migrationFootprintPurge},
 	{To: 6, Name: "워크트리 접두 발자국을 지운다", SQL: migrationWorktreePrefixPurge},
+	{To: 7, Name: "프로젝트에 핀·보관 축", SQL: migrationProjectViewAxis},
 }
 
 // timeLayout 은 저장용 시각 표기다.

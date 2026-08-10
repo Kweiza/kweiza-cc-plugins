@@ -58,6 +58,10 @@ type LedgerMachine struct {
 }
 
 // LedgerProject 는 project 표 한 행의 원문이다.
+//
+// ★ PinnedAt·ArchivedAt 도 *string 이다(원장은 값 원문을 그대로 나르지, 파싱해서 time.Time
+// 으로 되살리지 않는다 — RemoteURL·Config·ConfigFromSHA 와 같은 이유). 증분 007 이 더한
+// 두 컬럼이 nullable TEXT 라 이 표의 NULL 가능 필드가 셋에서 다섯으로 늘었다.
 type LedgerProject struct {
 	ID            string  `json:"id"`
 	Path          string  `json:"path"`
@@ -66,6 +70,8 @@ type LedgerProject struct {
 	Config        *string `json:"config"`
 	ConfigFromSHA *string `json:"config_from_sha"`
 	CreatedAt     string  `json:"created_at"`
+	PinnedAt      *string `json:"pinned_at"`
+	ArchivedAt    *string `json:"archived_at"`
 }
 
 // LedgerSession 은 session 표 한 행의 원문이다.
@@ -316,12 +322,13 @@ func readLedgerProjects(ctx context.Context, q dbtx) ([]LedgerProject, error) {
 	var out []LedgerProject
 	for rows.Next() {
 		var p LedgerProject
-		var remote, config, fromSHA sql.NullString
+		var remote, config, fromSHA, pinned, archived sql.NullString
 		if err := rows.Scan(&p.ID, &p.Path, &remote, &p.DefaultBranch,
-			&config, &fromSHA, &p.CreatedAt); err != nil {
+			&config, &fromSHA, &p.CreatedAt, &pinned, &archived); err != nil {
 			return nil, fmt.Errorf("원장 프로젝트 행 해석 실패: %w", err)
 		}
 		p.RemoteURL, p.Config, p.ConfigFromSHA = ptrOf(remote), ptrOf(config), ptrOf(fromSHA)
+		p.PinnedAt, p.ArchivedAt = ptrOf(pinned), ptrOf(archived)
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -417,7 +424,7 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		for _, p := range d.Projects {
 			if _, err := t.tx.ExecContext(t.ctx, projectStmt,
 				p.ID, p.Path, p.RemoteURL, p.DefaultBranch,
-				p.Config, p.ConfigFromSHA, p.CreatedAt); err != nil {
+				p.Config, p.ConfigFromSHA, p.CreatedAt, p.PinnedAt, p.ArchivedAt); err != nil {
 				return fmt.Errorf("원장 프로젝트 되쓰기 실패(id=%q): %w", clip(p.ID, 64), err)
 			}
 		}
