@@ -1554,30 +1554,39 @@ GOOS=windows GOARCH=amd64 go vet ./...
 
 - [ ] **Step 3: 실물로 한 번 본다**
 
+> ★ **`127.0.0.1` 로 치면 안 된다.** 루프백 면제(`RequireTokenOnLoopback` 기본 false)에 걸려
+> 토큰 없이 통과하므로 폼이 아예 안 뜬다 — 그런데 응답이 200 이라 **"됐다"고 착각하기 딱 좋다.**
+> 정본 서버가 컨테이너라 이 함정이 안 보였던 것뿐이다(브리지 게이트웨이가 172.x 로 보여
+> 호스트 요청이 루프백이 아니다). 직접 실행한 서버에서는 **비루프백 주소로 쳐야** 인증
+> 게이트를 실제로 거친다. 아래 `$LAN` 을 이 머신의 LAN IP 로 바꿔라(`hostname -I | awk '{print $1}'`).
+
 ```bash
 cd plugins/flightdeck/server
+LAN=$(hostname -I | awk '{print $1}')
 go build -o /tmp/fd-login-check ./cmd/fd
-FD_TOKEN=testtoken123 FD_ADDR=127.0.0.1:7999 FD_DB=/tmp/fd-login-check.db /tmp/fd-login-check serve &
+FD_TOKEN=testtoken123 FD_ADDR=0.0.0.0:7999 FD_DB=/tmp/fd-login-check.db /tmp/fd-login-check serve &
 sleep 2
 
 # ① 브라우저 흉내 — 폼이 401 로 온다
-curl -s -i -H 'Accept: text/html' http://127.0.0.1:7999/ | head -3
-curl -s -H 'Accept: text/html' http://127.0.0.1:7999/ | grep -c 'name="token"'
+curl -s -i -H 'Accept: text/html' http://$LAN:7999/ | head -3
+curl -s -H 'Accept: text/html' http://$LAN:7999/ | grep -c 'name="token"'
 
 # ② CLI 흉내 — JSON 401 그대로
-curl -s -i -H 'Accept: application/json' http://127.0.0.1:7999/api/v1/items/next | head -3
+curl -s -i -H 'Accept: application/json' http://$LAN:7999/api/v1/items/next | head -3
 
 # ③ 로그인 → 쿠키
-curl -s -i -X POST -H 'Sec-Fetch-Site: same-origin' \
-  -d 'token=testtoken123&next=/' http://127.0.0.1:7999/login | grep -i 'set-cookie\|^HTTP'
+curl -s -i -X POST -H "Sec-Fetch-Site: same-origin" \
+  -d 'token=testtoken123&next=/' http://$LAN:7999/login | grep -i 'set-cookie\|^HTTP'
 
 # ④ 그 쿠키로 화면은 되고 REST 는 안 된다
-curl -s -o /dev/null -w 'screen=%{http_code}\n' -b 'fd_token=testtoken123' http://127.0.0.1:7999/
-curl -s -o /dev/null -w 'rest=%{http_code}\n' -b 'fd_token=testtoken123' http://127.0.0.1:7999/api/v1/items/next
+curl -s -o /dev/null -w 'screen=%{http_code}\n' -b 'fd_token=testtoken123' http://$LAN:7999/
+curl -s -o /dev/null -w 'rest=%{http_code}\n' -b 'fd_token=testtoken123' http://$LAN:7999/api/v1/items/next
 
 kill %1
 ```
 기대: ① `HTTP/1.1 401` 과 `1` · ② `HTTP/1.1 401` + `application/json` · ③ `303` 과 `Set-Cookie: fd_token=...; Path=/; Max-Age=315360000; HttpOnly; SameSite=Strict` · ④ `screen=200` 과 `rest=401`.
+
+**하나라도 어긋나면 고치지 말고 멈춰라** — 이 태스크의 범위는 문서와 관문이고, 제품 코드의 결함이면 그것은 별개의 판단이 필요하다.
 
 - [ ] **Step 4: 커밋한다**
 
