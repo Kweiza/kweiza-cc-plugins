@@ -504,10 +504,9 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 	if log == nil {
 		log = slog.Default()
 	}
-	// ★ ProbeMigration 이 아니라 원장 전용 갈래다. 그것은 기본 dsn() 을 쓰고 그 안의
-	//   journal_mode(WAL) 이 롤백저널 대상을 되돌릴 수 없이 바꾼다 — "거절한다"고
-	//   인쇄하는 실행조차 아카이브를 변조했다. 판정 로직은 한 벌 그대로다(probe.go 참고).
-	plan, err := probeMigrationLedger(ctx, path)
+	// ★ 이 재기는 대상 파일을 한 바이트도 안 바꾼다 — "거절한다"고 인쇄하는 실행조차
+	//   아카이브를 변조하던 것을 probe.go 가 DSN 에서 막는다(그 함수의 주석 참고).
+	plan, err := ProbeMigration(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("원장을 읽기 전에 DB 상태를 재지 못했다(path=%q): %w", clip(path, 200), err)
 	}
