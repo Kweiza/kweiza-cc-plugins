@@ -88,6 +88,37 @@ type HealthzBody struct {
 	Build buildinfo.Coord `json:"build"`
 	// SelfUpdate 는 이 서버가 자기 판을 따라가고 있는가다.
 	SelfUpdate SelfUpdateStatus `json:"self_update"`
+	// LedgerBackup 은 매시간 판단 원장 백업이 실제로 돌고 있는가다.
+	LedgerBackup LedgerBackupStatus `json:"ledger_backup"`
+}
+
+// LedgerBackupStatus 는 판단 원장 주기 백업의 상태다.
+//
+// ★ **Running 이 먼저다.** SelfUpdateStatus.Watching·buildinfo.Coord.Known 과 같은 규율이다 —
+// 잡이 안 떴는데 나머지가 비어 있으면 "아직 회차가 없었다"로 읽히고, 그것은 "안 돌고 있다"와
+// 전혀 다르다. 이 축이 존재하는 이유가 정확히 그 둘을 가르는 것이다.
+//
+// ★ 이 축이 왜 필요했나. 잡을 세우면서 위험이 **옮겨갔다**: "손으로 부르는 것을 아무도
+// 안 부른다" 에서 "도는 줄 알았는데 조용히 실패한다" 로. 로그만 남기면 `docker logs` 를
+// 뒤지기 전까지 아무도 모르고, 그동안 설계 §7 은 "매시간 자동 실행: 있음"이라고 말한다.
+//
+// ★ **성공도 여기 남는다.** 자동 갱신과 다른 점이다 — 그쪽은 성공하면 프로세스가 갈아치워져
+// 새 프로세스가 그 사실을 모르지만, 이 잡은 성공해도 같은 프로세스가 계속 돈다.
+// 그래서 "마지막 회차가 언제 · 무엇을 했나"가 이 축의 본체다.
+type LedgerBackupStatus struct {
+	Running bool   `json:"running"`
+	Reason  string `json:"reason,omitempty"`
+	// LastAt 은 마지막 회차 시각이다. **nil 은 "아직 한 회차도 안 돌았다"** 이고,
+	// 제로값과 접으면 1970년에 백업한 서버처럼 보인다(selfUpdateStatusOf 가 같은 갈래를 가른다).
+	LastAt *time.Time `json:"last_at,omitempty"`
+	// Outcome 은 wrote | unchanged | failed 다.
+	//
+	// ★ unchanged 를 failed 와 안 접는다. 안 바뀐 회차는 **정상이고 흔하다**(원장이
+	// 안 바뀌면 안 쓴다) — 그것을 실패로 접으면 화면이 정상 운영을 사고로 보고한다.
+	Outcome string `json:"outcome,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	// Route 는 산출물 자리다. 이 값이 없으면 "돌긴 도는데 어디에 쌓이는지 모른다"가 된다.
+	Route string `json:"route,omitempty"`
 }
 
 // SelfUpdateStatus 는 서버의 자동 갱신 축이다.
@@ -191,9 +222,11 @@ func UnauthorizedGuidance(reach LoopbackReach) string {
 // tokenSet·loopbackOpen 과 같은 모양으로 순수하게 남아 시험이 값을 직접 준다.
 // su 도 같은 이유로 인자다 — 핸들러가 body 에 따로 얹으면 순수 함수가 불완전한 body 를
 // 만들고 그 시험은 통과한다. 실제 응답과 갈리는 그 모양을 이 저장소가 반복해서 문제 삼았다.
-func HealthzOf(h service.Health, tokenSet bool, reach LoopbackReach, build buildinfo.Coord, su SelfUpdateStatus) HealthzBody {
+func HealthzOf(h service.Health, tokenSet bool, reach LoopbackReach, build buildinfo.Coord,
+	su SelfUpdateStatus, lb LedgerBackupStatus) HealthzBody {
 	b := HealthzBody{
-		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build, SelfUpdate: su,
+		OK: h.OK, APIVersion: h.APIVersion, DBOK: h.DBOK, Build: build,
+		SelfUpdate: su, LedgerBackup: lb,
 		DiskFreePct: h.DiskFreePct, DiskKnown: h.DiskKnown, At: h.At,
 		Auth: AuthStatus{
 			TokenSet: tokenSet, LoopbackOpen: reach.open(),
@@ -224,7 +257,13 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.opt.SelfUpdate != nil {
 		su = s.opt.SelfUpdate()
 	}
-	body := HealthzOf(h, s.opt.Token != "", s.loopbackReach(), buildinfo.Self(), su)
+	// 같은 규율 — nil 이면 빈 구조체가 아니라 **사유를 채운 값**을 낸다.
+	// 빈 값은 "아직 회차가 없었다"로 읽히는데 그것은 "배선이 안 됐다"와 전혀 다르다.
+	lb := LedgerBackupStatus{Running: false, Reason: "이 서버는 판단 원장 백업 축을 배선하지 않았다"}
+	if s.opt.LedgerBackup != nil {
+		lb = s.opt.LedgerBackup()
+	}
+	body := HealthzOf(h, s.opt.Token != "", s.loopbackReach(), buildinfo.Self(), su, lb)
 	status := http.StatusOK
 	if !body.OK {
 		status = http.StatusServiceUnavailable

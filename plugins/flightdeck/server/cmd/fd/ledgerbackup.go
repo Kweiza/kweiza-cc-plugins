@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/api"
 	"github.com/kweiza/flightdeck/internal/ledger"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -98,36 +100,106 @@ func ledgerBackupOnce(ctx context.Context, st *store.Store, outDir, at string) (
 	return true, nil
 }
 
-// runLedgerBackup 은 주기 잡이다. ctx 가 끝나면 돌아온다.
+// ledgerBackupState 는 마지막 회차의 관측이다 — cmd/fd 안의 표현이다.
+type ledgerBackupState struct {
+	lastAt  time.Time // 제로값 = 아직 한 회차도 안 돌았다
+	outcome string    // wrote | unchanged | failed
+	detail  string
+	route   string
+}
+
+// ledgerBackupJob 은 주기 잡이고 **자기 마지막 회차를 기억한다.**
+//
+// ★ 기억이 왜 필요한가. 잡을 세우면서 위험이 옮겨갔다 — "아무도 안 부른다"에서
+// "도는 줄 알았는데 조용히 실패한다"로. 로그만 남기면 `docker logs` 를 뒤지기 전까지
+// 아무도 모르고, 그동안 설계 §7 은 "매시간 자동 실행: 있음"이라고 말한다.
+type ledgerBackupJob struct {
+	log   *slog.Logger
+	st    *store.Store
+	route string
+	every time.Duration
+
+	mu    sync.Mutex
+	state ledgerBackupState
+}
+
+func newLedgerBackupJob(log *slog.Logger, st *store.Store, route string, every time.Duration) *ledgerBackupJob {
+	return &ledgerBackupJob{log: log, st: st, route: route, every: every,
+		state: ledgerBackupState{route: route}}
+}
+
+// State 는 마지막 회차의 관측이다. 잠금 밖으로 값을 복사해 낸다.
+func (j *ledgerBackupJob) State() ledgerBackupState {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.state
+}
+
+// ledgerBackupStatusOf 는 잡의 관측을 API 표면의 모양으로 옮긴다. 순수 함수다.
+//
+// ★ **클로저 안에 두지 않는다.** 앞선 물결이 자동 갱신 축에서 정확히 이 자리를 실측으로
+// 잃었다(2026-08-07): 조립·선 넘기기·화면은 각자 잠겨 있었는데 **그 셋을 잇는 변환만**
+// 아무 시험에도 안 걸려서, 판정은 살아 있고 값만 안 도착하는 상태가 조용히 났다.
+// serve.go 의 selfUpdateStatusOf 주석이 그 실측을 적어 뒀고, 이 함수는 같은 규율이다.
+//
+// ★ LastAt 이 유일한 비자명 갈래다 — 이쪽은 time.Time(제로 = 회차 없음), api 는
+// *time.Time(nil = 회차 없음)이다. IsZero() 로 가른다. 값 그대로 주소를 넘기면
+// "회차 없음"이 1970년으로 실려 나가고, omitempty 는 nil 만 보므로 그 거짓을 못 거른다.
+//
+// 필드를 여기서 걸러내지 않는다 — 판정은 전부 상류(회차)에 살고, 여기서 또 고르면
+// 같은 판정이 두 벌이 된다.
+func ledgerBackupStatusOf(s ledgerBackupState) api.LedgerBackupStatus {
+	out := api.LedgerBackupStatus{
+		Running: true,
+		Outcome: s.outcome,
+		Detail:  s.detail,
+		Route:   s.route,
+	}
+	if !s.lastAt.IsZero() {
+		at := s.lastAt
+		out.LastAt = &at
+	}
+	return out
+}
+
+// tick 은 한 회차를 돌고 그 결과를 기억한다.
+func (j *ledgerBackupJob) tick(ctx context.Context, at time.Time) {
+	wrote, err := ledgerBackupOnce(ctx, j.st, j.route, at.UTC().Truncate(time.Microsecond).Format(stampLayout))
+	next := ledgerBackupState{lastAt: at, route: j.route}
+	switch {
+	case err != nil:
+		next.outcome, next.detail = "failed", err.Error()
+		j.log.Error("판단 원장 백업 실패 — 다음 회차에 다시 시도한다",
+			"route", clip(j.route, 200), "error", err.Error())
+	case wrote:
+		next.outcome = "wrote"
+		j.log.Info("판단 원장 백업", "route", clip(j.route, 200), "outcome", "wrote")
+	default:
+		next.outcome = "unchanged"
+		j.log.Info("판단 원장 백업", "route", clip(j.route, 200), "outcome", "unchanged")
+	}
+	j.mu.Lock()
+	j.state = next
+	j.mu.Unlock()
+}
+
+// Run 은 주기 잡이다. ctx 가 끝나면 돌아온다.
 //
 // ★ 기동 직후에 한 번 돈다. 그래야 서버가 오래 안 떠 있던 판에서도 최신 원장이 곧바로
-// 생기고, 안 바뀐 회차는 위 비교가 걸러 준다(읽기와 인코딩만 돌고 쓰기는 없다).
+// 생기고, 안 바뀐 회차는 비교가 걸러 준다(읽기와 인코딩만 돌고 쓰기는 없다).
 //
 // ★ 실패해도 서버를 안 죽인다. 백업이 실패했다고 판단을 못 받는 것이 더 나쁘다 —
-// 그 실패는 ERROR 로 남고 다음 회차가 다시 시도한다.
-func runLedgerBackup(ctx context.Context, log *slog.Logger, st *store.Store, outDir string, every time.Duration) {
-	tick := func() {
-		wrote, err := ledgerBackupOnce(ctx, st, outDir, nowStampString())
-		switch {
-		case err != nil:
-			log.Error("판단 원장 백업 실패 — 다음 회차에 다시 시도한다",
-				"route", clip(outDir, 200), "error", err.Error())
-		case wrote:
-			log.Info("판단 원장 백업", "route", clip(outDir, 200), "outcome", "wrote")
-		default:
-			log.Info("판단 원장 백업", "route", clip(outDir, 200), "outcome", "unchanged")
-		}
-	}
-
-	tick()
-	t := time.NewTicker(every)
+// 그 실패는 ERROR 와 /healthz 의 outcome=failed 로 남고 다음 회차가 다시 시도한다.
+func (j *ledgerBackupJob) Run(ctx context.Context) {
+	j.tick(ctx, time.Now())
+	t := time.NewTicker(j.every)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			tick()
+			j.tick(ctx, time.Now())
 		}
 	}
 }

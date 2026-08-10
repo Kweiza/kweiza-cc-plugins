@@ -100,7 +100,7 @@ func portOf(addr string) string {
 // **실패 모양**이다: 토큰이 끊기면 인증이 통째로 열려 시끄럽게 드러나고, self_update 가
 // 끊기면 화면이 아무 말도 안 하는 **침묵**이라 이 축만 한 칸 더 뺐다.
 func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool,
-	watcher *selfWatcher) api.Options {
+	watcher *selfWatcher, ledgerJob *ledgerBackupJob) api.Options {
 	opt := api.Options{
 		Token:         token,
 		RatePerMinute: ratePerMinute,
@@ -111,6 +111,10 @@ func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContai
 	// 빼므로(handlers_meta.go), "감시기가 없다"와 "감시기가 빈 값을 답한다"가 안 섞인다.
 	if watcher != nil {
 		opt.SelfUpdate = func() api.SelfUpdateStatus { return selfUpdateStatusOf(watcher.Status()) }
+	}
+	// 같은 규율 — nil 이면 콜백을 안 단다. api 쪽이 "배선 안 됨"을 사유로 말한다.
+	if ledgerJob != nil {
+		opt.LedgerBackup = func() api.LedgerBackupStatus { return ledgerBackupStatusOf(ledgerJob.State()) }
 	}
 	return opt
 }
@@ -209,7 +213,10 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	// 감시기의 Status() 를 물어야 하므로, 조립 시점에 감시기가 이미 있어야 한다.
 	watcher := newServeWatcher(log, env, home, path)
 	inContainer, _ := detectContainer()
-	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher))
+	// ★ 잡을 핸들러보다 먼저 만든다 — api.Options.LedgerBackup 콜백이 이 잡의 State() 를
+	//   물으므로 조립 시점에 이미 있어야 한다(감시기와 같은 이유).
+	ledgerJob := newLedgerBackupJob(log, st, LedgerOutDir(env, home, inContainer), ledgerBackupInterval)
+	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher, ledgerJob))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -217,12 +224,11 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	// ★ 판단 원장 주기 백업(설계 §7). serve 가 소유하는 티커다 — selfwatch 와 같은 모양이고,
 	//   이 프로세스가 이미 그 DB 를 쥐고 있어 여는 쪽을 한 벌 더 만들 이유가 없다.
 	//   ctx 로 묶여 있어 종료·자동 갱신 드레인에서 함께 선다.
-	ledgerOut := LedgerOutDir(env, home, inContainer)
-	go runLedgerBackup(ctx, log, st, ledgerOut, ledgerBackupInterval)
+	go ledgerJob.Run(ctx)
 
 	log.Info("기동", "route", clip(*addr, 120), "db_path", clip(path, 200),
 		"api_version", service.APIVersion, "auth_required", token != "",
-		"ledger_out", clip(ledgerOut, 200))
+		"ledger_out", clip(ledgerJob.route, 200))
 
 	return serveWithWatcher(ctx, *addr, handler, log, watcher)
 }
