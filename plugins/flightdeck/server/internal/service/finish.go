@@ -180,6 +180,16 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			"item", clip(in.ItemID, 64), "reason", v.Reason)
 		return FinishResult{}, &RefusedError{What: "finish", Reason: v.Reason, Guidance: v.Guidance}
 	}
+	// 종속을 남긴 채 폐기하면 **한 번** 붙잡는다 — 판정과 사유는 finish_dropped_deps.go 에 있다.
+	// 후속 관문보다 먼저 본다: 이쪽은 **되돌릴 수 없는 손실**(기대던 항목들이 영구 미충족이 된다)이고
+	// 저쪽은 큐에 남는 항목이라, 둘 다 걸릴 때 먼저 보여야 할 사유는 이쪽이다.
+	if refused := s.judgeDroppedWithDependents(ctx, in); refused != nil {
+		s.logFinishRefused(ctx, in, GateDroppedDeps)
+		s.log.WarnContext(ctx, "마무리 거절 — 이 항목을 기다리는 항목이 있다",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"item", clip(in.ItemID, 64))
+		return FinishResult{}, refused
+	}
 	// 후속을 안 실었으면 **한 번** 붙잡는다 — 판정과 사유는 finish_followups.go 에 있다.
 	// body 관문(위 JudgeFinish)과 같은 자리·같은 모양이다: 빠진 것을 그 자리에서 말한다.
 	if len(in.Followups) == 0 {

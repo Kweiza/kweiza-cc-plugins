@@ -559,6 +559,7 @@ POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 �
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
+POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropped-dep`·`after-bad-ref` 의 유일한 탈출구)
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
 GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /sessions/{id}/prescriptions (세션 카드 파생 안 돎)

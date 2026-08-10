@@ -172,6 +172,26 @@ type moveReq struct {
 	To        string `json:"to"`
 }
 
+// afterCutPath 는 선행 하나를 끊는 표면이다.
+func afterCutPath(itemID string) string {
+	return "/api/v1/items/" + urlPath(itemID) + "/after/cut"
+}
+
+// afterCutReq 는 POST /api/v1/items/{id}/after/cut 의 본문이다.
+//
+// 필드 이름이 internal/api 의 cutAfterRequest 와 어긋나면 서버가 조용히 0값을 받는다 —
+// 그리고 이 명령에서 그 실패는 특히 나쁘다. dep 이 빈 채 닿으면 서버는 "정확히 하나여야
+// 한다"로 거절하는데, 사람은 자기가 방금 준 `--item` 을 다시 들여다본다. 이음매 시험이 잠근다.
+//
+// dep 은 **하나**다(add·finish 의 after 는 배열이다) — 이 동사는 한 번에 하나씩 끊는다.
+// 여럿을 한 호출로 받으면 "셋 중 둘만 끊겼다"가 표현 불가능한 결과가 되고,
+// 그때 사람이 무엇을 다시 시도해야 하는지 응답이 말할 수 없다.
+type afterCutReq struct {
+	Project   string    `json:"project"`
+	SessionID string    `json:"session_id"`
+	Dep       afterWire `json:"dep"`
+}
+
 // rekeyReq 는 POST /api/v1/sessions/{id}/rekey 의 본문이다.
 // 필드 이름이 internal/api 의 rekeyRequest 와 어긋나면 서버가 조용히 0값을 받는다.
 type rekeyReq struct {

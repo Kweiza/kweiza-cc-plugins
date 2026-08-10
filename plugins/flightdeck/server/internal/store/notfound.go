@@ -34,6 +34,10 @@ const (
 	NFRefState     NotFoundKind = "ref 관측"
 	NFChangeSet    NotFoundKind = "변경집합"
 
+	// NFItemAfter 는 끊으려는 선행이 그 항목에 안 걸려 있을 때다. 좌표가 (항목, 세 축 중 하나)라
+	// id 한 칸에 안 들어가므로 notFoundNote 로 낸다.
+	NFItemAfter NotFoundKind = "선행 조건"
+
 	// NFLiveLandingRow 는 NFLiveClaim 과 같은 자리다. 이미 빠진 줄 행은 지워지지 않고
 	// 이력으로 남으므로, "행이 아예 없다"와 "이미 빠졌다"를 SELECT 를 하나 더 붙여
 	// 가르지 않는다 — 갈라봐야 회수 화면이 두 경우에 같은 문구를 낼 뿐이다.
@@ -49,7 +53,7 @@ func NotFoundKinds() []NotFoundKind {
 	return []NotFoundKind{
 		NFProject, NFMachine, NFItem, NFClaim, NFLiveClaim, NFSession,
 		NFJudgment, NFSnapshot, NFResourceHold, NFIdempotency, NFRefState, NFChangeSet,
-		NFLiveLandingRow,
+		NFLiveLandingRow, NFItemAfter,
 	}
 }
 

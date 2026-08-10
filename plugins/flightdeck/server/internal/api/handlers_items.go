@@ -289,3 +289,38 @@ func (s *server) handleMoveItem(w http.ResponseWriter, r *http.Request) {
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
 }
+
+// cutAfterRequest 는 항목에 걸린 선행 하나를 끊는 요청이다.
+//
+// move 와 같은 규율으로 **전용 동사**다 — item_after 에 일반 PATCH/DELETE 를 열면
+// "무엇까지 고칠 수 있나"가 다시 열린 질문이 되고, 그 질문은 항목 본문까지 번진다.
+// 본문이 만들어진 시점의 사진이라는 규율은 DESIGN §11 이 적고 store 의 관문이 지킨다.
+type cutAfterRequest struct {
+	Project   string     `json:"project"`
+	SessionID string     `json:"session_id"`
+	Dep       afterInput `json:"dep"` // item·job·sha 중 정확히 하나
+}
+
+func (s *server) handleCutAfter(w http.ResponseWriter, r *http.Request) {
+	var req cutAfterRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	infoFrom(r.Context()).setSession(req.SessionID)
+	res, err := s.svc.CutAfter(r.Context(), service.CutAfterInput{
+		Project: req.Project, SessionID: req.SessionID,
+		ItemID: r.PathValue("id"),
+		Dep:    model.After{Item: req.Dep.Item, Job: req.Dep.Job, SHA: req.Dep.SHA},
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// ★ 화면에도 낸다. 이 쓰기는 **무엇이 걸려 있었는지를 지우는** 유일한 동사라,
+	// 보고 있는 세션이 자기 항목의 전제가 방금 바뀐 것을 즉시 알아야 한다.
+	// (원장은 store 가 item.after.cut 으로 따로 남긴다 — SSE 는 지금 보는 사람에게만 가고 사라진다.)
+	s.publish(r, "item.after.cut", req.Project, req.SessionID, map[string]any{
+		"item": clip(res.Item.ID, 100), "count": len(res.Item.After),
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}

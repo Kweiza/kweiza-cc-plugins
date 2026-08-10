@@ -229,6 +229,71 @@ func (t *Tx) AddAfter(project, itemID string, a model.After) error {
 	return t.addAfter(project, itemID, a)
 }
 
+// RemoveAfter 는 선행 조건 하나를 끊는다.
+//
+// judge.AfterSatisfied 가 내는 영구 미충족(after-dropped-dep · after-bad-ref)의 처방은
+// "선행을 고쳐라"인데, 그 명령을 집행할 쓰기가 여기 말고는 없다.
+//
+// ★ 역인덱스 감소를 **같은 트랜잭션에** 묶는다. item_dependents 는 pick 순위의 1축이라
+// 행만 지우고 n 을 남기면 아무도 안 기대는 항목이 영영 상위에 뜨고, 그 틀림은 오류를 안 낸다.
+// 지운 행 수만큼 줄인다 — item_after 에 UNIQUE 가 없어 같은 선행이 여러 행일 수 있고,
+// 그때 1만 줄이면 남은 차이가 그대로 역인덱스의 거짓이 된다.
+func (t *Tx) RemoveAfter(project, itemID string, a model.After, sessionID string) error {
+	if err := ValidateAfter(a); err != nil {
+		return err
+	}
+	// `IS` 로 비교한다 — 세 칸 중 둘은 NULL 이고 `=` 는 NULL 에 대해 NULL(거짓)을 낸다.
+	res, err := t.tx.ExecContext(t.ctx, `
+		DELETE FROM item_after
+		WHERE project = ? AND item_id = ? AND dep_item IS ? AND dep_job IS ? AND dep_sha IS ?`,
+		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA))
+	if err != nil {
+		return fmt.Errorf("선행 조건 절단 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("선행 조건 절단 결과 확인 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	if n == 0 {
+		// 조용한 0건 성공은 최악이다 — 사람은 처방을 집행했다고 믿고 떠나는데 항목은 그대로 굶는다.
+		return notFoundNote(NFItemAfter, fmt.Sprintf("항목 %s/%s 의 item=%q job=%q sha=%q 에 해당하는",
+			clip(project, 64), clip(itemID, 64), clip(a.Item, 64), clip(a.Job, 64), clip(a.SHA, 40)))
+	}
+	// 역인덱스는 dep_item 축에만 있다. job·sha 를 끊고 여기를 지나면 엉뚱한 수를 만진다.
+	//
+	// ★ 이 가드는 지금 **시험으로 못 잡는다** — 빼도 초록이다. bumpDependents 의 감소 경로가
+	// UPDATE 뿐이라 빈 id 로는 0행이 되어 결과가 같기 때문이다. 그것은 우연이지 계약이 아니다:
+	// 같은 함수의 증가 경로는 INSERT … ON CONFLICT 라, 계약이 한 번만 바뀌면 빈 item_id 행이
+	// 조용히 생긴다. 그래서 의도를 코드에 남긴다.
+	if a.Item != "" {
+		if err := t.bumpDependents(project, a.Item, -int(n)); err != nil {
+			return err
+		}
+	}
+	// ★ 원장에 남긴다. 이 쓰기는 되돌리는 코드가 없고, 항목 본문은 만들어진 시점의 사진이라
+	// **무엇이 걸려 있었는지가 끊는 순간 사라진다.** 안 남기면 "이 항목이 왜 지금 적격인가"에
+	// 답할 자리가 어디에도 없다 — 그리고 그것이 원래 이 결함을 만든 공백과 같은 모양이다.
+	// 축 이름을 값과 함께 싣는다(dep_item·dep_job·dep_sha 는 처방이 서로 다르다).
+	axis, dep := "item", a.Item
+	switch {
+	case a.Job != "":
+		axis, dep = "job", a.Job
+	case a.SHA != "":
+		axis, dep = "sha", a.SHA
+	}
+	t.LogEvent("item.after.cut", project, sessionID, map[string]any{
+		"item": clip(itemID, 100), "axis": axis, "dep": clip(dep, 100), "rows": n,
+	})
+	return nil
+}
+
+// RemoveAfter 는 단발 트랜잭션으로 감싼 것이다.
+func (s *Store) RemoveAfter(ctx context.Context, project, itemID string, a model.After, sessionID string) error {
+	return s.Tx(ctx, func(t *Tx) error { return t.RemoveAfter(project, itemID, a, sessionID) })
+}
+
 // bumpDependents 는 역인덱스를 delta 만큼 움직인다.
 // 감소는 0 아래로 안 내려간다 — 음수 카운트는 조용히 "의존 없음"으로 읽혀 잘못된 통과를 만든다.
 func (t *Tx) bumpDependents(project, depItem string, delta int) error {
@@ -266,6 +331,44 @@ func (s *Store) Dependents(ctx context.Context, project, itemID string) (int, er
 			clip(project, 64), clip(itemID, 64), err)
 	}
 	return n, nil
+}
+
+// DependentItems 는 이 항목을 선행으로 가리키는 **아직 살아 있는** 항목 id 들이다.
+//
+// Dependents(수)와 따로 있는 이유: 폐기 관문이 "3건이 막힌다"까지밖에 못 말하면 세션은
+// 무엇을 손봐야 하는지 다시 조사해야 한다. 이 레포의 거절 문구는 전부 **이름을 내는** 쪽이다
+// (service 의 refuseIneligibleFollowup · judgeMissingFollowups 가 같은 규율이다).
+//
+// ★ **done·dropped 는 안 센다.** 끝난 항목은 선행이 폐기돼도 잃을 것이 없다 —
+// 그것까지 세면 오래된 프로젝트일수록 거짓 거절이 늘어 관문이 벽이 된다.
+// open·claimed 는 둘 다 센다: judge.AfterSatisfied 가 그 둘을 똑같이 after-unmet-item
+// ("기다리면 풀린다")으로 보므로, 선행이 폐기되면 둘 다 영구히 굶는다.
+//
+// 순서는 id 순이다 — 거절 문구에 그대로 실리므로 같은 상태에 같은 문장이어야 한다.
+func (s *Store) DependentItems(ctx context.Context, project, itemID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT a.item_id FROM item_after a
+		JOIN item i ON i.project = a.project AND i.id = a.item_id
+		WHERE a.project = ? AND a.dep_item = ? AND i.state IN ('open', 'claimed')
+		ORDER BY a.item_id`, project, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("종속 항목 조회 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("종속 항목 행 해석 실패: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("종속 항목 순회 실패: %w", err)
+	}
+	return out, nil
 }
 
 // DeleteItem 은 항목을 지우고 역인덱스를 되돌린다.

@@ -165,6 +165,7 @@ const (
 	GateFollowupIneligible FinishGate = "followup-ineligible" // 이을 자격이 없거나 존재를 못 읽었다
 	GateFollowupBody       FinishGate = "followup-body"       // 새로 만들 후속에 제목·본문이 없다
 	GateFollowupPaths      FinishGate = "followup-paths"      // 후속 경로가 좌표계 밖이다
+	GateDroppedDeps        FinishGate = "dropped-deps"        // 이 항목을 기다리는 살아 있는 항목이 있다
 )
 
 // logFinishRefused 는 **트랜잭션에 들어가기도 전에** 끊긴 시도를 원장에 남긴다.
