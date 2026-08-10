@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"net"
+	"net/url"
 	"strings"
 )
 
@@ -102,4 +103,57 @@ func IsLoopback(remoteAddr string) bool {
 		return false
 	}
 	return ip.IsLoopback()
+}
+
+// JudgeScreenPath 는 이 경로가 화면인가다 — **쿠키를 인정하는 유일한 조건**이다. 순수 함수다.
+//
+// ★ 이 함수가 /api/v1 에 대해 거짓을 내는 것이 화면 로그인 설계 전체의 안전을 지탱한다.
+// REST 쓰기는 withScreenWrite 의 출처 대조를 **안 탄다**(JudgeScreenWrite 가 화면 경로만
+// Screen=true 로 본다). 그래서 여기서 REST 를 참으로 내는 순간 REST 쓰기 전체의 CSRF 방어가
+// 쿠키의 SameSite 하나로 줄어든다 — 그 방어는 브라우저 구현에 전적으로 기대는 것이다.
+//
+// ★ /events 가 참인 이유. 화면이 무는 짧은 별칭이고(api.go 의 그 라우트), EventSource 는
+// 임의 헤더를 못 싣는다. 이 경로가 쿠키를 안 받으면 화면은 멀쩡히 뜨는데 영원히 안 갱신된다.
+// /api/v1/events 는 REST 쪽이라 거짓이다.
+func JudgeScreenPath(path string) bool {
+	switch path {
+	case "/", "/events":
+		return true
+	}
+	return strings.HasPrefix(path, "/actions/")
+}
+
+// JudgeLoginScreen 은 이 401 에 HTML 폼을 낼 것인가다. 순수 함수다.
+//
+// ★ **메서드를 안 본다.** 걸러야 하는 것은 "쓰기"가 아니라 **HTML 을 못 읽는 소비자**이고,
+// 그 축은 Accept 하나로 갈린다 — fd CLI 는 application/json, EventSource 는
+// text/event-stream 을 보낸다. 메서드를 조건에 넣으면 쿠키 없이 화면 폼을 제출한 사람이
+// 브라우저 앞에 앉아 JSON 401 을 들여다보게 된다. 그 사람은 폼을 읽을 수 있다.
+//
+// ★ */* 를 거짓으로 두는 이유. curl 의 기본값이라 참으로 두면 CLI 소비자가 HTML 을 받는다.
+// 브라우저는 언제나 text/html 을 명시한다.
+func JudgeLoginScreen(accept string) bool {
+	return strings.Contains(strings.ToLower(accept), "text/html")
+}
+
+// JudgeNext 는 로그인 뒤 돌아갈 자리를 고른다. 순수 함수다.
+//
+// ★ **이 서버 안의 경로만 남긴다.** 스킴이 있거나 // 로 시작하면 브라우저가 다른 호스트로
+// 나가고, 그 순간 이 로그인 폼이 오픈 리다이렉트가 된다 — 공격자가 만든 주소로 사람을
+// 보내면서 출발지가 이 대시보드였다는 사실을 이용한다.
+//
+// ★ 못 읽은 것은 통과시키지 않는다. 파싱 실패도 "/" 로 접는다 — IsLoopback 이 해석 실패를
+// 루프백이 아니라고 보는 것과 같은 규율이다.
+func JudgeNext(next string) string {
+	next = strings.TrimSpace(next)
+	// 역슬래시는 일부 브라우저가 / 로 정규화한다. \\evil.com 이 //evil.com 이 되는 길을 막는다.
+	if next == "" || !strings.HasPrefix(next, "/") ||
+		strings.HasPrefix(next, "//") || strings.Contains(next, `\`) {
+		return "/"
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" {
+		return "/"
+	}
+	return u.RequestURI()
 }

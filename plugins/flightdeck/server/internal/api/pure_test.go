@@ -648,3 +648,66 @@ func TestHealthzCarriesLedgerBackup(t *testing.T) {
 		t.Errorf("회차가 없는데 last_at 이 실렸다:\n%s", quiet)
 	}
 }
+
+func TestJudgeScreenPath(t *testing.T) {
+	// ★ 이 표가 이 설계 전체의 안전을 지탱한다. /api/v1 이 참이 되는 순간
+	// REST 쓰기의 CSRF 방어가 쿠키의 SameSite 하나로 줄어든다.
+	cases := map[string]bool{
+		"/":                     true,
+		"/events":               true,
+		"/actions/reclaim":      true,
+		"/actions/drop":         true,
+		"/actions/lane-release": true,
+		"/api/v1/items/next":    false,
+		"/api/v1/events":        false, // REST 쪽 별칭이다 — 화면이 무는 것은 /events 다
+		"/healthz":              false,
+		"/metrics":              false,
+		"/login":                false,
+		"/actions":              false, // 접두는 슬래시까지다
+		"":                      false,
+	}
+	for path, want := range cases {
+		if got := JudgeScreenPath(path); got != want {
+			t.Errorf("JudgeScreenPath(%q) = %v, 기대 %v", path, got, want)
+		}
+	}
+}
+
+func TestJudgeLoginScreen(t *testing.T) {
+	cases := map[string]bool{
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8": true,
+		"text/html":         true,
+		"TEXT/HTML":         true, // 대소문자 무시
+		"application/json":  false,
+		"text/event-stream": false, // EventSource 는 폼을 못 읽는다
+		"*/*":               false, // curl 기본값 — 사람이 아니다
+		"":                  false,
+	}
+	for accept, want := range cases {
+		if got := JudgeLoginScreen(accept); got != want {
+			t.Errorf("JudgeLoginScreen(%q) = %v, 기대 %v", accept, got, want)
+		}
+	}
+}
+
+func TestJudgeNext(t *testing.T) {
+	cases := map[string]string{
+		"/":                   "/",
+		"/?project=kweiza":    "/?project=kweiza",
+		"/?q=a%20b":           "/?q=a%20b",
+		"":                    "/",
+		"   ":                 "/",
+		"//evil.com":          "/", // 프로토콜 상대 URL — 다른 호스트로 나간다
+		"///evil.com":         "/",
+		"http://evil.com":     "/",
+		"https://evil.com/x":  "/",
+		"javascript:alert(1)": "/",
+		"relative":            "/", // 슬래시로 안 시작하면 거절한다
+		"/\\evil.com":         "/", // 일부 브라우저가 \ 를 / 로 정규화한다
+	}
+	for next, want := range cases {
+		if got := JudgeNext(next); got != want {
+			t.Errorf("JudgeNext(%q) = %q, 기대 %q", next, got, want)
+		}
+	}
+}
