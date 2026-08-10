@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -23,7 +24,7 @@ func TestCloseDeclarationsByItemSeesRolledBackFinish(t *testing.T) {
 	drifted := mustSession(t, s, "p", "cc-drifted")
 	mustItem(t, s, "p", "it-1")
 
-	if _, err := s.ClaimItem(ctx, "p", "it-1", owner.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-1", owner.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 
@@ -84,7 +85,7 @@ func TestCloseDeclarationsByItemFoldsRepeatsAndSeparatesModes(t *testing.T) {
 	mustItem(t, s, "p", "it-1")
 	mustItem(t, s, "p", "it-2")
 
-	if _, err := s.ClaimItem(ctx, "p", "it-1", owner.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-1", owner.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 
@@ -112,7 +113,7 @@ func TestCloseDeclarationsByItemFoldsRepeatsAndSeparatesModes(t *testing.T) {
 	}
 
 	// it-2 는 제 세션이 제대로 닫는다 — 성공한 마무리다.
-	if _, err := s.ClaimItem(ctx, "p", "it-2", owner.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-2", owner.ID, time.Time{}); err != nil {
 		t.Fatalf("it-2 선점 실패: %v", err)
 	}
 	if err := s.Tx(ctx, func(tx *Tx) error {

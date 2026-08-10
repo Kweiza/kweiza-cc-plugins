@@ -25,7 +25,7 @@ func deadClaim(t *testing.T, h *harness, item string) model.Session {
 	if err := h.st.UpsertMachine(ctx, model.Machine{ID: "m-dead", Hostname: "dead-host"}); err != nil {
 		t.Fatalf("머신 등록 실패: %v", err)
 	}
-	sess, _, err := h.st.OpenSession(ctx, h.project, "m-dead", "/wt-dead", "cc-dead-"+item, "죽은 세션")
+	sess, _, err := h.st.OpenSession(ctx, h.project, "m-dead", "/wt-dead", "cc-dead-"+item, "죽은 세션", time.Time{})
 	if err != nil {
 		t.Fatalf("세션 열기 실패: %v", err)
 	}
@@ -34,7 +34,7 @@ func deadClaim(t *testing.T, h *harness, item string) model.Session {
 	}); err != nil {
 		t.Fatalf("항목 등록 실패: %v", err)
 	}
-	if _, err := h.st.ClaimItem(ctx, h.project, item, sess.ID); err != nil {
+	if _, err := h.st.ClaimItem(ctx, h.project, item, sess.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 	return sess

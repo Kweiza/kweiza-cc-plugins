@@ -110,9 +110,13 @@ func TestLanePanelDrawsEveryRowWithItsAxes(t *testing.T) {
 		t.Fatalf("화면이 %d 다", code)
 	}
 
-	mustContain(t, html, "랜딩 레인", "레인 절이 화면에 없다 — 줄을 볼 자리가 없다")
-	mustContain(t, html, lf.holder, "점유자 세션이 줄 표에 없다")
-	mustContain(t, html, lf.waiter, "대기자 세션이 줄 표에 없다 — 줄은 전부 내야 한다")
+	// 레인 절이 ④ 안에 있다는 것 자체는 ④에서 잰다(절의 존재는 절 하나 아래에서 못 잰다).
+	mustContain(t, sectionOf(t, html, "landing"), "랜딩 레인",
+		"레인 절이 ④에 없다 — 줄을 볼 자리가 없다")
+	// 세션 id 는 ①의 카드에도 찍히므로 **줄 표 안에서** 잰다. 페이지 전체에 걸면
+	// 줄 행이 통째로 빠져도 ①의 카드가 이 단정을 만족시킨다.
+	mustContain(t, laneSectionOf(t, html), lf.holder, "점유자 세션이 줄 표에 없다")
+	mustContain(t, laneSectionOf(t, html), lf.waiter, "대기자 세션이 줄 표에 없다 — 줄은 전부 내야 한다")
 
 	// ★ 다섯을 전부 **레인 절 안에서** 잰다. 페이지 전체에 걸었다가 섹션 ①의 신호 배지가
 	// 레인의 대기 경과인 척한 사고가 이 파일에서 실제로 났다(사연은 아래 laneSectionOf 에 있다).
@@ -138,7 +142,7 @@ func TestLanePanelDrawsEveryRowWithItsAxes(t *testing.T) {
 		"대기자의 마지막 신호 나이(2분)가 없다 — 대기 경과(7분)가 아니다. 그 둘이 같은 값이면 이 단정은 아무것도 안 지킨다")
 
 	// 점유자와 대기자가 화면에서 구분돼야 한다. 안 그러면 "누가 지금 쥐고 있나"를 못 읽는다.
-	mustContain(t, html, "lane-holder", "점유자 행이 표시로 구분되지 않는다")
+	mustContain(t, lane, "lane-holder", "점유자 행이 표시로 구분되지 않는다")
 }
 
 // TestLanePanelSplitsWaitingFromHeld 는 대기 경과와 획득 경과가 **서로 다른 시각에서**
@@ -201,12 +205,20 @@ func TestLanePanelOffersReclaimPerRow(t *testing.T) {
 	lf := newLaneFixture(t)
 
 	_, html := lf.get("?project=" + testProject)
+	lane := laneSectionOf(t, html)
 
-	mustContain(t, html, "actions/lane-release", "레인 회수 폼이 없다")
+	mustContain(t, lane, "actions/lane-release", "레인 회수 폼이 없다")
 	// 줄 행 둘이 **각각** 회수 대상으로 골라져야 한다. 점유자만 고를 수 있으면
 	// 대기 중 좀비를 빼는 길이 화면에 없다.
+	//
+	// ★ `value="1"` 은 항목 id 도 문장도 아닌 짧은 조각이라 다른 절의 어떤 <option>·
+	//    <input> 이든 우연히 만족시킬 수 있다. **다만 지금은 아니다** — 실측했다:
+	//    레인 폼의 option 을 통째로 없애면 페이지 전체에 걸어도 빨개진다(이 화면에서
+	//    value="1"·value="2" 를 내는 자리가 여기뿐이다). 그러니 이 좁히기가 고친 것은
+	//    지금 있는 거짓 초록이 아니라, **줄 행 말고 다른 것이 1·2 를 값으로 갖게 되는 날**
+	//    조용히 생길 거짓 초록이다.
 	for _, want := range []string{`value="1"`, `value="2"`} {
-		mustContain(t, html, want, "줄 행 "+want+" 을 회수 대상으로 고를 수 없다")
+		mustContain(t, lane, want, "줄 행 "+want+" 을 회수 대상으로 고를 수 없다")
 	}
 }
 
@@ -292,12 +304,14 @@ func TestLanePanelSeparatesZeroFromUnread(t *testing.T) {
 	f.openSession("cc-1", "아무도 줄에 안 섰다")
 
 	_, html := f.get("?project=" + testProject)
+	landing := sectionOf(t, html, "landing")
 
-	mustContain(t, html, "랜딩 레인", "레인 절이 없다")
-	mustContain(t, html, "줄이 비었다", "0건 문장이 없다 — 빈 표는 아무 말도 하지 않는다")
+	mustContain(t, landing, "랜딩 레인", "레인 절이 ④에 없다")
+	mustContain(t, laneSectionOf(t, html), "줄이 비었다",
+		"0건 문장이 없다 — 빈 표는 아무 말도 하지 않는다")
 	// 0건 문장은 **자기 절이** 가진다. ④ 전체의 Empty 로 뭉개면 종료 항목 0건과
 	// 줄 0건이 한 문장으로 접힌다.
-	if strings.Contains(html, "종료된 항목 0건 — 아직 아무 항목도 끝나거나 폐기되지 않았다. 줄이 비었다") {
+	if strings.Contains(landing, "종료된 항목 0건 — 아직 아무 항목도 끝나거나 폐기되지 않았다. 줄이 비었다") {
 		t.Fatal("레인 0건 문장이 ④ 전체 Empty 에 뭉개졌다")
 	}
 }
@@ -308,14 +322,20 @@ func TestLanePanelSeparatesZeroFromUnread(t *testing.T) {
 // 우연히 같은 문자열을 내는 순간 그 단정이 조용히 거짓 초록이 된다 — 이 파일이
 // 실제로 그것을 들고 있었다(섹션 ①의 mcp 신호 배지가 레인의 대기 경과인 척했고,
 // ①을 접자마자 드러났다). 레인 축은 레인 절 안에서 재라.
+//
+// ★ 끝을 **다음 <h3>(스냅숏)**에서 끊는다. 레인은 새 <section> 이 아니라 ④ 안쪽
+// <h3> 이라(절 개수가 여섯으로 고정이다) ④ 끝까지 자르면 스냅숏 표가 딸려 온다.
+// 그 표도 판정 시각을 같은 "N분 전" 어법으로 찍으므로, 레인의 시각 단정이 스냅숏
+// 칸으로 만족되는 길이 열린다 — 이 파일이 이미 한 번 치른 값과 같은 부류다.
 func laneSectionOf(t *testing.T, html string) string {
 	t.Helper()
-	i := strings.Index(html, "랜딩 레인")
+	sec := sectionOf(t, html, "landing")
+	i := strings.Index(sec, "랜딩 레인")
 	if i < 0 {
-		t.Fatal("레인 절이 화면에 없다")
+		t.Fatal("레인 절이 ④ 안에 없다")
 	}
-	sec := html[i:]
-	if j := strings.Index(sec, "<section"); j > 0 {
+	sec = sec[i:]
+	if j := strings.Index(sec, "<h3"); j > 0 {
 		sec = sec[:j]
 	}
 	return sec

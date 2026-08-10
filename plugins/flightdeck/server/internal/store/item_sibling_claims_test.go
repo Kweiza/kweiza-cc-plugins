@@ -26,7 +26,7 @@ func TestSiblingClaimedItemsSeparatesEachJoinAxis(t *testing.T) {
 	}
 
 	// 기준 카드 — 이 카드가 "나"이고, 형제를 찾는 주체다.
-	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "")
+	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestSiblingClaimedItemsSeparatesEachJoinAxis(t *testing.T) {
 	}
 
 	for _, c := range cards {
-		sess, _, err := s.OpenSession(ctx, c.project, c.machine, c.worktree, c.cc, "")
+		sess, _, err := s.OpenSession(ctx, c.project, c.machine, c.worktree, c.cc, "", time.Time{})
 		if err != nil {
 			t.Fatalf("%s: 카드 등록 실패: %v", c.name, err)
 		}
@@ -75,7 +75,7 @@ func TestSiblingClaimedItemsSeparatesEachJoinAxis(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("%s: 항목 등록 실패: %v", c.name, err)
 		}
-		if _, err := s.ClaimItem(ctx, c.project, c.item, sess.ID); err != nil {
+		if _, err := s.ClaimItem(ctx, c.project, c.item, sess.ID, time.Time{}); err != nil {
 			t.Fatalf("%s: 선점 실패: %v", c.name, err)
 		}
 	}
@@ -107,7 +107,7 @@ func TestSiblingClaimedItemsExcludesMyOwnCard(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
 
-	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "")
+	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestSiblingClaimedItemsExcludesMyOwnCard(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimItem(ctx, "p", "it-mine", me.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-mine", me.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	// 대조 전제: 카드 스코프 조회로는 분명히 보인다.
@@ -144,11 +144,11 @@ func TestSiblingClaimedItemsDropsAReleasedClaim(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
 
-	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "")
+	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sib, _, err := s.OpenSession(ctx, "p", "m1", "/w/tree2", "cc-A", "")
+	sib, _, err := s.OpenSession(ctx, "p", "m1", "/w/tree2", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestSiblingClaimedItemsDropsAReleasedClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimItem(ctx, "p", "it-x", sib.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-x", sib.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	// 대조 전제: 반납 전에는 분명히 형제로 보인다.
@@ -188,11 +188,11 @@ func TestSiblingReleasedItemsSeesOnlyThisTurn(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
 
-	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "")
+	me, _, err := s.OpenSession(ctx, "p", "m1", "/w/main", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sib, _, err := s.OpenSession(ctx, "p", "m1", "/w/tree2", "cc-A", "")
+	sib, _, err := s.OpenSession(ctx, "p", "m1", "/w/tree2", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestSiblingReleasedItemsSeesOnlyThisTurn(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimItem(ctx, "p", "it-old", sib.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "it-old", sib.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetItemState(ctx, "p", "it-old", model.ItemDone, ""); err != nil {

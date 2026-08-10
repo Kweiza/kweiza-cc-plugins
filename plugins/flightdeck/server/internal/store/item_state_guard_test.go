@@ -90,7 +90,7 @@ func TestStateGuardLeavesTheClaimPathIntact(t *testing.T) {
 	s2 := mustSession(t, s, "p", "cc-B")
 	mustItem(t, s, "p", "x")
 
-	if _, err := s.ClaimItem(ctx, "p", "x", s1.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "x", s1.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if it, _ := s.GetItem(ctx, "p", "x"); it.State != model.ItemClaimed {
@@ -108,7 +108,7 @@ func TestStateGuardLeavesTheClaimPathIntact(t *testing.T) {
 		t.Fatalf("전제가 깨졌다 — 항목이 claimed 로 안 남았다: %s", it.State)
 	}
 
-	if _, err := s.ClaimItem(ctx, "p", "x", s2.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "x", s2.ID, time.Time{}); err != nil {
 		t.Fatalf("점유자 없는 claimed 항목을 다시 못 집었다: %v — 가드가 정상 갈래를 막았다", err)
 	}
 	if it, _ := s.GetItem(ctx, "p", "x"); it.State != model.ItemClaimed {

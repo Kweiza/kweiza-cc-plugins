@@ -667,7 +667,13 @@ func (t *Tx) closedOrMissing(project, itemID string, want model.ItemState) error
 // "미선점 확인 → 삽입" 사이에 남이 끼어들 창이 없다.
 // 이미 남의 것이면 **점유자를 담은 오류**(*ClaimHeldError)를 돌려준다 —
 // 불리언 실패로 접으면 누구에게 물어야 하는지 알 수 없고, 그러면 다시 추측이 시작된다.
-func (t *Tx) ClaimItem(project, itemID, sessionID string) (model.Claim, error) {
+// at 은 **선점 시각**이다. 영값이면 지금이다(Beat·Touch 와 같은 문법).
+//
+// ★ 이 값도 화면 축이다 — ①의 회수 폼과 ③의 큐 표가 둘 다 `{{.Since}}부터` 로 찍는다.
+// 그리고 이 함수는 그 시각을 **구조체에 담아 돌려주므로**(아래 return) 받은 값을 그대로
+// 쓰면 안 된다: 서비스 시계는 나노초를 담는데 행은 마이크로초로 저장돼(timeLayout)
+// "방금 만든 것"과 "다시 읽은 것"이 갈린다. atStamp 가 그 자리를 막는다.
+func (t *Tx) ClaimItem(project, itemID, sessionID string, at time.Time) (model.Claim, error) {
 	found := true
 	var state model.ItemState
 	switch it, err := t.GetItem(project, itemID); {
@@ -698,7 +704,7 @@ func (t *Tx) ClaimItem(project, itemID, sessionID string) (model.Claim, error) {
 		return model.Claim{}, &ClaimRefusedError{Project: project, ItemID: itemID, Reason: v.Reason}
 	}
 
-	now := nowStamp()
+	now := atStamp(at)
 	// PK 가 (project, item_id) 라 **반납된 선점 행이 그대로 남아 있다**.
 	// 그래서 단순 INSERT 가 아니라 upsert 여야 한다 — 재선점이 PK 위반으로 죽으면
 	// 한 번 반납한 항목을 아무도 다시 못 집는다.
@@ -723,11 +729,11 @@ func (t *Tx) ClaimItem(project, itemID, sessionID string) (model.Claim, error) {
 }
 
 // ClaimItem 은 단발 트랜잭션으로 감싼 것이다.
-func (s *Store) ClaimItem(ctx context.Context, project, itemID, sessionID string) (model.Claim, error) {
+func (s *Store) ClaimItem(ctx context.Context, project, itemID, sessionID string, at time.Time) (model.Claim, error) {
 	var c model.Claim
 	err := s.Tx(ctx, func(t *Tx) error {
 		var e error
-		c, e = t.ClaimItem(project, itemID, sessionID)
+		c, e = t.ClaimItem(project, itemID, sessionID, at)
 		return e
 	})
 	return c, err

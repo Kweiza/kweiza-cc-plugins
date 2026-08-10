@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -18,7 +19,7 @@ func TestOpenSessionRevivesDoneCard(t *testing.T) {
 	seed(t, s, "p")
 	ctx := context.Background()
 
-	first, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-A", "")
+	first, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatalf("첫 등록 실패: %v", err)
 	}
@@ -26,7 +27,7 @@ func TestOpenSessionRevivesDoneCard(t *testing.T) {
 		t.Fatalf("닫기 실패: %v", err)
 	}
 
-	again, created, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-A", "")
+	again, created, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatalf("재등록 실패: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestOpenSessionKeepsBlockedStateAndReason(t *testing.T) {
 	seed(t, s, "p")
 	ctx := context.Background()
 
-	first, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-B", "")
+	first, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-B", "", time.Time{})
 	if err != nil {
 		t.Fatalf("첫 등록 실패: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestOpenSessionKeepsBlockedStateAndReason(t *testing.T) {
 		t.Fatalf("막힘 표시 실패: %v", err)
 	}
 
-	again, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-B", "")
+	again, _, err := s.OpenSession(ctx, "p", "m1", "/w/t", "cc-B", "", time.Time{})
 	if err != nil {
 		t.Fatalf("재등록 실패: %v", err)
 	}

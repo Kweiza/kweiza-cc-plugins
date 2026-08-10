@@ -47,7 +47,7 @@ func seed(t *testing.T, s *Store, project string) {
 
 func mustSession(t *testing.T, s *Store, project, cc string) model.Session {
 	t.Helper()
-	sess, _, err := s.OpenSession(context.Background(), project, "m1", "/w/"+cc, cc, "")
+	sess, _, err := s.OpenSession(context.Background(), project, "m1", "/w/"+cc, cc, "", time.Time{})
 	if err != nil {
 		t.Fatalf("세션 등록 실패(cc=%s): %v", cc, err)
 	}
@@ -331,7 +331,7 @@ func TestOpenSessionTripleKey(t *testing.T) {
 	seed(t, s, "p")
 	ctx := context.Background()
 
-	first, created, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인")
+	first, created, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인", time.Time{})
 	if err != nil {
 		t.Fatalf("첫 등록 실패: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestOpenSessionTripleKey(t *testing.T) {
 		t.Error("첫 등록인데 created=false")
 	}
 
-	again, created, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인")
+	again, created, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인", time.Time{})
 	if err != nil {
 		t.Fatalf("재등록 실패: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestOpenSessionTripleKey(t *testing.T) {
 	}
 
 	// label 은 표시 전용이라 최신 선언이 이긴다. 그 외는 안 건드린다.
-	relabeled, _, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인 완성")
+	relabeled, _, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "파이프라인 완성", time.Time{})
 	if err != nil {
 		t.Fatalf("label 갱신 실패: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestOpenSessionEachAxisSeparates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base, _, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "")
+	base, _, err := s.OpenSession(ctx, "p", "m1", "/w/track2", "cc-A", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestOpenSessionEachAxisSeparates(t *testing.T) {
 	seen := map[string]string{base.ID: "base"}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, created, err := s.OpenSession(ctx, "p", c.machine, c.wt, c.cc, "")
+			got, created, err := s.OpenSession(ctx, "p", c.machine, c.wt, c.cc, "", time.Time{})
 			if err != nil {
 				t.Fatalf("등록 실패: %v", err)
 			}
@@ -560,7 +560,7 @@ func TestClaimRaceOnlyOneWinsAndLosersLearnTheHolder(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = s.ClaimItem(ctx, "p", "t5-x", sessions[i])
+			_, errs[i] = s.ClaimItem(ctx, "p", "t5-x", sessions[i], time.Time{})
 		}(i)
 	}
 	close(start)
@@ -616,13 +616,13 @@ func TestClaimResumeAndRelease(t *testing.T) {
 	a := mustSession(t, s, "p", "cc-A")
 	b := mustSession(t, s, "p", "cc-B")
 
-	c1, err := s.ClaimItem(ctx, "p", "t5-x", a.ID)
+	c1, err := s.ClaimItem(ctx, "p", "t5-x", a.ID, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 재개: 이미 자기 것이면 거절이 아니라 같은 선점이 돌아온다 —
 	// 컨텍스트가 날아가 돌아온 세션이 여기서 막히면 맥락을 되찾을 길이 없다.
-	c2, err := s.ClaimItem(ctx, "p", "t5-x", a.ID)
+	c2, err := s.ClaimItem(ctx, "p", "t5-x", a.ID, time.Time{})
 	if err != nil {
 		t.Fatalf("자기 선점 재개가 거절됐다: %v", err)
 	}
@@ -652,7 +652,7 @@ func TestClaimResumeAndRelease(t *testing.T) {
 		t.Errorf("반납 후 항목 상태 = %q, want open", it.State)
 	}
 	// 반납된 항목을 남이 다시 잡을 수 있어야 한다(선점 행이 PK 로 남아 있어도).
-	if _, err := s.ClaimItem(ctx, "p", "t5-x", b.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "t5-x", b.ID, time.Time{}); err != nil {
 		t.Fatalf("반납된 항목을 다시 못 잡는다: %v", err)
 	}
 }
@@ -663,7 +663,7 @@ func TestForceReleaseClaimRequiresReason(t *testing.T) {
 	ctx := context.Background()
 	mustItem(t, s, "p", "t5-x")
 	a := mustSession(t, s, "p", "cc-A")
-	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -689,7 +689,7 @@ func TestClaimRefusalsThatAreNotAboutAHolder(t *testing.T) {
 	a := mustSession(t, s, "p", "cc-A")
 
 	// 없는 항목 · 끝난 항목은 점유자 축이 아니다. 오류 타입을 가른다 — 처방이 다르다.
-	_, err := s.ClaimItem(ctx, "p", "없는항목", a.ID)
+	_, err := s.ClaimItem(ctx, "p", "없는항목", a.ID, time.Time{})
 	var re *ClaimRefusedError
 	if !errors.As(err, &re) {
 		t.Fatalf("없는 항목 선점이 *ClaimRefusedError 가 아니다: %T %v", err, err)
@@ -699,7 +699,7 @@ func TestClaimRefusalsThatAreNotAboutAHolder(t *testing.T) {
 	if err := s.FinishItem(ctx, "p", "t5-done", a.ID, model.ItemDone, ""); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.ClaimItem(ctx, "p", "t5-done", a.ID)
+	_, err = s.ClaimItem(ctx, "p", "t5-done", a.ID, time.Time{})
 	if !errors.As(err, &re) {
 		t.Fatalf("끝난 항목 선점이 *ClaimRefusedError 가 아니다: %T %v", err, err)
 	}
@@ -714,7 +714,7 @@ func TestFinishReleasesClaimAtomically(t *testing.T) {
 	ctx := context.Background()
 	mustItem(t, s, "p", "t5-x")
 	a := mustSession(t, s, "p", "cc-A")
-	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1492,7 +1492,7 @@ func TestTxGroupsWritesAtomically(t *testing.T) {
 	ctx := context.Background()
 	mustItem(t, s, "p", "t5-x")
 	a := mustSession(t, s, "p", "cc-A")
-	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "t5-x", a.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 

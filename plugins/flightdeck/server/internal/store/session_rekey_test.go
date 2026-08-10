@@ -17,7 +17,7 @@ import (
 
 func claimItem(t *testing.T, s *Store, itemID, sessionID string) model.Claim {
 	t.Helper()
-	c, err := s.ClaimItem(context.Background(), "p", itemID, sessionID)
+	c, err := s.ClaimItem(context.Background(), "p", itemID, sessionID, time.Time{})
 	if err != nil {
 		t.Fatalf("claimItem 준비 실패: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestRekeyRefusesACCAnotherCardHolds(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
 	a := mustSession(t, s, "p", "cc-a")
-	if _, _, err := s.OpenSession(ctx, "p", "m1", a.Worktree, "cc-b", ""); err != nil {
+	if _, _, err := s.OpenSession(ctx, "p", "m1", a.Worktree, "cc-b", "", time.Time{}); err != nil {
 		t.Fatalf("전제 세팅 실패(같은 워크트리로 두번째 세션): %v", err)
 	}
 

@@ -42,11 +42,7 @@ func declared(t *testing.T, itemID string) (*fixture, string) {
 // 된다. 이 패키지가 실제로 그 값을 치렀다(claim_filter_test·lane_panel_test 의 머리말).
 func queueTableOf(t *testing.T, html string) string {
 	t.Helper()
-	i := strings.Index(html, `<section id="queue">`)
-	if i < 0 {
-		t.Fatal("섹션 ③이 화면에 없다")
-	}
-	sec := html[i:]
+	sec := sectionOf(t, html, "queue")
 	j := strings.Index(sec, "탈락 사유 분포")
 	if j < 0 {
 		t.Fatal("③의 항목 표 끝(탈락 사유 분포 절)을 못 찾았다 — 이 헬퍼의 전제가 깨졌다")
@@ -94,9 +90,10 @@ func TestReclaimFormNamesTheRolledBackFinish(t *testing.T) {
 	mustContain(t, now, "it-rolled 제목",
 		"회수 폼 줄에 제목이 없다 — id 만으로는 무엇을 회수하는지 사람이 모른다")
 
-	// 그리고 이 수가 정확한 수인 척하지 않는다(문구는 ③의 폐기 폼 꼬리에 있다).
-	mustContain(t, html, "그 수는 하한이다",
-		"원장에 안 써진 마무리가 있을 수 있다는 사실이 화면 어디에도 없다")
+	// 그리고 이 수가 정확한 수인 척하지 않는다. 문구는 ③의 폐기 폼 꼬리에 있으므로
+	// ③ 안에서 잰다 — 주석이 자리를 알고 있는데 단정만 페이지 전체를 보고 있었다.
+	mustContain(t, sectionOf(t, html, "queue"), "그 수는 하한이다",
+		"원장에 안 써진 마무리가 있을 수 있다는 사실이 ③에 없다")
 }
 
 // ─────────────────────────── 시점 B — 회수 후(open) ───────────────────────────

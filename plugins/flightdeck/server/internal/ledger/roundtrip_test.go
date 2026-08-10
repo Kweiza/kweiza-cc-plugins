@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/ledger"
 	"github.com/kweiza/flightdeck/internal/model"
@@ -227,7 +228,7 @@ func seedLedgerRefs(t *testing.T, s *store.Store) {
 	// label 을 채운다 — 마지막 인자가 그것이다. 비워 두면 LedgerSession.Label 의
 	// 값 있는 경로가 시험되지 않는다. BlockedWhy 는 state='blocked' 여야 채워지는데
 	// 그건 internal/store 의 TestWriteLedgerRestoresBlockedSession 이 이미 덮는다.
-	if _, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc1", "cc1", "메인 세션"); err != nil {
+	if _, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc1", "cc1", "메인 세션", time.Time{}); err != nil {
 		t.Fatalf("세션 등록 실패: %v", err)
 	}
 }
@@ -239,7 +240,7 @@ func seedLedgerFixture(t *testing.T, s *store.Store) {
 	ctx := context.Background()
 	seedLedgerRefs(t, s)
 
-	sess, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc1", "cc1", "")
+	sess, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc1", "cc1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("세션 재개 실패: %v", err)
 	}
@@ -282,7 +283,7 @@ func seedLedgerFixture(t *testing.T, s *store.Store) {
 	// nullable 전제 관문(TestRoundTripFixtureExercisesEveryNullableColumn)이 이 구멍을
 	// 찾아냈다. 이것이 없으면 읽기가 blocked_why 를 버려도 왕복이 원리적으로 못 본다 —
 	// want·final 이 둘 다 ReadLedger 산출물이라 양쪽에 똑같이 없기 때문이다.
-	blocked, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc2", "cc2", "막힌 세션")
+	blocked, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc2", "cc2", "막힌 세션", time.Time{})
 	if err != nil {
 		t.Fatalf("둘째 세션 열기 실패: %v", err)
 	}

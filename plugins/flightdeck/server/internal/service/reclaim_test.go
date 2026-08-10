@@ -31,14 +31,14 @@ func claimFixture(t *testing.T) (*Service, *store.Store, model.Session) {
 	if err := st.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "h"}); err != nil {
 		t.Fatal(err)
 	}
-	sess, _, err := st.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨")
+	sess, _, err := st.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddItem(ctx, model.Item{Project: "p", ID: "x", Title: "t", Body: "b", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimItem(ctx, "p", "x", sess.ID); err != nil {
+	if _, err := st.ClaimItem(ctx, "p", "x", sess.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	return svc, st, sess
@@ -195,14 +195,14 @@ func TestReclaimClaimJudgmentUsesInjectedClock(t *testing.T) {
 	if err := st.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "h"}); err != nil {
 		t.Fatal(err)
 	}
-	sess, _, err := st.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨")
+	sess, _, err := st.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddItem(ctx, model.Item{Project: "p", ID: "x", Title: "t", Body: "b", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimItem(ctx, "p", "x", sess.ID); err != nil {
+	if _, err := st.ClaimItem(ctx, "p", "x", sess.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 
