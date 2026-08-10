@@ -270,7 +270,7 @@ func OverlapsWithLive(paths []string, live []LiveSession, self, selfCC string) [
 		}
 		// ★ 쌍도 여기서 세운다 — 호출부가 따로 부르게 두면 그 호출을 빠뜨린 표면이 생기고,
 		//   그것이 곧 "판정이 두 자리"다(이 패키지가 워크트리·머신·프로젝트 축에서 세 번 겪었다).
-		SortPairsBySize(o)
+		SortPairsBySize(&o)
 		out = append(out, o)
 	}
 	SortOverlapsBySize(out)
@@ -311,6 +311,10 @@ func SortOverlapsBySize(os []Overlap) {
 
 // SortPairsBySize 는 겹침 하나의 **경로쌍**을 상대 규모 큰 순으로 세운다(제자리). 순수 함수다.
 //
+// ★ **포인터로 받는다.** 슬라이스 헤더 덕에 값 수신으로도 지금은 옳게 돌지만, "제자리"라고
+// 적힌 함수가 값을 받으면 다음 사람이 여기서 `o.Pairs = append(...)` 나 재대입을 했을 때
+// **조용히 안 먹는다.** 이 저장소가 없애려는 침묵과 같은 모양이라 타입으로 막는다.
+//
 // ★ **규칙은 세션 층(SortOverlapsBySize)과 같은 하나다** — 못 읽은 것 먼저(`+∞`) · 그다음
 // 증감합 내림차순 · 동점은 경로 이름. 두 층에 다른 규칙을 두면 머리줄의 "상대 규모 큰 순"이라는
 // 한 문장이 두 뜻이 되고, 읽는 쪽은 어느 층을 말하는지 모른다.
@@ -325,7 +329,7 @@ func SortOverlapsBySize(os []Overlap) {
 // 지목하는 경로는 안 바뀐다. 걸렸다면 못 바꿨을 것이다 — 처방 경로는 git 을 안 돌아 규모를
 // **원리적으로** 모르므로(설계 §6), 두 표면의 쌍 순서가 갈렸을 것이기 때문이다.
 // TestOverlapPairsIsUntouchedByPrescriptions 가 그 전제를 잠근다.
-func SortPairsBySize(o Overlap) {
+func SortPairsBySize(o *Overlap) {
 	sort.SliceStable(o.Pairs, func(i, j int) bool {
 		ui, si := pairWeight(o, o.Pairs[i])
 		uj, sj := pairWeight(o, o.Pairs[j])
@@ -346,7 +350,7 @@ func SortPairsBySize(o Overlap) {
 //
 // 세션 층의 overlapWeight 와 달리 **최대가 아니라 그 쌍 자신의 합**이다. 쌍은 하나뿐이므로
 // 최대라는 개념이 없다 — 같은 규칙의 같은 자리에서 층만 다른 것이다.
-func pairWeight(o Overlap, p [2]string) (unknown bool, sum int) {
+func pairWeight(o *Overlap, p [2]string) (unknown bool, sum int) {
 	d, ok := o.TheirDelta[p[1]]
 	if !ok {
 		return true, 0

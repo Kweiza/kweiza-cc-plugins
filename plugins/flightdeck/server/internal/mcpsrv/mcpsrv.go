@@ -845,9 +845,14 @@ func (s *Server) toolFinish(ctx context.Context, sessionID string, raw json.RawM
 	//    왔는데 0건으로 해석됐으면 그것은 뜻이 없거나 전송 계층이 값을 흘린 자국이다.
 	//    안쪽 홉(cmd/fd/wire.go)이 `omitempty` 로 빈 목록을 키째 지우므로 REST 핸들러는
 	//    "안 보냈다"와 "비워 보냈다"를 이미 구분할 수 없다. 근거 전문은 followups_arrival.go 에 있다.
+	//
+	// ★ **처방을 안 붙인다(service.FollowupsGuidance 를 재사용하지 않는다).** 그 문구는
+	//    judgeMissingFollowups 전용이고 마지막 문장이 "이 관문은 **한 번만** 막는다 —
+	//    그대로 다시 불러라"다. 이 관문은 **매번** 막으므로 그 말을 따르면 무한히 거절당한다
+	//    (문구 하나로 "관문이 벽이 된다"에 도달하는 경로다). 그 문구의 "위에 이름이 나온
+	//    항목들"도 여기서는 가리킬 목록이 없다. 사유 자체가 이미 복구 경로 셋을 담는다.
 	if ok, reason := judgeFollowupsArrived(raw, len(a.Followups)); !ok {
-		return textResult(s.withTail(ctx, RenderRefusal("finish", reason,
-			service.FollowupsGuidance), tailOpts{}), true)
+		return textResult(s.withTail(ctx, RenderRefusal("finish", reason, ""), tailOpts{}), true)
 	}
 	fs := make([]service.FollowupInput, 0, len(a.Followups))
 	for _, f := range a.Followups {

@@ -38,8 +38,8 @@ import (
 // ## 왜 바깥 경계인가
 //
 // 키가 왔는지를 신뢰성 있게 볼 수 있는 자리가 여기 하나다. 안쪽 홉인 `cmd/fd/wire.go` 의
-// `followupReq` 는 `json:"followups,omitempty"` 라 **빈 목록을 키째 지운다** — REST 핸들러는
-// "안 보냈다"와 "비워 보냈다"를 이미 구분할 수 없다.
+// `finishReq.Followups` 가 `json:"followups,omitempty"` 라 **빈 목록을 키째 지운다** —
+// REST 핸들러는 "안 보냈다"와 "비워 보냈다"를 이미 구분할 수 없다.
 //
 // ★ **거절이 닫기보다 싸다.** 정상 호출자가 치르는 대가는 키를 빼고 한 번 다시 부르는
 // 것뿐이고, 반대쪽 대가는 되돌릴 수 없는 링크 소실이다. `service.Rekey` 가 빈 cc 를 store
@@ -71,6 +71,12 @@ func judgeFollowupsArrived(raw json.RawMessage, decoded int) (ok bool, reason st
 //
 // ★ 최상위 키만 본다. 문자열 검색(`strings.Contains`)으로 하면 본문에 그 낱말이 들어간
 // 마무리가 전부 걸린다 — 이 저장소의 판단 본문은 이 관문 자체를 서술하기도 한다.
+//
+// ★★ **대소문자를 무시하고 맞춘다.** `encoding/json` 이 필드명을 대소문자 무시로 맞추므로
+// `{"Followups": []}` 는 `DisallowUnknownFields` 에도 안 걸리고 `a.Followups` 를 0건으로
+// 채운다. 여기서 정확히 일치만 보면 그 호출은 "키 없음"으로 접혀 **조용히 통과한다** —
+// 이 관문이 존재하는 바로 그 사고 모양이다. 실측으로 확인한 갈래다(`Followups` · `FOLLOWUPS` ·
+// `followUps` 셋 다 decodeArgs 를 통과한다).
 func hasFollowupsKey(raw json.RawMessage) bool {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return false
@@ -81,6 +87,10 @@ func hasFollowupsKey(raw json.RawMessage) bool {
 		// **없다고 본다** — 있다고 접으면 정상 호출을 거절하게 된다.
 		return false
 	}
-	_, present := top["followups"]
-	return present
+	for k := range top {
+		if strings.EqualFold(k, "followups") {
+			return true
+		}
+	}
+	return false
 }

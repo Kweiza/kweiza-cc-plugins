@@ -31,7 +31,7 @@ func TestSortPairsBySizePutsUnknownFirstThenBiggest(t *testing.T) {
 			"e.go": {Added: 1},
 		},
 	}
-	SortPairsBySize(o)
+	SortPairsBySize(&o)
 
 	var got []string
 	for _, p := range o.Pairs {
@@ -55,7 +55,7 @@ func TestSortPairsBySizeIsDeterministicOnTies(t *testing.T) {
 		}
 	}
 	o := mk()
-	SortPairsBySize(o)
+	SortPairsBySize(&o)
 	var got []string
 	for _, p := range o.Pairs {
 		got = append(got, p[1])

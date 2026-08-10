@@ -72,6 +72,18 @@ func TestToolFinishRefusesBeforeTouchingTheBackend(t *testing.T) {
 	if !strings.Contains(resText(res), "항목을 닫지 않았다") {
 		t.Errorf("무엇이 안 됐는지를 안 말한다:\n%s", resText(res))
 	}
+
+	// ★★ **judgeMissingFollowups 전용 처방을 여기 붙이면 안 된다.**
+	// 그 문구의 마지막 문장은 "이 관문은 **한 번만** 막는다 — 그대로 다시 불러라"인데
+	// 이 관문은 **매번** 막는다. 그 말을 따르면 무한히 거절당한다 — 문구 하나로
+	// "관문이 벽이 된다"에 도달하는 경로다. 그 문구의 "위에 이름이 나온 항목들"도
+	// 여기서는 가리킬 목록이 없다(이 사유는 항목 이름을 안 낸다).
+	for _, mustNot := range []string{"한 번만", "그대로 다시 불러라", "위에 이름이 나온"} {
+		if strings.Contains(resText(res), mustNot) {
+			t.Errorf("이 관문에 대해 거짓인 문구 %q 가 붙었다 — 그 말을 따르면 루프다:\n%s",
+				mustNot, resText(res))
+		}
+	}
 }
 
 // 반대 갈래 — 키가 없으면 관문이 안 막고 그대로 흘러야 한다.

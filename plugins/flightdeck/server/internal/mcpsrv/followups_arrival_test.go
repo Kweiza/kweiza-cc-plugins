@@ -54,6 +54,28 @@ func TestFollowupsKeyPresentButEmptyIsRefused(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// ★ encoding/json 은 필드명을 **대소문자 무시**로 맞춘다 — `{"Followups": []}` 는
+			// DisallowUnknownFields 에도 안 걸리고 0건으로 채워진다. 정확 일치만 보면
+			// 이 갈래가 "키 없음"으로 접혀 조용히 통과한다(이 관문이 없애려는 바로 그 모양).
+			name:     "대문자 키도 거절한다",
+			raw:      `{"item_id":"x","outcome":"done","body":"b","Followups":[]}`,
+			wantOK:   false,
+			wantWord: "followups",
+		},
+		{
+			name:     "섞인 대소문자 키도 거절한다",
+			raw:      `{"item_id":"x","outcome":"done","body":"b","followUps":null}`,
+			wantOK:   false,
+			wantWord: "followups",
+		},
+		{
+			// 본문에 그 낱말이 들어간 마무리는 **통과**해야 한다 — 이 저장소의 판단 본문은
+			// 이 관문 자체를 서술하기도 한다. 최상위 키만 보는 이유다.
+			name:   "본문에 followups 라는 낱말이 있어도 통과한다",
+			raw:    `{"item_id":"x","outcome":"done","body":"followups 를 실었는데 0건이 된 사고를 적는다"}`,
+			wantOK: true,
+		},
+		{
 			// 인자가 아예 없는 호출(raw 가 비었다)도 정상이다 — decodeArgs 가 그렇게 다룬다.
 			name:   "인자 없음도 통과한다",
 			raw:    ``,
