@@ -1234,7 +1234,9 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 //	store 에 항목 본문을 고치는 메서드가 아예 없다(store/item.go 전수). 게다가 이 변경
 //	**전에는** 같은 입력이 "후속 N건은 안 넣었다"로 시끄럽게 나왔다(render.go:1349).
 //	화면이 여기서 침묵하면 그 신호가 조용해지는 쪽으로 퇴행하고, 세션은 자기가 적어 보낸
-//	본문이 어딘가 반영됐다고 믿고 떠난다 — 설계 §3 이 이름 붙인 "조용한 거짓"이다.
+//	본문이 어딘가 반영됐다고 믿고 떠난다 — **설계 §0** 이 이름 붙인 부류다:
+//	"손으로 베낀 스냅숏은 원본이 움직이는 순간 조용히 거짓이 되고, 거짓임을 알려 주는
+//	자리가 없다." (이 줄은 오래 §3 을 가리켰는데 §3 은 데이터 모델이고 그 말이 없다.)
 func TestRenderFinishSaysWhatItLinkedInsteadOfCreated(t *testing.T) {
 	out := RenderFinish(service.FinishResult{
 		Item:            model.Item{ID: "batch7", State: model.ItemDone},

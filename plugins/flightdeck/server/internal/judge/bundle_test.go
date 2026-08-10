@@ -288,7 +288,7 @@ func TestEligibleBundleSoloWhenNoNeighbor(t *testing.T) {
 }
 
 // 전이하지 않는다. A–B, B–C 인데 A–C 가 무관하면 A 선두 묶음에 C 가 없어야 한다.
-// 전이를 허용하면 넓은 토큰 하나가 큐의 3분의 2를 한 묶음으로 만든다(설계 §0.1).
+// 전이를 허용하면 넓은 토큰 하나가 큐의 3분의 2를 한 묶음으로 만든다(이 저장소 실측).
 //
 // ★ EligibleBundle 전체가 아니라 bundleAround 를 선두별로 직접 부른다.
 // 이 셋을 EligibleBundle 에 통째로 넣으면 B(두 판단 J1·J2 에 걸친 진짜 허브 —
