@@ -193,6 +193,68 @@ func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived 
 	return s.Tx(ctx, func(t *Tx) error { return t.SetProjectView(id, pinned, archived) })
 }
 
+// projectRefTables 는 project(id) 를 참조하거나 project 컬럼으로 프로젝트에 묶이는 표 중
+// **삭제할 때 사람이 직접 다뤄야 하는 것**이다. 삭제 순서이기도 하다 — 자식부터 부모 순이다.
+//
+// item_after · claim 은 여기 없다. 둘 다 (project, item_id) 로 item(project, id) 를
+// ON DELETE CASCADE 로 참조해서, item 을 지우면 자동으로 함께 사라진다 — 이 목록이
+// 답해야 하는 "지우기 전에 손으로 볼 것"에 안 든다.
+//
+// ★ 뒤의 둘(item_dependents · pick_eval)은 FK 가 아니라 컬럼으로만 묶인다. FK 가 안 우니
+// 안 지워도 삭제는 성공하고, 그래서 더 위험하다 — 조용히 고아 행이 남는다.
+//
+// ★ judgment 는 여기 있지만 **지우지 않는다**. judgment_no_delete 트리거가 원리적으로
+// 막는다(schema.sql). 그래서 RemoveProject 는 판단이 하나라도 있으면 거절한다.
+//
+// ★ event 는 여기 없다. event.project 는 FK 가 아니라 그냥 컬럼이고(schema.sql 의 그 자리),
+// 프로젝트가 사라져도 남는다 — 그것이 옳다. "이런 프로젝트가 있었고 언제 지워졌다"가
+// 원장에 남는 유일한 길이다.
+//
+// ★ landing_queue(증분 003)는 project(id) 와 session(id) 를 **둘 다** FK 로 참조하고
+// 어느 쪽도 CASCADE 가 아니다(schema_table_count_test.go 의 TestDeclaredTablesMatchDesign 이
+// 이 표가 실재함을 못박는다). session 보다 앞에 둔 이유: session 을 먼저 지우면 그 세션을
+// 가리키는 landing_queue 행이 FK 위반으로 삭제 전체를 막는다 — 자식(landing_queue)이 부모
+// (session) 보다 먼저다.
+var projectRefTables = []string{
+	"session_workspace",
+	"landing_queue",
+	"session",
+	"ref_state",
+	"change_set",
+	"item",
+	"judgment",
+	"snapshot",
+	"counter",
+	"resource_hold",
+	"job",
+	"item_dependents",
+	"pick_eval",
+}
+
+// ProjectRefCounts 는 이 프로젝트에 묶인 행 수를 표별로 센다.
+// 지우기 전에 무엇이 함께 갈지 보여주는 자리다.
+func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int, error) {
+	out := make(map[string]int, len(projectRefTables)+1)
+	for _, tbl := range projectRefTables {
+		var n int
+		// ★ 표 이름은 위 projectRefTables 상수에서만 온다(외부 입력이 아니다) — 그래서
+		// 문자열 결합으로 SQL 을 짓는 것이 안전하다. tbl 이 사용자 입력이었다면 이 자리가
+		// SQL 인젝션 통로였을 것이다.
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM `+tbl+` WHERE project = ?`, id).Scan(&n); err != nil {
+			return nil, fmt.Errorf("행 수 조회 실패(table=%s, project=%q): %w", tbl, clip(id, 64), err)
+		}
+		out[tbl] = n
+	}
+	var ev int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM event WHERE project = ?`, id).Scan(&ev); err != nil {
+		return nil, fmt.Errorf("이벤트 수 조회 실패(project=%q): %w", clip(id, 64), err)
+	}
+	out["event"] = ev // 세기만 한다 — 안 지운다
+	return out, nil
+}
+
 // nullTime 은 제로값을 NULL 로 낸다.
 func nullTime(t time.Time) any {
 	if t.IsZero() {
