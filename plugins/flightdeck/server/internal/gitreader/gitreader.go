@@ -441,8 +441,8 @@ func (r *Reader) UncommittedPaths(ctx context.Context, worktree string) ([]strin
 // 손 앵커들이 대부분 **랜딩 전 구간**이기 때문이다 — 안 재면 조율이 가장 필요한 창이 빈다.
 //
 // 커밋이 하나도 없는 저장소에서는 `HEAD` 가 없어 실패한다. **특례를 안 만든다** —
-// 호출부(service.sessionCardsAndRoots)의 바로 이웃 줄인 Ref(기본 브랜치)가 같은 저장소에서
-// 이미 같은 모양으로 실패를 낸다. 특례를 만들면 붙어 있는 두 줄의 관용이 갈린다.
+// 호출부(service.sessionCardsAndRoots)의 같은 함수 안 준비부에 있는 Ref(기본 브랜치)가
+// 같은 저장소에서 이미 같은 모양으로 실패를 낸다. 특례를 만들면 두 자리의 관용이 갈린다.
 func (r *Reader) UncommittedDelta(ctx context.Context, worktree string) (map[string]model.LineDelta, error) {
 	out, err := r.run(ctx, worktree, "diff", "--numstat", "-z", "--no-renames", "HEAD", "--")
 	if err != nil {

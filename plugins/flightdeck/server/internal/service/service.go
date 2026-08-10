@@ -133,7 +133,7 @@ type Service struct {
 // DeriveStats 는 세션 카드 파생의 누적 비용이다.
 //
 // ★ 이 축이 왜 있나. 세션 카드 파생은 요청 1건당 `git worktree list` + 세션마다
-// ChangedPaths·UncommittedPaths 를 돌린다 — 저장소 전수 훑기다. 그런데 그 비용은
+// ChangedPaths·UncommittedPaths·UncommittedDelta 를 돌린다 — 저장소 전수 훑기다. 그런데 그 비용은
 // 어느 화면에도 안 떴다. 무엇이 그것을 얼마나 자주 돌리는지 모르면
 // "세션·워크트리가 늘면 느려진다"가 **느려진 뒤에야** 보인다(설계 §10:
 // 계측이 어떤 처방이 나았는지 판정할 유일한 축이다).

@@ -1,0 +1,54 @@
+package service
+
+import (
+	"testing"
+
+	"github.com/kweiza/flightdeck/internal/model"
+)
+
+// TestLiveForCarriesPathDeltaIntoLiveSession 는 liveFor 가 카드의 View.PathDelta 를
+// judge.LiveSession.Delta 로 옮기는지 잰다.
+//
+// ★ 이 시험이 왜 있나. board.go 의 liveFor 안 `Delta: c.View.PathDelta` 한 줄이
+// **pick 표면**의 꼬리 겹침이 상대 규모를 내는 유일한 배선이다. 최종 리뷰가 변이로
+// 확인했다 — 이 줄을 지워도 `go test -count=1 ./...` 가 전 패키지 초록이었다. 배선이
+// 통째로 죽어도 어떤 관문도 못 잡는다는 뜻이었다. 이 시험이 그 배선을 직접 잠근다:
+// 이 시험을 지운 채로 그 줄을 지우면 이 시험이 먼저 빨개진다.
+//
+// ★ 쌍둥이 배선은 반대편 패키지에 있다 — internal/mcpsrv/mcpsrv.go 의 liveOf
+// (**board 표면**이 쓴다). 그쪽은 internal/mcpsrv/live_delta_wiring_test.go 의
+// TestLiveOfCarriesPathDeltaIntoLiveSession 이 같은 방식으로 잠근다. 둘은 짝이고,
+// 한쪽만 고치면 board 와 pick 의 꼬리 문구가 갈린다(mcpsrv.liveOf 의 주석이 그
+// 비대칭을 직접 경고한다).
+//
+// 실물 git 저장소는 안 태운다 — liveFor 는 비공개지만 같은 패키지라 시험이 직접
+// 부를 수 있고(설계 §12: 판정 로직은 시험이 직접 부르는 함수에), SessionCard 를
+// 손으로 채우면 이 축만 골라 잠글 수 있다.
+func TestLiveForCarriesPathDeltaIntoLiveSession(t *testing.T) {
+	c := SessionCard{
+		View: model.SessionView{
+			Session: model.Session{ID: "s1", Label: "세션1"},
+			Paths:   []string{"a.go", "b.go"},
+			PathDelta: map[string]model.LineDelta{
+				"a.go": {Added: 47, Removed: 1},
+			},
+		},
+	}
+
+	got := liveFor([]SessionCard{c})
+	if len(got) != 1 {
+		t.Fatalf("%d건, 원하는 것 1건", len(got))
+	}
+	d, ok := got[0].Delta["a.go"]
+	if !ok {
+		t.Fatalf("liveFor 결과에 a.go 규모 키가 없다 — Delta 배선이 안 됐다: %+v", got[0])
+	}
+	if d.Added != 47 || d.Removed != 1 {
+		t.Fatalf("규모가 안 옮겨졌다: 받은 값 %+v, 기대 {Added:47 Removed:1}", d)
+	}
+	// b.go 는 규모를 못 잰 경로다 — 키가 아예 없어야 한다("못 읽었다"는 0 이 아니라
+	// 키 부재다). 있으면 liveFor 가 규모를 조작해 낸 것이다.
+	if _, ok := got[0].Delta["b.go"]; ok {
+		t.Fatalf("liveFor 가 못 잰 경로에 규모 키를 만들어 냈다 — 0 과 '못 읽었다'가 섞였다")
+	}
+}

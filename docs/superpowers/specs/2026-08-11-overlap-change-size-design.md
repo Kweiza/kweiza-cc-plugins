@@ -264,9 +264,9 @@ type Overlap struct {
 | 미추적 · footprint 전용 경로 | 키 부재 | 자연히 |
 | 프로젝트 경로 없음(`g == nil`) | 규모 전부 키 부재 | `board.go:466` 기존 분기 |
 
-**커밋 0개 저장소에 특례를 안 만드는 이유:** 바로 이웃 줄인 `Ref(proj.DefaultBranch)`
-(`board.go:406`)가 이미 같은 저장소에서 `d.fail` 을 낸다. 특례를 만들면 **붙어 있는 두 줄의
-관용이 갈린다.**
+**커밋 0개 저장소에 특례를 안 만드는 이유:** 같은 함수(`sessionCardsAndRoots`) 안 준비부에
+있는 `Ref(proj.DefaultBranch)`(`board.go:406`)가 이미 같은 저장소에서 `d.fail` 을 낸다.
+특례를 만들면 **두 자리의 관용이 갈린다.**
 
 **파서는 전체를 안 버린다.** 레코드 하나가 깨져도 그 경로만 빼고 나머지를 낸다 —
 `emittedKeys`(`service/prescribe.go:336`)가 payload 해석 실패에 대해 쓰는 규율과 같다:

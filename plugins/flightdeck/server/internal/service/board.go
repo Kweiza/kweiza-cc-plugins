@@ -153,7 +153,8 @@ type BoardView struct {
 	// (OldestOutside)에 조건 하나를 얹은 것뿐이라 새 질의도 새 git 호출도 없다.
 	//
 	// ★ 카드가 아니라 **원시 뷰**다. git 파생(브랜치·ahead·미커밋)이 안 붙어 있다 —
-	// 파생은 카드당 git 호출 1~4회고 캐시가 없어서, 창 밖까지 파생하면 세션 수만큼 터진다.
+	// 파생은 카드당 git 호출 2~5회고(미커밋 규모가 조건 없이 붙어 하한도 올랐다) 캐시가
+	// 없어서, 창 밖까지 파생하면 세션 수만큼 터진다.
 	// 표시 계층이 이 사실을 말해야 한다: 이 줄은 "무엇이 잠겼나"만 답하고 파생 축은 모른다.
 	OutsideClaims []model.SessionView `json:"outside_claims,omitempty"`
 	Derived
@@ -372,7 +373,7 @@ func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([
 // 경로(footprint ∪ change_set ∪ 미커밋). 셋 다 실패해도 세션 행은 남는다.
 func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
 	// ★ 이 함수가 이 서버에서 가장 비싼 일이다 — `git worktree list` 한 번 + 살아 있는
-	//   세션마다 ChangedPaths·UncommittedPaths. 그 비용을 세는 자리를 여기 둔다.
+	//   세션마다 ChangedPaths·UncommittedPaths·UncommittedDelta. 그 비용을 세는 자리를 여기 둔다.
 	//   호출부에 두면 호출부가 늘 때마다 계측이 조용히 빠진다(실제로 그 모양으로
 	//   MCP 꼬리가 도구 호출마다 이 파생을 한 번씩 더 돌리고 있었고, 아무 화면에도 안 떴다).
 	start := time.Now()
@@ -565,7 +566,8 @@ func liveFor(cards []SessionCard) []judge.LiveSession {
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
-			// 규모도 함께 넘긴다 — 이 자리가 git 파생을 이미 돈 유일한 자리다.
+			// 규모도 함께 넘긴다. 이 변환이 두 자리(여기(pick) · mcpsrv.liveOf(board))에
+			// 있는데, 한쪽만 고치면 board 와 pick 중 한쪽에서만 규모가 뜬다.
 			// 안 넘기면 꼬리 겹침이 규모를 원리적으로 못 낸다.
 			Delta: c.View.PathDelta,
 			// ★ 대화 id 를 함께 넘긴다. 카드 id 만으로는 형제 카드(같은 대화, 다른 카드)를

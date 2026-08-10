@@ -277,7 +277,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	// ★ 창 밖인데 항목을 쥔 세션. **창을 이 화면에 걸지 않는다** — 걸면 회수가 가장
 	// 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
 	// 카드가 아니라 한 줄인 이유: git 파생을 안 읽었다(창 밖까지 파생하면 카드당
-	// git 호출 1~4회가 세션 수만큼 터진다). 그 사실을 줄머리가 말한다.
+	// git 호출 2~5회가 세션 수만큼 터진다). 그 사실을 줄머리가 말한다.
 	for _, ov := range v.OutsideClaims {
 		_, act := activityOf(ov.Signals, now)
 		foot = append(foot, fmt.Sprintf("창 밖 선점 · %s %s · %s · 파생 안 읽음",
