@@ -499,6 +499,10 @@ func (o *Outbox) Append(e OutboxEntry) error {
 func (o *Outbox) List() ([]OutboxEntry, error) {
 	out, err := readEntryDir(o.pendingDir())
 	legacy, lerr := readEntries(o.pendingPath())
+	if n := fillMissingKeys(legacy); n > 0 {
+		o.warn("키 없는 줄에 본문 기준 키를 부여했다 — 다음 재생부터 정상 판단으로 나간다",
+			"dir", o.dir, "건수", n)
+	}
 	out = append(out, legacy...)
 	// ★ 오류가 나도 읽은 데까지는 정렬해서 낸다 — 이 파일은 재생성 불가한 자산이라
 	// 부분 결과를 버리지 않는다(설계 §9). readEntries 가 같은 규율을 갖고 있다.
@@ -551,6 +555,38 @@ func readEntryDir(dir string) ([]OutboxEntry, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// fillMissingKeys 는 키가 빈 줄에 **본문 기준 키를 부여한다.** 채운 개수를 낸다.
+//
+// ★★ **빼지 않고 늘지도 않게 하는 길이 이것이다.** 앞선 판은 빈 키 줄을 큐에 남기고
+// 재생 대상에도 뒀다: 빼면 그 판단을 조용히 버리는 것이라(설계 §9) 뺄 수 없었고, 두면
+// `Replay` 가 매번 다시 보내 매번 400 을 받았다 — **헛 전송이 fd 호출마다 반복되고 큐
+// 잔량이 영영 0 이 안 됐다**(doctor 가 "대기 N건"을 계속 찍어 사람은 판단이 안 나갔다고 읽는다).
+//
+// ★ **빈 키의 문제는 정확히 '별칭'이었다.** 빈 키끼리 서로 같아 보여서, 키로 매칭하는
+// 모든 자리(병합·중복 검사)가 서로 다른 판단을 하나로 뭉갰다. 그래서 `settle` 이 그 줄을
+// 절대 안 지웠고 `TallyRejected` 가 그 줄을 절대 안 접었다. **본문 해시 키는 그 별칭을
+// 없앤다** — 서로 다른 판단은 서로 다른 키를 얻고, 같은 판단은 같은 키를 얻는다
+// (`IdempotencyKey` 의 원래 계약 그대로: "같은 세션이 같은 본문을 두 번 쌓으면 한 건이다").
+// 별칭이 사라지면 그 줄을 특별 취급할 이유가 통째로 없어지고, **그 판단은 원장으로 간다.**
+//
+// ★ 세션을 빈 문자열로 넘긴다. 빈 키 줄은 어느 세션의 것인지 모르고, `IdempotencyKey` 가
+// 그 자리에 `nosession` 을 채운다 — 없는 세션을 지어내는 것보다 모른다고 적는 편이 맞다.
+// 경로+본문을 해시하는 조합은 `Client.key`(client.go)가 온라인 경로에서 쓰는 것과 같다.
+//
+// ★ **파일을 여기서 안 고친다.** 되쓰기는 재생이 병합할 때 일어나고(settleLegacy → keep),
+// 그때 채운 키가 파일에 앉는다. 읽기가 파일을 고치면 `List` 한 번에 디스크가 움직인다.
+func fillMissingKeys(es []OutboxEntry) int {
+	n := 0
+	for i := range es {
+		if strings.TrimSpace(es[i].Key) != "" {
+			continue
+		}
+		es[i].Key = IdempotencyKey("", append([]byte(es[i].Path+"\n"), es[i].Body...))
+		n++
+	}
+	return n
 }
 
 // readEntries 는 JSONL 대기열 파일 하나를 읽는다.
@@ -726,29 +762,20 @@ func (o *Outbox) settleLegacy(done map[string]bool, bumpedKey string) error {
 		if err != nil {
 			return err
 		}
+		// ★ **읽자마자 채운다. `List` 와 같은 규칙이어야 한다** — 여기서 안 채우면 done 이
+		// 들고 온 (채워진) 키와 이 파일의 (빈) 키가 안 맞아 보낸 줄이 안 지워지고, 그 줄은
+		// 다음 재생에서 다시 나간다. 두 자리가 같은 키를 봐야 병합이 성립한다.
+		//
+		// ★ 채운 뒤 `keep` 이 되쓰므로 **파일이 이 시점에 갱신된다** — 그다음부터 이 자리는
+		// 아무것도 안 채운다. 읽기가 아니라 병합이 고치는 이유가 그것이다.
+		fillMissingKeys(cur)
 		out := make([]OutboxEntry, 0, len(cur))
 		for _, e := range cur {
-			// ★ **키가 빈 줄은 절대 안 지운다.** 병합은 키 문자열로 매칭하므로 빈 키끼리
-			// 서로 별칭이 된다 — 하나가 배달되면 나머지가 격리에도 안 남고 사라진다.
-			// 옛 구현은 위치로 지워서 이 별칭이 없었으니, 안 막으면 이 커밋이 만든 회귀다.
-			// 지금 작성기는 빈 키를 안 만들지만(FreshKey·IdempotencyKey 가 nosession 을
-			// 채운다) 손편집·부분 기록으로 들어온 줄까지 잃을 이유는 없다. 남기고 말한다.
-			if e.Key == "" {
-				// ★ 이 문구는 오래 "재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)"였고
-				// **둘 다 거짓이었다.** Replay 에는 키 가드가 없어 이 줄을 매번 다시 보내고,
-				// doctor 는 대기 건수만 찍지 이 줄의 자리를 안 찍는다. 그 문구를 읽은 사람은
-				// 이미 처리된 줄로 알고 넘어갔다.
-				//
-				// ★ 그다음 판은 "격리가 fd 호출마다 한 줄씩 는다"였고 **그것도 이제 거짓이다** —
-				// 격리가 사건당 파일이 되면서 같은 판단의 같은 거절은 한 건으로 끝난다.
-				// 반복되는 것은 파일이 아니라 **전송**이고, 생성기는 여전히 열려 있다
-				// (§9 판정이 따로 필요하다 — 후속으로 냈다).
-				o.warn("키 없는 줄이 큐에 있다 — 큐에 남기고 재생 대상에서도 안 뺀다. "+
-					"재생마다 다시 보내고 다시 거절당한다(격리 자리는 안 자란다 — 같은 거절은 한 건이다)",
-					"dir", o.dir, "path", e.Path)
-				out = append(out, e)
-				continue
-			}
+			// ★ 앞선 판은 여기에 **빈 키 줄 특별 취급**이 있었다: 지우지도 빼지도 않고
+			// 큐에 남기고 경고를 냈다. 빈 키끼리 서로 별칭이라 키로 매칭하면 하나가
+			// 배달될 때 나머지가 함께 사라지기 때문이었다. **fillMissingKeys 가 그 별칭을
+			// 없애서 특별 취급할 이유가 사라졌다** — 이제 빈 키 줄은 자기 키를 갖고 아래
+			// 일반 경로로 간다. 그 줄이 겪던 무한 반복 전송도 함께 끝난다.
 			if done[e.Key] {
 				continue // 보냈거나 격리했다
 			}
@@ -1100,6 +1127,77 @@ func TallyRejected(rs []RejectedEntry) RejectedTally {
 		}
 	}
 	return t
+}
+
+// Retention 은 **비우는 경로가 없는 자리들**의 크기다. 바이트다.
+//
+// ★★ 왜 이 수를 내는가. 격리와 fail-open 기록은 둘 다 **추가 전용이고 지우는 코드가
+// 없다**(실측: `rejectedPath`·`failOpenPath` 에 닿는 `os.Remove`·`O_TRUNC` 0건).
+// 그것은 설계이지 결함이 아니다 — 격리는 재생성 불가한 판단을 담고, fail-open 기록은
+// 지우면 세려던 것을 지운다. **다만 상한이 없는 자리는 언젠가 문제가 된다.**
+//
+// ★ **회전도 상한도 안 만든다.** 이 머신 실측(2026-08-11): 고정 자리에는 아웃박스
+// 디렉토리 자체가 없고, 옛 자리의 격리가 577바이트·1건이며 fail-open 기록은 없다.
+// **압력이 실물로 관측된 적이 없다.** 근거 없이 회전을 만들면 "어느 시점 이후를 못 본다"는
+// 새 구멍이 열리고, 그것은 이 저장소가 없애려는 종류의 침묵이다.
+// 그래서 하는 것은 **그 사실을 화면에 두는 것**뿐이다 — 언젠가 커졌을 때 그 수가 거기
+// 있고, 그때 근거를 갖고 판정한다(안 잰 축을 잰 척하지 않는 것과 같은 어법이다).
+//
+// ★ 격리는 두 형식을 **합쳐서** 잰다. 사건당 파일로 옮겼어도 옛 `rejected.jsonl` 은
+// 비우는 경로가 없어 그 자리에 남는다 — 한쪽만 재면 그 잔량이 화면에서 사라진다.
+type Retention struct {
+	Rejected int64 // rejected.jsonl + rejected/ 전부
+	FailOpen int64 // failopen.jsonl
+	Err      string
+}
+
+// Retention 은 위 수를 잰다. **읽기만 한다.**
+func (o *Outbox) Retention() Retention {
+	var r Retention
+	note := func(err error) {
+		if err != nil && !os.IsNotExist(err) {
+			r.Err = strings.TrimSpace(r.Err + " " + err.Error())
+		}
+	}
+	if fi, err := os.Stat(o.rejectedPath()); err == nil {
+		r.Rejected += fi.Size()
+	} else {
+		note(err)
+	}
+	n, err := dirBytes(o.rejectedDir())
+	note(err)
+	r.Rejected += n
+	if fi, err := os.Stat(o.failOpenPath()); err == nil {
+		r.FailOpen = fi.Size()
+	} else {
+		note(err)
+	}
+	return r
+}
+
+// dirBytes 는 디렉토리 하나에 든 **일반 파일**의 바이트 합이다. 없으면 0 이다.
+//
+// ★ 재귀하지 않는다 — 이 자리들은 평평하고, 재귀하면 남이 실수로 둔 것까지 이 수에 섞인다.
+func dirBytes(dir string) (int64, error) {
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var n int64
+	for _, de := range des {
+		if de.IsDir() {
+			continue
+		}
+		fi, err := de.Info()
+		if err != nil {
+			continue // 방금 사라졌다. 크기를 재는 자리에서 그것은 오류가 아니다
+		}
+		n += fi.Size()
+	}
+	return n, nil
 }
 
 // Leftover 는 옛 자리 하나에 아직 남아 있는 것이다.

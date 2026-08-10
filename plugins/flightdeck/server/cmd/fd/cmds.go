@@ -972,8 +972,12 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// ★ 아웃박스는 이제 **채널 무관한 고정 자리**에 있다(OutboxPath). 그래서 이 줄이 세는
 	// 것은 이 채널의 대기가 아니라 **이 머신의 대기**다 — 예전에는 채널마다 달랐다.
 	// 자리와 사유를 함께 찍는 것은 그대로다: 값이 예상과 다를 때 "왜 저기냐"에 답할 자리다.
-	if pend, err := a.cli.Outbox.List(); err != nil {
-		fmt.Fprintf(out, "  ! 아웃박스를 못 읽었다: %v\n", err)
+	// ★ `pend` 를 블록 밖으로 뺀다 — 아래 격리 구간이 **같은 스냅숏**을 봐야 한다.
+	//   거기서 List 를 다시 부르면 두 수가 서로 다른 시점을 가리키고, 그 화면은
+	//   "격리된 키가 큐에 있다"를 재는 데 쓸 수 없다(그 사이에 재생이 돌 수 있다).
+	pend, pendErr := a.cli.Outbox.List()
+	if pendErr != nil {
+		fmt.Fprintf(out, "  ! 아웃박스를 못 읽었다: %v\n", pendErr)
 	} else {
 		fmt.Fprintf(out, "  아웃박스 대기 %d건 (%s · %s)\n",
 			len(pend), a.cli.Outbox.Dir(), a.cli.Outbox.Source())
@@ -1000,19 +1004,47 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 			moved = "영구 거절이라 격리했다(버리지 않았다)"
 		}
 		fmt.Fprintf(out, "  ! 격리 기록 %d건 · 고유 판단 %d건 — %s\n", tal.Lines, tal.Judgments, moved)
-		// ★ 위 문장은 **키 없는 줄에 대해서는 거짓이다.** settle 이 그 줄을 일부러 큐에
-		// 남기고(빈 키끼리 별칭이 되므로 지우면 남의 판단이 사라진다) Replay 에는 빈 키
-		// 가드가 없어 **재생마다 다시 보내고 다시 거절당한다.** 생성기는 여전히 열려 있다
-		// (닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로 열린다 — 후속으로 냈다).
-		//
-		// ★ **다만 격리 자리는 이제 안 자란다.** 격리가 사건당 파일이 되면서 같은 판단의
-		// 같은 거절은 같은 이름을 얻고 둘째부터 EEXIST 로 끝난다. 앞선 판의 이 줄은
-		// "fd 호출마다 한 줄씩 는다"였는데 **그것이 이제 거짓이다** — 그대로 두면 사람이
-		// 디스크가 차는 줄 알고 없는 문제를 쫓는다. 반복되는 것은 파일이 아니라 **전송**이다.
+		// ★ 키 없는 건수가 뜻하는 것이 **바뀌었다.** 앞선 두 판은 이 자리에서
+		// "그 줄은 큐에서 안 빠진다 · 재생마다 다시 보낸다"를 말했고 그때는 참이었다.
+		// 지금 `fillMissingKeys` 가 읽는 자리에서 빈 키에 본문 기준 키를 주므로 **새로
+		// 격리되는 줄에는 빈 키가 없다.** 여기 남아 세이는 것은 **그 변경 전에 격리된
+		// 옛 줄**뿐이고, 격리는 비우는 경로가 없어 그것들이 영원히 남는다.
+		// 그 사실을 그대로 말한다 — 안 그러면 사람이 오늘도 그 줄이 생기는 줄 안다.
 		if tal.Keyless > 0 {
-			fmt.Fprintf(out, "  ! 그중 키 없는 %d건은 큐에서 안 빠진다 — "+
-				"재생마다 다시 보내고 다시 거절당한다(격리 자리는 안 자란다 — 같은 거절은 한 건이다)\n",
+			fmt.Fprintf(out, "  ! 그중 키 없는 %d건은 **옛 기록**이다 — 지금은 읽는 자리에서 "+
+				"키를 채우므로 빈 키로 격리되지 않는다(격리는 비우는 경로가 없어 옛 줄이 남는다)\n",
 				tal.Keyless)
+		}
+		// ★ **격리된 키가 큐에 다시 있다.** `Append` 는 격리 이력을 안 본다 — 400/409 로
+		// 거절된 판단이 같은 키로 다시 쌓일 수 있다. **막지 않는 것이 판정이다**: 4xx 사유에는
+		// 상태 의존이 실재하고(`claim_held` "항목을 세션이 쥐고 있다" · `missing_ref` "가리키는
+		// 좌표가 없다" · `item_closed`) 잠금은 풀리고 좌표는 나중에 생길 수 있다. 막으면 그
+		// 판단은 사람이 격리 파일을 손으로 뒤지기 전까지 영영 안 간다(§9). 그리고 막는 검사는
+		// 값이 **O(격리 크기)** 라 Append 를 O(1) 로 만든 작업을 되돌린다.
+		//
+		// ★ **그래서 막는 대신 여기서 말한다. 이 자리는 값이 0 이다** — doctor 는 큐와 격리를
+		// 이미 둘 다 읽었고, 여기서 하는 것은 그 두 집합의 교집합을 세는 것뿐이다.
+		if pendErr == nil {
+			queued := make(map[string]bool, len(pend))
+			for _, e := range pend {
+				if e.Key != "" {
+					queued[e.Key] = true
+				}
+			}
+			again := map[string]bool{}
+			for _, r := range rej {
+				if r.Entry.Key != "" && queued[r.Entry.Key] {
+					again[r.Entry.Key] = true
+				}
+			}
+			if len(again) > 0 {
+				fmt.Fprintf(out, "  ! 전에 거절당한 판단 %d건이 큐에 다시 있다 — "+
+					"막지 않는다(그 사이 잠금이 풀렸거나 좌표가 생겼으면 이번엔 나간다). "+
+					"같은 사유로 또 거절되면 격리에 새 줄이 안 생기고 이 수만 남는다\n", len(again))
+				for k := range again {
+					fmt.Fprintf(out, "      %s\n", clip(k, 48))
+				}
+			}
 		}
 		for _, r := range rej {
 			// ★ 키를 함께 찍는다. 안 찍으면 위 `N줄 · M건` 을 사람이 화면에서 검증할 수
@@ -1038,6 +1070,18 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	}
 	fmt.Fprintln(out, "    이 수는 잠금을 **못 잡은** 것만이다 — NFS 처럼 flock 이 조용히 "+
 		"안 걸리는 자리는 잡았다고 나오고 여기 안 잡힌다(설계 §13).")
+	// ★ **비우는 경로가 없는 자리의 크기.** 회전도 상한도 안 만들었다 — 이 머신에서
+	// 압력이 실물로 관측된 적이 없고(실측 2026-08-11: 격리 577바이트·1건, fail-open 없음),
+	// 근거 없이 회전을 만들면 "어느 시점 이후를 못 본다"는 새 구멍이 열린다. 여기서 하는
+	// 것은 **그 사실을 화면에 두는 것**이다: 언젠가 커졌을 때 그 수가 거기 있고, 그때
+	// 근거를 갖고 판정한다. 상한 없는 자리를 화면 밖에 두는 것이 이 항목이 지적한 결함이다.
+	if ret := a.cli.Outbox.Retention(); ret.Err != "" {
+		fmt.Fprintf(out, "  ! 보관 자리를 재다 걸렸다: %s\n", clip(ret.Err, 200))
+	} else {
+		fmt.Fprintf(out, "  보관 자리 — 격리 %s · 잠금실패 기록 %s "+
+			"(**둘 다 비우는 경로가 없다** — 지우려면 사람이 지운다)\n",
+			humanBytes(ret.Rejected), humanBytes(ret.FailOpen))
+	}
 	//
 	// ★ 격리 쪽은 고정 자리와 **같은 축으로** 가른다. 이 자리를 빼면 처방이 이 머신에 안
 	// 닿는다 — 실측(2026-08-06): 이 머신의 격리는 `~/.local/state/flightdeck/outbox` 의

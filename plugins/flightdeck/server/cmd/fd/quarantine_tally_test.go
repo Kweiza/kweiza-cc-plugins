@@ -170,19 +170,16 @@ func TestDoctorPrintsTheKeyOfEachRejectedLine(t *testing.T) {
 	}
 }
 
-// 키 없는 격리 줄은 **큐에서 안 빠졌다** — doctor 가 그 사실을 말한다.
+// 키 없는 격리 기록은 **옛 것이다** — doctor 가 그 사실을 말한다.
 //
-// ★ 오늘 doctor 는 격리 줄 전체에 "영구 거절이라 큐에서 뺐다(버리지 않았다)"를 붙인다
-// (cmds.go:852). 빈 키 줄에 대해서는 **거짓이다**: `settle`(outbox.go:366-371)이 그 줄을
-// 일부러 큐에 남기고, `Replay`(481-482)에는 빈 키 가드가 없어 재생마다 다시 보내고 다시
-// 거절당한다. `Flush` 는 모든 명령 앞에서 돌므로(client.go:357-358) 그 **전송**이 fd 호출마다
-// 반복된다. 생성기는 여전히 열려 있다 — 닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로
-// 열리고 그것은 독립 판정이다(후속으로 등록했다).
+// ★★ **이 시험도 뒤집혔다.** 앞선 판은 doctor 가 "그 줄은 큐에서 안 빠진다"를 말하는지
+// 봤다. 그때는 참이었다 — 빈 키끼리 별칭이라 `settle` 이 지울 수 없었다. `fillMissingKeys`
+// 가 읽는 자리에서 키를 채우면서 **새로 격리되는 줄에는 빈 키가 없다.** 그래서 이 수에
+// 남아 세이는 것은 그 변경 **전에** 격리된 옛 줄뿐이다.
 //
-// ★ 앞선 판은 이 자리를 "격리 파일이 fd 호출당 한 줄씩 자란다 — 유일한 무한 증가원"이라고
-// 적었다. **격리가 사건당 파일이 된 뒤로 그것은 거짓이다**: 같은 판단의 같은 거절은 한
-// 이름이라 파일이 안 는다. 반복되는 것은 파일이 아니라 전송이고, 화면도 그렇게 말해야 한다.
-func TestDoctorSaysKeylessRejectedLinesAreStillInTheQueue(t *testing.T) {
+// ★ 이 자리를 안 고치면 화면이 오늘도 그 줄이 생긴다고 말한다 — 사람은 없는 결함을 쫓는다.
+// 그리고 격리는 비우는 경로가 없어 그 옛 줄이 영원히 남으므로, 이 수는 **0 으로 안 간다.**
+func TestDoctorSaysKeylessRejectedRecordsAreOld(t *testing.T) {
 	h := newHarness(t)
 	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
 	seedRejected(t, dir,
@@ -194,35 +191,40 @@ func TestDoctorSaysKeylessRejectedLinesAreStillInTheQueue(t *testing.T) {
 		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
 	}
 	if !strings.Contains(out, "키 없는 2건") {
-		t.Errorf("doctor 가 키 없는 격리 줄을 갈라 안 냈다:\n%s", out)
+		t.Errorf("doctor 가 키 없는 격리 기록을 갈라 안 냈다:\n%s", out)
 	}
-	if !strings.Contains(out, "큐에서 안 빠진다") {
-		t.Errorf("doctor 가 '큐에서 뺐다'만 말한다 — 빈 키 줄에는 거짓이다:\n%s", out)
+	if !strings.Contains(out, "옛 기록") {
+		t.Errorf("doctor 가 그 기록이 옛 것이라고 말하지 않는다 — 그대로 두면 사람이 "+
+			"오늘도 빈 키 줄이 생기는 줄 알고 없는 결함을 쫓는다:\n%s", out)
 	}
-	// ★ 여기서는 격리 줄이 **전부** 키 없는 줄이다. 그러면 큐에서 빠진 것이 하나도 없으므로
-	//   머리줄이 "큐에서 뺐다"고 말하면 안 된다 — 아래 줄이 그것을 부정하는 화면은
-	//   사람에게 둘 중 무엇이 참인지 고르게 시킨다.
+	// ★ 여기서는 격리가 **전부** 키 없는 기록이다. 그러면 큐에서 빠진 것이 하나도 없으므로
+	//   머리줄이 "큐에서 뺐다"고 말하면 안 된다 — 화면 안에서 자기모순을 만들지 않는다.
 	if strings.Contains(out, "큐에서 뺐다") {
-		t.Errorf("격리 줄이 전부 키 없는데도 doctor 가 '큐에서 뺐다'고 말한다 — "+
-			"그 줄들은 큐에 그대로 있다:\n%s", out)
+		t.Errorf("격리가 전부 키 없는 기록인데도 doctor 가 '큐에서 뺐다'고 말한다:\n%s", out)
 	}
 }
 
-// 키 없는 줄은 재생마다 **다시 보내지고 다시 격리된다** — 큐에는 그대로 남는다.
+// 키 없는 줄은 **키를 얻고 한 번만 나간다** — 재생마다 다시 보내지지 않는다.
 //
-// ★ 이것이 격리 파일의 유일한 무한 증가원이고, 이 시험은 그것을 **닫지 않고 못박는다.**
-// 닫는 것("보내지 말고 큐에서도 빼라")은 "그 판단이 영영 안 간다"는 §9 질문을 새로 열어
-// 독립 판정이 필요하다 — 후속으로 냈다. 여기서는 동작을 사실로 고정해서, 위쪽
-// `settle` 의 경고 문구가 **다시 거짓으로 돌아가지 못하게** 한다: 그 문구는 오래
-// "재생 대상에서 뺀다"라고 적혀 있었는데 `Replay` 에는 키 가드가 없다.
-func TestKeylessLineIsResentAndRequarantinedOnEveryReplay(t *testing.T) {
+// ★★ **이 시험은 뒤집힌 것이다.** 앞선 판의 이름은 `…IsResentAndRequarantinedOnEveryReplay`
+// 였고, 재생 횟수만큼 다시 보내지는 것을 **사실로 못박는** 시험이었다. 그때는 그것이
+// 참이었다: 빈 키끼리 서로 별칭이라 `settle` 이 그 줄을 지울 수 없었고(하나를 지우면
+// 나머지가 함께 사라진다) 그래서 큐에 영원히 남아 매번 다시 나갔다.
+//
+// ★ `fillMissingKeys` 가 **별칭을 없애면서** 그 이유가 통째로 사라졌다. 이제 그 줄은
+// 자기 키를 갖고 일반 경로로 간다 — 보내지고, 결과에 따라 지워지거나 격리된다.
+// 여기서 재는 것은 **전송이 몇 번 일어나는가**다. 그 수가 재생 횟수를 따라가면
+// 헛 POST 가 fd 호출마다 반복되던 상태로 돌아간 것이다.
+func TestKeylessLineIsSentOnceAfterGettingAKey(t *testing.T) {
 	dir := t.TempDir()
 	o := newOutboxAt(dir)
 	// 키 없는 줄 하나. 손편집·부분 기록으로 들어오는 모양이다.
 	if err := o.keep([]OutboxEntry{{Key: "", Path: "/api/v1/judgments", Body: []byte(`{}`)}}); err != nil {
 		t.Fatalf("큐를 못 심었다: %v", err)
 	}
+	sends := 0
 	reject := func(_ context.Context, _ OutboxEntry) error {
+		sends++
 		return parseAPIError(400, "/api/v1/judgments",
 			[]byte(`{"error":{"code":"invalid_key","message":"멱등 키가 비었다"}}`))
 	}
@@ -234,29 +236,31 @@ func TestKeylessLineIsResentAndRequarantinedOnEveryReplay(t *testing.T) {
 		}
 	}
 
-	rej, err := o.Rejected()
-	if err != nil {
-		t.Fatalf("격리를 못 읽었다: %v", err)
-	}
-	// ★★ **이 단정은 뒤집힌 것이다.** 격리가 O_APPEND JSONL 이던 판에서는 재생마다 한 줄이
-	// 늘어 `replays` 개였고, 그 증가가 이 파일의 유일한 무한 증가원이라고 적혀 있었다.
-	// 격리가 **사건당 파일**이 되면서 같은 판단이 같은 사유로 다시 거절된 것은 같은 이름을
-	// 얻어 EEXIST 로 끝난다 — **무한 증가가 닫혔다.**
-	//
-	// ★ 이것이 "빈 키를 접은 것"이 아닌 이유: 접힌 것은 **판단이 아니라 같은 사건의 반복**이다.
-	// 그 판단은 여전히 큐에 남아 있고(아래 단정) 격리 자리에도 한 벌 있다. 서로 **다른**
-	// 빈 키 판단 둘은 본문이 다르므로 판별자가 갈라 준다 — 바로 아래 시험이 그 축을 붙든다.
-	if got := TallyRejected(rej); got.Keyless != 1 {
-		t.Errorf("재생 %d회에 키 없는 격리가 %d 건이다 — 같은 판단의 같은 거절은 한 사건이라 "+
-			"1 이어야 한다. 이 수가 재생 횟수를 따라가면 격리 자리가 fd 호출마다 자란다",
-			replays, got.Keyless)
+	// ★ 핵심 단정. 앞선 판에서는 이 값이 3 이었다(재생마다 한 번).
+	if sends != 1 {
+		t.Errorf("재생 %d회에 전송이 %d회다 — 1 이어야 한다. 이 수가 재생 횟수를 따라가면 "+
+			"그 줄이 큐에서 안 빠지는 것이고, 헛 POST 가 fd 호출마다 난다", replays, sends)
 	}
 	pend, err := o.List()
 	if err != nil {
 		t.Fatalf("큐를 못 읽었다: %v", err)
 	}
-	if len(pend) != 1 {
-		t.Errorf("키 없는 줄이 큐에 %d 개 남았다 — settle 이 일부러 남기므로 1 이어야 한다", len(pend))
+	if len(pend) != 0 {
+		t.Errorf("큐에 %d건 남았다 — 격리됐으므로 0 이어야 한다. "+
+			"앞선 판은 여기가 영영 1 이라 doctor 가 '대기 1건'을 계속 찍었다", len(pend))
+	}
+	// ★ **판단은 버려지지 않았다.** 큐에서 뺀 것과 없앤 것은 다르다(설계 §9).
+	rej, err := o.Rejected()
+	if err != nil {
+		t.Fatalf("격리를 못 읽었다: %v", err)
+	}
+	if len(rej) != 1 {
+		t.Fatalf("격리가 %d건이다 — 1 이어야 한다: %+v", len(rej), rej)
+	}
+	// ★ 격리된 줄은 **채워진 키**를 들고 있어야 한다 — 빈 키로 격리되면 그 줄은
+	//   격리 자리에서도 여전히 별칭이고, TallyRejected 가 그것을 영영 못 센다.
+	if rej[0].Entry.Key == "" {
+		t.Error("격리된 줄의 키가 비었다 — 채운 키로 격리돼야 그 자리에서도 식별된다")
 	}
 }
 
@@ -286,9 +290,13 @@ func TestDifferentKeylessJudgmentsAreNeverFoldedTogether(t *testing.T) {
 	if err != nil {
 		t.Fatalf("격리를 못 읽었다: %v", err)
 	}
-	if got := TallyRejected(rej); got.Keyless != 2 {
-		t.Fatalf("서로 다른 빈 키 판단 둘이 %d 건으로 격리됐다 — 2 여야 한다. "+
-			"뭉쳐졌다면 판별자가 본문을 안 보는 것이고, 그것은 남의 판단을 지운다", got.Keyless)
+	// ★ 이제 둘 다 **채워진 키**를 들고 격리되므로 키 없는 건수는 0 이고 고유 판단은 2 다.
+	//   앞선 판에서는 둘 다 빈 키로 격리돼 `Keyless=2 · Judgments=0` 이었다 —
+	//   즉 격리 자리에서 그 둘은 **식별 불가**했다. 그것이 이 항목이 없앤 상태다.
+	if got := TallyRejected(rej); got.Keyless != 0 || got.Judgments != 2 {
+		t.Fatalf("서로 다른 빈 키 판단 둘이 키없음=%d · 고유판단=%d 로 격리됐다 — 0/2 여야 한다. "+
+			"고유판단이 1 이면 둘이 같은 키를 얻은 것이고, 그것은 남의 판단을 지운다",
+			got.Keyless, got.Judgments)
 	}
 	var bodies []string
 	for _, r := range rej {
@@ -301,12 +309,15 @@ func TestDifferentKeylessJudgmentsAreNeverFoldedTogether(t *testing.T) {
 	}
 }
 
-// settle 의 경고는 **하지 않는 일을 약속하지 않는다.**
+// 빈 키에 키를 부여한 것을 **말한다.** 조용히 고치지 않는다.
 //
-// ★ 그 문구는 오래 "재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)"였고 둘 다 거짓이다:
-// `Replay` 에 키 가드가 없고, doctor 는 대기 **건수**만 찍지 그 줄의 자리를 안 찍는다.
-// 문구를 안 지키면 다음 사람이 "이미 처리된 줄"로 읽고 위 시험이 못박은 무한 증가를 못 본다.
-func TestKeylessWarningDoesNotPromiseExclusionFromReplay(t *testing.T) {
+// ★ 이것은 파일 안의 값을 바꾸는 동작이다. 조용하면 다음 사람이 격리 파일에서 본 키가
+// 어디서 왔는지 모른다 — 작성기가 만든 키와 구분이 안 된다.
+//
+// ★ 앞선 판의 이 시험은 경고가 "재생 대상에서 **안 뺀다**"를 말하는지 봤다. 그 문구는
+// 그때 참이었고(그 줄은 큐에 남아 매번 다시 나갔다) 이제 거짓이다 — 키를 얻은 줄은
+// 일반 경로로 가서 보내지고 빠진다.
+func TestFillingAMissingKeyIsAnnounced(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 	o := newOutboxAt(dir).withLogger(
@@ -314,17 +325,13 @@ func TestKeylessWarningDoesNotPromiseExclusionFromReplay(t *testing.T) {
 	if err := o.keep([]OutboxEntry{{Key: "", Path: "/api/v1/judgments"}}); err != nil {
 		t.Fatalf("큐를 못 심었다: %v", err)
 	}
-	if _, err := o.settle(map[string]bool{}, "", 1); err != nil {
-		t.Fatalf("settle 이 실패했다: %v", err)
+	if _, err := o.List(); err != nil {
+		t.Fatalf("조회가 실패했다: %v", err)
 	}
 
 	got := buf.String()
-	if !strings.Contains(got, "키 없는 줄이 큐에 있다") {
-		t.Fatalf("빈 키 경고가 아예 안 나왔다:\n%s", got)
-	}
-	if !strings.Contains(got, "안 뺀다") {
-		t.Errorf("경고가 '재생 대상에서 안 뺀다'는 사실을 말하지 않는다 — "+
-			"그 줄은 재생마다 다시 보내진다:\n%s", got)
+	if !strings.Contains(got, "키를 부여했다") {
+		t.Fatalf("빈 키를 채우고도 아무 말을 안 했다 — 파일 안의 값을 조용히 바꾸면 안 된다:\n%s", got)
 	}
 }
 
@@ -346,5 +353,134 @@ func TestDoctorSeparatesLegacyRejectedLinesFromDistinctJudgments(t *testing.T) {
 	}
 	if !strings.Contains(out, "격리 기록 2건 · 고유 판단 1건") {
 		t.Errorf("옛 자리 줄이 줄 수와 판단 수를 안 갈랐다 — 이 머신의 격리가 전부 이 자리에 있다:\n%s", out)
+	}
+}
+
+// ── 막지 않고 말한다 ─────────────────────────────────────────────────────────
+
+// 격리된 키는 **다시 쌓을 수 있다.** Append 가 그것을 막지 않는다.
+//
+// ★★ 이것이 `fd-append-is-blind-to-quarantine-history` 의 판정이다. 막는 쪽이 자연스러워
+// 보이지만 **4xx 사유에는 상태 의존이 실재한다** — `claim_held`("항목을 세션이 쥐고 있다") ·
+// `missing_ref`("가리키는 좌표가 없다") · `item_closed`. 잠금은 풀리고 좌표는 나중에 생길
+// 수 있다. 막으면 그 판단은 사람이 격리 파일을 손으로 뒤지기 전까지 **영영 안 간다**(설계 §9).
+// 이 머신에 실제로 남아 있는 격리 1건이 바로 그 종류다(409 `missing_ref`).
+//
+// ★ 그리고 막는 검사는 값이 **O(격리 크기)** 다 — `Append` 를 O(1) 로 만든 작업을 되돌리고,
+// 격리는 비우는 경로가 없어 계속 자란다. §9 를 안 어기는 피해를 §9 를 어기는 확률과
+// 맞바꾸는 그 거래는 이 저장소가 이미 한 번 거절했다.
+func TestAppendStillAcceptsAKeyThatWasAlreadyQuarantined(t *testing.T) {
+	o := mkOutbox(t)
+	e := entry("s1:once-rejected")
+	if err := o.quarantine(RejectedEntry{
+		Entry: e, Reason: "서버가 409 로 거절했다: 가리키는 좌표가 없다", At: o.stamp(),
+	}); err != nil {
+		t.Fatalf("격리를 못 심었다: %v", err)
+	}
+	if err := o.Append(e); err != nil {
+		t.Fatalf("전에 격리된 키를 다시 못 쌓았다: %v — 막으면 잠금이 풀리거나 좌표가 "+
+			"생겨도 그 판단은 영영 안 간다", err)
+	}
+	pend, err := o.List()
+	if err != nil {
+		t.Fatalf("큐를 못 읽었다: %v", err)
+	}
+	if len(pend) != 1 || pend[0].Key != e.Key {
+		t.Fatalf("큐가 %+v 다 — 그 키 1건이어야 한다", pend)
+	}
+	// 격리 기록도 그대로 남아 있어야 한다. 다시 쌓는 것과 이력을 지우는 것은 다르다.
+	rej, err := o.Rejected()
+	if err != nil || len(rej) != 1 {
+		t.Errorf("격리 기록이 %d건이다(err=%v) — 다시 쌓았다고 이력이 사라지면 안 된다", len(rej), err)
+	}
+}
+
+// doctor 는 **전에 거절당한 판단이 큐에 다시 있다**고 말한다.
+//
+// ★ 막지 않는 대신 말한다. 이 자리는 **값이 0 이다** — doctor 는 큐와 격리를 이미 둘 다
+// 읽었고, 여기서 하는 것은 두 집합의 교집합을 세는 것뿐이다. 안 말하면 사람은 그 판단이
+// 전에 400 을 받았다는 사실을 알 방법이 없고, 같은 거절이 반복돼도 격리에 새 줄이
+// 안 생기므로(같은 사건은 한 이름) **화면 어디에도 안 나온다.**
+func TestDoctorNamesJudgmentsRejectedBeforeAndQueuedAgain(t *testing.T) {
+	h := newHarness(t)
+	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
+	const key = "s1:comes-back"
+	seedRejected(t, dir, [2]string{key, "서버가 409 로 거절했다: 가리키는 좌표가 없다"})
+	o := newOutboxAt(dir)
+	if err := o.Append(OutboxEntry{Key: key, At: time.Unix(1, 0).UTC(),
+		Path: "/api/v1/judgments", Body: []byte(`{"kind":"decision","body":"다시 남긴다"}`)}); err != nil {
+		t.Fatalf("큐에 못 쌓았다: %v", err)
+	}
+
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
+	}
+	if !strings.Contains(out, "다시 있다") {
+		t.Errorf("doctor 가 전에 거절당한 판단이 큐에 다시 있다는 것을 안 낸다:\n%s", out)
+	}
+	if !strings.Contains(out, key) {
+		t.Errorf("doctor 가 그 키를 안 찍었다 — 어느 판단인지 없으면 사람이 확인할 자리가 없다:\n%s", out)
+	}
+	// ★ **막았다고 말하면 안 된다.** 그 판단은 큐에 그대로 있고 다음 재생이 보낸다.
+	if strings.Contains(out, "막았다") || strings.Contains(out, "거절했다 — 이미") {
+		t.Errorf("doctor 가 막았다고 말한다 — 막지 않는 것이 판정이다:\n%s", out)
+	}
+}
+
+// ── 비우는 경로가 없는 자리 ──────────────────────────────────────────────────
+
+// doctor 는 보관 자리의 **크기**와 **비우는 경로가 없다**는 사실을 함께 낸다.
+//
+// ★★ 이것이 `fd-rejected-and-failopen-files-have-no-retention-path` 의 판정이다.
+// **회전도 상한도 안 만들었다**: 이 머신 실측(2026-08-11)에서 고정 자리에는 아웃박스
+// 디렉토리 자체가 없고 옛 자리의 격리가 577바이트·1건, fail-open 기록은 없다 —
+// **압력이 실물로 관측된 적이 없다.** 근거 없이 회전을 만들면 "어느 시점 이후를 못 본다"는
+// 새 구멍이 열리고, 그것은 이 저장소가 없애려는 종류의 침묵이다.
+//
+// ★ 그래서 하는 것은 **그 자리를 화면에 두는 것**이다. 언젠가 커졌을 때 그 수가 거기 있고
+// 그때 근거를 갖고 판정한다. 상한 없는 자리를 화면 밖에 두는 것이 이 항목이 지적한 결함이다.
+func TestDoctorReportsRetentionSizeAndThatNothingClearsIt(t *testing.T) {
+	h := newHarness(t)
+	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
+	seedRejected(t, dir, [2]string{"s1:aaaa", "서버가 400 로 거절했다: 본문이 비었다"})
+
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
+	}
+	if !strings.Contains(out, "보관 자리") {
+		t.Fatalf("doctor 가 보관 자리를 안 낸다:\n%s", out)
+	}
+	if !strings.Contains(out, "비우는 경로가 없다") {
+		t.Errorf("doctor 가 그 자리에 상한이 없다는 사실을 안 말한다 — 크기만 내면 "+
+			"사람은 언젠가 저절로 줄어드는 줄 안다:\n%s", out)
+	}
+	// ★ 0 이 아니어야 한다 — 위에서 심은 격리가 실제로 세이는지까지 본다.
+	//   문구만 있고 수가 0 이면 그 화면은 아무것도 안 재는 것과 같다.
+	if strings.Contains(out, "격리 0B") {
+		t.Errorf("격리를 심었는데 크기가 0B 다 — 재는 자리가 실제 파일에 안 닿는다:\n%s", out)
+	}
+}
+
+// 보관 크기는 **두 형식을 합쳐** 잰다.
+//
+// ★ 격리를 사건당 파일로 옮겼어도 옛 `rejected.jsonl` 은 비우는 경로가 없어 그 자리에
+// 남는다. 한쪽만 재면 그 잔량이 화면에서 사라지고, 사라진 잔량은 아무도 안 판정한다.
+func TestRetentionCountsBothQuarantineFormats(t *testing.T) {
+	o := mkOutbox(t)
+	seedRejected(t, o.Dir(), [2]string{"s1:old", "옛 형식 줄"})
+	legacyOnly := o.Retention()
+	if legacyOnly.Rejected == 0 {
+		t.Fatalf("옛 형식만 있을 때 격리 크기가 0 이다: %+v", legacyOnly)
+	}
+	if err := o.quarantine(RejectedEntry{
+		Entry: entry("s1:new"), Reason: "새 형식 사건", At: o.stamp()}); err != nil {
+		t.Fatalf("격리를 못 심었다: %v", err)
+	}
+	both := o.Retention()
+	if both.Rejected <= legacyOnly.Rejected {
+		t.Errorf("사건당 파일을 더했는데 크기가 %d → %d 다 — 두 형식을 합쳐 재야 한다",
+			legacyOnly.Rejected, both.Rejected)
 	}
 }
