@@ -825,3 +825,92 @@ func TestLedgerSQLHasNoInlineColumnLists(t *testing.T) {
 			len(bad), strings.Join(bad, "\n  "))
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 원장 열기 거절 문구는 **갈래마다 다른 사실**을 말한다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 예전에는 non-None 넷을 한 문장으로 뭉쳤다. 그런데 그중 셋이 MigrateReject 이고
+// 그것은 정의상 "열어도 DB 를 안 바꾼다 — 아예 안 연다"라서, 앞 절("이 바이너리로 열면
+// DB 가 바뀐다")이 거짓이고 뒤 절("먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라")은
+// 어느 갈래도 그 방법으로 안 풀린다.
+//
+// ★ dbVersion > codeVersion 에서는 한 문장이 **정반대를 말했다**: Reason 은 "바이너리를
+// 올려라"인데 꼬리는 "이 바이너리로 serve 를 올려라"였고, 그 처방을 따르면 같은 판정으로
+// 기동도 거절된다. 이 저장소에서 실제로 났던 상황이고(수동 빌드 서버가 19시간·115커밋
+// 만큼 낡은 채로 돌았다), 하필 판단 원장을 뜨는 것이 가장 절실한 상황에서만 보인다.
+func TestLedgerOpenRefusalSpeaksPerAction(t *testing.T) {
+	// 계획을 손으로 짓지 않는다 — PlanMigration 을 통과시켜야 이 시험이 실제 판정에 묶인다.
+	cases := []struct {
+		name                   string
+		hasTable               bool
+		dbVersion, objects     int
+		wantAction             MigrationAction
+		wantsServePrescription bool
+		wantsChangesTheDBClaim bool
+	}{
+		{"빈 DB — 열면 스키마가 적용된다", false, 0, 0, MigrateApply, true, true},
+		{"버전표만 있다 — 열면 다시 적용된다", true, 0, 1, MigrateApply, true, true},
+		{"증분이 얹힌다", true, SchemaVersion - 1, 12, MigrateUpgrade, true, true},
+		{"버전표 없이 객체가 있다 — 안 연다", false, 0, 12, MigrateReject, false, false},
+		{"객체는 있는데 버전 기록이 없다 — 안 연다", true, 0, 12, MigrateReject, false, false},
+		{"구 바이너리 · 신 DB — 안 연다", true, SchemaVersion + 1, 12, MigrateReject, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plan := PlanMigration(c.hasTable, c.dbVersion, c.objects, SchemaVersion)
+			if plan.Action != c.wantAction {
+				t.Fatalf("이 시험의 좌표가 틀렸다 — 판정이 %q 인데 %q 를 기대했다: %s",
+					plan.Action, c.wantAction, plan.Reason)
+			}
+			msg := ledgerOpenRefusal(plan).Error()
+
+			// 어느 갈래든 Reason 은 그대로 실린다 — 새 문구를 지어내지 않는다는 규율이다.
+			if !strings.Contains(msg, plan.Reason) {
+				t.Errorf("거절 문구가 판정의 사유를 안 싣는다.\n  문구: %s\n  사유: %s", msg, plan.Reason)
+			}
+			if got := strings.Contains(msg, "fd serve"); got != c.wantsServePrescription {
+				if got {
+					t.Errorf("안 여는 갈래(%s)에 `fd serve` 처방이 붙었다 — 그 처방으로는 "+
+						"안 풀리고, 구 바이너리·신 DB 갈래에서는 사유와 **정반대**를 말한다:\n  %s",
+						plan.Action, msg)
+				} else {
+					t.Errorf("DB 가 실제로 바뀌는 갈래(%s)에 처방이 없다 — 운영자가 "+
+						"무엇을 해야 하는지 못 읽는다:\n  %s", plan.Action, msg)
+				}
+			}
+			if got := strings.Contains(msg, "DB 가 바뀐다"); got != c.wantsChangesTheDBClaim {
+				if got {
+					t.Errorf("안 여는 갈래(%s)가 'DB 가 바뀐다'고 말한다 — 거짓이다:\n  %s",
+						plan.Action, msg)
+				} else {
+					t.Errorf("바뀌는 갈래(%s)가 그 사실을 안 말한다:\n  %s", plan.Action, msg)
+				}
+			}
+		})
+	}
+}
+
+// OpenLedger 가 그 문구를 실제로 쓰는지 — 순수 함수만 시험하면 배선이 빠져도 초록이다.
+func TestOpenLedgerRefusesOldBinaryWithoutSayingRunServe(t *testing.T) {
+	s := newStore(t)
+	path := s.path
+	// 이 바이너리보다 높은 버전을 기록해 "구 바이너리 · 신 DB" 를 만든다.
+	if _, err := s.db.ExecContext(context.Background(),
+		`UPDATE schema_version SET version = ?`, SchemaVersion+1); err != nil {
+		t.Fatalf("버전 올리기 실패: %v", err)
+	}
+	s.Close()
+
+	_, err := OpenLedger(context.Background(), path, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("구 바이너리가 신 DB 의 원장을 열었다 — 모르는 스키마 위에서 읽는다")
+	}
+	if strings.Contains(err.Error(), "fd serve") {
+		t.Errorf("거절이 `fd serve` 를 처방한다 — 같은 판정으로 기동도 거절되므로 "+
+			"운영자를 막다른 길로 보낸다:\n  %v", err)
+	}
+	if strings.Contains(err.Error(), "DB 가 바뀐다") {
+		t.Errorf("안 여는 갈래인데 'DB 가 바뀐다'고 말한다:\n  %v", err)
+	}
+}

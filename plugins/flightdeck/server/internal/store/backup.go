@@ -459,6 +459,35 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 	})
 }
 
+// ledgerOpenRefusal 은 원장 열기를 거절하는 문구다. 순수 함수다.
+//
+// ★ 왜 갈래를 가르나. 예전에는 non-None 넷을 한 문장으로 뭉쳤다:
+//
+//	"이 바이너리로 열면 DB 가 바뀐다(%s) — … (먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)"
+//
+// 그런데 non-None 중 **셋이 MigrateReject** 이고, 그것은 정의상 "열어도 DB 를 안 바꾼다 —
+// 아예 안 연다"다. 앞 절이 거짓이고, 뒤 절은 어느 갈래도 fd serve 재기동으로 안 풀린다
+// (남의 DB거나 · 끊긴 마이그레이션이라 백업에서 되돌려야 하거나 · 바이너리가 낡았거나).
+//
+// 특히 dbVersion > codeVersion 에서는 한 문장이 **정반대를 말했다**. Reason 은 "바이너리를
+// 올려라"인데 꼬리는 "이 바이너리로 serve 를 올려라"이고, 그 처방을 따르면 selfcheck 가
+// 같은 판정으로 기동도 거절한다. 이 저장소에서 실제로 났던 상황이다(수동 빌드 서버가
+// 19시간·115커밋만큼 낡은 채로 돌았다) — 하필 판단 원장을 뜨는 것이 가장 절실한
+// 상황에서만 보이는 문구였다.
+//
+// ★ MigrateReject 에는 처방을 **일부러 안 붙인다.** Reason 이 갈래마다 다른 처방을 이미
+// 담고 있어서(손으로 확인하라 · 백업에서 되돌려라 · 바이너리를 올려라), 고정 꼬리를 붙이면
+// 그중 하나와 반드시 어긋난다. 갈래를 가르는 선례는 selfcheck.go 가 이미 쓴다.
+func ledgerOpenRefusal(plan MigrationPlan) error {
+	// Reason 은 PlanMigration 이 항상 채운다 — 어느 갈래든 새 사유를 지어내지 않는다.
+	if plan.Action == MigrateReject {
+		return fmt.Errorf("이 바이너리는 이 DB 를 아예 열지 않는다(스키마도 안 바꾼다) "+
+			"— 원장 내보내기를 거절한다: %s", plan.Reason)
+	}
+	return fmt.Errorf("이 바이너리로 열면 DB 가 바뀐다(%s) — 원장 내보내기를 거절한다: %s "+
+		"(먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)", plan.Action, plan.Reason)
+}
+
 // OpenLedger 는 원장을 읽기 위해 DB 를 연다. **스키마를 바꾸지 않는다.**
 //
 // ★ store.Open 을 쓰지 않는 이유. 그것은 verifyPragmas 다음에 반드시 s.migrate 를 돌고,
@@ -483,9 +512,7 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 		return nil, fmt.Errorf("원장을 읽기 전에 DB 상태를 재지 못했다(path=%q): %w", clip(path, 200), err)
 	}
 	if plan.Action != MigrateNone {
-		// Reason 은 PlanMigration 이 항상 채운다 — 새 문구를 지어내지 않는다.
-		return nil, fmt.Errorf("이 바이너리로 열면 DB 가 바뀐다(%s) — 원장 내보내기를 거절한다: %s "+
-			"(먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)", plan.Action, plan.Reason)
+		return nil, ledgerOpenRefusal(plan)
 	}
 
 	db, err := sql.Open("sqlite", ledgerDSN(path))
