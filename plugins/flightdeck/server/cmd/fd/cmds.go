@@ -999,16 +999,20 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 		if tal.Keyless == tal.Lines {
 			moved = "영구 거절이라 격리했다(버리지 않았다)"
 		}
-		fmt.Fprintf(out, "  ! 격리 %d줄 · 고유 판단 %d건 — %s\n", tal.Lines, tal.Judgments, moved)
+		fmt.Fprintf(out, "  ! 격리 기록 %d건 · 고유 판단 %d건 — %s\n", tal.Lines, tal.Judgments, moved)
 		// ★ 위 문장은 **키 없는 줄에 대해서는 거짓이다.** settle 이 그 줄을 일부러 큐에
 		// 남기고(빈 키끼리 별칭이 되므로 지우면 남의 판단이 사라진다) Replay 에는 빈 키
-		// 가드가 없어 재생마다 다시 보내고 다시 격리한다. Flush 는 모든 명령 앞에서 도므로
-		// 그 줄은 **fd 호출당 한 줄씩** 이 파일을 키운다 — 이 파일의 유일한 무한 증가원이다.
-		// 여기서 그 생성기를 닫지는 않는다(닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로
-		// 열린다 — 후속으로 냈다). 화면이 거짓말하는 것만 막는다.
+		// 가드가 없어 **재생마다 다시 보내고 다시 거절당한다.** 생성기는 여전히 열려 있다
+		// (닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로 열린다 — 후속으로 냈다).
+		//
+		// ★ **다만 격리 자리는 이제 안 자란다.** 격리가 사건당 파일이 되면서 같은 판단의
+		// 같은 거절은 같은 이름을 얻고 둘째부터 EEXIST 로 끝난다. 앞선 판의 이 줄은
+		// "fd 호출마다 한 줄씩 는다"였는데 **그것이 이제 거짓이다** — 그대로 두면 사람이
+		// 디스크가 차는 줄 알고 없는 문제를 쫓는다. 반복되는 것은 파일이 아니라 **전송**이다.
 		if tal.Keyless > 0 {
-			fmt.Fprintf(out, "  ! 그중 키 없는 %d줄은 큐에서 안 빠진다 — "+
-				"재생마다 다시 보내고 다시 격리한다(fd 호출마다 한 줄씩 는다)\n", tal.Keyless)
+			fmt.Fprintf(out, "  ! 그중 키 없는 %d건은 큐에서 안 빠진다 — "+
+				"재생마다 다시 보내고 다시 거절당한다(격리 자리는 안 자란다 — 같은 거절은 한 건이다)\n",
+				tal.Keyless)
 		}
 		for _, r := range rej {
 			// ★ 키를 함께 찍는다. 안 찍으면 위 `N줄 · M건` 을 사람이 화면에서 검증할 수
@@ -1040,7 +1044,7 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 1줄이 전부이고 고정 자리에는 파일이 없다. 여기서 안 가르면 겹친 재생의 흔적이
 	// 이 머신에서는 영영 건수 하나로만 보인다.
 	for _, lo := range a.cli.LegacyLeftovers() {
-		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 %d줄 · 고유 판단 %d건(그 자리에 남는다)\n",
+		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 기록 %d건 · 고유 판단 %d건(그 자리에 남는다)\n",
 			lo.Dir, lo.Pending, lo.Rejected, lo.RejectedJudgments)
 		if lo.Err != "" {
 			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))

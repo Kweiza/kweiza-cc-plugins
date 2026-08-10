@@ -32,6 +32,15 @@ import (
 //
 // 그래서 이 축의 피해는 "잃는다"가 아니라 항목 스스로 적은 대로 "doctor 집계가 부푼다"이고,
 // 처방은 **쓰기 경로가 아니라 세는 자리**에 있다. 아래가 그 자리를 붙든다.
+//
+// ★★ **개정: 위 중복은 그 뒤에 닫혔다 — 잠금이 아니라 이름으로.** 격리가 사건당 파일이
+// 되면서 판별자(격리된 항목 전체 + 사유)가 파일 이름이 됐고, 겹친 재생 둘은 같은 이름을
+// 얻어 둘째가 EEXIST 로 끝난다. 위 실측표는 **여전히 유효하다** — 그것이 말하는 것은
+// "잠금으로는 못 닫는다"이고 그 판정은 안 바뀌었다. 바뀐 것은 다른 길이 있었다는 것이다.
+// `TestConcurrentReplaysQuarantineTheSameEventOnlyOnce`(outbox_concurrency_test.go)가
+// 그 완료 조건(300라운드에서 두 건 이상 0)을 두 형식 모두에 대해 붙든다.
+// 아래 시험들은 **세는 자리**를 계속 붙든다: 옛 `rejected.jsonl` 은 비우는 경로가 없어
+// 그 자리에 영원히 남고, 거기 든 중복은 오늘도 그대로다.
 
 // seedRejected 는 격리 파일을 직접 심는다. (키, 사유) 쌍을 순서대로 받는다.
 //
@@ -130,7 +139,7 @@ func TestDoctorSeparatesRejectedLinesFromDistinctJudgments(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
 	}
-	if !strings.Contains(out, "격리 2줄 · 고유 판단 1건") {
+	if !strings.Contains(out, "격리 기록 2건 · 고유 판단 1건") {
 		t.Errorf("doctor 가 줄 수와 판단 수를 안 갈랐다 — 겹친 재생의 두 줄이 판단 둘로 읽힌다:\n%s", out)
 	}
 }
@@ -166,11 +175,13 @@ func TestDoctorPrintsTheKeyOfEachRejectedLine(t *testing.T) {
 // ★ 오늘 doctor 는 격리 줄 전체에 "영구 거절이라 큐에서 뺐다(버리지 않았다)"를 붙인다
 // (cmds.go:852). 빈 키 줄에 대해서는 **거짓이다**: `settle`(outbox.go:366-371)이 그 줄을
 // 일부러 큐에 남기고, `Replay`(481-482)에는 빈 키 가드가 없어 재생마다 다시 보내고 다시
-// 격리한다. `Flush` 는 모든 명령 앞에서 도므로(client.go:357-358) 그 줄은 **fd 호출당
-// 한 줄씩** 격리 파일을 키운다 — 이 파일의 유일한 무한 증가원이고 오늘 열려 있다.
+// 거절당한다. `Flush` 는 모든 명령 앞에서 돌므로(client.go:357-358) 그 **전송**이 fd 호출마다
+// 반복된다. 생성기는 여전히 열려 있다 — 닫으면 "그 판단이 영영 안 간다"는 §9 질문이 새로
+// 열리고 그것은 독립 판정이다(후속으로 등록했다).
 //
-// 이 시험은 그 생성기를 **닫지 않는다**(닫으면 "그 판단이 영영 안 간다"는 §9 질문이
-// 새로 열리고, 그것은 독립 판정이다 — 후속으로 등록했다). 화면이 거짓말하는 것만 막는다.
+// ★ 앞선 판은 이 자리를 "격리 파일이 fd 호출당 한 줄씩 자란다 — 유일한 무한 증가원"이라고
+// 적었다. **격리가 사건당 파일이 된 뒤로 그것은 거짓이다**: 같은 판단의 같은 거절은 한
+// 이름이라 파일이 안 는다. 반복되는 것은 파일이 아니라 전송이고, 화면도 그렇게 말해야 한다.
 func TestDoctorSaysKeylessRejectedLinesAreStillInTheQueue(t *testing.T) {
 	h := newHarness(t)
 	dir, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
@@ -182,7 +193,7 @@ func TestDoctorSaysKeylessRejectedLinesAreStillInTheQueue(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
 	}
-	if !strings.Contains(out, "키 없는 2줄") {
+	if !strings.Contains(out, "키 없는 2건") {
 		t.Errorf("doctor 가 키 없는 격리 줄을 갈라 안 냈다:\n%s", out)
 	}
 	if !strings.Contains(out, "큐에서 안 빠진다") {
@@ -227,10 +238,18 @@ func TestKeylessLineIsResentAndRequarantinedOnEveryReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("격리를 못 읽었다: %v", err)
 	}
-	if got := TallyRejected(rej); got.Keyless != replays {
-		t.Errorf("재생 %d회에 키 없는 격리 줄이 %d 개다 — 재생마다 한 줄씩이라 %d 여야 한다. "+
-			"수가 줄었다면 어디선가 빈 키를 접은 것이고, 그것은 남의 판단을 지우는 방향이다",
-			replays, got.Keyless, replays)
+	// ★★ **이 단정은 뒤집힌 것이다.** 격리가 O_APPEND JSONL 이던 판에서는 재생마다 한 줄이
+	// 늘어 `replays` 개였고, 그 증가가 이 파일의 유일한 무한 증가원이라고 적혀 있었다.
+	// 격리가 **사건당 파일**이 되면서 같은 판단이 같은 사유로 다시 거절된 것은 같은 이름을
+	// 얻어 EEXIST 로 끝난다 — **무한 증가가 닫혔다.**
+	//
+	// ★ 이것이 "빈 키를 접은 것"이 아닌 이유: 접힌 것은 **판단이 아니라 같은 사건의 반복**이다.
+	// 그 판단은 여전히 큐에 남아 있고(아래 단정) 격리 자리에도 한 벌 있다. 서로 **다른**
+	// 빈 키 판단 둘은 본문이 다르므로 판별자가 갈라 준다 — 바로 아래 시험이 그 축을 붙든다.
+	if got := TallyRejected(rej); got.Keyless != 1 {
+		t.Errorf("재생 %d회에 키 없는 격리가 %d 건이다 — 같은 판단의 같은 거절은 한 사건이라 "+
+			"1 이어야 한다. 이 수가 재생 횟수를 따라가면 격리 자리가 fd 호출마다 자란다",
+			replays, got.Keyless)
 	}
 	pend, err := o.List()
 	if err != nil {
@@ -238,6 +257,47 @@ func TestKeylessLineIsResentAndRequarantinedOnEveryReplay(t *testing.T) {
 	}
 	if len(pend) != 1 {
 		t.Errorf("키 없는 줄이 큐에 %d 개 남았다 — settle 이 일부러 남기므로 1 이어야 한다", len(pend))
+	}
+}
+
+// 서로 **다른** 빈 키 판단은 같은 사유로 거절돼도 **안 접힌다.**
+//
+// ★ 위 시험이 "같은 사건의 반복은 한 건"을 잰다면, 이 시험은 그 접기가 **어디서 멈추는지**를
+// 잰다. 빈 키끼리는 서로 별칭이라(settle 이 같은 이유로 그 줄을 절대 안 지운다) 키만으로
+// 판별하면 서로 다른 판단이 한 파일로 뭉개진다 — 세는 자리를 고치려다 판단을 잃는 것이고
+// 그것이 §9 위반이다. 그래서 판별자에 **본문**이 들어간다.
+func TestDifferentKeylessJudgmentsAreNeverFoldedTogether(t *testing.T) {
+	dir := t.TempDir()
+	o := newOutboxAt(dir)
+	if err := o.keep([]OutboxEntry{
+		{Key: "", Path: "/api/v1/judgments", Body: []byte(`{"body":"판단 하나"}`)},
+		{Key: "", Path: "/api/v1/judgments", Body: []byte(`{"body":"판단 둘"}`)},
+	}); err != nil {
+		t.Fatalf("큐를 못 심었다: %v", err)
+	}
+	reject := func(_ context.Context, _ OutboxEntry) error {
+		return parseAPIError(400, "/api/v1/judgments",
+			[]byte(`{"error":{"code":"invalid_key","message":"멱등 키가 비었다"}}`))
+	}
+	if _, err := o.Replay(t.Context(), reject); err != nil {
+		t.Fatalf("재생 실패: %v", err)
+	}
+	rej, err := o.Rejected()
+	if err != nil {
+		t.Fatalf("격리를 못 읽었다: %v", err)
+	}
+	if got := TallyRejected(rej); got.Keyless != 2 {
+		t.Fatalf("서로 다른 빈 키 판단 둘이 %d 건으로 격리됐다 — 2 여야 한다. "+
+			"뭉쳐졌다면 판별자가 본문을 안 보는 것이고, 그것은 남의 판단을 지운다", got.Keyless)
+	}
+	var bodies []string
+	for _, r := range rej {
+		bodies = append(bodies, string(r.Entry.Body))
+	}
+	for _, want := range []string{"판단 하나", "판단 둘"} {
+		if !strings.Contains(strings.Join(bodies, "|"), want) {
+			t.Errorf("격리에 %q 가 없다: %v", want, bodies)
+		}
 	}
 }
 
@@ -284,7 +344,7 @@ func TestDoctorSeparatesLegacyRejectedLinesFromDistinctJudgments(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
 	}
-	if !strings.Contains(out, "격리 2줄 · 고유 판단 1건") {
+	if !strings.Contains(out, "격리 기록 2건 · 고유 판단 1건") {
 		t.Errorf("옛 자리 줄이 줄 수와 판단 수를 안 갈랐다 — 이 머신의 격리가 전부 이 자리에 있다:\n%s", out)
 	}
 }

@@ -336,3 +336,48 @@ func TestKeepRemovesTheTempWhenWritingFails(t *testing.T) {
 		}
 	}
 }
+
+// 겹친 재생 둘이 같은 판단을 격리해도 **격리는 한 건이다.**
+//
+// ★★ 이것이 `fd-quarantine-outside-the-queue-lock` 의 완료 조건이다. 그 항목을 닫은
+// 판단(dbaf719)이 이 관문을 이 자리에 명시해 뒀다: *전환 뒤 bothAtOnce·300라운드에서
+// 두 줄 이상 **0**.* 그 판단은 잠금으로 이 축을 닫으려는 처방을 **재현으로 반증**했고
+// (오늘 286~299/300, 잠금 안으로 넣어도 284~296/300 — 분포가 통째로 겹친다), 개수를 닫는
+// 유일한 길이 **중복 판정을 커널의 원자 연산으로 만드는 것**이라고 적었다.
+//
+// ★ 잠금이 왜 못 닫는지: `Replay` 의 첫 `List`·`send`·거절 판정이 전부 잠금 밖이라
+// "쓰겠다"는 결정이 두 번 내려진다. 그 뒤에 무엇을 잠가도 append 는 두 번 난다 —
+// **직렬화는 순서를 정하지 개수를 안 바꾼다.** 이름이 사건의 정체성이면 커널이 둘째를 막는다.
+func TestConcurrentReplaysQuarantineTheSameEventOnlyOnce(t *testing.T) {
+	forEachQueueFormat(t, func(t *testing.T, seed func(*testing.T, string, ...string)) {
+		base := t.TempDir()
+		dupes := 0
+		for i := 0; i < concurrentRounds; i++ {
+			dir := roundDir(t, base, i)
+			seed(t, dir, "always-400")
+			a, b := newOutboxAt(dir), newOutboxAt(dir)
+			reject := func(context.Context, OutboxEntry) error {
+				return &APIError{Status: 400, Message: "이 줄은 영원히 거절된다"}
+			}
+			bothAtOnce(
+				func() { _, _ = a.Replay(context.Background(), reject) },
+				func() { _, _ = b.Replay(context.Background(), reject) },
+			)
+			rs, err := a.Rejected()
+			if err != nil {
+				t.Fatalf("격리를 못 읽었다: %v", err)
+			}
+			if len(rs) > 1 {
+				dupes++
+			}
+			if len(rs) == 0 {
+				t.Fatalf("전제가 깨졌다 — 격리가 0건이다. 거절이 안 일어났으면 이 시험은 아무것도 안 잰다")
+			}
+		}
+		if dupes > 0 {
+			t.Errorf("같은 거절 사건이 두 건 이상 들어간 라운드가 %d/%d 였다 — "+
+				"겹친 재생 둘이 각자 쓴 것이고, doctor 의 격리 집계가 그만큼 부푼다",
+				dupes, concurrentRounds)
+		}
+	})
+}

@@ -195,6 +195,14 @@ const (
 	// 33/300 · 진짜 프로세스 둘의 유실 15/200 — 전부 전량 재기록이 있어야 나는 것들이다).
 	pendingDirName = "pending"
 	rejectedName   = "rejected.jsonl"
+	// rejectedDirName 은 **격리 사건당 파일**의 자리다.
+	//
+	// ★ 왜 파일 하나가 아닌가. 겹친 재생 둘은 `Replay` 의 첫 `List`·`send`·거절 판정이
+	// 전부 잠금 밖이라 **각자 "쓰겠다"고 결정한다.** 그래서 O_APPEND 판에서는 같은 사건이
+	// 두 줄로 들어갔다(실측 300라운드×6판: 286~299/300). **잠금으로는 못 닫는다** —
+	// 결정이 이미 두 번 내려졌으므로 직렬화는 순서만 정하고 개수를 안 바꾼다. 개수를 닫는
+	// 유일한 길은 **중복 판정을 커널의 원자 연산으로** 만드는 것이고, 그것이 이 자리다.
+	rejectedDirName = "rejected"
 	// failOpenName 은 **잠금 없이 지나간 사건**의 기록이다.
 	//
 	// ★ 왜 파일인가. 이 사건은 오래 `o.warn` 으로만 흘렀고 그 로거는 stderr 로 간다.
@@ -289,6 +297,7 @@ func (o *Outbox) Source() string { return o.source }
 func (o *Outbox) pendingPath() string  { return filepath.Join(o.dir, pendingName) }
 func (o *Outbox) pendingDir() string   { return filepath.Join(o.dir, pendingDirName) }
 func (o *Outbox) rejectedPath() string { return filepath.Join(o.dir, rejectedName) }
+func (o *Outbox) rejectedDir() string  { return filepath.Join(o.dir, rejectedDirName) }
 
 // entryFileName 은 키 하나가 갖는 파일 이름이다. 순수 함수다.
 //
@@ -728,12 +737,14 @@ func (o *Outbox) settleLegacy(done map[string]bool, bumpedKey string) error {
 				// ★ 이 문구는 오래 "재생 대상에서 뺀다(fd doctor 가 그 자리를 찍는다)"였고
 				// **둘 다 거짓이었다.** Replay 에는 키 가드가 없어 이 줄을 매번 다시 보내고,
 				// doctor 는 대기 건수만 찍지 이 줄의 자리를 안 찍는다. 그 문구를 읽은 사람은
-				// 이미 처리된 줄로 알고 넘어가는데, 실제로는 재생마다 거절당해 격리 파일이
-				// **fd 호출당 한 줄씩** 자란다 — 이 파일의 유일한 무한 증가원이다.
-				// 여기서 그 생성기를 닫지는 않는다(§9 판정이 따로 필요하다 — 후속으로 냈다).
+				// 이미 처리된 줄로 알고 넘어갔다.
+				//
+				// ★ 그다음 판은 "격리가 fd 호출마다 한 줄씩 는다"였고 **그것도 이제 거짓이다** —
+				// 격리가 사건당 파일이 되면서 같은 판단의 같은 거절은 한 건으로 끝난다.
+				// 반복되는 것은 파일이 아니라 **전송**이고, 생성기는 여전히 열려 있다
+				// (§9 판정이 따로 필요하다 — 후속으로 냈다).
 				o.warn("키 없는 줄이 큐에 있다 — 큐에 남기고 재생 대상에서도 안 뺀다. "+
-					"재생마다 다시 보내므로 거절당하면 격리가 fd 호출마다 한 줄씩 는다"+
-					"(fd doctor 의 '키 없는 N줄' 이 그 수다)",
+					"재생마다 다시 보내고 다시 거절당한다(격리 자리는 안 자란다 — 같은 거절은 한 건이다)",
 					"dir", o.dir, "path", e.Path)
 				out = append(out, e)
 				continue
@@ -922,28 +933,123 @@ func (o *Outbox) Replay(ctx context.Context, send func(context.Context, OutboxEn
 	return res, nil
 }
 
-// quarantine 은 영구 거절된 줄을 격리 파일로 옮긴다. **추가 전용이다.**
+// rejectedFileName 은 격리 **사건** 하나가 갖는 파일 이름이다. 순수 함수다.
+//
+// ★★ **판별자는 키가 아니다.** 앞선 판단(dbaf719)은 이 자리에 `rejected/<key>.json` 을
+// 후속으로 제안했는데, 그것은 **그 판단이 스스로 거절한 사유에 그대로 걸린다**:
+// "키는 판단의 정체성이지 **거절 사건의 정체성이 아니다** — 같은 키가 400('항목이 잠겨
+// 있다') 뒤 404('항목이 사라졌다')로 재격리되는 경로가 열려 있고(`Append` 는 pending 만
+// 보고 격리 이력을 안 본다), 키로 접으면 **나중 사실이 사라진다**." 키로 이름을 지으면
+// 그 둘째 사건이 EEXIST 로 조용히 없어진다 — 오늘 O_APPEND 판은 두 줄로 남기는 정보다.
+//
+// ★ 그래서 판별자는 **격리된 항목 전체 + 사유**다. 격리 시각(`RejectedEntry.At`)만 뺀다 —
+// 그것이 겹친 쌍둥이를 가르는 유일한 축이고(실측 격차 0.286ms), 정체성이 아니라 관측 시각이다.
+// 같은 판단이 같은 사유로 같은 시도 횟수에서 거절된 사건은 **하나**이고, 사유나 시도가
+// 다르면 **다른 사건**이다. dbaf719 의 실측이 그대로 근거다: 경합 쌍둥이는
+// 사유 296/296 동일 · Tries 296/296 동일.
+//
+// ★ **본문까지 넣는 이유는 빈 키다.** 키 없는 줄은 서로 별칭이고 재생마다 다시 격리된다.
+// 판별자에 본문이 없으면 서로 다른 빈 키 판단들이 같은 사유를 받았을 때 **한 파일로 접혀
+// 사라진다** — 세는 자리를 고치려다 판단을 잃는 것이고, 그것이 §9 위반이다.
+func rejectedFileName(r RejectedEntry) (string, error) {
+	buf, err := json.Marshal(struct {
+		Entry  OutboxEntry `json:"entry"`
+		Reason string      `json:"reason"`
+	}{Entry: r.Entry, Reason: r.Reason})
+	if err != nil {
+		return "", fmt.Errorf("격리 판별자 직렬화 실패: %w", err)
+	}
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:16]) + ".json", nil
+}
+
+// quarantine 은 영구 거절된 줄을 격리 자리로 옮긴다. **추가 전용이다.**
+//
+// ★ **같은 사건은 한 번만 들어간다.** 겹친 재생 둘이 같은 판단을 같은 사유로 거절하면
+// 같은 이름을 얻고 둘째는 EEXIST 로 끝난다 — 그 중복이 이 자리의 축이었고, 잠금으로는
+// 원리적으로 못 닫혔다(위 rejectedDirName 주석). **잠그지 않는 이유**도 같다: 잠글 것이
+// 없다. 그리고 잠그면 `Append` 와 같은 `.lock` 을 O(격리 파일)만큼 점유해 **유실 확률과
+// 중복을 맞바꾸는 거래**가 된다(그 파일은 비우는 경로가 없어 계속 자란다).
+//
+// ★ tmp + Link 인 이유는 Append 와 같다 — 이름만 원자적이면 남이 반쪽을 읽는다.
 func (o *Outbox) quarantine(r RejectedEntry) error {
-	if err := os.MkdirAll(filepath.Dir(o.rejectedPath()), 0o755); err != nil {
+	name, err := rejectedFileName(r)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(o.rejectedDir(), 0o755); err != nil {
 		return fmt.Errorf("격리 디렉토리 생성 실패: %w", err)
 	}
 	buf, err := json.Marshal(r)
 	if err != nil {
 		return fmt.Errorf("격리 직렬화 실패: %w", err)
 	}
-	f, err := os.OpenFile(o.rejectedPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("격리 파일 열기 실패: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.Write(append(buf, '\n')); err != nil {
+	tmp := filepath.Join(o.rejectedDir(), ".tmp-"+tmpNonce())
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("격리 기록 실패: %w", err)
+	}
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, filepath.Join(o.rejectedDir(), name)); err != nil {
+		if os.IsExist(err) {
+			return nil // 같은 사건이 이미 있다. 겹친 재생이 만드는 그 중복이다
+		}
+		return fmt.Errorf("격리 자리를 못 잡았다(%s): %w", name, err)
 	}
 	return nil
 }
 
-// Rejected 는 격리된 줄 전부다. 파일이 없으면 빈 목록이다(오류가 아니다).
-func (o *Outbox) Rejected() ([]RejectedEntry, error) { return readRejected(o.rejectedPath()) }
+// Rejected 는 격리된 것 전부다. 자리가 없으면 빈 목록이다(오류가 아니다).
+//
+// ★ 큐와 같이 **두 형식을 다 읽는다** — 사건당 파일(`rejected/`)과 옛 `rejected.jsonl`.
+// 다만 큐와 달리 **옛 파일이 저절로 사라지지 않는다**: 격리는 추가 전용이고 비우는 경로가
+// 코드에 없다(후속 `fd-rejected-and-failopen-files-have-no-retention-path`). 그래서 옛
+// 줄은 그 자리에 영원히 남고 이 함수가 계속 둘을 합쳐 낸다. 그 사실을 숨기지 않는다.
+//
+// ★ 격리 시각 오름차순 **안정** 정렬이다. doctor 가 이 목록을 그대로 찍으므로 순서가
+// 흔들리면 같은 상태가 실행마다 다르게 보인다.
+func (o *Outbox) Rejected() ([]RejectedEntry, error) {
+	out, err := readRejectedDir(o.rejectedDir())
+	legacy, lerr := readRejected(o.rejectedPath())
+	out = append(out, legacy...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	if err != nil {
+		return out, err
+	}
+	return out, lerr
+}
+
+// readRejectedDir 는 사건당 파일 격리 자리 하나를 읽는다. 디렉토리가 없으면 빈 목록이다.
+//
+// ★ 깨진 파일은 **조용히 안 버린다**(설계 §9). readEntryDir·readEntries 와 같은 규율이다.
+func readRejectedDir(dir string) ([]RejectedEntry, error) {
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("격리 디렉토리를 못 읽었다(%s): %w", dir, err)
+	}
+	out := make([]RejectedEntry, 0, len(des))
+	for _, de := range des {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return out, fmt.Errorf("격리 항목 %s 를 못 읽었다: %w", de.Name(), err)
+		}
+		var r RejectedEntry
+		if err := json.Unmarshal(b, &r); err != nil {
+			return out, fmt.Errorf("격리 항목 %s 를 해석하지 못했다: %w", de.Name(), err)
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
 
 // RejectedTally 는 격리 파일 하나를 사람이 읽을 수 있는 수 셋으로 접는다.
 //
