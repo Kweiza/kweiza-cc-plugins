@@ -597,7 +597,25 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 이 프로세스에 한 번이라도 닿았을 때만 참이다 — 안 닿는 사유는 `notice` 가 말한다.
 컨테이너로 띄우면 호스트 요청이 브리지 게이트웨이로 보여 면제가 구조적으로 안 걸린다.
 도달은 API 요청만 남긴다 — `/healthz` 는 게이트 앞이라 안 센다(컨테이너 헬스체크가 그 창을 30초마다 친다).
-모든 쓰기에 `Idempotency-Key: <session>:<seq>`.
+
+**브라우저는 헤더를 못 싣는다 — 그래서 화면 경로에만 쿠키 갈래가 있다.**
+`POST /login` 이 토큰을 대조해 `fd_token` 쿠키(`HttpOnly`·`SameSite=Strict`·`Path=/`·10년,
+TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `/events` 에서만** 그
+쿠키를 인정한다. `/api/v1/*` 는 헤더 전용 그대로다 — REST 쓰기는 `withScreenWrite` 의 출처
+대조를 안 타므로(`JudgeScreenWrite` 가 화면 경로만 `Screen=true`), 거기에 쿠키를 열면 REST
+쓰기 전체의 CSRF 방어가 `SameSite` 하나로 줄어든다. **헤더가 있으면 쿠키는 안 본다**
+(멱등 키와 같은 규율 — 무엇이 인증했는지가 요청마다 달라지면 안 된다).
+인증 안 된 요청 중 `Accept: text/html` 인 것만 **401 본문에 폼**을 받는다. 상태코드는
+401 그대로다 — 리다이렉트로 덮으면 인증 실패가 `/metrics` 의 unauthorized 축에서 사라진다.
+`/login`·`/logout` 은 게이트 앞이다(`JudgePreSessionPath`). 로그아웃은 그 브라우저의 쿠키만
+지운다 — 토큰 무효화는 `FD_TOKEN` 교체뿐이고 이 제품에 다른 길을 만들지 않는다.
+
+모든 쓰기에 `Idempotency-Key: <session>:<seq>` — 단 `/login`·`/logout` 은 통째로 빠진다.
+세션이 생기기 전의 요청이라 `<session>:<seq>` 를 만들 값 자체가 없다. **면제는 키 요구가
+아니라 멱등 표 진입 자체다** — 처음엔 키 요구만 면제했더니 빈 문자열 키로 표에 그대로
+들어가 서로 무관한 로그인 시도가 한 슬롯을 공유했고, 틀린 토큰의 401 이 캐시된 뒤 맞는
+토큰의 재시도가 fingerprint 불일치로 409 가 됐다(TTL 24시간). `JudgePreSessionPath` 가
+인증 게이트와 멱등 게이트 양쪽에서 이 둘을 함께 면제하는 이유다.
 
 **`/healthz` 의 `self_update` 는 서버가 자기 교체를 따라가고 있는가다**(축 자체는 §7).
 모양은 `internal/api/handlers_meta.go` 의 `SelfUpdateStatus` 가 정본이다. 읽는 순서에 규율이 있다 —
