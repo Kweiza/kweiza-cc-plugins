@@ -115,6 +115,22 @@ func ClassifyError(err error) Classified {
 		}
 	}
 
+	// ★ store.ConflictError(아래) 와 같은 자리에 안 둔 이유가 store.RemovalBlockedError
+	// 의 타입 주석에 있다 — conflictOf/ConflictAdvice 는 INSERT 방향("가리키는 좌표가
+	// 없다")만을 위해 지어졌고, 이 오류는 DELETE 방향("아직 이 좌표를 가리키는 행이
+	// 있다")이라 그 고정 문구를 그대로 쓰면 "세션 등록 실패"처럼 실제로 한 일과 반대로
+	// 말하는 문장이 나간다. Reason 은 store 층이 이미 사람이 읽을 한국어로 지어 뒀다.
+	var blocked *store.RemovalBlockedError
+	if errors.As(err, &blocked) {
+		return Classified{
+			Status:  http.StatusConflict,
+			Code:    "removal_blocked",
+			Message: blocked.Reason,
+			Guidance: "`fd project rm` 을 다시 실행해 무엇이 남았는지 다시 확인하라 — " +
+				"판정 이후 다른 프로젝트가 새로 만든 참조일 수 있다.",
+		}
+	}
+
 	var conflict *store.ConflictError
 	if errors.As(err, &conflict) {
 		return ConflictAdvice(conflict)

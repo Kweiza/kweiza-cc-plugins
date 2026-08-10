@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -66,6 +67,14 @@ type ProjectRemoval struct {
 //
 // ★ 세는 것과 지우는 것이 같은 함수인 이유: 다른 함수로 세면 세고 나서 지우기 전에 바뀐
 // 것을 못 본다. 같은 자리에서 세고 판정하고 지운다.
+//
+// ★ 이 함수의 판정 하나만으로는 부족하다 — 이 함수와 s.st.RemoveProject 는 **서로 다른
+// 트랜잭션**이라 그 사이 원장이 바뀔 수 있다(리뷰 #1). store.RemoveProject 는 자기
+// 트랜잭션 안에서 같은 순수 함수(store.JudgeProjectRemoval)를 한 번 더 평가하고,
+// 거절하면 *store.RemovalRefusedError 를 낸다 — 그것을 여기서 Refusal 로 접는다.
+// 두 번째 판정을 별도 오류(500 류)로 흘리지 않는 이유는, 그것은 사용자 잘못이 아니라
+// 서버가 정직하게 다시 확인한 결과이기 때문이다 — 처음부터 --yes 없이 불렀을 때와 같은
+// 모양(ProjectRemoval.Refusal)으로 보여야 CLI 가 문구를 새로 안 만든다.
 func (s *Service) RemoveProject(ctx context.Context, id, actor, reason string,
 	confirm bool) (ProjectRemoval, error) {
 
@@ -73,6 +82,13 @@ func (s *Service) RemoveProject(ctx context.Context, id, actor, reason string,
 		return ProjectRemoval{}, &RefusedError{What: "project remove",
 			Reason:   "사유가 비었다",
 			Guidance: "되돌릴 수 없는 삭제다 — 왜 지우는지를 적어라. 원장에 남는다."}
+	}
+	// ★ 존재 확인을 먼저 한다(리뷰 #5). 안 하면 오타 난 id 는 카운트가 전부 0이라
+	// 판정을 통과하고 "확인이 없다 … --yes 를 붙여라" 가 나간다 — 없는 프로젝트를
+	// 지우라고 권하는 꼴이다. GetProject 가 못 찾으면 그 자체가 이미 정확한 사유
+	// (store.NotFoundError → NFProject)라 그대로 올린다.
+	if _, err := s.st.GetProject(ctx, id); err != nil {
+		return ProjectRemoval{}, err
 	}
 	counts, err := s.st.ProjectRefCounts(ctx, id)
 	if err != nil {
@@ -88,6 +104,14 @@ func (s *Service) RemoveProject(ctx context.Context, id, actor, reason string,
 		return out, nil
 	}
 	if err := s.st.RemoveProject(ctx, id); err != nil {
+		var raced *store.RemovalRefusedError
+		if errors.As(err, &raced) {
+			// ★ Counts 도 재-판정 시점의 새 값으로 바꾼다 — 호출 밖의 낡은 Counts 를
+			// 그대로 두면 "0건이라며 왜 거절이냐"는 모순된 화면이 나간다.
+			out.Counts = raced.Counts
+			out.Refusal = raced.Reason
+			return out, nil
+		}
 		return ProjectRemoval{}, err
 	}
 	s.st.LogEvent(ctx, "project.removed", id, "", map[string]any{

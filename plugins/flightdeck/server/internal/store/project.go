@@ -259,21 +259,35 @@ var projectRefTables = []string{
 // 아니라서 RemoveProject 의 삭제 루프(projectRefTables 를 그대로 도는)는 이 둘을 안 본다.
 // event 는 지우지 않아서(위 주석), judgment_foreign 은 아예 이 프로젝트가 소유하지 않는
 // 남의 판단이라 지울 권한이 없어서(아래 주석) 그렇다.
+//
+// ★ **두 판(Store·Tx)이 같은 질의를 공유한다**(getProject·UpsertProject 가 쓰는 dbtx
+// 패턴). Tx 판이 필요한 이유는 RemoveProject 가 자기 트랜잭션 **안에서** 다시 세기
+// 때문이다(그 함수의 주석 참고 — 리뷰 #1). 질의를 두 벌로 베끼면 한쪽만 고쳐지는 날
+// Store 판과 Tx 판이 다른 것을 세게 된다.
 func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int, error) {
+	return projectRefCounts(ctx, s.db, id)
+}
+
+// ProjectRefCounts 는 진행 중인 트랜잭션 안에서 센다. RemoveProject 의 재-판정이 쓴다.
+func (t *Tx) ProjectRefCounts(id string) (map[string]int, error) {
+	return projectRefCounts(t.ctx, t.tx, id)
+}
+
+func projectRefCounts(ctx context.Context, q dbtx, id string) (map[string]int, error) {
 	out := make(map[string]int, len(projectRefTables)+2)
 	for _, tbl := range projectRefTables {
 		var n int
 		// ★ 표 이름은 위 projectRefTables 상수에서만 온다(외부 입력이 아니다) — 그래서
 		// 문자열 결합으로 SQL 을 짓는 것이 안전하다. tbl 이 사용자 입력이었다면 이 자리가
 		// SQL 인젝션 통로였을 것이다.
-		if err := s.db.QueryRowContext(ctx,
+		if err := q.QueryRowContext(ctx,
 			`SELECT count(*) FROM `+tbl+` WHERE project = ?`, id).Scan(&n); err != nil {
 			return nil, fmt.Errorf("행 수 조회 실패(table=%s, project=%q): %w", tbl, clip(id, 64), err)
 		}
 		out[tbl] = n
 	}
 	var ev int
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM event WHERE project = ?`, id).Scan(&ev); err != nil {
 		return nil, fmt.Errorf("이벤트 수 조회 실패(project=%q): %w", clip(id, 64), err)
 	}
@@ -291,8 +305,30 @@ func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int
 	// 단계)가 FK 위반으로 죽는다. 그래서 별도 질의로 센다: 이 축을 안 세면
 	// JudgeProjectRemoval 이 이 경로를 못 보고 통과시키고, 사람은 드라이버 원문 그대로의
 	// FK 오류("FOREIGN KEY constraint failed")만 받는다 — 무엇이 막았는지 아무도 모른다.
+	//
+	// ★ session(id) 를 CASCADE 없이 참조하는 표는 judgment 말고 **넷 더** 있다 —
+	// claim(schema.sql:196) · resource_hold(:318) · job(:337) · landing_queue
+	// (migrations/003:18). 넷 다 구조적으로 judgment 와 같은 취약점이 있다: ClaimItem·
+	// EnqueueLanding 등은 session_id 가 넘겨준 project 소속인지 검증하지 않는다(예:
+	// EnqueueLanding(project, sessionID, at) 은 project 와 sessionID 를 각자 받는다) —
+	// TestRemoveProjectTranslatesForeignLandingQueueFKViolation 이 그 경로로 실제 FK
+	// 위반을 재현한다. 그런데도 이 넷은 **미리 세지 않는다**. 이유가 judgment 와 다르다:
+	//   1. judgment 는 judgment_no_delete 트리거 때문에 **영원히** 못 지운다 — 세지 않으면
+	//      이 프로젝트는 그 판단이 남는 한 영구히 못 지워지는데, 그 사실 자체를 아무도
+	//      모른 채 "확인 없음" 문구만 반복해서 본다. claim·resource_hold·job·landing_queue
+	//      는 DELETE 대상이다(judgment_no_delete 같은 트리거가 없다) — 걸리면 RemoveProject
+	//      의 트랜잭션이 롤백될 뿐이고(아래 2차 방어가 사유를 낸다), 데이터 손실이 아니라
+	//      **삭제 실패**로 끝난다. 사람은 사유를 읽고 다시 시도하면 된다.
+	//   2. 넷의 project 값은 대개 **서비스 내부 로직**이 채운다(랜딩 큐 진입·선점·자원
+	//      점유는 세션이 이미 열려 있는 프로젝트 컨텍스트에서 서버가 조립한다) — judgment
+	//      처럼 사람이 명령줄마다 `--project` 를 손으로 치는 경로가 아니다. 실물로
+	//      어긋나려면 그 내부 로직 자체가 버그를 내야 하므로 발생 확률이 judgment(사람의
+	//      오타 하나) 보다 훨씬 낮다고 판단했다.
+	// 넷 다 셀 수도 있었지만(질의를 넷 더 늘리면 된다), 위 이유로 지금은 안 세는 쪽을
+	// 골랐다 — 세는 축을 늘릴수록 JudgeProjectRemoval 의 판정문이 늘어 사람이 읽는 표가
+	// 커지는데, 그 대가에 걸맞은 것은 "영원히 못 지운다"는 judgment 하나뿐이라고 봤다.
 	var foreignJudgment int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT count(*) FROM judgment
 		WHERE session_id IN (SELECT id FROM session WHERE project = ?)
 		  AND (project IS NULL OR project <> ?)`, id, id).Scan(&foreignJudgment); err != nil {
@@ -325,8 +361,19 @@ func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int
 // 안 부른다). 왜 "시도하고 잡아서 번역"(옵션 B) 을 1차 방어로 안 쓰는가: 그러면 매번
 // DELETE 를 실제로 던져 봐야 알 수 있고, 사람은 --yes 를 준 뒤에야 거절을 본다 —
 // 이 명령의 절반("무엇이 함께 지워질지 먼저 보여준다")이 --yes 없이도 성립해야 하는데
-// 시도-후-번역은 그 절반을 지키지 못한다. 다만 2차 방어로는 남겨 둔다(RemoveProject 의
-// 그 주석) — 판정과 삭제 사이의 레이스까지 사람이 읽을 사유를 받게 하기 위해서다.
+// 시도-후-번역은 그 절반을 지키지 못한다.
+//
+// ★ 이 함수는 **두 자리**에서 불린다 — service.RemoveProject(호출 밖, ProjectRefCounts 로
+// 세고 confirm 여부를 가른다) 와 RemoveProject(호출 안, 실제 삭제 직전에 다시 센다).
+// 그 둘은 판정 로직이 두 벌이 되는 것이 아니다. **같은 순수 함수를 두 번 평가**하는
+// 것뿐이다 — 표류하는 것은 로직 자체가 갈릴 때이지, 같은 함수를 두 자리에서 부르는
+// 것으로는 안 생긴다(리뷰 #1이 이 함수의 옛 주석 — "여기서 다시 세면 판정이 두 벌이
+// 된다" — 이 그 근거를 착각했다고 짚었다: 호출 밖의 판정과 실제 삭제 사이에는 물리적
+// 시간 간격이 있고, 그 사이 다른 세션이 fd add 로 항목을 넣으면 호출 밖 판정은 그것을
+// 못 본 채 지나간 뒤다. 판단이 새로 생기는 방향은 FK 가 막지만 — 삭제 루프가 judgment
+// 를 건너뛰므로 0건일 때만 무해하고, 그렇지 않으면 트리거가 죽는다 — **항목이 새로
+// 생기는 방향은 아무것도 안 막는다**. 그래서 RemoveProject 안에서 다시 세는 것이
+// 필요하다).
 func JudgeProjectRemoval(counts map[string]int) (bool, string) {
 	if n := counts["item"]; n > 0 {
 		return false, fmt.Sprintf("큐 항목이 %d건 있다 — 항목이 있는 프로젝트는 지우지 않는다. "+
@@ -346,17 +393,80 @@ func JudgeProjectRemoval(counts map[string]int) (bool, string) {
 	return true, "지울 수 있다 — 항목도 판단도 없다"
 }
 
+// RemovalRefusedError 는 RemoveProject 트랜잭션 **안에서** 다시 평가한 JudgeProjectRemoval
+// 이 거절했다는 뜻이다 — 호출 밖(service.RemoveProject)의 첫 판정과 이 트랜잭션 사이에
+// 원장이 바뀌었다(리뷰 #1: 대개 다른 세션이 fd add 로 항목을 새로 넣었다). 트랜잭션은
+// 롤백되어 **아무것도 안 지워졌다**. Counts 는 재-판정 시점의 새 값이다 — 호출 밖의 낡은
+// Counts 를 그대로 사람에게 보여주면 "0건이라며 왜 거절이냐"는 모순이 생긴다.
+type RemovalRefusedError struct {
+	Project string
+	Counts  map[string]int
+	Reason  string
+}
+
+func (e *RemovalRefusedError) Error() string {
+	return fmt.Sprintf("프로젝트 %q 삭제: 판정 이후 원장이 바뀌어 다시 거절됐다 — %s",
+		clip(e.Project, 64), e.Reason)
+}
+
+// RemovalBlockedError 는 RemoveProject 의 DELETE 하나가 참조 무결성 위반으로 막혔다는
+// 뜻이다 — **2차 방어**다(아래 RemoveProject 주석 참고). Reason 은 이미 사람이 읽을
+// 한국어 문장이고, Err 는 드라이버 원문을 로그용으로만 물고 있다(ConflictError 의 규율과
+// 같다 — constraint.go:90-93 "원인 전문은 Err 에 그대로 물려 둔다").
+//
+// ★ store.ConflictError(conflictOf/writeErr 의 정본 경로)를 그대로 안 썼다. 그 기구는
+// **INSERT 방향**("쓰려는 것이 가리키는 좌표가 없다")만을 위해 지어졌다 — 이 파일 밖
+// writeErr 호출부 전부(judgment.go·session.go·item.go·resource.go·landing.go)가 INSERT
+// 문이고 하나도 DELETE 가 없다. ConflictAdvice 의 ConflictMissingRef 분기는 고정 문구
+// "%s 등록 실패 — 가리키는 좌표(%s) 중 등록되지 않은 것이 있다"(internal/api/errors.go)를
+// 낸다 — DELETE 가 막힌 이 경우에 그대로 쓰면 "세션 등록 실패"처럼 **실제로 한 일(삭제)과
+// 반대로 말하는 문장**이 나간다. 그래서 별도 타입을 두고 ClassifyError 에 전용 분기를
+// 달았다 — ClaimHeldError·ResourceHeldError·ItemClosedError 가 이미 같은 이유로
+// conflictWordTable 밖에서 자기 문구를 쓰는 것과 같은 자리다.
+type RemovalBlockedError struct {
+	Project string
+	Table   string
+	Reason  string
+	Err     error
+}
+
+func (e *RemovalBlockedError) Error() string {
+	return fmt.Sprintf("프로젝트 %q 삭제가 표 %s 에서 막혔다: %s", clip(e.Project, 64), e.Table, e.Reason)
+}
+
+func (e *RemovalBlockedError) Unwrap() error { return e.Err }
+
 // RemoveProject 는 프로젝트와 거기 묶인 행 전부를 지운다.
 //
-// ★ 판정은 부르는 쪽이 한다(JudgeProjectRemoval). 여기서 다시 세면 판정이 두 벌이 되고,
-// 두 벌은 반드시 표류한다.
+// ★ 판정은 부르는 쪽이 한다(JudgeProjectRemoval) — 여기서 **다시** 판정하는 것은 판정
+// 로직을 두 벌로 만드는 것이 아니라 같은 순수 함수를 트랜잭션 경계 안에서 한 번 더
+// 평가하는 것이다(위 JudgeProjectRemoval 주석, 리뷰 #1). 왜 필요한가: 이 함수는
+// service.RemoveProject 가 이미 한 번 세고 판정한 **뒤에** 별도 호출로 불린다 — 그
+// 사이엔 물리적 시간 간격이 있고, 그 사이 다른 세션이 fd add 로 항목을 넣으면 그 항목은
+// 세어지지도 거절되지도 않은 채 DELETE FROM item WHERE project = ? 로 조용히 사라진다.
+//
+// ★ 이 재-셈이 실제로 경합을 닫는 이유: 이 DB 핸들은 DSN 에 _txlock=immediate 가 걸려
+// 있어(store.go 의 Tx 주석) s.Tx 가 BEGIN IMMEDIATE 로 열리고, **BEGIN 시점에 이미 쓰기
+// 잠금을 쥔다.** 그래서 이 함수가 시작된 순간부터 커밋·롤백까지 다른 모든 쓰기
+// 트랜잭션(다른 세션의 fd add 포함)은 그 잠금 뒤에 줄을 선다 — 이 안의 재-셈(SELECT)과
+// 아래 DELETE 사이에 새 행이 끼어드는 것이 SQLite 잠금 모델로 원리적으로 불가능하다.
+// 재-셈을 트랜잭션 **밖**(예: service 층)에서 한 번 더 해도 같은 시간 간격 문제가
+// 그대로 남는다 — 반드시 이 트랜잭션 **안**이어야 한다.
 //
 // ★ event 는 안 지운다 — projectRefTables 의 그 주석대로다.
 func (s *Store) RemoveProject(ctx context.Context, id string) error {
 	return s.Tx(ctx, func(t *Tx) error {
 		// 지운다는 사실을 **먼저** 예약한다. 예약 이벤트는 롤백 뒤에도 흘러서
-		// 아래가 통째로 죽어도 "무엇을 지우려 했나"가 원장에 남는다.
+		// 아래가 통째로 죽어도(재-판정 거절 포함) "무엇을 지우려 했나"가 원장에 남는다.
 		t.LogEvent("project.remove", id, "", map[string]any{"project": clip(id, 64)})
+
+		counts, err := t.ProjectRefCounts(id)
+		if err != nil {
+			return err
+		}
+		if ok, why := JudgeProjectRemoval(counts); !ok {
+			return &RemovalRefusedError{Project: id, Counts: counts, Reason: why}
+		}
 
 		for _, tbl := range projectRefTables {
 			if tbl == "judgment" {
@@ -367,7 +477,7 @@ func (s *Store) RemoveProject(ctx context.Context, id string) error {
 			}
 			if _, err := t.tx.ExecContext(t.ctx,
 				`DELETE FROM `+tbl+` WHERE project = ?`, id); err != nil {
-				if ferr := removalFKMessage(tbl, id, err); ferr != nil {
+				if ferr := removalFKMessage(id, tbl, err); ferr != nil {
 					return ferr
 				}
 				return fmt.Errorf("행 삭제 실패(table=%s, project=%q): %w", tbl, clip(id, 64), err)
@@ -375,7 +485,7 @@ func (s *Store) RemoveProject(ctx context.Context, id string) error {
 		}
 		res, err := t.tx.ExecContext(t.ctx, `DELETE FROM project WHERE id = ?`, id)
 		if err != nil {
-			if ferr := removalFKMessage("project", id, err); ferr != nil {
+			if ferr := removalFKMessage(id, "project", err); ferr != nil {
 				return ferr
 			}
 			return fmt.Errorf("프로젝트 삭제 실패(id=%q): %w", clip(id, 64), err)
@@ -395,24 +505,32 @@ func (s *Store) RemoveProject(ctx context.Context, id string) error {
 }
 
 // removalFKMessage 는 RemoveProject 의 **2차 방어**다. 삭제 도중 FK 위반이 나면 드라이버
-// 원문 대신 사람이 읽을 사유를 낸다. FK 위반이 아니면 nil 이다(호출부가 원래 오류를 그대로
-// fmt.Errorf 로 감싼다).
+// 원문 대신 사람이 읽을 사유를 담은 *RemovalBlockedError 를 낸다. FK 위반이 아니면 nil
+// 이다(호출부가 원래 오류를 그대로 fmt.Errorf 로 감싼다).
 //
-// ★ 1차 방어는 JudgeProjectRemoval 이다(judgment·judgment_foreign 카운트로 미리 거절) —
-// 정상 경로는 여기 절대 안 온다. 이 함수가 잡는 것은 **판정과 삭제 사이의 레이스**뿐이다:
-// ProjectRefCounts 로 센 시점과 이 DELETE 사이에 다른 세션이 이 프로젝트의 세션을 가리키는
-// 새 판단을 남기면(극히 드묾 — 사람이 --yes 를 눌러 부르는 단발 명령이라 창이 밀리초 단위다)
-// 여기로 온다. 그때도 "FOREIGN KEY constraint failed" 원문만 올리면 무엇이 막았는지
-// 아무도 모른다 — 그래서 한 번 더 번역한다.
-func removalFKMessage(tbl, id string, err error) error {
+// ★ 1차 방어는 JudgeProjectRemoval 의 재-판정이다(바로 위 RemoveProject 주석) — item·
+// judgment·judgment_foreign 세 축이 걸리는 레이스는 이제 여기 절대 안 온다(_txlock=immediate
+// 가 재-셈과 DELETE 사이의 끼어듦 자체를 막는다). 이 함수가 실제로 잡는 것은 **그 세
+// 축이 안 보는 나머지 넷**이다 — claim·resource_hold·job·landing_queue 도 session(id)
+// 를 CASCADE 없이 참조하는데(ProjectRefCounts 의 그 주석) 미리 세지 않기로 했으므로,
+// 다른 프로젝트의 그 표 행이 이 프로젝트의 세션을 가리키면 session 삭제 시점에 여기로
+// 온다(TestRemoveProjectTranslatesForeignLandingQueueFKViolation 이 landing_queue 로
+// 그 경로를 실제로 재현한다). 그때도 "FOREIGN KEY constraint failed" 원문만 올리면
+// 무엇이 막았는지 아무도 모른다 — 그래서 번역한다.
+func removalFKMessage(project, tbl string, err error) *RemovalBlockedError {
 	if JudgeConstraintCode(ConstraintCode(err)).Kind != ConflictMissingRef {
 		return nil
 	}
-	return fmt.Errorf(
-		"표 %s 를 지우는 중 참조 무결성 위반이 났다 — 세었을 때는 없던 참조가 그 사이 생겼을 "+
-			"수 있다(대개 다른 프로젝트의 판단이 이 프로젝트의 세션을 새로 가리켰다). "+
-			"`fd project rm` 을 다시 실행해 사유를 다시 확인하라(table=%s, project=%q): %w",
-		tbl, tbl, clip(id, 64), err)
+	return &RemovalBlockedError{
+		Project: project,
+		Table:   tbl,
+		Reason: fmt.Sprintf(
+			"표 %s 를 지우는 중 참조 무결성 위반이 났다 — 아마 다른 프로젝트의 claim·"+
+				"resource_hold·job·landing_queue 중 하나가 이 프로젝트의 세션을 아직 "+
+				"가리키고 있다(미리 세지 않는 축이다 — ProjectRefCounts 의 그 주석). "+
+				"`fd project rm` 을 다시 실행해 다시 확인하라", tbl),
+		Err: err,
+	}
 }
 
 // nullTime 은 제로값을 NULL 로 낸다.

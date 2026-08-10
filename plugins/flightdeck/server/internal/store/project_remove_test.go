@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +66,18 @@ func TestRemoveProjectRefusesWithForeignJudgment(t *testing.T) {
 // footprint 는 만들지 않았다. 그러면 이 시험은 "삭제 순서가 옳다"를 사실상 안 잰다:
 // 항목 6번째인 session 앞에 CASCADE 없는 FK 넷(landing_queue·claim·resource_hold·job)이
 // 오게 만든 바로 그 순서 결함(앞 태스크 8a7ca7f 의 리뷰 사유)이 이 시험으로는 안 걸린다.
-// 태스크 지시("삭제가 실제로 도는 것을 실물로 확인하라")대로 세션·선점·랜딩 줄 행·발자국을
-// 실제로 만들고, 지운 뒤 그 넷이 전부 없는지 직접 잰다.
+// 태스크 지시("삭제가 실제로 도는 것을 실물로 확인하라")대로 세션·랜딩 줄 행·발자국을
+// 실제로 만들고, 지운 뒤 그것들이 전부 없는지 직접 잰다.
+//
+// ★ 리뷰 #1 수정 이후 **item·claim 은 이 시험에 없다.** RemoveProject 가 이제 자기
+// 트랜잭션 안에서 JudgeProjectRemoval 을 다시 평가하므로(재-판정), item 이 하나라도
+// 있으면 직접 호출도 거절된다 — 그리고 claim 은 (project, item_id) → item(project, id)
+// 가 ON DELETE CASCADE 라 item 없이는 존재할 수 없다(claim.session_id 자체는 별개 FK지만
+// 그 행이 생기려면 먼저 item 이 있어야 한다 — ClaimItem 의 전제). 즉 "item=0 인데 claim>0"
+// 인 상태는 스키마 제약상 존재할 수 없고, item 이 있으면 애초에 재-판정이 막는다 — claim
+// 이 실제로 지워지는 것을 검증할 조합이 원리적으로 없다. claim 을 지우는 DELETE 문 자체는
+// projectRefTables 루프에 그대로 남아 있다(순서가 틀리면 여전히 FK 위반을 내야 하므로)ㅡ
+// 다만 이 성공 경로 시험으로는 그 문이 항상 0행에 대해 도는 것만 확인된다.
 func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -82,14 +93,6 @@ func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 	sess, _, err := s.OpenSession(ctx, "junk", "m1", "/tmp/junk", "cc1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("세션 열기 실패: %v", err)
-	}
-	if err := s.AddItem(ctx, model.Item{
-		Project: "junk", ID: "i1", Title: "t", Body: "b", CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("항목 등록 실패: %v", err)
-	}
-	if _, err := s.ClaimItem(ctx, "junk", "i1", sess.ID, time.Time{}); err != nil {
-		t.Fatalf("선점 실패: %v", err)
 	}
 	if err := s.Tx(ctx, func(tx *Tx) error {
 		_, err := tx.EnqueueLanding("junk", sess.ID, time.Now().UTC())
@@ -109,13 +112,11 @@ func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 		t.Fatal("프로젝트가 그대로 있다")
 	}
 
-	// ⑵ 자식 행이 전부 없다 — session_workspace·claim·landing_queue·session 은 projectRefTables
+	// ⑵ 자식 행이 전부 없다 — session_workspace·landing_queue·session 은 projectRefTables
 	// 가 직접 지우고, footprint 는 session ON DELETE CASCADE 로 딸려 사라져야 한다.
 	for _, q := range []struct{ tbl, sql string }{
 		{"session", `SELECT count(*) FROM session WHERE project = 'junk'`},
-		{"claim", `SELECT count(*) FROM claim WHERE project = 'junk'`},
 		{"landing_queue", `SELECT count(*) FROM landing_queue WHERE project = 'junk'`},
-		{"item", `SELECT count(*) FROM item WHERE project = 'junk'`},
 		{"footprint", `SELECT count(*) FROM footprint WHERE session_id = '` + sess.ID + `'`},
 	} {
 		var n int
@@ -139,15 +140,83 @@ func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 	}
 }
 
-// TestRemoveProjectTranslatesForeignJudgmentFKViolation 은 RemoveProject 자신의 방어 2중을
-// 잰다: 사전 판정(JudgeProjectRemoval)을 건너뛰고(또는 판정과 삭제 사이에 레이스가 나서)
-// 다른 프로젝트의 판단이 이 프로젝트의 세션을 가리키는 채로 삭제를 시도하면, 드라이버
-// 원문("FOREIGN KEY constraint failed") 대신 사람이 읽을 수 있는 사유가 나와야 한다.
+// TestRemoveProjectRejudgesInsideTransactionCatchesLateItem 은 리뷰 #1 이 지적한 경합을
+// 결정론적으로 재현한다: service.RemoveProject 가 이미 "항목 0건"으로 판정한 **뒤**,
+// 실제 삭제 트랜잭션이 열리기 **전**에 다른 세션이 fd add 로 항목을 넣으면 어떻게 되는지를
+// 순서를 고정해 재현한다(진짜 고루틴 경합은 타이밍에 의존해 들쭉날쭉하다 — 이 순서 자체가
+// 곧 경합이 뜻하는 바이므로 순차 재현으로 충분하다).
 //
-// ★ 정상 경로에서는 JudgeProjectRemoval 이 judgment_foreign 카운트로 여기 닿기 전에 이미
-// 거절한다(TestRemoveProjectRefusesWithForeignJudgment). 이 시험은 그 1차 방어를 우회해
-// store.RemoveProject 를 직접 불러 **2차 방어**(FK 오류 번역)만 단독으로 잰다.
-func TestRemoveProjectTranslatesForeignJudgmentFKViolation(t *testing.T) {
+// ★ 이것이 통과하려면 RemoveProject 가 **자기 트랜잭션 안에서** 다시 세고 다시 판정해야
+// 한다 — 트랜잭션 밖에서(예: service 층에서 한 번 더) 다시 세면 이 시험이 흉내 낸 것과
+// 똑같은 시간 간격이 그 재-셈과 실제 DELETE 사이에도 남아 문제를 안 닫는다.
+func TestRemoveProjectRejudgesInsideTransactionCatchesLateItem(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	if err := s.UpsertProject(ctx, model.Project{
+		ID: "junk", Path: "/tmp/junk", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("등록 실패: %v", err)
+	}
+
+	// ① service.RemoveProject 가 부를 자리 — "항목 0건" 을 확인한다(호출 밖 판정).
+	counts, err := s.ProjectRefCounts(ctx, "junk")
+	if err != nil {
+		t.Fatalf("사전 조회 실패: %v", err)
+	}
+	if counts["item"] != 0 {
+		t.Fatalf("전제가 깨졌다 — item %d, 기대 0", counts["item"])
+	}
+	if ok, why := JudgeProjectRemoval(counts); !ok {
+		t.Fatalf("전제가 깨졌다 — 사전 판정이 이미 거절했다: %s", why)
+	}
+
+	// ② 그 사이 다른 세션이 fd add 로 항목을 넣는다.
+	if err := s.AddItem(ctx, model.Item{
+		Project: "junk", ID: "late", Title: "t", Body: "b", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("항목 등록 실패: %v", err)
+	}
+
+	// ③ confirm=true 로 실제 삭제를 부른다 — 트랜잭션 안의 재-판정이 새 항목을 봐야 한다.
+	err = s.RemoveProject(ctx, "junk")
+	var raced *RemovalRefusedError
+	if !errors.As(err, &raced) {
+		t.Fatalf("RemovalRefusedError 를 기대했는데 %v(타입 %T) 다", err, err)
+	}
+	if !strings.Contains(raced.Reason, "항목") {
+		t.Fatalf("사유가 무엇이 막았는지를 안 말한다: %q", raced.Reason)
+	}
+	if raced.Counts["item"] != 1 {
+		t.Fatalf("재-판정 카운트가 새 항목을 못 봤다: item=%d", raced.Counts["item"])
+	}
+
+	// 프로젝트도 새 항목도 그대로 있어야 한다 — 트랜잭션이 롤백됐다는 뜻이다.
+	if _, gerr := s.GetProject(ctx, "junk"); gerr != nil {
+		t.Fatalf("거절됐는데 프로젝트가 지워졌다: %v", gerr)
+	}
+	if _, gerr := s.GetItem(ctx, "junk", "late"); gerr != nil {
+		t.Fatalf("거절됐는데 항목이 사라졌다: %v", gerr)
+	}
+}
+
+// TestRemoveProjectRefusesRaceViaInternalRejudge 는 RemoveProject 의 **재-판정**(리뷰 #1)
+// 이 사전 판정(JudgeProjectRemoval 의 호출 밖 평가)을 아예 건너뛴 직접 호출도 잡아낸다는
+// 단정이다. "other" 프로젝트의 판단이 "junk" 의 세션을 가리키는 채로 store.RemoveProject
+// 를 곧장 부른다 — 트랜잭션 안의 재-판정이 judgment_foreign 카운트로 이것도 잡아서
+// *RemovalRefusedError 로 깔끔하게 거절해야 한다.
+//
+// ★ 리뷰 #1 이전에는 이 시나리오가 실제 FK 위반까지 가서 RemovalBlockedError(2차 방어,
+// 옛 이름 removalFKMessage)로 번역됐었다. 이제는 안 그런다 — _txlock=immediate 가 재-셈과
+// DELETE 사이의 끼어듦 자체를 막으므로(RemoveProject 의 그 주석), judgment_foreign 축은
+// 더는 2차 방어에 도달하지 않는다. 2차 방어가 실제로 잡는 것은 ProjectRefCounts 가 미리
+// 안 세는 나머지 넷(claim·resource_hold·job·landing_queue) 뿐이다 —
+// TestRemoveProjectTranslatesForeignLandingQueueFKViolation 이 그 경로를 잰다.
+//
+// ★ 이 시험은 ProjectRefCounts 가 실제로 judgment_foreign 을 세는지도 함께 잰다(리뷰 #3) —
+// 그 질의가 항상 0을 내도록 퇴행하면 사전 판정도 이 재-판정도 이 교차 판단을 못 본 채
+// 통과시킨다.
+func TestRemoveProjectRefusesRaceViaInternalRejudge(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 
@@ -173,12 +242,74 @@ func TestRemoveProjectTranslatesForeignJudgmentFKViolation(t *testing.T) {
 		t.Fatalf("판단 저장 실패: %v", err)
 	}
 
-	err = s.RemoveProject(ctx, "junk") // 사전 판정을 거치지 않고 직접 부른다
-	if err == nil {
-		t.Fatal("FK 위반이 나야 하는데 성공했다")
+	// ProjectRefCounts 가 이 교차 참조를 실제로 세는지(리뷰 #3).
+	counts, err := s.ProjectRefCounts(ctx, "junk")
+	if err != nil {
+		t.Fatalf("카운트 조회 실패: %v", err)
 	}
-	if !strings.Contains(err.Error(), "참조 무결성") {
-		t.Fatalf("원문 FK 오류만 나왔다 — 무엇이 막았는지 사람이 못 읽는다: %v", err)
+	if counts["judgment_foreign"] != 1 {
+		t.Fatalf("judgment_foreign 이 %d, 기대 1 — 이 질의가 퇴행하면 판정이 이 교차 판단을 "+
+			"못 본 채 통과시킨다", counts["judgment_foreign"])
+	}
+
+	err = s.RemoveProject(ctx, "junk") // 사전 판정을 거치지 않고 직접 부른다
+	var raced *RemovalRefusedError
+	if !errors.As(err, &raced) {
+		t.Fatalf("RemovalRefusedError 를 기대했는데 %v(타입 %T) 다", err, err)
+	}
+	if !strings.Contains(raced.Reason, "판단") {
+		t.Fatalf("사유가 무엇이 막았는지를 안 말한다: %q", raced.Reason)
+	}
+	// junk 프로젝트는 실패 뒤에도 그대로 있어야 한다(트랜잭션 롤백).
+	if _, gerr := s.GetProject(ctx, "junk"); gerr != nil {
+		t.Fatalf("실패했는데 프로젝트가 지워졌다: %v", gerr)
+	}
+}
+
+// TestRemoveProjectTranslatesForeignLandingQueueFKViolation 은 RemoveProject 의 진짜
+// **2차 방어**(RemovalBlockedError)를 잰다. judgment_foreign 축은 이제 재-판정(1차 방어,
+// 리뷰 #1)이 트랜잭션 진입 직후 잡으므로 여기 안 온다 — 2차 방어가 실제로 잡는 것은
+// ProjectRefCounts 가 미리 안 세는 나머지 넷(claim·resource_hold·job·landing_queue,
+// ProjectRefCounts 의 그 주석) 이다. landing_queue 를 골랐다 — EnqueueLanding(project,
+// sessionID, at) 이 judgment 의 NoteInput 과 같은 모양으로 project 와 sessionID 를 각자
+// 받고 서로 검증하지 않는다.
+func TestRemoveProjectTranslatesForeignLandingQueueFKViolation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	for _, id := range []string{"junk", "other"} {
+		if err := s.UpsertProject(ctx, model.Project{
+			ID: id, Path: "/tmp/" + id, DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("등록 실패(%s): %v", id, err)
+		}
+	}
+	if err := s.UpsertMachine(ctx, model.Machine{ID: "m1", Hostname: "h"}); err != nil {
+		t.Fatalf("머신 등록 실패: %v", err)
+	}
+	sess, _, err := s.OpenSession(ctx, "junk", "m1", "/tmp/junk", "cc1", "", time.Time{})
+	if err != nil {
+		t.Fatalf("세션 열기 실패: %v", err)
+	}
+	// "other" 프로젝트의 랜딩 줄 행이 "junk" 의 세션을 가리킨다 — 교차 참조.
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		_, err := tx.EnqueueLanding("other", sess.ID, time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatalf("랜딩 줄 등록 실패: %v", err)
+	}
+
+	err = s.RemoveProject(ctx, "junk")
+	var blocked *RemovalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("RemovalBlockedError 를 기대했는데 %v(타입 %T) 다", err, err)
+	}
+	if strings.Contains(blocked.Reason, "FOREIGN KEY") {
+		t.Fatalf("원문 FK 오류가 사유에 새어 나왔다: %q", blocked.Reason)
+	}
+	if blocked.Table != "session" {
+		t.Fatalf("표가 %q, 기대 session — junk 자신의 landing_queue 는 비어 있어 그 줄은 "+
+			"무해하게 지워지고, 실제로 걸리는 것은 session 삭제여야 한다", blocked.Table)
 	}
 	// junk 프로젝트는 실패 뒤에도 그대로 있어야 한다(트랜잭션 롤백).
 	if _, gerr := s.GetProject(ctx, "junk"); gerr != nil {

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // TestProjectLsPrintsAxisAndCounts 는 ls 의 출력 계약이다.
@@ -69,6 +71,11 @@ func TestProjectRmNeedsReason(t *testing.T) {
 
 // TestProjectRmWithoutYesOnlyCounts 는 --yes 없이는 세기만 한다는 단정이다.
 // 되돌릴 수 없는 일이라 이 한 단계가 이 명령의 절반이다.
+//
+// ★ 리뷰 #6: 브리프 원안은 자식 행이 하나도 없는 프로젝트를 썼다 — 그러면 카운트 루프가
+// 한 줄도 안 찍혀 "무엇이 함께 지워질지 먼저 보여준다"는 이 명령의 절반이 어떤 시험에서도
+// 0 아닌 값으로 검증된 적이 없었다. 세션을 하나 열어 표 이름과 수가 실제로 출력에
+// 찍히는지, 그리고 event 는 안 지운다는 안내가 실제로 나오는지 함께 잰다.
 func TestProjectRmWithoutYesOnlyCounts(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -76,6 +83,12 @@ func TestProjectRmWithoutYesOnlyCounts(t *testing.T) {
 		ID: "junk", Path: "/tmp/junk", DefaultBranch: "main",
 	}); err != nil {
 		t.Fatalf("등록 실패: %v", err)
+	}
+	if err := h.st.UpsertMachine(ctx, model.Machine{ID: "m1", Hostname: "h"}); err != nil {
+		t.Fatalf("머신 등록 실패: %v", err)
+	}
+	if _, _, err := h.st.OpenSession(ctx, "junk", "m1", "/tmp/junk", "cc1", "", time.Time{}); err != nil {
+		t.Fatalf("세션 열기 실패: %v", err)
 	}
 
 	code, out := h.run("", "project", "rm", "--project", "junk", "--reason", "워크트리 잔해다")
@@ -85,9 +98,31 @@ func TestProjectRmWithoutYesOnlyCounts(t *testing.T) {
 	if !strings.Contains(out, "--yes") {
 		t.Fatalf("어떻게 실제로 지우는지를 안 말한다\n%s", out)
 	}
+	// 무엇이 함께 지워질지 먼저 보여주는 것이 이 명령의 절반이다 — 표 이름과 수가
+	// 실제로 출력에 찍히는지 잰다(cmd/fd/project.go 의 "  %-20s %d\n" 형식).
+	if !regexp.MustCompile(`(?m)^\s*session\s+1\s*$`).MatchString(out) {
+		t.Fatalf("자식 행 카운트(session 1)가 출력에 안 보인다\n%s", out)
+	}
+	if !strings.Contains(out, "event 는 안 지운다") {
+		t.Fatalf("event 를 안 지운다는 안내가 없다\n%s", out)
+	}
 	// ★ 실물 서버라 여기서 원장을 직접 본다 — "안 지웠다"가 출력이 아니라 사실이어야 한다.
 	if _, err := h.st.GetProject(ctx, "junk"); err != nil {
 		t.Fatalf("--yes 가 없는데 지워졌다: %v", err)
+	}
+}
+
+// TestProjectRmRefusesUnknownProjectWithoutSuggestingYes 는 리뷰 #5 다: 등록되지 않은
+// 프로젝트는 카운트가 전부 0이라 판정만 보면 통과하는데, 존재 확인이 없으면 "확인이
+// 없다 … --yes 를 붙여라"가 그대로 나가 **없는 것을 지우라고 권하는** 꼴이 된다.
+func TestProjectRmRefusesUnknownProjectWithoutSuggestingYes(t *testing.T) {
+	h := newHarness(t)
+	code, out := h.run("", "project", "rm", "--project", "no-such-project", "--reason", "오타 테스트")
+	if code != 1 {
+		t.Fatalf("종료코드 %d, 기대 1\n%s", code, out)
+	}
+	if strings.Contains(out, "--yes") {
+		t.Fatalf("없는 프로젝트에 --yes 를 권했다\n%s", out)
 	}
 }
 
@@ -151,5 +186,60 @@ func TestProjectRmDeletesJunkProject(t *testing.T) {
 	}
 	if _, err := h.st.GetProject(ctx, "junk"); err == nil {
 		t.Fatal("--yes 를 줬는데 프로젝트가 그대로 있다")
+	}
+}
+
+// TestProjectRmSurfacesBlockedRemovalReasonNotRawFK 는 리뷰 #2 를 **CLI 출력까지** 잰다.
+// removalFKMessage(지금은 *store.RemovalBlockedError)가 번역한 사유가 실제로 사람에게
+// 닿는지 — 이전에는 타입 없는 fmt.Errorf 라 internal/api 의 ClassifyError 가 못 가리고
+// 마지막 default(500 + "서버 내부 오류다")로 떨어져, 공들여 쓴 한글 사유가 서버 로그에만
+// 남고 CLI 는 "지우지 못했다: 서버 내부 오류다…"만 찍었다.
+//
+// ★ "other" 프로젝트의 랜딩 줄 행이 "junk" 의 세션을 가리키게 만든다 — landing_queue 는
+// ProjectRefCounts 가 미리 안 세는 축이라(ProjectRefCounts 의 그 주석, 리뷰 #4) 사전
+// 판정도 RemoveProject 안의 재-판정(리뷰 #1)도 못 잡고, 실제 DELETE 가 걸려야 2차 방어를
+// 탄다 — TestRemoveProjectTranslatesForeignLandingQueueFKViolation 과 같은 픽스처다.
+func TestProjectRmSurfacesBlockedRemovalReasonNotRawFK(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	for _, id := range []string{"junk", "other"} {
+		if err := h.st.UpsertProject(ctx, model.Project{
+			ID: id, Path: "/tmp/" + id, DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("등록 실패(%s): %v", id, err)
+		}
+	}
+	if err := h.st.UpsertMachine(ctx, model.Machine{ID: "m1", Hostname: "h"}); err != nil {
+		t.Fatalf("머신 등록 실패: %v", err)
+	}
+	sess, _, err := h.st.OpenSession(ctx, "junk", "m1", "/tmp/junk", "cc1", "", time.Time{})
+	if err != nil {
+		t.Fatalf("세션 열기 실패: %v", err)
+	}
+	if err := h.st.Tx(ctx, func(tx *store.Tx) error {
+		_, err := tx.EnqueueLanding("other", sess.ID, time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatalf("랜딩 줄 등록 실패: %v", err)
+	}
+
+	code, out := h.run("", "project", "rm", "--project", "junk", "--reason", "지워 본다", "--yes")
+	if code != 1 {
+		t.Fatalf("종료코드 %d, 기대 1\n%s", code, out)
+	}
+	low := strings.ToLower(out)
+	if strings.Contains(low, "foreign key") {
+		t.Fatalf("드라이버 원문(FOREIGN KEY)이 새어 나왔다\n%s", out)
+	}
+	if strings.Contains(out, "서버 내부 오류") {
+		t.Fatalf("500(내부 오류)으로 접혔다 — ClassifyError 가 RemovalBlockedError 를 "+
+			"못 가렸다는 뜻이다\n%s", out)
+	}
+	if !strings.Contains(out, "참조 무결성") {
+		t.Fatalf("무엇이 막았는지를 안 말한다\n%s", out)
+	}
+	// junk 프로젝트는 실패 뒤에도 그대로 있어야 한다(트랜잭션 롤백).
+	if _, gerr := h.st.GetProject(ctx, "junk"); gerr != nil {
+		t.Fatalf("실패했는데 프로젝트가 지워졌다: %v", gerr)
 	}
 }
