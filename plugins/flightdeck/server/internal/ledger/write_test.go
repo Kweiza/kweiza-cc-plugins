@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -541,5 +542,35 @@ func TestWriteSweepsDebrisFromAnEarlierCrash(t *testing.T) {
 	if _, err := os.Stat(debris); !os.IsNotExist(err) {
 		t.Error("성공한 실행이 앞선 급사의 잔해를 그대로 뒀다 — " +
 			"판단 본문이 든 몇 MB 가 급사마다 쌓이고 not-empty 항목 수를 부풀린다")
+	}
+}
+
+// TestJudgeRestoreSchemaRefusesAnyMismatch 는 복원의 **안전핀**을 문다.
+//
+// ★ 지금까지 manifest.schema_version 을 보는 자리가 하나도 없었다 — Read 도
+// store.WriteLedger 도 안 봤고, "무손실의 안전핀"이라는 주석만 있었다. 스키마가 5로
+// 오른 뒤 4로 뜬 원장을 되읽으면 5에서 생긴 컬럼이 JSONL 에 없어 영값으로 들어가고,
+// NULL 이어야 할 자리가 ""가 되거나 NOT NULL 위반으로 트랜잭션 전체가 죽는다.
+// 반대 방향은 이 바이너리가 모르는 컬럼이 실려 오는 것이다.
+//
+// 어느 방향이든 거절한다. 세대를 맞추는 것은 이 명령이 할 수 있는 일이 아니고,
+// 조용히 넣는 것보다 "그 판의 바이너리로 넣어라"가 복구 가능하다.
+func TestJudgeRestoreSchemaRefusesAnyMismatch(t *testing.T) {
+	if err := JudgeRestoreSchema(4, 4); err != nil {
+		t.Errorf("같은 판인데 거절했다: %v", err)
+	}
+	for _, c := range []struct{ ledger, code int }{{3, 4}, {5, 4}} {
+		err := JudgeRestoreSchema(c.ledger, c.code)
+		if err == nil {
+			t.Errorf("원장 %d · 바이너리 %d 를 그대로 통과시켰다 — "+
+				"세대가 다른 원장을 되쓰면 조용히 깨진다", c.ledger, c.code)
+			continue
+		}
+		// 두 수를 다 말해야 운영자가 어느 판의 바이너리를 찾아야 하는지 안다.
+		for _, want := range []string{strconv.Itoa(c.ledger), strconv.Itoa(c.code)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("거절 문구가 %q 를 안 말한다: %v", want, err)
+			}
+		}
 	}
 }

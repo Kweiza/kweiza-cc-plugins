@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kweiza/flightdeck/internal/ledger"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 // 이관 CLI 의 소비자 좌표계는 **stdout 과 파일시스템**이다.
@@ -406,5 +407,170 @@ func TestExportJudgmentsRefusesGitWorktreeEvenWithForce(t *testing.T) {
 				"레포에 섞여 들어간다:\n%s", force, out)
 		}
 		mustContain(t, "거절 문구", out, "되쓰기 거절", "git-worktree")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `fd import --judgments` — 복원 명령이 없어서 오늘 이 산출물로 복원하는 방법은
+// Go 시험을 쓰는 것뿐이었다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// readManifestCounts 는 dir/manifest.json 의 건수다.
+func readManifestCounts(t *testing.T, dir string) ledger.Counts {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest.json 을 못 읽었다: %v", err)
+	}
+	var m ledger.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("manifest.json 파싱 실패: %v", err)
+	}
+	return m.Counts
+}
+
+// 내보낸 원장이 **빈 DB 에** 그대로 들어간다. 이것이 "무손실"의 실물 증명이다.
+func TestImportJudgmentsRestoresIntoEmptyDB(t *testing.T) {
+	h := newHarness(t)
+	if rc, out := h.run("", "note", "--kind", "decision", "--body", "복원 대상 판단"); rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+	want := readManifestCounts(t, outDir)
+	if want.Judgments == 0 || want.Sessions == 0 {
+		t.Fatalf("픽스처가 빈약하다 — 이 시험이 아무것도 안 본다: %+v", want)
+	}
+
+	// 빈 DB 에 넣는다. 미리 심어 둘 것이 하나도 없어야 한다.
+	fresh := filepath.Join(t.TempDir(), "restored.db")
+	rc, out := h.run("", "import", "--judgments", "--from", outDir, "--db", fresh, "--apply")
+	if rc != 0 {
+		t.Fatalf("되쓰기 실패(rc=%d): %s", rc, out)
+	}
+	mustContain(t, "되쓰기 출력", out, "fd import --judgments", "넣음")
+
+	// 복원본에서 다시 뜬 원장이 원본과 같은 건수여야 한다.
+	backDir := filepath.Join(t.TempDir(), "ledger-back")
+	if rc, out := h.run("", "export", "--judgments", "--out", backDir, "--db", fresh); rc != 0 {
+		t.Fatalf("복원본 내보내기 실패: %s", out)
+	}
+	if got := readManifestCounts(t, backDir); got != want {
+		t.Errorf("복원본의 건수가 원본과 다르다:\n  원본: %+v\n  복원: %+v", want, got)
+	}
+}
+
+// 예행은 **DB 를 열지도 않는다**. 여는 것만으로 파일이 생기면 "안 건드린다"가 거짓이다.
+func TestImportJudgmentsDryRunDoesNotCreateDB(t *testing.T) {
+	h := newHarness(t)
+	if rc, out := h.run("", "note", "--kind", "decision", "--body", "판단"); rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+
+	never := filepath.Join(t.TempDir(), "안생겨야한다.db")
+	rc, out := h.run("", "import", "--judgments", "--from", outDir, "--db", never)
+	if rc != 0 {
+		t.Fatalf("예행이 실패했다(rc=%d): %s", rc, out)
+	}
+	mustContain(t, "예행 출력", out, "예행이다", "--apply")
+	if _, err := os.Stat(never); !os.IsNotExist(err) {
+		t.Errorf("예행이 DB 파일을 만들었다 — 한 바이트도 안 건드린다는 계약이 거짓이 된다: %v", err)
+	}
+}
+
+// 세대가 다른 원장은 거절한다 — 지금까지 manifest.schema_version 을 보는 자리가 없었다.
+func TestImportJudgmentsRefusesSchemaVersionMismatch(t *testing.T) {
+	h := newHarness(t)
+	if rc, out := h.run("", "note", "--kind", "decision", "--body", "판단"); rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+	// 매니페스트의 스키마 판만 바꾼다 — 다른 값은 그대로라 건수 대조는 통과한다.
+	mp := filepath.Join(outDir, "manifest.json")
+	body, err := os.ReadFile(mp)
+	if err != nil {
+		t.Fatalf("manifest 읽기 실패: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("manifest 파싱 실패: %v", err)
+	}
+	raw["schema_version"] = store.SchemaVersion + 1
+	fixed, _ := json.Marshal(raw)
+	if err := os.WriteFile(mp, fixed, 0o600); err != nil {
+		t.Fatalf("manifest 쓰기 실패: %v", err)
+	}
+
+	fresh := filepath.Join(t.TempDir(), "restored.db")
+	rc, out := h.run("", "import", "--judgments", "--from", outDir, "--db", fresh, "--apply")
+	if rc == 0 {
+		t.Fatalf("세대가 다른 원장을 그대로 되썼다 — 컬럼이 조용히 어긋난다:\n%s", out)
+	}
+	mustContain(t, "거절 문구", out, "되쓰기 거절", "스키마")
+}
+
+// 비어 있지 않은 DB 에는 안 넣는다 — 병합 복원은 다른 연산이다.
+func TestImportJudgmentsRefusesNonEmptyDB(t *testing.T) {
+	h := newHarness(t)
+	if rc, out := h.run("", "note", "--kind", "decision", "--body", "판단"); rc != 0 {
+		t.Fatalf("판단 등록 실패: %s", out)
+	}
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "ledger-out")
+	if rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db); rc != 0 {
+		t.Fatalf("내보내기 실패: %s", out)
+	}
+	// 대상이 원본 자신이다 — 폐포가 비어 있지 않다.
+	rc, out := h.run("", "import", "--judgments", "--from", outDir, "--db", h.db, "--apply")
+	if rc == 0 {
+		t.Fatalf("비어 있지 않은 DB 에 부어넣었다 — 어느 행이 어디서 왔는지 못 가른다:\n%s", out)
+	}
+	mustContain(t, "거절 문구", out, "되쓰기 거절", "비어 있지 않다", "병합")
+}
+
+// 두 이관은 원본도 대상도 다르다 — 섞어 주면 어느 쪽인지 알 수 없다.
+func TestImportJudgmentsRefusesContradictoryFlags(t *testing.T) {
+	h := newHarness(t)
+	code := t.TempDir()
+
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"--judgments 인데 --from 이 없다",
+			[]string{"import", "--judgments", "--apply"}, "--from 이 비었다"},
+		{"--judgments 와 레거시 원본을 함께 줬다",
+			[]string{"import", "--judgments", "--from", code, "--from-code", code}, "함께 못 준다"},
+		{"--from 만 주고 --judgments 를 안 줬다",
+			[]string{"import", "--from", code, "--from-code", code}, "--judgments 와 함께만"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rc, out := h.run("", c.args...)
+			if rc == 0 {
+				t.Fatalf("모순된 플래그를 받아들였다:\n%s", out)
+			}
+			mustContain(t, "거절 문구", out, c.want)
+		})
 	}
 }
