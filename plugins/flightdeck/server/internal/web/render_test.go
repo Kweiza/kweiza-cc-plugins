@@ -446,9 +446,16 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 	// 로그아웃 폼은 아래 셈에서 뺀다 — 이유는 바로 아래 ★ 주석.
 	// 먼저 그 폼이 실제로 정확히 하나 있는지부터 확인한다: 없거나 여럿이면
 	// 아래 뺄셈이 조용히 틀린 수를 통과시킨다.
-	logoutForms := strings.Count(html, `<form class="logout"`)
+	//
+	// ★ 세는 문자열이 **여는 태그 통째**다(logoutFormOpen — login_test.go 가 같은 값으로
+	// 로그아웃의 존재를 단정한다). `<form class="logout"` 만 세면 클래스가 붙은 폼이
+	// GET 으로 바뀌어도 여기서는 하나로 세고, 그러면 아래 POST 뺄셈이 하나 어긋나
+	// **로그아웃과 무관한 자리에서** 빨개진다 — 원인이 그 메시지에서 안 보인다.
+	// 의미적 앵커(POST · action="logout")를 함께 묶으면 이 줄이 먼저 정확한 말을 한다.
+	logoutForms := strings.Count(html, logoutFormOpen)
 	if logoutForms != 1 {
-		t.Fatalf(`로그아웃 폼이 %d개다 — 정확히 하나여야 아래 셈이 뺄 수 있다`, logoutForms)
+		t.Fatalf("로그아웃 폼(%s)이 %d개다 — 정확히 하나여야 아래 셈이 뺄 수 있다",
+			logoutFormOpen, logoutForms)
 	}
 
 	// 폼은 넷이다: Tier A 쓰기 셋 + 프로젝트 고르기 GET 하나.

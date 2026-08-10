@@ -78,20 +78,32 @@ func TestLoginScreenUsesGivenAction(t *testing.T) {
 	}
 }
 
+// logoutFormOpen 은 헤더 로그아웃 폼의 **여는 태그 통째**다.
+//
+// ★ 축을 따로따로 세면 아무것도 안 재게 된다. 앞선 판은 `method="post"` 가 본문 어딘가에
+// 있는지만 봤는데, 대시보드에는 파생물 쓰기 폼이 이미 셋 있어서 **로그아웃을 GET 으로
+// 바꿔도 초록**이었다(실측). 태그를 통째로 보면 세 축(클래스·메서드·목적지)이 한 문자열에
+// 묶여 어느 하나가 어긋나도 빨개진다.
+//
+// ★ render_test.go 의 로그아웃 **제외** 셈도 같은 문자열을 쓴다. 그쪽이 `<form class="logout"`
+// 만 보면 로그아웃이 GET 으로 바뀌었을 때 "폼 하나를 뺐는데 POST 수가 안 맞는다"는
+// 엉뚱한 자리에서 빨개지고, 원인이 로그아웃이라는 것이 그 메시지에서 안 보인다.
+const logoutFormOpen = `<form class="logout" method="post" action="logout"`
+
 // TestDashboardHasLogout 은 대시보드에 쿠키를 지울 길이 있는지 본다.
 //
 // ★ 로그아웃이 없으면 쿠키를 버릴 수단이 브라우저 설정뿐이다. 수명이 10년이라 그 길이
 // 없으면 남의 머신에서 한 번 본 것이 사실상 영구히 남는다.
+//
+// ★ POST 여야 한다 — GET 이면 링크 프리페치·크롤러가 사람을 대신 로그아웃시킨다.
+// action 은 상대경로여야 한다(프록시 경로 접두 뒤에서도 맞는 자리를 가리킨다).
 func TestDashboardHasLogout(t *testing.T) {
 	src, err := files.ReadFile("dashboard.gohtml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := string(src)
-	if !strings.Contains(body, `action="logout"`) {
-		t.Error(`로그아웃 폼이 없다 (action="logout" — 상대경로여야 한다)`)
-	}
-	if !strings.Contains(body, `method="post"`) {
-		t.Error("로그아웃이 POST 가 아니다 — GET 이면 링크 프리페치로 눌린다")
+	if !strings.Contains(string(src), logoutFormOpen) {
+		t.Errorf("로그아웃 폼의 여는 태그가 %s 가 아니다 — "+
+			"클래스·POST·상대경로 action 셋이 그대로여야 한다", logoutFormOpen)
 	}
 }
