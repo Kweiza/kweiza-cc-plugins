@@ -98,6 +98,65 @@ func TestRenderTailSeparatesZeroFromUnobserved(t *testing.T) {
 	}
 }
 
+func TestTailShowsTheirChangeSize(t *testing.T) {
+	out := RenderTail(TailInput{
+		NotesObserved:    true,
+		OverlapsObserved: true,
+		Overlaps: []judge.Overlap{{
+			SessionID: "01KZP9EFAAAAAAAAAAAAAAAAAA", Label: "",
+			Pairs:      [][2]string{{"DESIGN.md", "DESIGN.md"}, {"cmds.go", "cmds.go"}},
+			TheirDelta: map[string]model.LineDelta{"DESIGN.md": {Added: 47, Removed: 1}},
+		}},
+	})
+
+	if !strings.Contains(out, "DESIGN.md↔DESIGN.md(+47/-1)") {
+		t.Errorf("아는 규모가 안 붙었다:\n%s", out)
+	}
+	// ★ 상대가 못 잰 경로는 `(규모?)` 다.
+	if !strings.Contains(out, "cmds.go↔cmds.go(규모?)") {
+		t.Errorf("못 읽은 규모 표기가 없다:\n%s", out)
+	}
+	if !strings.Contains(out, "상대 규모 큰 순") {
+		t.Errorf("머리줄이 정렬을 안 말한다:\n%s", out)
+	}
+}
+
+// ★ 이 시험이 이 계획 전체의 논지를 지킨다. 못 읽음을 0 으로 접으면 여기가 빨개진다.
+func TestTailNeverRendersUnknownSizeAsZero(t *testing.T) {
+	out := RenderTail(TailInput{
+		NotesObserved:    true,
+		OverlapsObserved: true,
+		Overlaps: []judge.Overlap{{
+			SessionID: "01KZPBB3AAAAAAAAAAAAAAAAAA",
+			Pairs:     [][2]string{{"DESIGN.md", "DESIGN.md"}},
+			// TheirDelta 가 nil 이다 — 상대의 규모를 못 읽었다.
+		}},
+	})
+	if strings.Contains(out, "+0/-0") {
+		t.Fatalf("못 읽은 규모를 +0/-0 으로 찍었다 — 읽는 쪽은 그것을 '안 만졌다'로 읽는다:\n%s", out)
+	}
+	if !strings.Contains(out, "(규모?)") {
+		t.Fatalf("못 읽었다는 표기가 없다:\n%s", out)
+	}
+}
+
+func TestTailSaysWhatWasCutWhenOverlapsAreTruncated(t *testing.T) {
+	var os []judge.Overlap
+	for i := 0; i < tailOverlapLimit+2; i++ {
+		os = append(os, judge.Overlap{
+			SessionID: fmt.Sprintf("01KZP%021d", i),
+			Pairs:     [][2]string{{"a.go", "a.go"}},
+			TheirDelta: map[string]model.LineDelta{
+				"a.go": {Added: tailOverlapLimit + 2 - i},
+			},
+		})
+	}
+	out := RenderTail(TailInput{NotesObserved: true, OverlapsObserved: true, Overlaps: os})
+	if !strings.Contains(out, "제일 작은 쪽") {
+		t.Errorf("잘린 것이 무엇인지 안 말한다 — 정렬에 뜻이 생겼으면 화면이 그것을 말해야 한다:\n%s", out)
+	}
+}
+
 // TestRenderPickCarriesBranchAndWorktree 는 설계 §6 의
 // "pick 꼬리에 브랜치·워크트리 명령이 온다"를 응답 문자열로 단정한다.
 func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {

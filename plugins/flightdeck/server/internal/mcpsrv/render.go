@@ -1696,6 +1696,19 @@ type TailInput struct {
 // 축에서 세 번 겪고 세 번 다 주입으로 고친 그 사고다).
 const tailOverlapLimit = 5
 
+// renderDelta 는 상대 경로 하나의 증감 표기다. 순수 함수다.
+//
+// ★ **키가 없으면 `(규모?)` 다 — `(+0/-0)` 이 아니다.** 수와 **모양이 달라야** 한다:
+// 0 으로 찍으면 읽는 쪽이 "안 만졌다"로 읽고, 그것이 이 축이 없애려는 오탐의 거울상이다.
+// 못 재는 자리가 넷 있다 — 이진 파일 · 미추적 파일 · footprint 에만 있는 경로 · git 파생 실패.
+func renderDelta(m map[string]model.LineDelta, path string) string {
+	d, ok := m[path]
+	if !ok {
+		return "(규모?)"
+	}
+	return fmt.Sprintf("(+%d/-%d)", d.Added, d.Removed)
+}
+
 // RenderTail 은 응답 꼬리를 만든다. 순수 함수다.
 func RenderTail(in TailInput) string {
 	var lines []string
@@ -1728,11 +1741,12 @@ func RenderTail(in TailInput) string {
 	case len(in.Overlaps) == 0:
 		lines = append(lines, "겹침: 없음 — 살아 있는 세션 어느 것과도 경로가 안 겹친다.")
 	default:
-		lines = append(lines, fmt.Sprintf("겹침 %d건 (거르지 않고 알린다):", len(in.Overlaps)))
+		lines = append(lines, fmt.Sprintf(
+			"겹침 %d건 (거르지 않고 알린다 · 상대 규모 큰 순):", len(in.Overlaps)))
 		for i, o := range in.Overlaps {
 			if i >= tailOverlapLimit {
 				lines = append(lines, fmt.Sprintf(
-					"  · … %d건 더 — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
+					"  · … %d건 더(제일 작은 쪽이다) — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
 					len(in.Overlaps)-tailOverlapLimit))
 				break
 			}
@@ -1742,7 +1756,7 @@ func RenderTail(in TailInput) string {
 					pairs = append(pairs, fmt.Sprintf("+%d", len(o.Pairs)-4))
 					break
 				}
-				pairs = append(pairs, fmt.Sprintf("%s↔%s", p[0], p[1]))
+				pairs = append(pairs, fmt.Sprintf("%s↔%s%s", p[0], p[1], renderDelta(o.TheirDelta, p[1])))
 			}
 			label := o.Label
 			if label == "" {
