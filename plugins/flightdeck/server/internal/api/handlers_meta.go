@@ -339,7 +339,8 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 //
 // ★ 이 표면이 왜 따로 있나. MCP 도구는 응답마다 꼬리에 미확인 알림을 붙이는데(설계 §6),
 // 그 값을 가져올 표면이 dashboard.json 뿐이었다. 그래서 **도구 호출 1회마다**
-// 세션 카드 파생(git worktree list · ChangedPaths · UncommittedPaths)이 통째로 한 번 더 돌았다.
+// 세션 카드 파생(git worktree list · ChangedPaths · UncommittedPaths · UncommittedDelta)이
+// 통째로 한 번 더 돌았다.
 // 지금은 8~60ms 라 무해하지만, 세션·워크트리가 늘면 모든 도구 응답 지연에
 // 저장소 전수 훑기가 얹힌다.
 //

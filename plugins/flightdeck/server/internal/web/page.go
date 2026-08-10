@@ -55,7 +55,7 @@ type SessionRow struct {
 	HasActivity bool
 	Activity    string
 	// Derived 가 false 면 git 파생(브랜치·ahead·미커밋)을 **안 읽은** 행이다.
-	// 창 밖 선점자 줄이 그렇다 — 파생은 카드당 git 호출 1~4회라 창 밖까지 안 돈다.
+	// 창 밖 선점자 줄이 그렇다 — 파생은 카드당 git 호출 2~5회라 창 밖까지 안 돈다.
 	// 0값과 "안 읽었다"를 가르는 축이라, 화면이 이 사실을 말해야 한다.
 	Derived bool
 }
@@ -707,7 +707,7 @@ func sessionRow(now time.Time, c service.SessionCard) SessionRow {
 // outsideClaimRow 는 **창 밖인데 항목을 쥔 세션** 한 줄이다.
 //
 // ★ 카드가 아니라 줄이다. git 파생(브랜치·ahead·미커밋)이 없다 — 창 밖까지 파생하면
-// 카드당 git 호출 1~4회가 세션 수만큼 터진다(gitreader 에 캐시가 없다). 그래서
+// 카드당 git 호출 2~5회가 세션 수만큼 터진다(gitreader 에 캐시가 없다). 그래서
 // Derived=false 로 두고 **화면이 "이 축은 안 읽었다"를 말한다.** 0값과 미관측을
 // 뭉개지 않는 것이 이 패키지의 규율이다.
 //

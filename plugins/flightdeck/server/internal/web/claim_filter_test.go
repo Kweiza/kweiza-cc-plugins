@@ -109,7 +109,7 @@ func nowSectionOf(t *testing.T, html string) string {
 // ★ 이 시험이 "창을 이 섹션에 걸지 않는다"의 유일한 가드다. 창을 함께 걸면 회수가 가장
 // 필요한 카드(오래 조용한데 쥐고 있는 것)가 정확히 창 때문에 사라진다.
 //
-// 그리고 그 줄은 git 파생을 **안 읽었다** — 창 밖까지 파생하면 카드당 git 호출 1~4회가
+// 그리고 그 줄은 git 파생을 **안 읽었다** — 창 밖까지 파생하면 카드당 git 호출 2~5회가
 // 세션 수만큼 터진다. 0값과 미관측을 뭉개지 않는 것이 이 패키지의 규율이라, 화면이
 // "안 읽었다"를 말해야 한다.
 func TestNowSectionKeepsClaimHoldersOutsideTheWindow(t *testing.T) {

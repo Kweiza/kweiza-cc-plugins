@@ -429,7 +429,7 @@ func (b *mcpBackend) Alloc(ctx context.Context, project, counter string) (int64,
 // RecentNotes 는 꼬리에 실을 ask·blocked 다.
 //
 // ★ 앞선 판은 dashboard.json 을 `queue=false` 로 쳤다. 그래도 서버는 **세션 카드 파생을
-// 통째로 돌린다** — git worktree list + 세션마다 ChangedPaths·UncommittedPaths.
+// 통째로 돌린다** — git worktree list + 세션마다 ChangedPaths·UncommittedPaths·UncommittedDelta.
 // 꼬리는 모든 도구 응답에 붙으므로(설계 §6) 그 비용이 **도구 호출 1회마다** 얹혔고,
 // 그 사실이 어디에도 안 떴다. 지금은 꼬리 전용 표면 하나를 쓴다.
 //
