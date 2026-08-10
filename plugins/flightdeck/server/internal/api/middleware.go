@@ -145,7 +145,7 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 		// ★ loopbackSeen 관측 **뒤**다. 앞에 두면 루프백에서 온 로그인 요청이 도달
 		// 관측에서 빠진다 — /healthz 를 앞에 둔 것은 그 요청이 컨테이너 안에서 30초마다
 		// 자동으로 나기 때문이고, 로그인은 사람이 치는 것이라 사정이 다르다.
-		if JudgeAuthExempt(r.URL.Path) {
+		if JudgePreSessionPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -284,7 +284,7 @@ func (s *server) withIdempotency(next http.Handler) http.Handler {
 			return
 		}
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-		if v := JudgeIdempotencyKey(r.Method, key); !v.OK {
+		if v := JudgeIdempotencyKey(r.Method, r.URL.Path, key); !v.OK {
 			s.writeError(w, r, badRequest("idempotency_key_required", v.Reason,
 				"Idempotency-Key: <session>:<seq> 를 실어라 — 훅은 타임아웃으로 끊고 다시 부르는 것이 정상 동작이라, "+
 					"이 키가 없으면 같은 신호·항목이 조용히 두 번 들어간다."))

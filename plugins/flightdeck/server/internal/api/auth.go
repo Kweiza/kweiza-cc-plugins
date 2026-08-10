@@ -178,16 +178,20 @@ func JudgeLoginScreen(accept string) bool {
 // 다시 폼"이라는 모양으로 나타난다 — 원인이 이름이라는 것이 그 증상에서 안 보인다.
 const LoginCookieName = "fd_token"
 
-// JudgeAuthExempt 는 이 경로가 인증 게이트 앞인가다. 순수 함수다.
+// JudgePreSessionPath 는 이 경로가 **세션이 생기기 전**인가다. 순수 함수다.
 //
-// ★ 로그인 경로가 게이트 뒤에 있으면 **로그인하려면 이미 로그인돼 있어야 한다.**
+// ★ 두 게이트가 이것을 함께 본다 — 인증(withAuth)과 멱등(withIdempotency). 그 둘이 같은
+// 경로 집합을 면제하는 것은 우연이 아니라 **같은 한 가지 이유**다: 세션이 없으니 대조할
+// 자격증명도 없고 `<session>:<seq>` 형식의 멱등 키도 만들 수 없다.
 //
-// ★ **메서드를 안 본다.** GET /login 도 인증 안 된 상태에서 들어온다.
+// ★ 로그인 경로가 인증 게이트 뒤에 있으면 **로그인하려면 이미 로그인돼 있어야 한다.**
 //
-// ★ /healthz 는 여기 **없다.** 그것은 loopbackSeen 관측보다도 앞이고, 그 순서에는
-// 별도의 근거가 있다(withAuth 의 주석 — 컨테이너 헬스체크가 30초마다 쳐서 loopback_open 을
+// ★ **메서드를 안 본다.** GET /login 도 세션 이전이다.
+//
+// ★ /healthz 는 여기 **없다.** 그것은 loopbackSeen 관측보다도 앞이고, 그 순서에는 별도의
+// 근거가 있다(withAuth 의 주석 — 컨테이너 헬스체크가 30초마다 쳐서 loopback_open 을
 // 거짓으로 참으로 만든다). 두 면제를 한 함수로 접으면 그 순서가 흐려진다.
-func JudgeAuthExempt(path string) bool {
+func JudgePreSessionPath(path string) bool {
 	return path == "/login" || path == "/logout"
 }
 
