@@ -119,6 +119,11 @@ type LedgerBackupStatus struct {
 	Detail  string `json:"detail,omitempty"`
 	// Route 는 산출물 자리다. 이 값이 없으면 "돌긴 도는데 어디에 쌓이는지 모른다"가 된다.
 	Route string `json:"route,omitempty"`
+	// Journal 은 세대가 bare 레포에 쌓였는가다: committed | unchanged | failed: <사유>.
+	//
+	// ★ **백업 결과와 따로 낸다.** 저널이 실패해도 JSONL 은 착지했고 그것이 복원의 정본이다 —
+	// 한 축으로 접으면 "역사는 못 쌓았지만 원장은 성했다"가 "백업이 실패했다"로 읽힌다.
+	Journal string `json:"journal,omitempty"`
 }
 
 // SelfUpdateStatus 는 서버의 자동 갱신 축이다.

@@ -307,5 +307,14 @@ func ledgerBackupLines(h healthzResponse) []string {
 	if d := strings.TrimSpace(lb.Detail); d != "" {
 		line += "\n           " + clip(d, 300)
 	}
+	// ★ 저널 축은 **따로 찍는다.** 저널이 실패해도 JSONL 은 착지했으므로, 한 줄로 접으면
+	// "역사를 못 쌓았다"가 "백업이 실패했다"로 읽힌다 — 처방이 다르다.
+	if jr := strings.TrimSpace(lb.Journal); jr != "" {
+		label := map[string]string{"committed": "세대를 쌓았다", "unchanged": "쌓을 새 세대가 없다"}[jr]
+		if label == "" {
+			label = "**" + clip(jr, 300) + "**"
+		}
+		line += "\n           저널: " + label
+	}
 	return []string{line}
 }

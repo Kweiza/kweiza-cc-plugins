@@ -462,6 +462,7 @@ type healthzResponse struct {
 		Outcome string `json:"outcome"`
 		Detail  string `json:"detail"`
 		Route   string `json:"route"`
+		Journal string `json:"journal"`
 	} `json:"ledger_backup"`
 	SelfUpdate struct {
 		Watching bool   `json:"watching"`
