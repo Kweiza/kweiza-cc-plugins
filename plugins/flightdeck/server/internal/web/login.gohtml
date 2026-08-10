@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flightdeck — 토큰</title>
+<style>
+:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1c1b19; --dim:#5f5c56; --line:#e0ddd6;
+        --card:#ffffff; --crit:#8f1d1d; --accent:#2f5fb3; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#16181c; --fg:#e6e4e0; --dim:#9a978f; --line:#2c3037; --card:#1c1f24;
+          --crit:#f08a8a; --accent:#8fb2f0; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 ui-sans-serif,system-ui,
+       "Noto Sans KR","Apple SD Gothic Neo",sans-serif;
+       min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+main { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line);
+       border-radius:6px; padding:20px 22px; }
+h1 { font-size:16px; margin:0 0 2px; letter-spacing:.02em; }
+p.sub { color:var(--dim); font-size:12px; margin:0 0 16px; }
+label { display:block; font-size:13px; margin:0 0 6px; }
+input, button { font:inherit; padding:6px 8px; background:var(--bg); color:var(--fg);
+                border:1px solid var(--line); border-radius:4px; }
+input { width:100%; margin-top:4px; }
+button { cursor:pointer; margin-top:12px; width:100%; border-color:var(--accent); color:var(--accent); }
+p.err { color:var(--crit); font-size:13px; margin:0 0 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>flightdeck</h1>
+  <p class="sub">이 서버는 토큰이 켜져 있다.</p>
+  {{with .Error}}<p class="err">{{.}}</p>{{end}}
+  {{/* ★ action 이 상대경로다. dashboard.gohtml 의 폼·SSE 와 같은 규율 —
+       절대경로로 두면 리버스 프록시의 경로 접두 뒤에서 원점의 /login 을 찾아가고,
+       프록시는 그 경로를 모르므로 로그인이 조용히 실패한다.
+
+       ★ 그런데 상대경로는 **문서 URL 의 깊이**에 붙는다. 이 폼은 뿌리가 아닌 자리에서도
+       뜨므로(POST /actions/reclaim 의 401) 값을 여기 박으면 /actions/login 처럼 없는
+       자리를 가리킨다. 깊이를 세는 것은 api 의 JudgeLoginAction 이고, 여기 오는 것은
+       **이미 계산된 값**이다 — 이 템플릿은 세지 않는다. */}}
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label>토큰
+      <input type="password" name="token" autocomplete="current-password"
+             autofocus required spellcheck="false">
+    </label>
+    <button type="submit">들어간다</button>
+  </form>
+</main>
+</body>
+</html>

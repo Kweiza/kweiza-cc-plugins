@@ -443,6 +443,21 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 
 	_, html := f.get("")
 
+	// 로그아웃 폼은 아래 셈에서 뺀다 — 이유는 바로 아래 ★ 주석.
+	// 먼저 그 폼이 실제로 정확히 하나 있는지부터 확인한다: 없거나 여럿이면
+	// 아래 뺄셈이 조용히 틀린 수를 통과시킨다.
+	//
+	// ★ 세는 문자열이 **여는 태그 통째**다(logoutFormOpen — login_test.go 가 같은 값으로
+	// 로그아웃의 존재를 단정한다). `<form class="logout"` 만 세면 클래스가 붙은 폼이
+	// GET 으로 바뀌어도 여기서는 하나로 세고, 그러면 아래 POST 뺄셈이 하나 어긋나
+	// **로그아웃과 무관한 자리에서** 빨개진다 — 원인이 그 메시지에서 안 보인다.
+	// 의미적 앵커(POST · action="logout")를 함께 묶으면 이 줄이 먼저 정확한 말을 한다.
+	logoutForms := strings.Count(html, logoutFormOpen)
+	if logoutForms != 1 {
+		t.Fatalf("로그아웃 폼(%s)이 %d개다 — 정확히 하나여야 아래 셈이 뺄 수 있다",
+			logoutFormOpen, logoutForms)
+	}
+
 	// 폼은 넷이다: Tier A 쓰기 셋 + 프로젝트 고르기 GET 하나.
 	// Tier B 버튼 둘은 폼이 아니라 비활성 <button> 이라 여기 안 센다.
 	//
@@ -450,15 +465,22 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 	// 하나라도 늘면 대시보드가 다시 손 기재 저장소가 되고, 그것이 이 제품이
 	// 없애려던 병목 1위다. 여유를 안 둔다: 늘리려면 이 줄을 고치면서
 	// "그 폼이 무엇을 쓰는가"에 먼저 답하게 만드는 것이 이 락의 목적이다.
-	if n := strings.Count(html, "<form"); n > 4 {
+	//
+	// ★ 로그아웃은 이 셈에서 뺀다. 이 관문이 세는 것은 **파생물에 쓰는 폼**이고
+	// (actions.go 머리의 그 규율), 로그아웃은 쿠키 하나를 지울 뿐 원장에도 파생물에도
+	// 아무것도 안 남긴다. 상한을 올려서 통과시키면 다음 사람이 여섯째 폼을 넣을 때
+	// "저번에도 올렸잖나"가 근거가 되고, 그러면 이 락이 막으려던 증식이 한 칸씩 열린다.
+	// 빼는 쪽은 상한 넷을 **영구 불변**으로 남긴다.
+	if n := strings.Count(html, "<form") - logoutForms; n > 4 {
 		t.Fatalf("폼 %d개 — 넷을 넘었다. 파생물에 손대는 폼이 늘면 대시보드가 다시 손 기재 저장소가 된다", n)
 	}
 	// 그중 쓰기(POST)는 Tier A 의 셋이다: 선점 회수 · 항목 폐기 · 랜딩 줄 행 회수.
 	// 줄 행 회수가 Tier A 인 이유는 **이 서버가 실제로 그 일을 하기 때문**이다 —
 	// 레인에 자동 만료가 없어서 사람이 푸는 이 길이 유일한 탈출구다.
-	if n := strings.Count(html, `method="post"`); n != 3 {
+	// 로그아웃도 POST 지만 파생물에 쓰지 않으므로 위와 같은 이유로 뺀다.
+	if n := strings.Count(html, `method="post"`) - logoutForms; n != 3 {
 		t.Fatalf("POST 폼 %d개, 기대 3개(선점 회수·항목 폐기·랜딩 줄 행 회수). "+
-			"남은 하나(잡 우회 기록)는 Tier B 라 비활성 버튼이다", n)
+			"남은 하나(잡 우회 기록)는 Tier B 라 비활성 버튼이다. 로그아웃 폼은 파생물 쓰기가 아니라 이 셈에서 뺐다", n)
 	}
 	// 그리고 셋 다 사유가 필수다.
 	if n := strings.Count(html, `name="reason" required`); n != 3 {

@@ -12,7 +12,7 @@ import (
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
-//go:embed dashboard.gohtml
+//go:embed dashboard.gohtml login.gohtml
 var files embed.FS
 
 // tpl 은 기동 시 한 번 파싱한다. 파싱 실패는 요청 시각이 아니라 **여기서** 죽어야 한다 —
@@ -22,6 +22,11 @@ var tpl = template.Must(template.New("dashboard.gohtml").Funcs(template.FuncMap{
 	// 하나 있으면 그것을 쓰는 자리가 반드시 생기고, 그 순간 저장 XSS 가 열린다.
 	"join": func(sep string, xs []string) string { return strings.Join(xs, sep) },
 }).ParseFS(files, "dashboard.gohtml"))
+
+// loginTpl 도 기동 시 한 번 파싱한다. tpl 과 따로 두는 이유는 이 화면이 대시보드의
+// 템플릿 함수(join)도 데이터 모양도 쓰지 않기 때문이다 — 한 벌로 묶으면 로그인 화면이
+// 대시보드 Page 의 필드를 실수로 참조해도 파싱이 통과한다.
+var loginTpl = template.Must(template.New("login.gohtml").ParseFS(files, "login.gohtml"))
 
 const (
 	// defaultRefresh 는 SSE 가 없을 때의 폴백 주기(초)다.

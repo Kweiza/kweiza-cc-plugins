@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -22,40 +23,58 @@ func TestJudgeAuth(t *testing.T) {
 	const tok = "s3cret"
 	cases := []struct {
 		name       string
-		remote     string
-		header     string
+		req        AuthRequest
 		token      string
 		strictLoop bool
 		wantOK     bool
 		wantAnon   bool
 		reasonHas  string
 	}{
-		{"토큰 일치", "203.0.113.9:1", "Bearer " + tok, tok, false, true, false, "일치한다"},
-		{"토큰 불일치", "203.0.113.9:1", "Bearer nope", tok, false, false, false, "일치하지 않는다"},
-		{"헤더 없음 원격", "203.0.113.9:1", "", tok, false, false, false, "헤더가 없다"},
-		{"헤더 없음 루프백", "127.0.0.1:1", "", tok, false, true, true, "루프백"},
-		{"헤더 없음 IPv6 루프백", "[::1]:1", "", tok, false, true, true, "루프백"},
-		{"루프백 면제 끔", "127.0.0.1:1", "", tok, true, false, false, "루프백에도 토큰을 요구한다"},
-		{"서버 토큰 미설정", "203.0.113.9:1", "", "", false, true, true, "설정되지 않았다"},
-		{"형식 위반", "127.0.0.1:1", "Bearer a b", tok, false, false, false, "형식이 아니다"},
-		{"방식이 Basic", "127.0.0.1:1", "Basic abcd", tok, false, false, false, "Bearer 가 아니다"},
+		{"토큰 일치", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer " + tok}, tok, false, true, false, "일치한다"},
+		{"토큰 불일치", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer nope"}, tok, false, false, false, "일치하지 않는다"},
+		{"헤더 없음 원격", AuthRequest{RemoteAddr: "203.0.113.9:1"}, tok, false, false, false, "헤더가 없다"},
+		{"헤더 없음 루프백", AuthRequest{RemoteAddr: "127.0.0.1:1"}, tok, false, true, true, "루프백"},
+		{"헤더 없음 IPv6 루프백", AuthRequest{RemoteAddr: "[::1]:1"}, tok, false, true, true, "루프백"},
+		{"루프백 면제 끔", AuthRequest{RemoteAddr: "127.0.0.1:1"}, tok, true, false, false, "루프백에도 토큰을 요구한다"},
+		{"서버 토큰 미설정", AuthRequest{RemoteAddr: "203.0.113.9:1"}, "", false, true, true, "설정되지 않았다"},
+		{"형식 위반", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Bearer a b"}, tok, false, false, false, "형식이 아니다"},
+		{"방식이 Basic", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Basic abcd"}, tok, false, false, false, "Bearer 가 아니다"},
+		{"루프백인데 토큰이 틀림", AuthRequest{RemoteAddr: "127.0.0.1:1", AuthHeader: "Bearer wrong"}, tok, false, false, false, "일치하지 않는다"},
+		{"토큰 미설정 + 헤더 있음", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer whatever"}, "", false, true, true, "대조할 기준이 없다"},
+		{"RemoteAddr 이 이상함", AuthRequest{RemoteAddr: "@unix-socket"}, tok, false, false, false, "헤더가 없다"},
+		{"소문자 bearer", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "bearer " + tok}, tok, false, true, false, "일치한다"},
+		{"토큰 대소문자 다름", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer S3CRET"}, tok, false, false, false, "일치하지 않는다"},
 
-		// ── 표 밖 ────────────────────────────────────────────────────────────
-		// ① 틀린 토큰은 **루프백이어도** 거절한다. 면제로 덮으면 클라이언트의
-		//    토큰 오설정이 영영 안 보인다.
-		{"루프백인데 토큰이 틀림", "127.0.0.1:1", "Bearer wrong", tok, false, false, false, "일치하지 않는다"},
-		// ② 서버에 토큰이 없는데 헤더가 온 경우 — 대조할 기준이 없으므로 통과하되 **무인증**이다.
-		{"토큰 미설정 + 헤더 있음", "203.0.113.9:1", "Bearer whatever", "", false, true, true, "대조할 기준이 없다"},
-		// ③ RemoteAddr 이 해석 불가면 루프백이 아니다(못 읽은 것을 면제로 접지 않는다).
-		{"RemoteAddr 이 이상함", "@unix-socket", "", tok, false, false, false, "헤더가 없다"},
-		// ④ 소문자 스킴도 받는다(HTTP 규약상 대소문자 무시).
-		{"소문자 bearer", "203.0.113.9:1", "bearer " + tok, tok, false, true, false, "일치한다"},
-		// ⑤ 대소문자가 다른 토큰 값은 다른 토큰이다.
-		{"토큰 대소문자 다름", "203.0.113.9:1", "Bearer S3CRET", tok, false, false, false, "일치하지 않는다"},
+		// ── 쿠키 축 ──────────────────────────────────────────────────────────
+		// ① 화면 경로의 맞는 쿠키는 통과한다. 브라우저가 들어오는 유일한 길이다.
+		{"쿠키 일치 + 화면", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: tok, ScreenPath: true},
+			tok, false, true, false, "쿠키"},
+		// ② ★ 같은 쿠키가 REST 에서는 통과하지 못한다. 이 줄이 설계 전체를 붙든다 —
+		//    빠지면 REST 쓰기의 CSRF 방어가 SameSite 하나로 줄어든다.
+		{"쿠키 일치 + REST", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: tok, ScreenPath: false},
+			tok, false, false, false, "화면이 아니다"},
+		// ③ 틀린 쿠키는 거절한다. 사유가 "헤더가 없다"로 접히면 옛 쿠키를 든 브라우저의
+		//    처방("다시 로그인해라")이 안 나온다.
+		{"쿠키 불일치 + 화면", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: "nope", ScreenPath: true},
+			tok, false, false, false, "쿠키의 토큰이 일치하지 않는다"},
+		// ④ 틀린 쿠키는 **루프백이어도** 거절한다. 틀린 헤더와 같은 규율이다.
+		{"쿠키 불일치 + 루프백", AuthRequest{RemoteAddr: "127.0.0.1:1", CookieToken: "nope", ScreenPath: true},
+			tok, false, false, false, "일치하지 않는다"},
+		// ⑤ ★ 헤더가 이긴다. 헤더를 실을 수 있는 클라이언트가 쿠키로 조용히 뒤집히면
+		//    무엇이 인증했는지가 요청마다 달라진다.
+		{"헤더 틀림 + 쿠키 맞음", AuthRequest{RemoteAddr: "203.0.113.9:1", AuthHeader: "Bearer wrong", CookieToken: tok, ScreenPath: true},
+			tok, false, false, false, "일치하지 않는다"},
+		// ⑥ ★ 쿠키가 있어도 루프백 면제는 살아 있어야 한다. 쿠키 갈래를 면제보다 위에서
+		//    거절로 끝내면 이 줄이 깨진다 — 즉 기존 배포의 루프백 클라이언트가 죽는다.
+		{"비화면 쿠키 + 루프백 면제", AuthRequest{RemoteAddr: "127.0.0.1:1", CookieToken: tok, ScreenPath: false},
+			tok, false, true, true, "루프백"},
+		// ⑦ 서버에 토큰이 없으면 쿠키도 대조할 기준이 없다.
+		{"토큰 미설정 + 쿠키", AuthRequest{RemoteAddr: "203.0.113.9:1", CookieToken: "whatever", ScreenPath: true},
+			"", false, true, true, "설정되지 않았다"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := JudgeAuth(c.remote, c.header, c.token, c.strictLoop)
+			got := JudgeAuth(c.req, c.token, c.strictLoop)
 			if got.OK != c.wantOK || got.Anonymous != c.wantAnon {
 				t.Fatalf("판정이 다르다: OK=%v Anonymous=%v (기대 OK=%v Anonymous=%v) 사유=%q",
 					got.OK, got.Anonymous, c.wantOK, c.wantAnon, got.Reason)
@@ -646,5 +665,149 @@ func TestHealthzCarriesLedgerBackup(t *testing.T) {
 	}
 	if strings.Contains(string(quiet), `"last_at"`) {
 		t.Errorf("회차가 없는데 last_at 이 실렸다:\n%s", quiet)
+	}
+}
+
+func TestJudgeScreenPath(t *testing.T) {
+	// ★ 이 표가 이 설계 전체의 안전을 지탱한다. /api/v1 이 참이 되는 순간
+	// REST 쓰기의 CSRF 방어가 쿠키의 SameSite 하나로 줄어든다.
+	cases := map[string]bool{
+		"/":                     true,
+		"/events":               true,
+		"/actions/reclaim":      true,
+		"/actions/drop":         true,
+		"/actions/lane-release": true,
+		"/api/v1/items/next":    false,
+		"/api/v1/events":        false, // REST 쪽 별칭이다 — 화면이 무는 것은 /events 다
+		"/healthz":              false,
+		"/metrics":              false,
+		"/login":                false,
+		"/actions":              false, // 접두는 슬래시까지다
+		"":                      false,
+	}
+	for path, want := range cases {
+		if got := JudgeScreenPath(path); got != want {
+			t.Errorf("JudgeScreenPath(%q) = %v, 기대 %v", path, got, want)
+		}
+	}
+}
+
+func TestJudgeLoginScreen(t *testing.T) {
+	cases := map[string]bool{
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8": true,
+		"text/html":         true,
+		"TEXT/HTML":         true, // 대소문자 무시
+		"application/json":  false,
+		"text/event-stream": false, // EventSource 는 폼을 못 읽는다
+		"*/*":               false, // curl 기본값 — 사람이 아니다
+		"":                  false,
+	}
+	for accept, want := range cases {
+		if got := JudgeLoginScreen(accept); got != want {
+			t.Errorf("JudgeLoginScreen(%q) = %v, 기대 %v", accept, got, want)
+		}
+	}
+}
+
+func TestJudgeNext(t *testing.T) {
+	cases := map[string]string{
+		"/":                   "/",
+		"/?project=kweiza":    "/?project=kweiza",
+		"/?q=a%20b":           "/?q=a%20b",
+		"":                    "/",
+		"   ":                 "/",
+		"//evil.com":          "/", // 프로토콜 상대 URL — 다른 호스트로 나간다
+		"///evil.com":         "/",
+		"http://evil.com":     "/",
+		"https://evil.com/x":  "/",
+		"javascript:alert(1)": "/",
+		"relative":            "/", // 슬래시로 안 시작하면 거절한다
+		"/\\evil.com":         "/", // 일부 브라우저가 \ 를 / 로 정규화한다
+	}
+	for next, want := range cases {
+		if got := JudgeNext(next); got != want {
+			t.Errorf("JudgeNext(%q) = %q, 기대 %q", next, got, want)
+		}
+	}
+}
+
+// TestJudgeLoginAction 은 폼 action 의 깊이 셈을 잠근다.
+//
+// ★ 기대값을 손으로 적는 것으로는 부족하다 — 표가 틀리면 코드와 함께 틀린다. 그래서
+// 각 줄을 **문서 URL 에 실제로 해석해서** /login 에 닿는지 함께 본다(RFC 3986 그대로인
+// url.ResolveReference). 브라우저가 하는 계산이 그것이다.
+func TestJudgeLoginAction(t *testing.T) {
+	cases := map[string]string{
+		"/":                     "login",
+		"/login":                "login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
+		"/events":               "login",
+		"/actions/reclaim":      "../login",
+		"/actions/lane-release": "../login",
+		"/actions/":             "../login", // 뒤 슬래시면 마디가 하나 더다
+		"/api/v1/items/next":    "../../../login",
+		"/a//b":                 "../../login", // 빈 마디도 해석이 한 마디로 센다
+		"":                      "login",       // 못 읽은 것은 뿌리로 접는다
+		"*":                     "login",       // OPTIONS * — 슬래시가 없다
+	}
+	for path, want := range cases {
+		got := JudgeLoginAction(path)
+		if got != want {
+			t.Errorf("JudgeLoginAction(%q) = %q, 기대 %q", path, got, want)
+			continue
+		}
+		// 그리고 그 값이 실제로 /login 으로 풀리는지 본다.
+		if path == "" || path == "*" {
+			continue // 문서 URL 로 성립하지 않는 자리다 — 위 기대값만 잠근다
+		}
+		base, err := url.Parse("http://fd.example" + path)
+		if err != nil {
+			t.Fatalf("문서 URL %q 파싱 실패: %v", path, err)
+		}
+		ref, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("action %q 파싱 실패: %v", got, err)
+		}
+		if p := base.ResolveReference(ref).Path; p != "/login" {
+			t.Errorf("문서 %q 에서 action %q 가 %q 로 풀린다 — /login 이어야 한다", path, got, p)
+		}
+	}
+}
+
+// TestJudgeNextFrom 은 303 이 재생할 수 있는 요청만 돌아갈 자리로 남는지 본다.
+func TestJudgeNextFrom(t *testing.T) {
+	cases := []struct {
+		method, uri, want string
+	}{
+		{"GET", "/?project=kweiza", "/?project=kweiza"},
+		{"get", "/", "/"},                         // 메서드는 대소문자를 안 가린다
+		{"GET", "//evil.com", "/"},                // 오픈 리다이렉트 축은 JudgeNext 가 계속 본다
+		{"POST", "/actions/reclaim?key=abc", "/"}, // 303 은 GET 으로 재생된다 — 405 에 착지한다
+		{"DELETE", "/api/v1/items/x", "/"},
+		{"HEAD", "/", "/"}, // 303 이 재생하는 것은 GET 하나뿐이다
+		{"", "/x", "/"},
+	}
+	for _, c := range cases {
+		if got := JudgeNextFrom(c.method, c.uri); got != c.want {
+			t.Errorf("JudgeNextFrom(%q, %q) = %q, 기대 %q", c.method, c.uri, got, c.want)
+		}
+	}
+}
+
+func TestJudgePreSessionPath(t *testing.T) {
+	cases := map[string]bool{
+		"/login":  true,
+		"/logout": true,
+		// /healthz 는 여기 없다 — loopbackSeen 관측보다도 앞이라 미들웨어가 따로 본다.
+		// 여기 넣으면 그 순서가 흐려지고, 컨테이너 헬스체크가 loopback_open 을 거짓으로
+		// 참으로 만드는 회귀가 돌아온다(middleware.go 의 그 근거).
+		"/healthz":           false,
+		"/":                  false,
+		"/api/v1/items/next": false,
+		"/login/x":           false,
+	}
+	for path, want := range cases {
+		if got := JudgePreSessionPath(path); got != want {
+			t.Errorf("JudgePreSessionPath(%q) = %v, 기대 %v", path, got, want)
+		}
 	}
 }

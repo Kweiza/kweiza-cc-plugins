@@ -32,6 +32,12 @@ type IdemVerdict struct {
 // JudgeIdempotencyKey 는 쓰기 요청의 키가 성립하는지 본다. 순수 함수다.
 //
 // 읽기(GET·HEAD)에는 키를 요구하지 않는다 — 재생할 부작용이 없다.
+//
+// ★ 세션 이전 경로(/login·/logout) 면제는 **여기 없다.** withIdempotency 가 그 경로를
+// 이 함수에 닿기 전에 통째로 건너뛴다(멱등 표 begin() 자체를 안 태우려고 — 키 요구만
+// 면제하면 key 가 "" 인 채로 표에 들어가 서로 무관한 요청들이 한 슬롯을 공유한다).
+// 그 건너뛰기를 지우면 이 함수까지 오지만, 여기서 면제해도 이미 표에 올라간 뒤라
+// 늦다 — 그래서 면제 갈래를 이 함수에 두지 않는다. 미들웨어의 그 판정이 유일한 자리다.
 func JudgeIdempotencyKey(method, key string) IdemVerdict {
 	if !isWrite(method) {
 		return IdemVerdict{OK: true, Reason: "읽기 요청이라 키를 요구하지 않는다"}

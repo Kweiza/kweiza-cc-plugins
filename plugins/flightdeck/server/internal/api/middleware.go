@@ -139,10 +139,51 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 		if IsLoopback(r.RemoteAddr) {
 			s.loopbackSeen.Store(true)
 		}
-		d := JudgeAuth(r.RemoteAddr, r.Header.Get("Authorization"), s.opt.Token, s.opt.RequireTokenOnLoopback)
+
+		// 로그인·로그아웃은 게이트 앞이다. 판정은 핸들러가 스스로 한다(login.go).
+		//
+		// ★ loopbackSeen 관측 **뒤**다. 앞에 두면 루프백에서 온 로그인 요청이 도달
+		// 관측에서 빠진다 — /healthz 를 앞에 둔 것은 그 요청이 컨테이너 안에서 30초마다
+		// 자동으로 나기 때문이고, 로그인은 사람이 치는 것이라 사정이 다르다.
+		if JudgePreSessionPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 쿠키는 화면 경로에서만 인정한다 — 그 판정은 JudgeAuth 안에 있다.
+		// 여기서는 값만 읽는다. 쿠키가 없으면 ErrNoCookie 라 빈 문자열로 남는다.
+		var cookieTok string
+		if c, err := r.Cookie(LoginCookieName); err == nil {
+			cookieTok = c.Value
+		}
+		d := JudgeAuth(AuthRequest{
+			RemoteAddr:  r.RemoteAddr,
+			AuthHeader:  r.Header.Get("Authorization"),
+			CookieToken: cookieTok,
+			ScreenPath:  JudgeScreenPath(r.URL.Path),
+		}, s.opt.Token, s.opt.RequireTokenOnLoopback)
 		if !d.OK {
 			s.met.incUnauthorized()
-			// 로그 줄 없음(위 규율). 사유는 응답에만 싣는다 — 그 문구는 전부 이 계층이 쓴 것이다.
+			// 로그 줄 없음(위 규율). 사유는 응답에만 싣는다.
+			//
+			// ★ HTML 을 읽는 소비자에게는 폼을 낸다. **상태코드는 401 그대로다** —
+			// 리다이렉트로 덮으면 인증 실패가 지표에서 사라지고, /metrics 의
+			// unauthorized 카운터가 "아무도 막히지 않았다"고 거짓말한다.
+			// ★ Action 은 **여기서** 계산한다. 이 401 은 뿌리가 아닌 경로에서도 뜨는데
+			// (JudgeLoginScreen 이 메서드도 경로도 안 본다) 폼 action 은 상대경로라,
+			// 문서 URL 의 깊이만큼 거슬러 올라가지 않으면 /actions/login 처럼 없는 자리를
+			// 가리키고 그 자리도 다시 401 이다 — 무한 폼이다.
+			//
+			// ★ Next 는 JudgeNext 가 아니라 JudgeNextFrom 이다. 이 요청이 GET 이 아니면
+			// 그 URI 로 되돌아갈 수 없다 — 로그인 성공은 303 이고 303 은 GET 으로 재생된다.
+			if s.opt.LoginScreen != nil && JudgeLoginScreen(r.Header.Get("Accept")) {
+				s.opt.LoginScreen(w, r, LoginView{
+					Error:  d.Reason,
+					Next:   JudgeNextFrom(r.Method, r.URL.RequestURI()),
+					Action: JudgeLoginAction(r.URL.Path),
+				})
+				return
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="flightdeck"`)
 			s.writeError(w, r, Classified{
 				Status: http.StatusUnauthorized, Code: "unauthorized",
@@ -247,6 +288,14 @@ func (rec *bodyRecorder) Unwrap() http.ResponseWriter { return rec.ResponseWrite
 func (s *server) withIdempotency(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isWrite(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// ★ 세션 이전 경로는 멱등 표에 **아예 안 들어간다.** 키 요구만 면제하면 key 가 ""
+		// 인 채로 begin() 에 들어가고, 그러면 서로 무관한 로그인 시도들이 s.entries[""]
+		// 한 슬롯을 공유한다 — 틀린 토큰의 401 이 캐시된 뒤 맞는 토큰의 재시도가
+		// fingerprint 불일치로 409 가 된다. 폼에 키를 심는 우회를 기각한 것과 같은 실패다.
+		if JudgePreSessionPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

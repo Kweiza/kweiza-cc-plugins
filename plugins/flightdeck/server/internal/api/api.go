@@ -90,6 +90,36 @@ type Options struct {
 	// 아무나 원격에서 낼 수 있었다. 조립을 두 자리로 나누면 한쪽만 잠기고,
 	// 그 비대칭은 잠겨 있다고 믿게 만들어서 안 잠근 것보다 나쁘다.
 	Fallback http.Handler
+
+	// LoginScreen 은 401 을 HTML 토큰 폼으로 낼 렌더러다. nil 이면 JSON 401 로 접힌다.
+	//
+	// ★ Fallback 과 **같은 이유의 같은 모양**이다. 토큰을 아는 자리(여기)와 템플릿을 가진
+	// 자리(internal/web)가 다른데, 화면은 게이트 사슬 안에 있어야 하므로 401 을 내는 것도
+	// 이 계층이다. 콜백으로 받으면 api 가 HTML 을 알지 않고도 폼을 낼 수 있고, web 은
+	// 토큰을 모르는 채로 남는다 — 토큰이 두 자리에 살면 상수시간 비교와 대소문자 규칙이
+	// 두 벌이 되고 그 둘은 반드시 표류한다.
+	//
+	// ★ 이 콜백은 **상태코드를 스스로 쓴다**(401). 여기서 미리 쓰면 렌더러가 500 을 내야
+	// 하는 경우에 헤더가 이미 나가 있다.
+	LoginScreen func(w http.ResponseWriter, r *http.Request, v LoginView)
+}
+
+// LoginView 는 토큰 폼을 그리는 데 필요한 것 전부다.
+//
+// ★ **토큰 값을 안 담는다.** 되비추면 그 값이 HTML 에 실려 나가고, web/notFound 가
+// 요청 경로에 대해 세워둔 규율("소비자가 이미 아는 것을 되비추지 않는다")이 여기서 깨진다.
+type LoginView struct {
+	// Error 는 직전 시도의 사유다. 비면 첫 방문이다.
+	Error string
+	// Next 는 로그인 뒤 돌아갈 자리다. **호출부가 이미 JudgeNext 를 통과시킨 값이다** —
+	// 렌더러가 그 검증을 다시 하지 않는다. 두 자리에서 검증하면 한쪽만 고쳐진다.
+	Next string
+	// Action 은 이 폼의 action 이 가리켜야 할 **상대경로**다(`login` · `../login` · …).
+	// **호출부가 이미 JudgeLoginAction 으로 계산한 값이다** — 렌더러가 다시 계산하지
+	// 않는다(Next 와 같은 규율). 렌더러가 계산하면 그 깊이 셈이 두 벌이 되고, 두 벌은
+	// 반드시 표류한다 — 그리고 이 축의 표류는 "토큰을 정확히 쳐도 폼이 다시 뜬다"로
+	// 나타나서 원인이 폼 action 이라는 것이 증상에서 안 보인다.
+	Action string
 }
 
 func (o Options) withDefaults() Options {
@@ -318,6 +348,12 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /events", s.handleEvents) // 짧은 별칭. 화면이 이걸 문다
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
+	// 화면 로그인. **게이트 앞에서 갈라진다**(withAuth·withIdempotency 가 함께 보는
+	// JudgePreSessionPath) — 로그인이 게이트 뒤에 있으면 로그인하려면 이미 로그인돼 있어야 한다.
+	mux.HandleFunc("GET /login", s.handleLogin)
+	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /logout", s.handleLogout)
 
 	// 못 맞춘 요청. Fallback 이 있으면 그쪽으로 넘기고, 없으면 JSON 404 다.
 	// 기본 404 는 평문이라 클라이언트가 오류 본문을 파싱하는 경로가 두 벌이 된다.

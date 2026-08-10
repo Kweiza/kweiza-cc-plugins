@@ -116,6 +116,15 @@ func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContai
 	if ledgerJob != nil {
 		opt.LedgerBackup = func() api.LedgerBackupStatus { return ledgerBackupStatusOf(ledgerJob.State()) }
 	}
+	// ★ 화면 로그인 렌더러. **여기서 두 LoginView 를 잇는다** — web 이 api 를 import 하지
+	// 않으므로 타입이 둘이고, 그 둘을 아는 자리는 이 조립 함수뿐이다.
+	//
+	// ★ nil 로 두면 실패가 **조용하다**: 서버는 뜨고 REST 도 다 도는데 브라우저에서만
+	// 폼 대신 JSON 401 이 뜬다. 그 모양은 운영에서 사람이 봐야 발견되고, 정확히 그런
+	// 침묵이 이 함수를 순수 함수로 뽑게 만든 사고였다(위 ★ 참고).
+	opt.LoginScreen = func(w http.ResponseWriter, r *http.Request, v api.LoginView) {
+		web.LoginScreen(w, r, web.LoginView{Error: v.Error, Next: v.Next, Action: v.Action})
+	}
 	return opt
 }
 

@@ -627,3 +627,80 @@ func TestDashboardIsReadOnlyAndCarriesFreshness(t *testing.T) {
 		t.Fatalf("project 없는 조회가 %d 다: %s", got.Code, got.Body.String())
 	}
 }
+
+// TestUnauthorizedBrowserGetsForm 은 브라우저가 401 본문으로 폼을 받는지 본다.
+// ★ 상태코드는 401 을 **유지해야 한다**. 리다이렉트로 덮으면 /metrics 의 unauthorized
+// 카운터가 안 오르고, 인증 실패가 지표에서 사라진다.
+func TestUnauthorizedBrowserGetsForm(t *testing.T) {
+	var gotView LoginView
+	e := newEnv(t, func(o *Options) {
+		o.Token = "s3cret"
+		o.LoginScreen = func(w http.ResponseWriter, r *http.Request, v LoginView) {
+			gotView = v
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("<form>토큰</form>"))
+		}
+	})
+
+	rec := e.do(http.MethodGet, "/?project=kweiza", nil,
+		withRemote("203.0.113.9:1"), withHeader("Accept", "text/html"))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("상태가 %d 다 — 401 이어야 한다", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type 이 %q 다 — HTML 이어야 한다", ct)
+	}
+	if gotView.Next != "/?project=kweiza" {
+		t.Fatalf("돌아갈 자리가 %q 다 — 원래 URL 이어야 한다", gotView.Next)
+	}
+	if gotView.Error == "" {
+		t.Fatal("사유가 비었다 — 폼이 왜 떴는지 말해야 한다")
+	}
+}
+
+// TestUnauthorizedCLIStaysJSON 은 CLI 소비자의 401 이 안 바뀌었는지 본다.
+func TestUnauthorizedCLIStaysJSON(t *testing.T) {
+	e := newEnv(t, func(o *Options) {
+		o.Token = "s3cret"
+		o.LoginScreen = func(w http.ResponseWriter, r *http.Request, v LoginView) {
+			t.Fatal("CLI 요청에 폼을 냈다 — Accept 를 안 본 것이다")
+		}
+	})
+	for _, path := range []string{"/", "/api/v1/items/next"} {
+		rec := e.do(http.MethodGet, path, nil,
+			withRemote("203.0.113.9:1"), withHeader("Accept", "application/json"))
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: 상태가 %d 다", path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+			t.Fatalf("%s: Content-Type 이 %q 다 — JSON 이어야 한다", path, ct)
+		}
+		if rec.Header().Get("WWW-Authenticate") == "" {
+			t.Fatalf("%s: WWW-Authenticate 가 없다", path)
+		}
+	}
+}
+
+// TestScreenCookiePassesScreenOnly 는 쿠키의 범위가 실제로 닫혔는지 본다.
+// ★ 이 시험이 이 변경의 안전을 재는 자리다.
+func TestScreenCookiePassesScreenOnly(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Token = "s3cret" })
+	cookie := &http.Cookie{Name: LoginCookieName, Value: "s3cret"}
+	withCookie := func(r *http.Request) { r.AddCookie(cookie) }
+
+	// 화면 경로 — 통과해야 한다. 이 태스크는 인증 갈래만 재고 대시보드 렌더는 안 잰다 —
+	// 뒤에서 무엇을 내든(200·404 등) **401 이면 안 된다**는 것만 본다.
+	rec := e.do(http.MethodGet, "/", nil, withRemote("203.0.113.9:1"), withCookie)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatal("화면 경로에서 쿠키가 안 통했다")
+	}
+
+	// REST — 401 이어야 한다.
+	rec = e.do(http.MethodGet, "/api/v1/items/next", nil, withRemote("203.0.113.9:1"), withCookie)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("REST 에서 쿠키가 통했다 (상태 %d) — 범위가 안 닫혔다", rec.Code)
+	}
+}
