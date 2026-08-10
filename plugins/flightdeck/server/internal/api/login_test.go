@@ -108,6 +108,12 @@ func TestLoginRejectsWrongTokenWithoutEcho(t *testing.T) {
 	if strings.Contains(gotView.Error, "wrong-guess") || strings.Contains(gotView.Next, "wrong-guess") {
 		t.Fatal("시도한 토큰 값이 응답에 되비쳤다")
 	}
+	// ★ **재시도 폼도 제출 가능해야 한다.** 폼을 채우는 자리가 둘인데(withAuth 와 여기)
+	// 왕복 시험이 닿는 것은 앞엣것뿐이라, 이 자리가 Action 을 안 채우면 action="" 이 되고
+	// 그러면 폼이 문서 URL 자신으로 제출된다 — 틀린 토큰을 한 번 친 사람만 무한 폼에 갇힌다.
+	if gotView.Action != "login" {
+		t.Fatalf("재시도 폼의 action 이 %q 다 — /login 에서 뜬 폼이라 \"login\" 이어야 한다", gotView.Action)
+	}
 }
 
 func TestLoginRefusesCrossSite(t *testing.T) {
