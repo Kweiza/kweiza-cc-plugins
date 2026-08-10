@@ -302,6 +302,53 @@ func parseNameOnlyZ(out []byte) []string {
 	return paths
 }
 
+// parseNumstatZ 는 `git diff --numstat -z --no-renames …` 출력을 가른다. 순수 함수다.
+//
+// 레코드 하나는 `증가 TAB 감소 TAB 경로 NUL` 이다 — 선행 NUL 도 헤더도 없다
+// (2026-08-11 실물 관측. 스펙 §2.1 에 출력 그대로 있다).
+//
+// ★ **경로와 규모를 따로 낸다.** 이진 파일은 `-\t-\t경로` 로 오는데, 그 파일이 **바뀐 것은
+// 사실**이라 경로 목록에는 남아야 하고(빠지면 겹침 축에서 통째로 사라진다) 규모는 못 잰
+// 것이라 맵에 키가 없어야 한다. 하나의 반환값으로는 그 둘을 못 가른다.
+//
+// ★ **깨진 레코드 하나가 축 전체를 끄지 않는다.** 그 레코드만 버리고 사유를 skipped 로
+// 올린다 — 호출자가 WARN 을 남긴다. 조용히 버리면 규모가 왜 비었는지 아무 데도 안 남고,
+// 통째로 오류를 내면 멀쩡한 나머지 경로까지 잃는다. service.emittedKeys 가 payload 해석
+// 실패에 대해 쓰는 규율과 같다.
+//
+// ★ **`--no-renames` 가 붙어 있다는 전제 위에 서 있다.** 그것이 없으면 numstat 이 이름
+// 변경을 `증가 TAB 감소 TAB NUL 원본 NUL 목적지 NUL` 3필드로 내고, 이 파서는 그것을
+// 조용히 어긋나게 읽는다. 호출부 둘 다 그 플래그를 준다 —
+// TestParseNumstatZAssumesNoRenames 가 그 전제를 시험으로 잠근다.
+func parseNumstatZ(out []byte) (paths []string, delta map[string]model.LineDelta, skipped []string) {
+	delta = map[string]model.LineDelta{}
+	for _, rec := range strings.Split(string(out), "\x00") {
+		if rec == "" {
+			continue // 마지막 NUL 뒤의 빈 토큰
+		}
+		f := strings.SplitN(rec, "\t", 3)
+		if len(f) != 3 || f[2] == "" {
+			skipped = append(skipped, fmt.Sprintf("필드가 3개가 아니다: %q", sanitizeExcerpt([]byte(rec), 80)))
+			continue
+		}
+		path := f[2]
+		// 이진 파일은 `-`/`-` 다. 경로는 남기고 규모만 비운다.
+		if f[0] == "-" && f[1] == "-" {
+			paths = append(paths, path)
+			continue
+		}
+		added, aerr := strconv.Atoi(f[0])
+		removed, rerr := strconv.Atoi(f[1])
+		if aerr != nil || rerr != nil {
+			skipped = append(skipped, fmt.Sprintf("증감이 수가 아니다: %q", sanitizeExcerpt([]byte(rec), 80)))
+			continue
+		}
+		paths = append(paths, path)
+		delta[path] = model.LineDelta{Added: added, Removed: removed}
+	}
+	return paths, delta, skipped
+}
+
 // parseAheadBehind 는 `rev-list --left-right --count A...B` 출력을 가른다.
 //
 // **한 줄 · 탭으로 나뉜 정수 2개**만 받는다. 필드만 세면 "0\n0" 이 (0,0) 으로 통과하는데,

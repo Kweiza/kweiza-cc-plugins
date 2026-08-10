@@ -1,11 +1,13 @@
 package gitreader
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
+	"github.com/kweiza/flightdeck/internal/model"
 )
 
 // 이 파일의 시험은 **판정 함수를 직접 부른다.** 상위 메서드를 통해서만 보면
@@ -479,5 +481,115 @@ func TestParseWorktreeList(t *testing.T) {
 	// 그 판정은 호출자 몫이다 — 파서는 구조만 본다.
 	if wts, err := parseWorktreeList(nil); err != nil || len(wts) != 0 {
 		t.Errorf("빈 출력: %+v %v", wts, err)
+	}
+}
+
+func TestParseNumstatZ(t *testing.T) {
+	cases := []struct {
+		name      string
+		out       string
+		wantPaths []string
+		wantDelta map[string]model.LineDelta
+		wantSkip  int
+	}{
+		{
+			name:      "정상 레코드 셋",
+			out:       "8\t0\t.gitignore\x001\t1\tplugin.json\x0012\t4\tcmds.go\x00",
+			wantPaths: []string{".gitignore", "plugin.json", "cmds.go"},
+			wantDelta: map[string]model.LineDelta{
+				".gitignore":  {Added: 8, Removed: 0},
+				"plugin.json": {Added: 1, Removed: 1},
+				"cmds.go":     {Added: 12, Removed: 4},
+			},
+		},
+		{
+			// ★ 이진 파일은 **경로로는 남고 규모로는 안 남는다.** 그 파일이 바뀐 것은 사실이라
+			// 겹침 축에서 빠지면 안 되고, 규모는 못 잰 것이라 0 으로 세면 안 된다.
+			name:      "이진 파일은 경로만 남고 규모는 키가 없다",
+			out:       "-\t-\tb.bin\x001\t0\tt.txt\x00",
+			wantPaths: []string{"b.bin", "t.txt"},
+			wantDelta: map[string]model.LineDelta{"t.txt": {Added: 1, Removed: 0}},
+		},
+		{
+			name:      "빈 출력",
+			out:       "",
+			wantPaths: nil,
+			wantDelta: map[string]model.LineDelta{},
+		},
+		{
+			name:      "필드가 모자라면 그 레코드만 버린다",
+			out:       "5\tx.go\x003\t1\ty.go\x00",
+			wantPaths: []string{"y.go"},
+			wantDelta: map[string]model.LineDelta{"y.go": {Added: 3, Removed: 1}},
+			wantSkip:  1,
+		},
+		{
+			name:      "수가 아닌 값이면 그 레코드만 버린다",
+			out:       "a\t0\tx.go\x003\t1\ty.go\x00",
+			wantPaths: []string{"y.go"},
+			wantDelta: map[string]model.LineDelta{"y.go": {Added: 3, Removed: 1}},
+			wantSkip:  1,
+		},
+		{
+			// 경로에 공백·유니코드가 있어도 -z 라 구분자가 안 흔들린다.
+			name:      "공백과 유니코드 경로",
+			out:       "2\t0\tdocs/설계 노트.md\x00",
+			wantPaths: []string{"docs/설계 노트.md"},
+			wantDelta: map[string]model.LineDelta{"docs/설계 노트.md": {Added: 2, Removed: 0}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			paths, delta, skipped := parseNumstatZ([]byte(tc.out))
+			if !reflect.DeepEqual(paths, tc.wantPaths) {
+				t.Errorf("경로: %q 를 기대했는데 %q 다", tc.wantPaths, paths)
+			}
+			if len(delta) != len(tc.wantDelta) {
+				t.Errorf("규모 %d건을 기대했는데 %d건이다: %v", len(tc.wantDelta), len(delta), delta)
+			}
+			for p, want := range tc.wantDelta {
+				got, ok := delta[p]
+				if !ok {
+					t.Errorf("%q 의 규모 키가 없다", p)
+					continue
+				}
+				if got != want {
+					t.Errorf("%q: %+v 를 기대했는데 %+v 다", p, want, got)
+				}
+			}
+			if len(skipped) != tc.wantSkip {
+				t.Errorf("버린 레코드 %d건을 기대했는데 %d건이다: %v", tc.wantSkip, len(skipped), skipped)
+			}
+		})
+	}
+}
+
+// ★ 이 시험이 이 계획의 논지를 지킨다. 이진 파일의 규모를 0 으로 접으면 여기가 빨개진다.
+func TestParseNumstatZNeverReportsUnknownAsZero(t *testing.T) {
+	_, delta, _ := parseNumstatZ([]byte("-\t-\tb.bin\x00"))
+	if d, ok := delta["b.bin"]; ok {
+		t.Fatalf("이진 파일의 규모 키가 생겼다(%+v) — 못 읽은 것은 키가 없어야 한다. "+
+			"0 으로 접으면 화면이 '안 만졌다'라고 말하게 된다", d)
+	}
+}
+
+// ★ 이 시험은 **파서가 무엇을 전제하는지**를 잠근다. 호출부에서 --no-renames 를 떼면
+// numstat 이 rename 을 3필드(NUL 로 나뉜 원본·목적지)로 내는데, 그 형태가 이 파서에
+// 들어오면 조용히 어긋난다. 그래서 그 형태가 오면 **버려진다는 것**을 여기 못박는다 —
+// 버려지면 skipped 에 남아 WARN 이 뜨고, 조용한 손실이 아니게 된다.
+func TestParseNumstatZAssumesNoRenames(t *testing.T) {
+	// --no-renames 없이 나오는 형태: "3\t1\t\x00old.go\x00new.go\x00"
+	paths, delta, skipped := parseNumstatZ([]byte("3\t1\t\x00old.go\x00new.go\x00"))
+	if len(delta) != 0 {
+		t.Errorf("rename 형태에서 규모가 나왔다: %v — 파서는 --no-renames 를 전제한다", delta)
+	}
+	if len(skipped) == 0 {
+		t.Error("rename 형태가 조용히 버려졌다 — skipped 에 사유가 남아야 WARN 이 뜬다")
+	}
+	for _, p := range paths {
+		if p == "" {
+			t.Error("빈 경로가 경로 목록에 들어갔다")
+		}
 	}
 }
