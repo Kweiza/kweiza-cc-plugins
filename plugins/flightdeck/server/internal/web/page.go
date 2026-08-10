@@ -466,10 +466,22 @@ func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 		return p
 	}
 	p.Projects = projects
-	// Nav 는 프로젝트 목록·건강·개별 조회의 성패와 무관하게 항상 만든다 — 프로젝트가
-	// 0건이거나 요청한 프로젝트를 못 찾아 아래에서 일찍 return 하는 갈래에서도
-	// 헤더의 프로젝트 줄은 그대로 나가야 한다.
-	p.Nav = buildProjectNav(projects, req.project, h.archivedSessionAges(ctx, projects, now))
+	// Nav 는 요청한 프로젝트를 못 찾아 아래에서 일찍 return 하는 갈래(NotFound)에서도
+	// 헤더의 프로젝트 줄이 그대로 나가야 하므로 그 판정보다 앞에서 만든다. (프로젝트가
+	// 0건인 갈래는 이 자리와 무관하다 — dashboard.gohtml 의 {{if .Projects}} 가드가
+	// 그때는 <nav> 를 통째로 지운다.)
+	//
+	// ★ req.project **원문**이 아니라 pickProject 와 같은 규칙으로 해결한 값을 넘긴다.
+	// req.project 는 질의 문자열 그대로라 "/" 로 들어오면 ""(web.go) 인데, 실제로
+	// 그려지는 프로젝트는 pickProject 가 정한 id 순 첫 번째다. 원문을 그대로 넘기면
+	// 그 프로젝트의 On 이 전부 false 가 되어, 핀이 하나라도 있고 id 순 첫 프로젝트가
+	// 핀이 아닐 때 "지금 보드가 그려진 바로 그 프로젝트"가 스스로 접힌 <details> 안에
+	// 들어간다 — 화면이 자기 위치를 안 말하는 사고(리뷰 Important-1)다.
+	current := req.project
+	if current == "" && len(projects) > 0 {
+		current = projects[0].ID
+	}
+	p.Nav = buildProjectNav(projects, current, h.archivedSessionAges(ctx, projects, now))
 
 	// 건강은 프로젝트와 무관하게 항상 낸다 — 프로젝트가 하나도 없을 때가
 	// 오히려 "서버는 사는데 아무도 안 붙었다"를 확인해야 하는 순간이다.

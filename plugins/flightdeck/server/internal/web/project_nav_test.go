@@ -123,6 +123,92 @@ func TestArchivedProjectStillOpens(t *testing.T) {
 	mustContain(t, html, "① 지금", "보관된 프로젝트도 페이지 전체가 그대로 나와야 한다")
 }
 
+// TestProjectNavUnfoldsResolvedCurrentProjectOnBareEntry 는 "/" 로 들어왔을 때
+// (?project= 없이) 실제로 그려지는 프로젝트가 접힌 쪽으로 밀리지 않는다는 단정이다.
+//
+// ★ req.project 는 질의 문자열 원문이라 "/" 에서는 빈 문자열이다. 그런데 실제로
+// 보드가 그려지는 프로젝트는 pickProject 가 정하는 **id 순 첫 번째**다. Nav 가
+// 이 해결값이 아니라 질의 원문을 current 로 쓰면, 핀이 있고 id 순 첫 프로젝트가
+// 핀이 아닐 때 "지금 보드가 그려진 바로 그 프로젝트"가 스스로 <details> 안에
+// 접힌다 — 화면이 자기 위치를 안 말하는 사고다(리뷰 Important-1).
+func TestProjectNavUnfoldsResolvedCurrentProjectOnBareEntry(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	f.addProject("aa-current") // id 순 첫째. 핀이 아니다 — "/" 로 들어오면 이것이 현재 프로젝트다.
+	f.addProject("mm-folded")  // 핀도 현재도 아니다 — 접힐 것이 하나는 있어야 <details> 가 생긴다.
+	f.addProject("zz-pinned")
+	f.pin("zz-pinned")
+
+	_, html := f.get("") // ?project= 를 안 준다 — 기본 진입이다.
+	nav := navOf(t, html)
+
+	before, _, found := strings.Cut(nav, "<details")
+	if !found {
+		t.Fatal("접는 자리가 없다 — 이 시험의 전제가 깨졌다")
+	}
+	if !strings.Contains(before, "aa-current") {
+		t.Fatalf(`"/" 로 들어왔을 때 pickProject 가 고른 id 순 첫 프로젝트 %q 가 접힌 쪽에 있다 — `+
+			`Nav 가 질의 원문("")을 그대로 썼지 실제로 그려지는 프로젝트를 모른다`, "aa-current")
+	}
+}
+
+// TestProjectNavHighlightsResolvedCurrentProjectOnBareEntry 는 같은 상황에서
+// on 강조가 실제로 그려지는 프로젝트에 붙는다는 단정이다.
+//
+// ★ 옛 템플릿은 `{{if eq .ID $.Project.ID}}` 로 **해결된** 프로젝트를 강조했다.
+// 새 템플릿은 `{{if .On}}` = `p.ID == current` 라, current 를 질의 원문으로 잘못
+// 넘기면 "/" 에서 아무것도 강조되지 않는다 — 이 강조 클래스를 단정하는 시험이
+// 이전에는 저장소에 하나도 없어 그 회귀가 조용히 통과했다(리뷰 Important-1).
+func TestProjectNavHighlightsResolvedCurrentProjectOnBareEntry(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	f.addProject("aa-current")
+	f.addProject("mm-folded")
+	f.addProject("zz-pinned")
+	f.pin("zz-pinned")
+
+	_, html := f.get("")
+	nav := navOf(t, html)
+
+	mustContain(t, nav, `class="on" href="?project=aa-current"`,
+		`"/" 로 들어왔을 때 실제로 그려지는 프로젝트(id 순 첫째)에 on 강조가 없다`)
+}
+
+// TestArchivedProjectLastSessionAgeHasExactlyOneSuffix 는 보관 목록의 마지막 세션
+// 나이 문구가 "전" 접미사를 두 번 안 붙인다는 단정이다.
+//
+// ★ web.Age 는 이미 "3일 전" 처럼 접미사를 포함해서 낸다(format.go:64).
+// archivedSessionAges 가 그 위에 또 " 전" 을 붙이면 "3일 전 전" 이 된다 — 이
+// 태스크가 화면에 새로 낸 유일한 파생 문자열이라 여기가 비면 축 하나가 통째로
+// 무보호로 남는다(리뷰 Important-2). "gone" 처럼 세션이 아예 없는 보관 프로젝트는
+// "세션 없음" 갈래로 빠져 이 문제를 못 잡으므로, 실제로 세션을 하나 연다.
+func TestArchivedProjectLastSessionAgeHasExactlyOneSuffix(t *testing.T) {
+	fixedNow := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
+	f := newFixture(t, withClock(func() time.Time { return fixedNow })).withRepo("feat")
+
+	sess := f.openSession("cc-arch", "옛 세션")
+	// 열린 시각을 사흘 전으로 되돌린다 — "방금"·"세션 없음" 갈래를 피하고 span 이
+	// 실제로 "N일" 모양으로 나오게 한다. render_test.go 의 다른 시험들과 같은
+	// SQL 우회다(TestDashboardSaysWhatTheWindowCutOff 를 보라).
+	oldOpened := fixedNow.Add(-3 * 24 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
+	if _, err := f.st.DB().Exec(`UPDATE session SET opened_at = ? WHERE id = ?`,
+		oldOpened, sess.ID); err != nil {
+		t.Fatalf("세션 개시 시각 되돌리기 실패: %v", err)
+	}
+	// openSession 이 이미 testProject 를 원장에 upsert 했으므로 archive 는 바로 된다.
+	f.archive(testProject)
+	f.addProject("keep")
+	f.pin("keep")
+
+	// testProject 를 보지 않는다 — 보고 있으면 On 이 이겨 Shown 으로 가고, 나이 문구가
+	// 실리는 Archived 하위 목록(<details> 안)을 안 거친다.
+	_, html := f.get("?project=keep")
+	nav := navOf(t, html)
+
+	mustContain(t, nav, "3일 전", "보관된 프로젝트의 마지막 세션 나이가 안 보인다")
+	if strings.Contains(nav, "전 전") {
+		t.Fatal(`나이 접미사가 두 번 붙었다("… 전 전") — Age 가 이미 "전" 을 포함하므로 밖에서 또 붙이면 안 된다`)
+	}
+}
+
 // navOf 는 헤더의 프로젝트 줄만 잘라 낸다. 페이지 다른 곳의 프로젝트 id 언급(카드·표)이
 // 이 시험들의 단정을 우연히 통과시키는 것을 막는다.
 func navOf(t *testing.T, html string) string {
