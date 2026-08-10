@@ -232,7 +232,6 @@ func TestOutboxReplayIsExactlyOnceAcrossProcessDeathAndRestart(t *testing.T) {
 	//   하네스가 FD_STATE_DIR 를 고정해 우연히 같은 경로가 나오더라도, 시험이 단정하는
 	//   좌표계는 **소비자가 실제로 쓰는 자리**여야 한다.
 	ob := newOutbox(envOf(h.env), h.home)
-	outboxPath := filepath.Join(ob.Dir(), pendingName)
 
 	// ── 대조 전제 ①: 정말 3건이 쌓였다 ──
 	pend, err := ob.List()
@@ -245,12 +244,13 @@ func TestOutboxReplayIsExactlyOnceAcrossProcessDeathAndRestart(t *testing.T) {
 	// 파일 원문을 뜬다. 항목을 다시 Append 하는 것과 다른 축이다 —
 	// Append 는 도구를 거쳐 **새로 쌓는 것**이고, 여기서 흉내 내려는 것은
 	// "보냈는데 절단 전에 죽어 파일이 그대로 남은 상태"다.
-	snapshot, err := os.ReadFile(outboxPath)
-	if err != nil {
-		t.Fatalf("아웃박스 파일을 못 읽었다(%s): %v", outboxPath, err)
-	}
+	//
+	// ★ 큐가 항목당 파일이 되면서 이 스냅숏은 **디렉토리 통째**다. 파일 하나를 읽던
+	//   앞선 판을 그대로 두면 `pending.jsonl` 이 없어 여기서 멈춘다 — 그런데 이 시험이
+	//   재려는 것은 형식이 아니라 **정확히 한 번**이므로, 흉내 내는 대상을 형식에 맞춘다.
+	snapshot := snapshotQueueDir(t, ob.pendingDir())
 	if len(snapshot) == 0 {
-		t.Fatal("전제가 깨졌다 — 아웃박스 파일이 비어 있다")
+		t.Fatal("전제가 깨졌다 — 아웃박스 큐 자리가 비어 있다")
 	}
 	// ── 대조 전제 ②: 재생 전 서버에 판단이 0건 ──
 	if got := len(h.judgments(model.JudgmentDecision)); got != 0 {
@@ -270,9 +270,7 @@ func TestOutboxReplayIsExactlyOnceAcrossProcessDeathAndRestart(t *testing.T) {
 	}
 
 	// ── 재생 도중 죽음: 보낸 뒤 절단 전에 죽으면 파일이 그대로다 ──
-	if err := os.WriteFile(outboxPath, snapshot, 0o600); err != nil {
-		t.Fatalf("아웃박스 원문 복원 실패: %v", err)
-	}
+	restoreQueueDir(t, ob.pendingDir(), snapshot)
 	// ── 대조 전제 ③: 되돌린 것이 **같은 키**인가. 키가 다르면 멱등이 아니라 새 요청이다 ──
 	again, err := ob.List()
 	if err != nil {
@@ -391,9 +389,12 @@ func TestOfflineStateSplitsByRegenerabilityAndNeverLandsUnderPluginRoot(t *testi
 		t.Fatalf("오프라인 note 실패(%d): %s", code, out)
 	}
 	outDir, _ := OutboxPath(envOf(env), homeDir(envOf(env)))
-	pending := filepath.Join(outDir, pendingName)
-	if _, err := os.Stat(pending); err != nil {
-		t.Fatalf("아웃박스가 %s 에 없다 — 판단이 어디에 쌓였는지 모른다: %v", pending, err)
+	// ★ **파일 이름이 아니라 자리를 단정한다.** 앞선 판은 `pending.jsonl` 의 존재를 봤는데,
+	//   그것은 이 시험이 재려는 축(어느 **디렉토리**에 쌓이는가)이 아니라 큐의 내부 형식이다.
+	//   형식이 항목당 파일로 바뀌면서 그 단정이 깨졌고, 깨진 이유가 축과 무관했다.
+	if pend, err := newOutboxAt(outDir).List(); err != nil || len(pend) == 0 {
+		t.Fatalf("아웃박스가 %s 에 없다 — 판단이 어디에 쌓였는지 모른다(건수=%d err=%v)",
+			outDir, len(pend), err)
 	}
 	// ★ 갈렸는지를 직접 본다. 같은 자리로 가면 이 시험은 축이 갈린 것을 못 본다.
 	if strings.HasPrefix(filepath.Clean(outDir), filepath.Clean(filepath.Join(data, "flightdeck"))) {
@@ -597,4 +598,48 @@ func additionalContext(t *testing.T, stdout string) string {
 		t.Fatalf("hookEventName 이 %q 다", payload.HookSpecificOutput.HookEventName)
 	}
 	return payload.HookSpecificOutput.AdditionalContext
+}
+
+// snapshotQueueDir 는 항목당 파일 큐 자리를 **통째로** 뜬다.
+//
+// ★ 큐가 `pending.jsonl` 하나였을 때 이 자리는 `os.ReadFile` 한 줄이었다. 형식이 바뀌면
+// 그 한 줄이 깨지는데, **깨지는 이유가 시험이 재려는 축과 무관하다** — 위 시험이 재는 것은
+// "정확히 한 번"이지 큐의 내부 형식이 아니다. 그래서 흉내 내는 대상만 형식에 맞춘다.
+func snapshotQueueDir(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("큐 자리를 못 읽었다(%s): %v", dir, err)
+	}
+	out := map[string][]byte{}
+	for _, de := range des {
+		if de.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			t.Fatalf("큐 항목을 못 읽었다(%s): %v", de.Name(), err)
+		}
+		out[de.Name()] = b
+	}
+	return out
+}
+
+// restoreQueueDir 는 뜬 것을 그대로 되돌린다.
+//
+// ★ **그 사이 생긴 것을 지우지 않는다.** 흉내 내려는 상태가 "보냈는데 절단 전에 죽어
+// 파일이 그대로 남았다"이지 "큐를 과거로 되감았다"가 아니다.
+func restoreQueueDir(t *testing.T, dir string, snap map[string][]byte) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("큐 자리를 못 만들었다(%s): %v", dir, err)
+	}
+	for name, b := range snap {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			t.Fatalf("큐 항목 원문 복원 실패(%s): %v", name, err)
+		}
+	}
 }

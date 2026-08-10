@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -178,8 +179,22 @@ func IdempotencyKey(session string, body []byte) string {
 // 대기열·격리 파일의 이름. 한 자리에 모은다 — 옛 자리 재생이 이 이름으로 큐를 찾으므로
 // 두 자리에 흩어 두면 한쪽만 고칠 때 그 큐가 조용히 안 보이게 된다.
 const (
-	pendingName  = "pending.jsonl"
-	rejectedName = "rejected.jsonl"
+	pendingName = "pending.jsonl"
+	// pendingDirName 은 **항목당 파일** 큐의 자리다. 새 쓰기는 전부 여기로 간다.
+	//
+	// ★ 왜 파일 하나가 아닌가. `pending.jsonl` 판은 잠금 구간의 첫 줄이 파일 전량 읽기,
+	// 끝이 파일 전량 쓰기라 **점유가 O(큐 크기)** 였다(실측 ext4: 1000건 병합 17.9ms ·
+	// p95 35.4ms). 큐가 깊고 세션이 몰리면 예산 250ms 를 못 채우는 프로세스가 나오고
+	// 무잠금으로 떨어져 **판단이 사라졌다**(큐 1000건·세션 30 에서 유실 10/36).
+	// 예산으로는 못 닫는다 — 30s 면 유실이 0 이 되지만 훅 예산(2s·3s·10s)을 통째로 넘긴다.
+	//
+	// ★ **그래서 이 자리에는 잠금이 없다.** 항목당 파일이면 `Append` 는 O_EXCL 한 번이고
+	// `settle` 은 내가 처리한 키의 파일만 지운다 — 남의 파일을 건드릴 수 있는 연산이 하나도
+	// 없다. 겹친 재생 둘은 각자 읽고 각자 보내고(서버가 멱등 키로 접는다) 각자 지운다.
+	// 잠금이 닫았던 축 셋이 여기서는 **자료구조로** 닫힌다(되살아남 300/300 · 되쓰기 삭제
+	// 33/300 · 진짜 프로세스 둘의 유실 15/200 — 전부 전량 재기록이 있어야 나는 것들이다).
+	pendingDirName = "pending"
+	rejectedName   = "rejected.jsonl"
 	// failOpenName 은 **잠금 없이 지나간 사건**의 기록이다.
 	//
 	// ★ 왜 파일인가. 이 사건은 오래 `o.warn` 으로만 흘렀고 그 로거는 stderr 로 간다.
@@ -193,7 +208,7 @@ const (
 // FailOpenEvent 는 잠금 없이 지나간 사건 하나다.
 type FailOpenEvent struct {
 	At     time.Time `json:"at"`
-	Op     string    `json:"op"`     // 어느 갈래인가 — "append" | "settle"
+	Op     string    `json:"op"`     // 어느 갈래인가 — "bump" | "settle"(옛 형식 병합)
 	Reason string    `json:"reason"` // 왜 못 잡았나. **항상 채운다**
 }
 
@@ -272,7 +287,40 @@ func (o *Outbox) Source() string { return o.source }
 // pendingPath·rejectedPath 는 두 파일의 자리다. 같은 디렉토리에 둔다 —
 // 같은 축의 같은 자산이고, 격리는 제 큐 옆에 남아야 '어디서 온 것인가'가 안 사라진다.
 func (o *Outbox) pendingPath() string  { return filepath.Join(o.dir, pendingName) }
+func (o *Outbox) pendingDir() string   { return filepath.Join(o.dir, pendingDirName) }
 func (o *Outbox) rejectedPath() string { return filepath.Join(o.dir, rejectedName) }
+
+// entryFileName 은 키 하나가 갖는 파일 이름이다. 순수 함수다.
+//
+// ★ **이름은 키만으로 결정된다.** 항목 본문은 `<정렬가능한시각>-<key>.json` 을 제안하면서
+// 동시에 O_EXCL 이 중복 키 검사를 커널의 원자 연산으로 만든다고 적었는데, **둘은 같이
+// 성립하지 않는다**: 같은 키를 두 번 쌓는 유일한 경로가 훅 재시도이고 그때 `At` 은
+// `c.Now()` 라 다르다. 이름에 시각이 들어가면 같은 키가 다른 파일을 얻어 O_EXCL 이
+// 아무것도 안 막는다. **순서는 이름이 아니라 값(`At`)이 정한다** — List 참조.
+//
+// ★ 키를 그대로 안 쓰는 이유는 별개다. 키 형식이 `<session>:<hash>` 인데
+// **windows 는 파일명에 `:` 를 못 쓴다.** 치환은 서로 다른 키가 같은 이름을 얻는 길을
+// 열므로(그러면 남의 판단이 사라진다) 해시로 접는다. 충돌은 sha256 앞 16바이트다.
+//
+// ★ 빈 키는 **빈 이름을 낸다** — 호출자가 그것을 보고 거절한다. 빈 키끼리는 서로
+// 별칭이라(settle 이 같은 이유로 그 줄을 절대 안 지운다) 한 이름에 접으면 서로 다른
+// 판단이 서로를 덮어쓴다.
+func entryFileName(key string) string {
+	if strings.TrimSpace(key) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:16]) + ".json"
+}
+
+// entryPath 는 키 하나가 사는 파일의 전체 경로다. 빈 키면 빈 문자열이다.
+func (o *Outbox) entryPath(key string) string {
+	name := entryFileName(key)
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(o.pendingDir(), name)
+}
 func (o *Outbox) failOpenPath() string { return filepath.Join(o.dir, failOpenName) }
 
 // recordFailOpen 은 잠금 없이 지나간 사건 하나를 남긴다.
@@ -357,48 +405,144 @@ func (o *Outbox) stamp() time.Time {
 //
 // 잠금을 못 잡으면 **무잠금으로 진행한다**(fail-open). 훅 예산을 넘기며 기다리는 것보다
 // 오늘과 같은 상태로 떨어지는 쪽이 낫다 — 다만 조용히 떨어지지는 않는다.
+// ★ **이 함수는 잠금을 안 쥔다.** 옛 판은 `List→검사→O_APPEND` 라 그 사이에 남이 끼면
+// 서로를 못 봤고, 그래서 프로세스 간 잠금 아래에서 돌았다. 항목당 파일에서는 중복 검사가
+// **파일 이름의 존재**이고 그 판정을 커널이 원자적으로 한다 — 검사와 쓰기 사이에 창이 없다.
+//
+// ★ **왜 `O_CREATE|O_EXCL` 직접 쓰기가 아니라 tmp + `Link` 인가.** 항목 본문이 적은
+// O_EXCL 은 *이름*은 원자적으로 잡지만 **내용은 아니다**: 자리를 잡은 뒤 Write 까지의
+// 사이에 남의 `List` 가 그 파일을 읽으면 0바이트 또는 반쪽 JSON 을 본다. 그 자리에서
+// 해석 실패를 오류로 올리면 **정상 동시성이 매번 빨간 줄을 내고**, 조용히 건너뛰면
+// 재생성 불가한 자산을 버리는 것이 된다(설계 §9) — 둘 다 못 쓴다. `Link` 는 **내용이
+// 완성된 파일에 이름을 붙이는** 연산이라 두 성질을 함께 준다: 보이는 순간 이미 온전하고,
+// 이름이 이미 있으면 EEXIST 다.
+//
+// ★ **Link 가 안 되는 파일 시스템에 폴백을 안 짓는다.** 안 재본 플랫폼을 위해 두 경로를
+// 두면 그 경로가 시험 없이 산다. 실패하면 오류로 말한다 — 조용히 다른 길로 가지 않는다.
 func (o *Outbox) Append(e OutboxEntry) error {
-	locked, err := withQueueLock(o.dir, queueLockBudget, func() error { return o.appendLocked(e) })
-	if locked {
-		return err
+	path := o.entryPath(e.Key)
+	if path == "" {
+		// ★ 옛 판은 빈 키도 쌓았고, `List` 의 `x.Key == e.Key` 가 빈 키끼리 매칭돼서
+		// **둘째 빈 키가 조용히 안 쌓였다.** 빈 키는 서로 별칭이라(settle 이 같은 이유로
+		// 그 줄을 절대 안 지운다) 그 동작은 서로 다른 판단 하나를 소리 없이 버리는 것이었다.
+		// 여기서는 거절한다 — 작성기는 빈 키를 안 만들고(FreshKey·IdempotencyKey 가
+		// nosession 을 채운다) 그래도 온다면 그것은 고쳐야 할 호출부다.
+		return errors.New("멱등 키가 빈 판단은 안 쌓는다 — 빈 키끼리 서로 별칭이 되어 " +
+			"한쪽이 다른 쪽을 지운다. 키는 FreshKey·IdempotencyKey 가 만든다")
 	}
-	o.warn("큐 잠금 없이 쌓는다 — 재생과 겹치면 이 판단이 사라질 수 있다",
-		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
-	// ★ 경고만으로는 아무도 안 센다 — 그 로거는 stderr 로 가고 doctor 는 파일만 읽는다.
-	o.recordFailOpen("append", queueLockSupported, err)
-	return o.appendLocked(e)
-}
-
-func (o *Outbox) appendLocked(e OutboxEntry) error {
-	cur, err := o.List()
+	// ★ 옛 형식에 이미 있으면 안 쌓는다. 이 자리를 빼면 형식 전환 중인 큐에서 같은 판단이
+	// 두 벌이 된다 — JSONL 쪽 한 줄과 항목 파일 하나. 둘 다 보내지지만 서버가 멱등으로
+	// 접으므로 원장은 멀쩡하고, **큐 잔량이 실제보다 커 보인다**(doctor 가 거짓말한다).
+	legacy, err := readEntries(o.pendingPath())
 	if err != nil {
 		return err
 	}
-	for _, x := range cur {
+	for _, x := range legacy {
 		if x.Key == e.Key {
 			return nil // 이미 쌓여 있다. 조용히 넘어가도 되는 유일한 경우다
 		}
-	}
-	if err := os.MkdirAll(filepath.Dir(o.pendingPath()), 0o755); err != nil {
-		return fmt.Errorf("아웃박스 디렉토리 생성 실패: %w", err)
 	}
 	buf, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("아웃박스 직렬화 실패: %w", err)
 	}
-	f, err := os.OpenFile(o.pendingPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("아웃박스 열기 실패: %w", err)
+	if err := os.MkdirAll(o.pendingDir(), 0o755); err != nil {
+		return fmt.Errorf("아웃박스 디렉토리 생성 실패: %w", err)
 	}
-	defer f.Close()
-	if _, err := f.Write(append(buf, '\n')); err != nil {
+	// ★ tmp 이름은 `.json` 으로 안 끝난다 — readEntryDir 가 그 접미사로 거른다.
+	//   이름이 프로세스마다 다른 이유는 keep 의 tmp 와 같다(고정 이름이면 둘이 같은
+	//   파일에 쓰고 서로의 바이트가 섞인다).
+	tmp := filepath.Join(o.pendingDir(), ".tmp-"+tmpNonce())
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("아웃박스 기록 실패: %w", err)
+	}
+	// ★ 성공하든 실패하든 tmp 는 치운다. Link 가 성공해도 tmp 는 같은 inode 를 가리키는
+	//   둘째 이름으로 남아, 안 치우면 큐 자리에 잔해가 하나씩 쌓인다.
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, path); err != nil {
+		if os.IsExist(err) {
+			return nil // 이미 쌓여 있다
+		}
+		return fmt.Errorf("아웃박스 항목 자리를 못 잡았다(%s): %w", filepath.Base(path), err)
 	}
 	return nil
 }
 
 // List 는 대기 중인 전부를 순서대로 낸다. 파일이 없으면 빈 목록이다(오류가 아니다).
-func (o *Outbox) List() ([]OutboxEntry, error) { return readEntries(o.pendingPath()) }
+//
+// ★ **두 형식을 다 읽는다** — 항목당 파일(`pending/`)과 옛 `pending.jsonl`. 그래서
+// 형식 전환에 마이그레이션 코드가 없다: 쓰기는 전부 새 형식으로 가고, 옛 파일이 있는
+// 자리는 재생이 **보내서** 비우며 그때 JSONL 이 사라진다. 옛 채널 자리(`Client.Legacy`)도
+// 같은 코드로 돌아서 형식 플래그가 필요 없다. 옮기지 않는다는 설계 판정(§7)도 그대로다 —
+// 읽는 자리가 둘일 뿐 판단은 제자리에서 전송으로 나간다.
+//
+// ★ **순서는 이름이 아니라 `At` 이 정하고, 정렬은 안정 정렬이다.**
+// 옛 판의 순서는 append 도착 순(= 잠금 획득 순)이었지 `At` 순이 아니었다. 새 판은
+// `At` 순이고, 그쪽이 "판단은 시간축이 의미다"(Replay 주석)에 가깝다 — 서버가 판단
+// 시각을 자기 수신 시각으로 채우므로(`store/judgment.go`) **큐 순서가 곧 원장 순서**다.
+// 안정 정렬인 이유: `At` 이 동률일 때 입력 순서(항목 파일은 이름순, 그다음 JSONL 은
+// 파일 내 순서)가 그대로 남아야 결과가 결정적이다. 시험 하네스가 모든 줄에 같은 `At` 을
+// 심는데(`entry()` 는 `time.Unix(0,0)`), 불안정 정렬이면 거기서 순서가 흔들린다.
+//
+// ★ 이 함수는 **잠금을 안 쥔다.** 겹친 재생이 방금 지운 파일은 ENOENT 로 건너뛴다 —
+// 그것은 오류가 아니라 "남이 이미 처리했다"이고, 이 자료구조에서 정상 갈래다.
+func (o *Outbox) List() ([]OutboxEntry, error) {
+	out, err := readEntryDir(o.pendingDir())
+	legacy, lerr := readEntries(o.pendingPath())
+	out = append(out, legacy...)
+	// ★ 오류가 나도 읽은 데까지는 정렬해서 낸다 — 이 파일은 재생성 불가한 자산이라
+	// 부분 결과를 버리지 않는다(설계 §9). readEntries 가 같은 규율을 갖고 있다.
+	sortEntriesByAt(out)
+	if err != nil {
+		return out, err
+	}
+	return out, lerr
+}
+
+// sortEntriesByAt 은 `At` 오름차순 **안정** 정렬이다. 순수 함수는 아니다(제자리 정렬).
+func sortEntriesByAt(es []OutboxEntry) {
+	sort.SliceStable(es, func(i, j int) bool { return es[i].At.Before(es[j].At) })
+}
+
+// readEntryDir 는 항목당 파일 큐 하나를 읽는다. 디렉토리가 없으면 빈 목록이다.
+//
+// ★ `os.ReadDir` 는 이름순으로 낸다(문서 보증). 그래서 `At` 동률일 때의 입력 순서가
+// 결정적이고, 위 안정 정렬이 그것을 보존한다.
+//
+// ★ **읽는 중 사라진 파일은 오류가 아니다.** 겹친 재생이 그 사이 보내고 지웠다는 뜻이고,
+// 그 판단은 잃은 것이 아니라 이미 갔다. 이것을 오류로 올리면 정상 동시성이 매번 빨간
+// 줄을 낸다 — 그리고 그 빨간 줄은 진짜 결함을 가린다.
+//
+// ★ 깨진 파일은 **조용히 버리지 않는다**(readEntries 와 같은 규율, 설계 §9).
+func readEntryDir(dir string) ([]OutboxEntry, error) {
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("아웃박스 항목 디렉토리를 못 읽었다(%s): %w", dir, err)
+	}
+	out := make([]OutboxEntry, 0, len(des))
+	for _, de := range des {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // 겹친 재생이 방금 보내고 지웠다
+			}
+			return out, fmt.Errorf("아웃박스 항목 %s 를 못 읽었다: %w", de.Name(), err)
+		}
+		var e OutboxEntry
+		if err := json.Unmarshal(b, &e); err != nil {
+			return out, fmt.Errorf("아웃박스 항목 %s 를 해석하지 못했다: %w", de.Name(), err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
 
 // readEntries 는 JSONL 대기열 파일 하나를 읽는다.
 //
@@ -436,22 +580,140 @@ func readEntries(path string) ([]OutboxEntry, error) {
 	return out, nil
 }
 
-// keep 은 남길 항목만 다시 쓴다(원자 교체).
-// settle 은 재생 한 번의 결과를 파일에 반영한다. 남은 건수를 낸다.
+// settle 은 재생 한 번의 결과를 큐에 반영한다. 남은 건수를 낸다.
 //
-// ★ **스냅숏을 되쓰지 않는다. 이것이 이 축의 수정 전부다.**
-// 옛 구현은 재생을 시작할 때 뜬 스냅숏에서 처리한 것을 뺀 `left` 를 통째로 되썼다.
-// 그 사이 남이 Append 한 줄은 스냅숏에 없으므로 그 되쓰기에 **삭제된다**(실측 33/300).
-// 그리고 남이 이미 지운 줄은 스냅숏에 남아 있으므로 **되살아난다**(실측 300/300).
-// 여기서는 잠금 안에서 파일을 다시 읽고 **내가 처리한 키만 빼서** 되쓴다. 그러면
-// 새로 들어온 줄은 내 관심 밖이라 그대로 살고, 남이 지운 줄은 애초에 안 읽힌다.
+// ★ **스냅숏을 되쓰지 않는다.** 옛 구현은 재생을 시작할 때 뜬 스냅숏에서 처리한 것을 뺀
+// `left` 를 통째로 되썼다. 그 사이 남이 Append 한 줄은 스냅숏에 없으므로 그 되쓰기에
+// **삭제되고**(실측 33/300), 남이 이미 지운 줄은 스냅숏에 남아 있으므로 **되살아났다**
+// (실측 300/300). 항목당 파일에서는 **되쓸 전체가 아예 없어서** 이 두 갈래가 원리적으로
+// 사라진다 — 내가 만지는 것은 내가 처리한 키의 파일뿐이다. 옛 JSONL 쪽은 여전히 전량
+// 재기록이라 거기서는 "다시 읽고 내 것만 빼는" 병합이 그대로 필요하다(settleLegacy).
 //
 // ★ Tries 는 **지금 파일값에 +1** 이다. 스냅숏값+1 로 쓰면 겹친 재생 둘이 같은 값에서
 // 출발해 같은 값을 써서 시도 하나가 사라진다(실측 299/300). 시도는 가산이라야 맞다.
+//
+// ★ **자리가 둘이라 처리도 둘이다.** 항목당 파일 쪽은 내가 처리한 키의 파일만 지우면
+// 끝이고 **잠금이 필요 없다** — 남의 파일을 건드릴 수 있는 연산이 없기 때문이다.
+// 옛 JSONL 쪽은 전량 재기록이라 아래 병합과 잠금이 그대로 필요하다. **JSONL 이 없으면
+// 그 경로를 아예 안 탄다** — 그래서 전환이 끝난 자리에서는 이 함수에 fail-open 이
+// 원리적으로 안 난다.
+//
+// ★ 남은 건수는 **처리 뒤에 다시 센다.** 옛 판은 병합 안에서 셌는데, 이제 자리가 둘이라
+// 한쪽만 보고 세면 틀린다. 세다 실패하면 스냅숏값을 낸다(0 을 내면 "다 나갔다"로 읽힌다).
 func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int) (int, error) {
-	remaining := snapshotLeft
+	var firstErr error
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	// ── 항목당 파일 ──────────────────────────────────────────────────────────
+	for key := range done {
+		if key == "" {
+			continue // 빈 키는 파일이 없다. 아래 JSONL 쪽에서 다룬다
+		}
+		// ★ ENOENT 는 오류가 아니다 — 겹친 재생이 이미 지웠다는 뜻이고, 그 판단은
+		// 잃은 것이 아니라 이미 갔다. 옛 판에서 이 상황은 "되살아나는 줄"이었다.
+		if err := os.Remove(o.entryPath(key)); err != nil && !os.IsNotExist(err) {
+			keep(fmt.Errorf("보낸 판단의 자리를 못 치웠다(%s): %w", clip(key, 40), err))
+		}
+	}
+	if bumpedKey != "" && !done[bumpedKey] {
+		keep(o.bumpTries(bumpedKey))
+	}
+
+	// ── 옛 JSONL ─────────────────────────────────────────────────────────────
+	if err := o.settleLegacy(done, bumpedKey); err != nil {
+		keep(err)
+	}
+
+	cur, err := o.List()
+	if err != nil {
+		keep(err)
+		return snapshotLeft, firstErr
+	}
+	return len(cur), firstErr
+}
+
+// bumpTries 는 항목 파일 하나의 시도 횟수를 1 올린다.
+//
+// ★ **이 자리에만 잠금이 남는다. 그리고 그것이 이 항목이 원래 하려던 것이다.**
+// 처음에는 여기도 잠금 없이 두고 "겹치면 시도 하나를 덜 세는 정도"라고 적었다.
+// **실측이 그것을 반증했다: 300라운드에서 268 이 Tries<2 였다.** 읽고-고쳐-쓰기는
+// 거의 항상 진다 — 두 프로세스가 같은 값(0)을 읽고 같은 값(1)을 쓴다. 그대로 두면
+// `TestConcurrentReplaysCountEveryTry` 가 지키던 계약이 통째로 깨지고, 그 계약이
+// 지키는 것은 **영구히 실패할 줄이 큐를 얼마나 오래 막는가**다(maxReplayTries 는
+// 상태코드가 못 가르는 것을 가르는 유일한 둘째 축이다).
+//
+// ★ **여기 잠금은 예산 문제를 안 되살린다.** 옛 판이 못 쓰게 된 이유는 잠금 자체가
+// 아니라 **점유가 O(큐 크기)** 였던 것이다(파일 전량 읽기 + 전량 쓰기 = 1000건 17.9ms).
+// 이 함수의 점유는 **파일 하나**라 O(1) 이고 큐 깊이와 무관하다 — 큐가 1000건이든
+// 10건이든 같은 수십 µs 다. 그래서 세션이 몰려도 예산 250ms 를 못 채울 이유가 없다.
+// 항목 본문이 말한 "잠금 구간을 O(1) 로 만든다"의 정확한 실현이 이 자리다.
+//
+// ★ 파일이 없으면 아무것도 안 한다 — 남이 이미 보냈거나 격리했다는 뜻이다.
+func (o *Outbox) bumpTries(key string) error {
+	locked, err := withQueueLock(o.dir, queueLockBudget, func() error { return o.bumpTriesLocked(key) })
+	if locked {
+		return err
+	}
+	o.warn("큐 잠금 없이 시도 횟수를 올린다 — 겹친 재생이 있으면 시도 하나가 사라진다",
+		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
+	o.recordFailOpen("bump", queueLockSupported, err)
+	return o.bumpTriesLocked(key)
+}
+
+func (o *Outbox) bumpTriesLocked(key string) error {
+	path := o.entryPath(key)
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("시도 횟수를 못 읽었다(%s): %w", clip(key, 40), err)
+	}
+	var e OutboxEntry
+	if err := json.Unmarshal(b, &e); err != nil {
+		return fmt.Errorf("시도 횟수를 올릴 항목을 해석하지 못했다(%s): %w", clip(key, 40), err)
+	}
+	e.Tries++
+	buf, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("시도 횟수 직렬화 실패(%s): %w", clip(key, 40), err)
+	}
+	// ★ 제자리 O_TRUNC 로 쓰지 마라 — 쓰는 도중 남의 List 가 반쪽을 읽는다.
+	//   Append 와 같은 이유이고, 여기서는 **덮어쓰기가 맞으므로** Link 가 아니라 Rename 이다.
+	tmp := path + "." + tmpNonce() + ".tmp"
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("시도 횟수 기록 실패(%s): %w", clip(key, 40), err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("시도 횟수 교체 실패(%s): %w", clip(key, 40), err)
+	}
+	return nil
+}
+
+// settleLegacy 는 옛 `pending.jsonl` 하나에 재생 결과를 반영한다.
+//
+// ★ **파일이 없으면 잠금도 안 잡는다.** 전환이 끝난 자리에서 이 함수는 곧장 돌아간다.
+func (o *Outbox) settleLegacy(done map[string]bool, bumpedKey string) error {
+	if _, err := os.Stat(o.pendingPath()); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("옛 큐 파일을 못 봤다: %w", err)
+	}
 	merge := func() error {
-		cur, err := o.List()
+		// ★ `o.List()` 를 쓰면 **항목당 파일까지 JSONL 로 되쓴다** — 같은 판단이 두 자리에
+		// 생기고, 그 뒤 항목 파일이 지워져도 JSONL 쪽 사본이 남아 영원히 재생된다.
+		// 이 함수가 되쓰는 것은 자기 파일뿐이다.
+		cur, err := readEntries(o.pendingPath())
 		if err != nil {
 			return err
 		}
@@ -484,22 +746,18 @@ func (o *Outbox) settle(done map[string]bool, bumpedKey string, snapshotLeft int
 			}
 			out = append(out, e)
 		}
-		remaining = len(out)
 		return o.keep(out)
 	}
 	locked, err := withQueueLock(o.dir, queueLockBudget, merge)
 	if locked {
-		return remaining, err
+		return err
 	}
 	// 잠금을 못 잡아도 **병합으로** 처리한다. 스냅숏 되쓰기로 되돌아가지 않는다 —
 	// 잠금 없이도 다시 읽고 빼는 쪽이 창을 훨씬 좁힌다(오늘보다 나쁘지 않다).
 	o.warn("큐 잠금 없이 재생 결과를 반영한다 — 겹친 재생이 있으면 판단이 사라질 수 있다",
 		"dir", o.dir, "supported", queueLockSupported, "error", errText(err))
 	o.recordFailOpen("settle", queueLockSupported, err)
-	// ★ 한 줄로 쓰지 마라(`return remaining, merge()`). Go 는 반환값들의 평가 순서를
-	// 규정하지 않아서, merge 가 갱신하는 remaining 을 그 전에 읽을지 후에 읽을지가 미정이다.
-	merr := merge()
-	return remaining, merr
+	return merge()
 }
 
 // errText 는 nil 오류를 빈 문자열로 낸다. 로그 인자에서 <nil> 을 안 보이게 한다.
@@ -523,6 +781,15 @@ func tmpNonce() string {
 	return fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(b[:]))
 }
 
+// keep 은 **옛 `pending.jsonl` 에** 남길 항목만 다시 쓴다(원자 교체).
+//
+// ★ **새 쓰기는 이 함수를 안 탄다.** 남은 호출자는 settleLegacy 하나이고, 그것은 옛 파일이
+// 실제로 있을 때만 돈다. 그래서 이 함수는 **전환이 끝나면 아무도 안 부르는 코드**다 —
+// 지우지 않는 이유는 실물 머신에 아직 그 파일이 남아 있을 수 있어서이지, 새 경로가
+// 이것을 쓰기 때문이 아니다. 여기에 새 기능을 얹지 마라.
+//
+// ★ 비면 파일을 **지운다.** 그래야 다음 `List` 가 옛 형식을 아예 안 보고, `Append` 의
+// 옛 형식 중복 검사도 빈 읽기로 끝난다 — 전환이 스스로 완결되는 자리가 여기다.
 func (o *Outbox) keep(entries []OutboxEntry) error {
 	if len(entries) == 0 {
 		if err := os.Remove(o.pendingPath()); err != nil && !os.IsNotExist(err) {

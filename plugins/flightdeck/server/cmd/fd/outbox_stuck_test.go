@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -36,8 +37,20 @@ func mkOutbox(t *testing.T) *Outbox {
 	return o
 }
 
+// entrySeq 는 이 하네스가 만드는 항목에 **서로 다른 단조 증가 `At`** 을 주는 축이다.
+//
+// ★ 앞선 판은 모든 항목에 `time.Unix(0,0)` 하나를 줬다. 큐가 JSONL 파일 하나였을 때는
+// 순서가 **파일 안 위치**로 정해져서 그래도 됐다 — 시험이 `Append` 순서를 그대로 되받았다.
+// 항목당 파일에서는 순서를 값이 정하므로(`sortEntriesByAt`), 같은 `At` 을 준다는 것은
+// **"순서를 안 정하겠다"고 말하는 것**이고 그때 남는 것은 파일 이름순, 즉 키 해시순이다.
+// 시험이 순서를 의도한다면 그 의도를 `At` 으로 적어야 한다.
+//
+// 원자적인 이유: 병렬 시험이 이 헬퍼를 함께 부른다. 값이 섞여도 **한 시험 안의 상대
+// 순서는 단조 증가라 그대로 유지된다** — 이 헬퍼가 보증하는 것은 그것뿐이고 그것이면 된다.
+var entrySeq atomic.Int64
+
 func entry(key string) OutboxEntry {
-	return OutboxEntry{Key: key, At: time.Unix(0, 0).UTC(), Path: "/api/v1/judgments",
+	return OutboxEntry{Key: key, At: time.Unix(0, entrySeq.Add(1)).UTC(), Path: "/api/v1/judgments",
 		Body: json.RawMessage(`{"kind":"now","body":"x"}`)}
 }
 

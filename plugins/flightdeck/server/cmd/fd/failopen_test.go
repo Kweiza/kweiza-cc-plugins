@@ -61,13 +61,20 @@ func TestFailOpenReasonSeparatesBudgetFromMechanismFailure(t *testing.T) {
 	}
 }
 
-// Append 가 잠금을 못 잡으면 **그 사실이 파일에 남는다.**
+// Append 는 **잠금을 아예 안 기다린다** — 남이 예산 내내 쥐고 있어도 그대로 쌓고,
+// fail-open 을 **한 건도 안 적는다.**
 //
-// ★ 오늘은 `o.warn` 하나뿐이라 stderr 로 흘러가고 아무도 안 센다. 이 시험이 없으면
-// 계수기를 통째로 지워도 패키지가 초록이다 — 이 항목이 고친 것 전부가 조용히 되돌아간다.
-func TestAppendRecordsAFailOpenWhenTheLockIsHeld(t *testing.T) {
+// ★ 이 시험은 앞선 판을 뒤집은 것이다. 그때는 "잠금을 못 잡으면 그 사실이 파일에 남는다"를
+// 단정했고 그것이 그 시점의 계약이었다. 큐가 항목당 파일이 되면서 이 경로에 잠금이
+// **필요 없어졌다** — 중복 검사가 파일 이름의 존재이고 그 판정을 커널이 원자적으로 한다.
+//
+// ★ **뒤집힌 단정을 지우지 않고 남기는 이유**: 이 자리에 잠금을 다시 들이는 변경이 오면
+// 그것은 조용히 예산 문제를 되살린다(점유가 O(큐 크기)였고 그래서 유실 10/36 이 났다).
+// "안 적혔다"를 관문으로 두면 그 회귀가 여기서 빨간불이 된다. fail-open 이 0 이라는 것은
+// 계수기가 죽었다는 뜻이 아니다 — settle 쪽 시험이 그 계수기가 살아 있음을 따로 잡는다.
+func TestAppendNeverWaitsForTheQueueLock(t *testing.T) {
 	if !queueLockSupported {
-		t.Skip("이 플랫폼에는 잠금 기구가 없다 — 모든 호출이 fail-open 이라 이 축을 못 잰다")
+		t.Skip("이 플랫폼에는 잠금 기구가 없다 — 잡을 잠금이 없으니 이 축을 못 잰다")
 	}
 	dir := t.TempDir()
 	o := newOutboxAt(dir)
@@ -83,30 +90,32 @@ func TestAppendRecordsAFailOpenWhenTheLockIsHeld(t *testing.T) {
 		})
 	}()
 	<-held
+	// ★ **예산보다 빨리 끝나야 한다.** 이것이 "안 기다린다"의 실측 축이다 —
+	//   기다렸다가 fail-open 으로 떨어지는 판과 안 기다리는 판은 결과가 같고 시간이 다르다.
+	start := time.Now()
 	err := o.Append(OutboxEntry{Key: "k1", Path: "/api/v1/judgments", Body: []byte(`{}`)})
+	elapsed := time.Since(start)
 	close(release)
 	if err != nil {
-		t.Fatalf("무잠금으로라도 쌓았어야 한다(fail-open): %v", err)
+		t.Fatalf("남이 잠금을 쥐었다고 못 쌓았다: %v", err)
+	}
+	if elapsed >= queueLockBudget {
+		t.Errorf("쌓는 데 %s 걸렸다 — 예산(%s)을 기다렸다는 뜻이다. 이 경로는 잠금을 안 본다",
+			elapsed.Round(time.Millisecond), queueLockBudget)
 	}
 
 	evs, rerr := o.FailOpens()
 	if rerr != nil {
 		t.Fatalf("계수 파일을 못 읽었다: %v", rerr)
 	}
-	if len(evs) != 1 {
-		t.Fatalf("fail-open 을 %d 건으로 적었다 — 잠금을 예산 내내 못 잡았으니 1 이어야 한다", len(evs))
+	if len(evs) != 0 {
+		t.Fatalf("fail-open 을 %d 건 적었다 — 이 경로는 잠금을 안 잡으므로 0 이어야 한다. "+
+			"0 이 아니면 쌓기가 다시 잠금에 매인 것이고, 그러면 O(큐 크기) 점유와 "+
+			"그것이 만든 유실(10/36)이 함께 돌아온다: %+v", len(evs), evs)
 	}
-	if evs[0].Op != "append" {
-		t.Errorf("어느 갈래에서 났는지를 %q 로 적었다 — append 여야 한다. "+
-			"갈래를 안 적으면 쌓기와 재생 중 어디가 밀리는지 못 가른다", evs[0].Op)
-	}
-	if evs[0].At.IsZero() {
-		t.Error("시각이 비었다 — 언제부터 밀렸는지가 이 수의 절반이다")
-	}
-	// ★ 판단은 그대로 쌓여 있어야 한다. 계수는 관측이지 처방이 아니다.
+	// ★ 판단은 그대로 쌓여 있어야 한다.
 	if pend, err := o.List(); err != nil || len(pend) != 1 {
-		t.Errorf("fail-open 갈래가 판단을 안 쌓았다(%d건, %v) — 계수 때문에 동작이 바뀌면 안 된다",
-			len(pend), err)
+		t.Errorf("판단이 안 쌓였다(%d건, %v)", len(pend), err)
 	}
 }
 
