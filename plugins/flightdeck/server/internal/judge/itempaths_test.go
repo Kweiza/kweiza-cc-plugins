@@ -179,6 +179,56 @@ func TestClassifyItemPaths(t *testing.T) {
 	}
 }
 
+// TestUnknownDetailDoesNotClaimUniformityWhenSomePathsHaveNoReason 은
+// unknownDetail 이 **사유를 못 받은 경로**를 통일 판정에 끼워 넣지 않는지 본다.
+//
+// ★ 이 시험이 없으면 `r == ""` 갈래를 지워도 전 스위트가 초록이다(2026-08-10 돌연변이
+// 실측, 20회 반복 확인). 지워지면 사유가 없는 경로가 조용히 무시되고 나머지 하나의
+// 사유로 "N개 전부 같은 이유다" 가 나간다 — **관측되지 않은 것을 관측된 것으로 말하는
+// 문장**이고, 이 함수가 통일 판정을 두는 목적(운영자에게 옳은 좌표를 주는 것)의 정반대다.
+// 같은 규율이 PathUnknown 에도 있다: 못 본 것을 없다고 하지 않는다.
+func TestUnknownDetailDoesNotClaimUniformityWhenSomePathsHaveNoReason(t *testing.T) {
+	// b.go 만 사유가 있다. a.go 는 관측 계층이 못 채운 것이다.
+	got := unknownDetail([]string{"a.go", "b.go"}, map[string]string{"b.go": "권한 거부"})
+	if strings.Contains(got, "전부 같은 이유") {
+		t.Errorf("사유 없는 경로를 통일로 접었다: %q — a.go 의 원인은 관측되지 않았다", got)
+	}
+	if !strings.Contains(got, "a.go") || !strings.Contains(got, "b.go") {
+		t.Errorf("원인이 갈릴 때는 경로가 판별자다 — 둘 다 나와야 한다: %q", got)
+	}
+
+	// 대조: 정말 전부 같은 사유면 경로를 나열하지 않고 원인을 한 번만 말한다.
+	// 이 대조가 없으면 위 단정은 "통일 판정 자체가 죽었다"와 구분되지 않는다.
+	uniform := unknownDetail([]string{"a.go", "b.go"},
+		map[string]string{"a.go": "루트 없음", "b.go": "루트 없음"})
+	if !strings.Contains(uniform, "전부 같은 이유") {
+		t.Errorf("원인이 하나인데 통일로 안 말했다: %q — 그러면 화면이 레포가 아니라 경로를 지목한다", uniform)
+	}
+}
+
+// TestUnreadableSuffixIsOrdered 는 못 읽은 프로젝트 목록이 **입력 순서에 안 흔들리는지** 본다.
+//
+// ★ 이 시험이 없으면 sort 를 지워도 전 스위트가 초록이다(2026-08-10 돌연변이 실측,
+// 20회 반복 확인) — 기존 케이스가 이미 정렬된 입력만 준다. 지워지면 같은 사실이
+// 호출자가 목록을 만든 순서에 따라 다른 문장이 되고, 그 순간 재개가 재출력이 아니게 된다.
+func TestUnreadableSuffixIsOrdered(t *testing.T) {
+	got := unreadableSuffix([]string{"z-proj", "a-proj"})
+	zi, ai := strings.Index(got, "z-proj"), strings.Index(got, "a-proj")
+	if ai < 0 || zi < 0 {
+		t.Fatalf("두 프로젝트가 다 안 실렸다: %q", got)
+	}
+	if ai > zi {
+		t.Errorf("입력 순서가 그대로 나갔다: %q — 사전순이어야 같은 사실이 같은 문장이 된다", got)
+	}
+
+	// 입력 슬라이스를 고치지 않는다 — 호출자가 보는 것과 갈라지면 안 된다.
+	in := []string{"z-proj", "a-proj"}
+	unreadableSuffix(in)
+	if in[0] != "z-proj" {
+		t.Errorf("입력을 제자리 정렬했다: %v", in)
+	}
+}
+
 // 0값이 "못 봤다"여야 한다. 이 단정이 깨지면 관측하지 않은 경로가 "없다"로 접힌다.
 func TestPathPresenceZeroValueIsUnknown(t *testing.T) {
 	var p PathPresence
