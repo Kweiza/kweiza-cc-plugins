@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 )
 
 // 판단 원장 내보내기 — `fd export --judgments` 의 저장 계층.
@@ -98,6 +99,53 @@ type LedgerDump struct {
 	Snapshots []LedgerSnapshot
 }
 
+// linkCols 는 judgment_link 표의 컬럼이다. 다른 다섯과 달리 이 표에는 조회 접근자가 없어
+// 상수가 없었고, 읽기와 쓰기가 각자 리터럴을 들고 있었다.
+const linkCols = `judgment_id, target_kind, target_id`
+
+// ledgerTables 는 판단 원장이 담는 FK 폐포 여섯 표다 — **표마다 컬럼 목록이 하나다.**
+//
+// 순서는 되쓰기 순서다: machine·project·session 이 판단보다 먼저 들어가야 FK 가 닫힌다
+// (WriteLedger 의 그 주석 참고).
+//
+// ★ 왜 한 자리에 모으나. 예전에는 읽기가 상수를, 쓰기가 인라인 리터럴을 써서 같은 표에
+// 목록이 **둘**이었다. 스키마에 컬럼이 하나 들어오면 백업이 그것을 버리고(읽기 목록에
+// 없다) 복원도 버리는데(쓰기 목록에 없다), 왕복 시험은 want·final 이 둘 다 ReadLedger
+// 산출물이라 원리적으로 못 본다. 목록이 둘이면 관문도 한쪽만 재게 되고, **재지 않은
+// 쪽이 정확히 그 조용한 손실 자리**가 된다.
+var ledgerTables = []struct {
+	name string
+	cols string
+}{
+	{"machine", machineCols},
+	{"project", projectCols},
+	{"session", sessionCols},
+	{"judgment", judgmentCols},
+	{"judgment_link", linkCols},
+	{"snapshot", snapshotCols},
+}
+
+// ledgerColNames 는 컬럼 목록 문자열을 이름 슬라이스로 가른다. 순수 함수다.
+func ledgerColNames(cols string) []string {
+	var out []string
+	for _, c := range strings.Split(cols, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ledgerInsert 는 표 하나의 되쓰기 문장이다. 순수 함수다.
+//
+// ★ `?` 를 손으로 안 적는다. 컬럼을 더한 사람이 목록·자리표·인자 셋을 다 고쳐야 하는데
+// 자리표를 빠뜨리면 런타임에서야 죽는다 — 상수에서 세면 그 자리가 원리적으로 사라진다.
+func ledgerInsert(name, cols string) string {
+	n := len(ledgerColNames(cols))
+	return `INSERT INTO ` + name + `(` + cols + `) VALUES (` +
+		strings.TrimSuffix(strings.Repeat("?, ", n), ", ") + `)`
+}
+
 // ReadLedger 는 여섯 표(FK 폐포 전량)를 **한 트랜잭션 안에서** 읽는다.
 //
 // ★ 왜 트랜잭션인가. 표를 따로 읽으면 그 사이 서버가 커밋한 판단의 **링크만** 산출물에
@@ -174,7 +222,7 @@ func readLedgerJudgments(ctx context.Context, q dbtx) ([]LedgerJudgment, error) 
 // 정렬 셋은 PK 와 같은 순서다 — 재현성을 위해 완전 순서여야 한다.
 func readLedgerLinks(ctx context.Context, q dbtx) ([]LedgerLink, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT judgment_id, target_kind, target_id FROM judgment_link
+		SELECT `+linkCols+` FROM judgment_link
 		ORDER BY judgment_id, target_kind, target_id`)
 	if err != nil {
 		return nil, fmt.Errorf("원장 링크 조회 실패: %w", err)
@@ -344,55 +392,49 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		if _, err := t.tx.ExecContext(t.ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 			return fmt.Errorf("FK 검사 미루기 실패: %w", err)
 		}
+		machineStmt := ledgerInsert("machine", machineCols)
 		for _, m := range d.Machines {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO machine(id, hostname, first_seen, last_seen)
-				VALUES (?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, machineStmt,
 				m.ID, m.Hostname, m.FirstSeen, m.LastSeen); err != nil {
 				return fmt.Errorf("원장 머신 되쓰기 실패(id=%q): %w", clip(m.ID, 64), err)
 			}
 		}
+		projectStmt := ledgerInsert("project", projectCols)
 		for _, p := range d.Projects {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO project(id, path, remote_url, default_branch, config, config_from_sha, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, projectStmt,
 				p.ID, p.Path, p.RemoteURL, p.DefaultBranch,
 				p.Config, p.ConfigFromSHA, p.CreatedAt); err != nil {
 				return fmt.Errorf("원장 프로젝트 되쓰기 실패(id=%q): %w", clip(p.ID, 64), err)
 			}
 		}
+		sessionStmt := ledgerInsert("session", sessionCols)
 		for _, x := range d.Sessions {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO session(id, project, machine_id, worktree, cc_session_id,
-				                    label, state, blocked_why, opened_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, sessionStmt,
 				x.ID, x.Project, x.MachineID, x.Worktree, x.CCSessionID,
 				x.Label, x.State, x.BlockedWhy, x.OpenedAt); err != nil {
 				return fmt.Errorf("원장 세션 되쓰기 실패(id=%q project=%q): %w",
 					clip(x.ID, 64), clip(x.Project, 64), err)
 			}
 		}
+		judgmentStmt := ledgerInsert("judgment", judgmentCols)
 		for _, j := range d.Judgments {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO judgment(id, project, session_id, at, kind, title, body, supersedes)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, judgmentStmt,
 				j.ID, j.Project, j.SessionID, j.At, j.Kind, j.Title, j.Body, j.Supersedes); err != nil {
 				return fmt.Errorf("원장 판단 되쓰기 실패(id=%q kind=%q): %w",
 					clip(j.ID, 64), clip(j.Kind, 32), err)
 			}
 		}
+		linkStmt := ledgerInsert("judgment_link", linkCols)
 		for _, l := range d.Links {
-			if _, err := t.tx.ExecContext(t.ctx,
-				`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, linkStmt,
 				l.JudgmentID, l.TargetKind, l.TargetID); err != nil {
 				return fmt.Errorf("원장 링크 되쓰기 실패(judgment=%q target=%s/%s): %w",
 					clip(l.JudgmentID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
 			}
 		}
+		snapshotStmt := ledgerInsert("snapshot", snapshotCols)
 		for _, sn := range d.Snapshots {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO snapshot(project, key, value, method, evidence, input_digest, computed_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, snapshotStmt,
 				sn.Project, sn.Key, sn.Value, sn.Method,
 				sn.Evidence, sn.InputDigest, sn.ComputedAt); err != nil {
 				return fmt.Errorf("원장 스냅숏 되쓰기 실패(project=%q key=%q): %w",
