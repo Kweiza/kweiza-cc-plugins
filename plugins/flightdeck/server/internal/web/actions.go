@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -349,5 +350,142 @@ func (h *handler) back(w http.ResponseWriter, r *http.Request, in ActionInput, c
 	q.Set("project", in.Project)
 	q.Set("notice", string(code))
 	q.Set("item", in.Item)
+	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 표시 축 — 핀·보관
+//
+// ★ 위의 ActionKind 셋과 **한 자리에 안 섞는다.** 그 셋은 사유를 요구하는 판정이고
+// (JudgeAction 이 reasonMin 을 든다), 이 축은 사유가 없다. 섞으면 "사유가 없으면 거절"이
+// 이 축 때문에 헐거워지고, 그 헐거움은 회수·폐기·줄 회수 쪽에서 터진다.
+//
+// ★ 이 축이 사유를 안 받는 근거: 사유가 필수인 셋은 전부 **남의 일을 뺏거나 되돌릴 수
+// 없는** 것이다. 핀과 보관은 둘 다 아니다 — 내 판이고 클릭 하나로 돌아온다. 요구하면
+// 원장에 의미 없는 문자열만 쌓이고 화면에는 프로젝트마다 입력칸이 붙는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ProjectViewInput 은 표시 축 폼에서 온 것 전부다.
+type ProjectViewInput struct {
+	Project string // 눌렀을 때 보고 있던 프로젝트. 돌아갈 자리다
+	Target  string // 축을 바꿀 프로젝트
+	Axis    string // pin · unpin · archive · unarchive
+}
+
+// projectAxes 는 허용하는 축 전부다. 목록 밖은 거절이다 —
+// 화이트리스트가 아니면 오타가 조용히 아무 일도 안 하는 성공이 된다.
+var projectAxes = map[string]bool{"pin": true, "unpin": true, "archive": true, "unarchive": true}
+
+// ParseProjectAxis 는 버튼 값 "pin:<id>" 를 축과 대상으로 가른다. 순수 함수다.
+//
+// ★ 토글("이 프로젝트를 뒤집어라")이 아니라 **명시적 값**인 이유는 멱등이다. 화면 쓰기는
+// 렌더 시각 키로 멱등을 걸고 있는데(Page.WriteKey), 토글이면 같은 키의 재전송이 상태를
+// 뒤집어 그 멱등이 거짓말이 된다. pin 을 두 번 보내면 두 번 다 핀이다.
+//
+// ★ 첫 콜론에서만 가른다 — 프로젝트 id 는 [A-Za-z0-9._/-] 이라 콜론이 없어야 정상이지만,
+// 여기서 뒤를 통째로 대상으로 두면 이상한 id 가 "없는 프로젝트"로 정확히 거절된다.
+// 뒤에서 또 자르면 엉뚱한 프로젝트에 맞을 수 있다.
+func ParseProjectAxis(raw string) (axis, target string) {
+	a, t, ok := strings.Cut(strings.TrimSpace(raw), ":")
+	if !ok || a == "" || t == "" {
+		return "", ""
+	}
+	return a, t
+}
+
+// JudgeProjectView 는 표시 축 요청이 성립하는지 판정한다. 순수 함수다.
+// known 은 등록된 프로젝트 id 전부다.
+func JudgeProjectView(in ProjectViewInput, known []string) ActionVerdict {
+	if strings.TrimSpace(in.Project) == "" {
+		return ActionVerdict{Reason: "돌아갈 프로젝트가 비었다 — 폼의 project 필드가 안 왔다"}
+	}
+	if strings.TrimSpace(in.Axis) == "" {
+		return ActionVerdict{Reason: "축이 비었다 — 버튼 값이 pin:<id> 꼴이어야 한다"}
+	}
+	if !projectAxes[in.Axis] {
+		return ActionVerdict{Reason: fmt.Sprintf("모르는 축 %q — pin·unpin·archive·unarchive 넷뿐이다",
+			Clip(in.Axis, 32))}
+	}
+	if strings.TrimSpace(in.Target) == "" {
+		return ActionVerdict{Reason: "대상 프로젝트가 비었다"}
+	}
+	for _, k := range known {
+		if k == in.Target {
+			return ActionVerdict{OK: true, Reason: "등록된 프로젝트다"}
+		}
+	}
+	return ActionVerdict{Reason: fmt.Sprintf("프로젝트 %q 가 등록돼 있지 않다", Clip(in.Target, 64))}
+}
+
+// projectView 는 표시 축을 바꾼다. 사유가 없으므로 formInput 을 안 탄다.
+func (h *handler) projectView(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "폼을 읽지 못했다: "+Clip(err.Error(), 200), http.StatusBadRequest)
+		return
+	}
+	axis, target := ParseProjectAxis(r.PostFormValue("axis"))
+	in := ProjectViewInput{
+		Project: strings.TrimSpace(r.PostFormValue("project")),
+		Target:  target,
+		Axis:    axis,
+	}
+
+	ctx := r.Context()
+	st := h.svc.Store()
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		h.log.ErrorContext(ctx, "프로젝트 목록 조회 실패",
+			"route", "POST /actions/project-view", "error", err.Error())
+		http.Error(w, "프로젝트 목록을 읽지 못했다. 잠시 뒤 다시 하라.", http.StatusInternalServerError)
+		return
+	}
+	known := make([]string, 0, len(projects))
+	for _, p := range projects {
+		known = append(known, p.ID)
+	}
+	if v := JudgeProjectView(in, known); !v.OK {
+		http.Error(w, fmt.Sprintf("표시 축 거절: %s\n대상: %s\n뒤로 가서 다시 하라.",
+			v.Reason, Clip(in.Target, 64)), http.StatusBadRequest)
+		return
+	}
+
+	// 지금 값을 읽어 바꿀 축 하나만 갈아 끼운다 — 다른 축을 덮지 않는다.
+	cur, err := st.GetProject(ctx, in.Target)
+	if err != nil {
+		h.log.ErrorContext(ctx, "프로젝트 조회 실패",
+			"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
+		http.Error(w, "프로젝트를 읽지 못했다.", http.StatusInternalServerError)
+		return
+	}
+	pinned, archived := cur.PinnedAt, cur.ArchivedAt
+	now := h.now()
+	switch in.Axis {
+	case "pin":
+		pinned = now
+		// ★ 핀과 보관은 함께 설 수 없다. 핀은 "줄에 남긴다"이고 보관은 "줄에서 뺀다"라
+		//   둘 다 켜지면 화면이 둘 중 하나를 말없이 이긴다. 핀을 찍으면 보관이 풀린다.
+		archived = time.Time{}
+	case "unpin":
+		pinned = time.Time{}
+	case "archive":
+		archived = now
+		pinned = time.Time{}
+	case "unarchive":
+		archived = time.Time{}
+	}
+
+	if err := st.SetProjectView(ctx, in.Target, pinned, archived); err != nil {
+		h.log.ErrorContext(ctx, "표시 축 갱신 실패",
+			"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
+		http.Error(w, "표시 축을 바꾸지 못했다.", http.StatusInternalServerError)
+		return
+	}
+	st.LogEvent(ctx, "web.project.view", in.Target, "", map[string]any{"axis": in.Axis})
+	h.log.InfoContext(ctx, "프로젝트 표시 축", "route", "POST /actions/project-view",
+		"project", Clip(in.Target, 64), "axis", in.Axis)
+
+	q := url.Values{}
+	q.Set("project", in.Project)
+	q.Set("notice", "project-view")
 	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
 }

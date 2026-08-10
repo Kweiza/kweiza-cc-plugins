@@ -84,6 +84,10 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   details.pfold > summary { cursor:pointer; color:var(--dim); font-size:12px; }
   details.pfold[open] { display:block; margin:6px 0 0; }
   details.pfold a { margin-right:10px; }
+  /* 표시 축 버튼 — 사유가 없는 클릭 하나짜리라 쓰기 폼(.write)과 다른 모양이다. */
+  button.ax { border:none; background:transparent; color:var(--dim); cursor:pointer;
+              font-size:12px; padding:0 4px; }
+  button.ax:hover { color:var(--fg); }
 </style>
 </head>
 <body>
@@ -92,24 +96,34 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   <h1>{{.Title}}</h1>
   <div class="derived">{{.Now}} · {{.HealthLine}} · 디스크: <span class="lv-{{.Disk.Level}}">{{.Disk.Text}}</span></div>
   {{if .Projects}}
+  {{/* ★ 폼 하나에 버튼 여럿이다. 프로젝트마다 폼을 만들면 폼이 프로젝트 수만큼 늘고,
+       render_test.go 의 상한이 세는 축이 통째로 무의미해진다. */}}
+  <form class="pview" method="post" action="actions/project-view?key={{.WriteKey "project-view"}}">
+  <input type="hidden" name="project" value="{{.Project.ID}}">
   <nav>프로젝트:
-    {{range .Nav.Shown}}<a class="{{if .On}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a>{{end}}
+    {{range .Nav.Shown}}<a class="{{if .On}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a
+      >{{if .Pinned}}<button class="ax" name="axis" value="unpin:{{.ID}}" title="핀 해제">★</button
+      >{{else}}<button class="ax" name="axis" value="pin:{{.ID}}" title="핀">☆</button>{{end}}{{end}}
     {{with .Nav.NoPins}}<span class="k">{{.}}</span>{{end}}
     {{/* 접기는 <details> 다 — JS 를 안 쓴다. 이 페이지의 다른 접기(.fold/.more)는 스크립트로
          접어서 JS 가 없으면 전부 펴지는데, 그 폴백은 긴 목록에는 옳지만 이 줄에는 반대다:
          스크립트가 없어도 접혀 있어야 이 축이 성립한다. */}}
     {{with .Nav.FoldedLine}}
     <details class="pfold"><summary>{{.}}</summary>
-      {{range $.Nav.Folded}}<a href="?project={{.ID}}">{{.ID}}</a>{{end}}
+      {{range $.Nav.Folded}}<a href="?project={{.ID}}">{{.ID}}</a
+        ><button class="ax" name="axis" value="pin:{{.ID}}" title="핀">☆</button
+        ><button class="ax" name="axis" value="archive:{{.ID}}" title="보관 — 줄에서 뺀다">보관</button>{{end}}
       {{if $.Nav.Archived}}
       <div class="k">보관:
         {{range $.Nav.Archived}}<a class="dim" href="?project={{.ID}}">{{.ID}}</a>
-          <span class="k">({{.LastSession}})</span>{{end}}
+          <span class="k">({{.LastSession}})</span
+          ><button class="ax" name="axis" value="unarchive:{{.ID}}" title="되돌린다">되돌리기</button>{{end}}
       </div>
       {{end}}
     </details>
     {{end}}
   </nav>
+  </form>
   {{end}}
   {{/* ★ POST 다. GET 링크로 두면 브라우저·확장의 링크 프리페치가 눌러서 로그아웃이
        사람 의사 없이 일어난다. 상대경로인 이유는 이 페이지의 다른 폼과 같다.

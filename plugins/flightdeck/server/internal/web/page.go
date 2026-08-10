@@ -384,6 +384,13 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 			Archived:    !p.ArchivedAt.IsZero(),
 			LastSession: ages[p.ID],
 		}
+		// ★ row.Pinned 를 row.Archived 보다 먼저 본다. projectView 핸들러(actions.go)가
+		// pin 을 찍으면 archived 를 지우고 archive 를 찍으면 pinned 를 지워 상호배타를
+		// 만들지만, SetProjectView 자체는 두 축을 안 묶는다 — 원장은 둘 다 켜진 조합을
+		// 여전히 담을 수 있다(옛 값·수동 UPDATE·경합). 그 조합이 실제로 생겨도 화면이
+		// 결정론적으로 한쪽을 골라야 하므로 여기서 순서로 정한다. Shown 쪽을 이기게
+		// 두는 이유는, 접힌 것을 펴는 대가(줄이 붐빈다)가 펼 것을 접는 대가(찾던 것이
+		// 사라진 줄 안다)보다 싸기 때문이다.
 		switch {
 		case pinned == 0:
 			nav.Shown = append(nav.Shown, row)

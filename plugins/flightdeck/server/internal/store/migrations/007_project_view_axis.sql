@@ -9,8 +9,10 @@
 --   한다. NULL 이 "아님"이다.
 --
 -- ★ 이 축은 표시 계층이다. 항목·판단·선점·랜딩 어디에도 안 닿고, 접힌 프로젝트도
---   ?project= 로 그대로 열린다. 그래서 화면의 이 폼은 "파생물에 쓰는 폼" 상한 넷에서 빠진다
---   (web/render_test.go 의 그 자리에 근거를 적어 뒀다).
+--   ?project= 로 그대로 열린다(그 단정은 web/project_nav_test.go 의
+--   TestArchivedProjectStillOpens 다). 그래서 화면의 이 폼은 "파생물에 쓰는 폼" 상한
+--   넷에서 빠진다 — 그 근거는 web/render_test.go 의
+--   TestWriteFormsAreAtMostFourAndAllRequireReason 이 이름으로 적어 뒀다.
 --
 -- ★ 순수 가산이다 — ALTER TABLE ADD COLUMN 뿐이라 migrate_guard_test.go 의
 --   destructiveOps 여섯 축(DROP TABLE·DROP COLUMN·RENAME·DELETE FROM·UPDATE…SET·
