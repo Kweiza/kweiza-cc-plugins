@@ -16,7 +16,7 @@ import (
 // 처방 — 발화 지점(설계 §6). 판정은 judge.Prescribe 가 하고 이 파일은 입력을 모으고 결과를 남긴다.
 //
 // ★ **세션 카드 파생을 안 돈다.** 이 경로는 턴마다 돌므로, git worktree list +
-// 세션별 ChangedPaths·UncommittedPaths 를 얹으면 **모든 턴 종료에 저장소 전수 훑기가 붙는다**.
+// 세션별 ChangedPaths·UncommittedPaths·UncommittedDelta 를 얹으면 **모든 턴 종료에 저장소 전수 훑기가 붙는다**.
 // 필요한 입력(footprint·claim·judgment·session·레인)은 전부 DB 표라 git 을 안 탄다.
 // 설계 §6 이 /notices 를 /dashboard.json 에서 가른 것과 같은 판정이다.
 //

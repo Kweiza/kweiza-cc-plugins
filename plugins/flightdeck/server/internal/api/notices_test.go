@@ -12,7 +12,7 @@ import (
 // 꼬리 전용 표면 — 소비자 좌표계는 **HTTP 응답 본문**과 **/metrics 문서**다.
 //
 // ★ 이 시험이 막는 것: MCP 응답 꼬리가 알림을 가져오려고 화면 표면(dashboard.json)을 쳐서
-// **도구 호출 1회마다** 세션 카드 파생(git worktree list · ChangedPaths · UncommittedPaths)이
+// **도구 호출 1회마다** 세션 카드 파생(git worktree list · ChangedPaths · UncommittedPaths · UncommittedDelta)이
 // 통째로 한 번 더 도는 것. 지금은 무해하지만 세션·워크트리가 늘면
 // 모든 도구 응답 지연에 저장소 전수 훑기가 얹힌다.
 
