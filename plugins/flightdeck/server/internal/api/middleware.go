@@ -139,14 +139,43 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 		if IsLoopback(r.RemoteAddr) {
 			s.loopbackSeen.Store(true)
 		}
+
+		// 로그인·로그아웃은 게이트 앞이다. 판정은 핸들러가 스스로 한다(login.go).
+		//
+		// ★ loopbackSeen 관측 **뒤**다. 앞에 두면 루프백에서 온 로그인 요청이 도달
+		// 관측에서 빠진다 — /healthz 를 앞에 둔 것은 그 요청이 컨테이너 안에서 30초마다
+		// 자동으로 나기 때문이고, 로그인은 사람이 치는 것이라 사정이 다르다.
+		if JudgeAuthExempt(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 쿠키는 화면 경로에서만 인정한다 — 그 판정은 JudgeAuth 안에 있다.
+		// 여기서는 값만 읽는다. 쿠키가 없으면 ErrNoCookie 라 빈 문자열로 남는다.
+		var cookieTok string
+		if c, err := r.Cookie(LoginCookieName); err == nil {
+			cookieTok = c.Value
+		}
 		d := JudgeAuth(AuthRequest{
-			RemoteAddr: r.RemoteAddr,
-			AuthHeader: r.Header.Get("Authorization"),
-			ScreenPath: JudgeScreenPath(r.URL.Path),
+			RemoteAddr:  r.RemoteAddr,
+			AuthHeader:  r.Header.Get("Authorization"),
+			CookieToken: cookieTok,
+			ScreenPath:  JudgeScreenPath(r.URL.Path),
 		}, s.opt.Token, s.opt.RequireTokenOnLoopback)
 		if !d.OK {
 			s.met.incUnauthorized()
-			// 로그 줄 없음(위 규율). 사유는 응답에만 싣는다 — 그 문구는 전부 이 계층이 쓴 것이다.
+			// 로그 줄 없음(위 규율). 사유는 응답에만 싣는다.
+			//
+			// ★ HTML 을 읽는 소비자에게는 폼을 낸다. **상태코드는 401 그대로다** —
+			// 리다이렉트로 덮으면 인증 실패가 지표에서 사라지고, /metrics 의
+			// unauthorized 카운터가 "아무도 막히지 않았다"고 거짓말한다.
+			if s.opt.LoginScreen != nil && JudgeLoginScreen(r.Header.Get("Accept")) {
+				s.opt.LoginScreen(w, r, LoginView{
+					Error: d.Reason,
+					Next:  JudgeNext(r.URL.RequestURI()),
+				})
+				return
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="flightdeck"`)
 			s.writeError(w, r, Classified{
 				Status: http.StatusUnauthorized, Code: "unauthorized",

@@ -171,6 +171,26 @@ func JudgeLoginScreen(accept string) bool {
 	return strings.Contains(strings.ToLower(accept), "text/html")
 }
 
+// LoginCookieName 은 화면 로그인 쿠키의 이름이다.
+//
+// ★ 이름을 내보내는 이유: 굽는 자리(handleLogin)와 읽는 자리(withAuth)와 지우는
+// 자리(handleLogout)가 셋인데, 리터럴로 두면 오타 하나가 "로그인은 되는데 다음 요청에서
+// 다시 폼"이라는 모양으로 나타난다 — 원인이 이름이라는 것이 그 증상에서 안 보인다.
+const LoginCookieName = "fd_token"
+
+// JudgeAuthExempt 는 이 경로가 인증 게이트 앞인가다. 순수 함수다.
+//
+// ★ 로그인 경로가 게이트 뒤에 있으면 **로그인하려면 이미 로그인돼 있어야 한다.**
+//
+// ★ **메서드를 안 본다.** GET /login 도 인증 안 된 상태에서 들어온다.
+//
+// ★ /healthz 는 여기 **없다.** 그것은 loopbackSeen 관측보다도 앞이고, 그 순서에는
+// 별도의 근거가 있다(withAuth 의 주석 — 컨테이너 헬스체크가 30초마다 쳐서 loopback_open 을
+// 거짓으로 참으로 만든다). 두 면제를 한 함수로 접으면 그 순서가 흐려진다.
+func JudgeAuthExempt(path string) bool {
+	return path == "/login" || path == "/logout"
+}
+
 // JudgeNext 는 로그인 뒤 돌아갈 자리를 고른다. 순수 함수다.
 //
 // ★ **이 서버 안의 경로만 남긴다.** 스킴이 있거나 // 로 시작하면 브라우저가 다른 호스트로

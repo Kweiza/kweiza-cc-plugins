@@ -729,3 +729,22 @@ func TestJudgeNext(t *testing.T) {
 		}
 	}
 }
+
+func TestJudgeAuthExempt(t *testing.T) {
+	cases := map[string]bool{
+		"/login":  true,
+		"/logout": true,
+		// /healthz 는 여기 없다 — loopbackSeen 관측보다도 앞이라 미들웨어가 따로 본다.
+		// 여기 넣으면 그 순서가 흐려지고, 컨테이너 헬스체크가 loopback_open 을 거짓으로
+		// 참으로 만드는 회귀가 돌아온다(middleware.go 의 그 근거).
+		"/healthz":           false,
+		"/":                  false,
+		"/api/v1/items/next": false,
+		"/login/x":           false,
+	}
+	for path, want := range cases {
+		if got := JudgeAuthExempt(path); got != want {
+			t.Errorf("JudgeAuthExempt(%q) = %v, 기대 %v", path, got, want)
+		}
+	}
+}
