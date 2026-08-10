@@ -127,7 +127,8 @@ func ClassifyError(err error) Classified {
 			Code:    "removal_blocked",
 			Message: blocked.Reason,
 			Guidance: "`fd project rm` 을 다시 실행해 무엇이 남았는지 다시 확인하라 — " +
-				"판정 이후 다른 프로젝트가 새로 만든 참조일 수 있다.",
+				"미리 세지 않는 넷(claim·resource_hold·job·landing_queue) 중 하나가 " +
+				"이 명령 이전부터 이 프로젝트의 세션을 가리키고 있었을 수 있다.",
 		}
 	}
 

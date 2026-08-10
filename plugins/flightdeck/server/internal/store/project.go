@@ -417,7 +417,8 @@ func (e *RemovalRefusedError) Error() string {
 // ★ store.ConflictError(conflictOf/writeErr 의 정본 경로)를 그대로 안 썼다. 그 기구는
 // **INSERT 방향**("쓰려는 것이 가리키는 좌표가 없다")만을 위해 지어졌다 — 이 파일 밖
 // writeErr 호출부 전부(judgment.go·session.go·item.go·resource.go·landing.go)가 INSERT
-// 문이고 하나도 DELETE 가 없다. ConflictAdvice 의 ConflictMissingRef 분기는 고정 문구
+// 와 UPDATE 뿐이고(예: session.go 의 Rekey 는 UPDATE session SET cc_session_id = ...)
+// DELETE 호출부는 하나도 없다. ConflictAdvice 의 ConflictMissingRef 분기는 고정 문구
 // "%s 등록 실패 — 가리키는 좌표(%s) 중 등록되지 않은 것이 있다"(internal/api/errors.go)를
 // 낸다 — DELETE 가 막힌 이 경우에 그대로 쓰면 "세션 등록 실패"처럼 **실제로 한 일(삭제)과
 // 반대로 말하는 문장**이 나간다. 그래서 별도 타입을 두고 ClassifyError 에 전용 분기를
@@ -446,8 +447,10 @@ func (e *RemovalBlockedError) Unwrap() error { return e.Err }
 // 세어지지도 거절되지도 않은 채 DELETE FROM item WHERE project = ? 로 조용히 사라진다.
 //
 // ★ 이 재-셈이 실제로 경합을 닫는 이유: 이 DB 핸들은 DSN 에 _txlock=immediate 가 걸려
-// 있어(store.go 의 Tx 주석) s.Tx 가 BEGIN IMMEDIATE 로 열리고, **BEGIN 시점에 이미 쓰기
-// 잠금을 쥔다.** 그래서 이 함수가 시작된 순간부터 커밋·롤백까지 다른 모든 쓰기
+// 있어(store.go 의 dsn() 주석, store.go:216-218) s.Tx 가 BEGIN IMMEDIATE 로 열리고,
+// **BEGIN 시점에 이미 쓰기 잠금을 쥔다** — 그 동작은 store_test.go 의
+// TestTxSurvivesReadThenWriteContention 이 실측으로 잰다(읽고-쓰는 트랜잭션이 경합해도
+// 하나도 SQLITE_BUSY 로 안 죽는다). 그래서 이 함수가 시작된 순간부터 커밋·롤백까지 다른 모든 쓰기
 // 트랜잭션(다른 세션의 fd add 포함)은 그 잠금 뒤에 줄을 선다 — 이 안의 재-셈(SELECT)과
 // 아래 DELETE 사이에 새 행이 끼어드는 것이 SQLite 잠금 모델로 원리적으로 불가능하다.
 // 재-셈을 트랜잭션 **밖**(예: service 층)에서 한 번 더 해도 같은 시간 간격 문제가

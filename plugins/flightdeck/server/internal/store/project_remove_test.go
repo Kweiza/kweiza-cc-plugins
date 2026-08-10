@@ -146,9 +146,14 @@ func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 // 순서를 고정해 재현한다(진짜 고루틴 경합은 타이밍에 의존해 들쭉날쭉하다 — 이 순서 자체가
 // 곧 경합이 뜻하는 바이므로 순차 재현으로 충분하다).
 //
-// ★ 이것이 통과하려면 RemoveProject 가 **자기 트랜잭션 안에서** 다시 세고 다시 판정해야
-// 한다 — 트랜잭션 밖에서(예: service 층에서 한 번 더) 다시 세면 이 시험이 흉내 낸 것과
-// 똑같은 시간 간격이 그 재-셈과 실제 DELETE 사이에도 남아 문제를 안 닫는다.
+// ★ 이 시험이 실제로 재는 것은 「RemoveProject 가 (호출 밖의 사전 판정과 별개로) 자기
+// 안에서 다시 세고 다시 판정한다」는 것뿐이다 — 재-셈을 s.Tx **밖**(예: 이 스토어 메서드
+// 진입 직후, 트랜잭션을 열기 전)에 둬도 순서(①사전 판정 ②late item 추가 ③RemoveProject
+// 호출)는 그대로라 이 시험은 그대로 초록이다. 「재-셈이 s.Tx 트랜잭션 경계 **안**이다」는
+// 더 강한 성질(재-셈과 실제 DELETE 사이에 다른 트랜잭션이 못 끼어든다 — RemoveProject 의
+// 함수 주석과 _txlock=immediate 근거)이고, 이 시험은 고루틴 경합이 없는 순차 재현이라 그
+// 성질을 검증하지 않는다. 지금 그 경계 성질을 지키는 것은 **코드 리뷰뿐**이다 — 재-셈
+// 호출(t.ProjectRefCounts)이 s.Tx 의 클로저 본문 안에 있는지 읽는 사람이 확인해야 한다.
 func TestRemoveProjectRejudgesInsideTransactionCatchesLateItem(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
