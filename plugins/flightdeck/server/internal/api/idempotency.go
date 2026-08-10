@@ -33,20 +33,14 @@ type IdemVerdict struct {
 //
 // 읽기(GET·HEAD)에는 키를 요구하지 않는다 — 재생할 부작용이 없다.
 //
-// ★ 세션 이전 경로(JudgePreSessionPath — /login·/logout)도 면제한다. 이 판정을 미들웨어
-// 본문이 아니라 여기(순수 함수) 안에 두는 이유: 미들웨어에서 갈래를 치면 시험이 그 조건의
-// **사본**을 단정하게 되고, 면제 경로가 하나 늘 때 판정과 시험이 따로 논다.
-//
-// ★ 폼에 키를 심는 우회는 기각했다. 로그인은 키 형식(`<session>:<seq>`)이 요구하는 세션이
-// 아직 없어 **원리적으로 키를 못 가진다** — 만들어 심으면 그 키가 재사용돼, 틀린 토큰으로
-// 한 번 실패한 뒤 맞는 토큰을 넣어도 멱등 표가 첫 실패 응답을 재생한다.
-func JudgeIdempotencyKey(method, path, key string) IdemVerdict {
+// ★ 세션 이전 경로(/login·/logout) 면제는 **여기 없다.** withIdempotency 가 그 경로를
+// 이 함수에 닿기 전에 통째로 건너뛴다(멱등 표 begin() 자체를 안 태우려고 — 키 요구만
+// 면제하면 key 가 "" 인 채로 표에 들어가 서로 무관한 요청들이 한 슬롯을 공유한다).
+// 그 건너뛰기를 지우면 이 함수까지 오지만, 여기서 면제해도 이미 표에 올라간 뒤라
+// 늦다 — 그래서 면제 갈래를 이 함수에 두지 않는다. 미들웨어의 그 판정이 유일한 자리다.
+func JudgeIdempotencyKey(method, key string) IdemVerdict {
 	if !isWrite(method) {
 		return IdemVerdict{OK: true, Reason: "읽기 요청이라 키를 요구하지 않는다"}
-	}
-	if JudgePreSessionPath(path) {
-		return IdemVerdict{OK: true,
-			Reason: "세션이 생기기 전의 경로라 <session>:<seq> 키를 만들 수 없다"}
 	}
 	k := strings.TrimSpace(key)
 	switch {

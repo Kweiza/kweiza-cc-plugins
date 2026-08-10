@@ -174,3 +174,69 @@ func TestLoginGetRedirectsHome(t *testing.T) {
 		t.Fatalf("Location 이 %q 다", loc)
 	}
 }
+
+func TestLogoutRefusesCrossSite(t *testing.T) {
+	h := NewServer(nil, Options{Token: "s3cret"})
+	req := httptest.NewRequest("POST", "/logout", nil)
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("상태가 %d 다 — 403 이어야 한다", rec.Code)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("크로스사이트 로그아웃에 쿠키를 구웠다")
+	}
+}
+
+// TestLoginRetryAfterWrongTokenIsNotConflated 는 틀린 토큰 뒤의 재시도가 통하는지 본다.
+//
+// ★ 이 시험이 없어서 결함이 샜다. 로그인 시험이 전부 서버를 새로 세우고 쓰기를 한 번만
+// 해서, 빈 키가 멱등 표의 한 슬롯을 공유한다는 사실이 드러날 자리가 없었다.
+func TestLoginRetryAfterWrongTokenIsNotConflated(t *testing.T) {
+	h := NewServer(nil, Options{
+		Token: "s3cret",
+		LoginScreen: func(w http.ResponseWriter, r *http.Request, v LoginView) {
+			w.WriteHeader(http.StatusUnauthorized)
+		},
+	})
+
+	// ① 틀린 토큰 — 401
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginPost(t, "/login", url.Values{"token": {"wrong"}}))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("첫 시도가 %d 다 — 401 이어야 한다", rec.Code)
+	}
+
+	// ② 같은 서버에 맞는 토큰 — 303 이어야 한다. 409 면 멱등 표가 둘을 접은 것이다.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, loginPost(t, "/login", url.Values{"token": {"s3cret"}}))
+	if rec.Code == http.StatusConflict {
+		t.Fatal("맞는 토큰이 409 로 거절됐다 — 빈 키가 멱등 표의 한 슬롯을 공유한다")
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("둘째 시도가 %d 다 — 303 이어야 한다", rec.Code)
+	}
+	if len(rec.Result().Cookies()) != 1 {
+		t.Fatal("둘째 시도가 쿠키를 안 구웠다")
+	}
+}
+
+// TestLogoutAfterLoginIsNotConflated 는 경로가 다른 두 쓰기가 안 접히는지 본다.
+func TestLogoutAfterLoginIsNotConflated(t *testing.T) {
+	h := NewServer(nil, Options{Token: "s3cret"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginPost(t, "/login", url.Values{"token": {"s3cret"}}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("로그인이 %d 다", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, loginPost(t, "/logout", nil))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("로그아웃이 %d 다 — 로그인과 같은 슬롯에서 충돌했을 수 있다", rec.Code)
+	}
+}

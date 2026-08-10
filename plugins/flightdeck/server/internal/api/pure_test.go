@@ -126,45 +126,32 @@ func TestRoutePattern(t *testing.T) {
 }
 
 func TestJudgeIdempotencyKey(t *testing.T) {
-	// path 를 비워 두면 일반 REST 쓰기 경로로 본다 — JudgePreSessionPath 가 거짓이라
-	// 기존 판정(면제 이전의 판정)이 그대로 유지된다.
-	const generalWritePath = "/api/v1/items"
 	cases := []struct {
-		name, method, path, key string
-		wantOK                  bool
-		wantReasonContains      string // 비면 안 본다
+		name, method, key string
+		wantOK            bool
 	}{
-		{"GET 은 불요", http.MethodGet, generalWritePath, "", true, ""},
-		{"HEAD 도 불요", http.MethodHead, generalWritePath, "", true, ""},
-		{"POST 에 키 있음", http.MethodPost, generalWritePath, "s1:1", true, ""},
-		{"POST 에 키 없음", http.MethodPost, generalWritePath, "", false, ""},
-		{"PUT 에 키 없음", http.MethodPut, generalWritePath, "  ", false, ""},
-		{"PATCH 에 키 없음", http.MethodPatch, generalWritePath, "", false, ""},
-		{"DELETE 에 키 없음", http.MethodDelete, generalWritePath, "", false, ""},
+		{"GET 은 불요", http.MethodGet, "", true},
+		{"HEAD 도 불요", http.MethodHead, "", true},
+		{"POST 에 키 있음", http.MethodPost, "s1:1", true},
+		{"POST 에 키 없음", http.MethodPost, "", false},
+		{"PUT 에 키 없음", http.MethodPut, "  ", false},
+		{"PATCH 에 키 없음", http.MethodPatch, "", false},
+		{"DELETE 에 키 없음", http.MethodDelete, "", false},
 		// 표 밖
-		{"키에 공백", http.MethodPost, generalWritePath, "s1 1", false, ""},
-		{"키에 제어문자", http.MethodPost, generalWritePath, "s1\n1", false, ""},
-		{"키가 너무 김", http.MethodPost, generalWritePath, strings.Repeat("k", 201), false, ""},
-		{"소문자 메서드", "post", generalWritePath, "", false, ""},
-		{"키 앞뒤 공백은 허용", http.MethodPost, generalWritePath, "  s1:1  ", true, ""},
-		// 세션 이전 경로 면제 — 로그인은 원리적으로 <session>:<seq> 키를 못 가진다.
-		{"로그인은 키 없이도 통과", http.MethodPost, "/login", "", true, "세션이 생기기 전"},
-		{"로그아웃도 키 없이도 통과", http.MethodPost, "/logout", "", true, "세션이 생기기 전"},
-		// ★ 회귀 관문: 면제가 일반 쓰기로 새지 않는가. 이 케이스가 깨지면 면제 범위가
-		// JudgePreSessionPath 밖으로 번진 것이다.
-		{"일반 쓰기는 여전히 키를 요구한다", http.MethodPost, "/api/v1/items", "", false, ""},
+		{"키에 공백", http.MethodPost, "s1 1", false},
+		{"키에 제어문자", http.MethodPost, "s1\n1", false},
+		{"키가 너무 김", http.MethodPost, strings.Repeat("k", 201), false},
+		{"소문자 메서드", "post", "", false},
+		{"키 앞뒤 공백은 허용", http.MethodPost, "  s1:1  ", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := JudgeIdempotencyKey(c.method, c.path, c.key)
+			got := JudgeIdempotencyKey(c.method, c.key)
 			if got.OK != c.wantOK {
 				t.Fatalf("OK=%v, 기대 %v (사유 %q)", got.OK, c.wantOK, got.Reason)
 			}
 			if got.Reason == "" {
 				t.Fatal("사유가 비었다")
-			}
-			if c.wantReasonContains != "" && !strings.Contains(got.Reason, c.wantReasonContains) {
-				t.Fatalf("사유가 %q — %q 를 포함해야 한다", got.Reason, c.wantReasonContains)
 			}
 		})
 	}

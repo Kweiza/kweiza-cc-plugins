@@ -283,8 +283,16 @@ func (s *server) withIdempotency(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// ★ 세션 이전 경로는 멱등 표에 **아예 안 들어간다.** 키 요구만 면제하면 key 가 ""
+		// 인 채로 begin() 에 들어가고, 그러면 서로 무관한 로그인 시도들이 s.entries[""]
+		// 한 슬롯을 공유한다 — 틀린 토큰의 401 이 캐시된 뒤 맞는 토큰의 재시도가
+		// fingerprint 불일치로 409 가 된다. 폼에 키를 심는 우회를 기각한 것과 같은 실패다.
+		if JudgePreSessionPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-		if v := JudgeIdempotencyKey(r.Method, r.URL.Path, key); !v.OK {
+		if v := JudgeIdempotencyKey(r.Method, key); !v.OK {
 			s.writeError(w, r, badRequest("idempotency_key_required", v.Reason,
 				"Idempotency-Key: <session>:<seq> 를 실어라 — 훅은 타임아웃으로 끊고 다시 부르는 것이 정상 동작이라, "+
 					"이 키가 없으면 같은 신호·항목이 조용히 두 번 들어간다."))
