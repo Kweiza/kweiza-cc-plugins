@@ -133,6 +133,9 @@ func RenderHealth(h healthzResponse, reachable bool, url string) string {
 	for _, line := range selfUpdateLines(h) {
 		fmt.Fprintf(&b, "\n    %s", line)
 	}
+	for _, line := range ledgerBackupLines(h) {
+		fmt.Fprintf(&b, "\n    %s", line)
+	}
 	// ★ 설정과 관측을 **따로** 찍는다. 한 값으로 접으면 "면제를 껐다"(의도한 상태)와
 	// "면제는 켰는데 아무도 못 받는다"(배선 결함)가 화면에서 같아지는데, 처방이 정반대다.
 	// 앞선 판은 `루프백 개방` 한 값만 냈고 그 값이 설정이었다 — 컨테이너 배포에서
@@ -265,4 +268,53 @@ func firstLine(title, body string) string {
 		}
 	}
 	return "(본문 없음)"
+}
+
+// ledgerBackupLines 는 판단 원장 주기 백업 축을 화면 줄로 옮긴다. 순수 함수다.
+//
+// ★ **아무 줄도 안 내는 갈래를 안 만든다.** 이 축이 존재하는 이유가 "도는 줄 알았는데
+// 조용히 실패한다"를 깨는 것인데, 침묵하면 읽는 쪽은 돌고 있다고 믿는다(설계 §13).
+// 옛 서버라 축 자체가 없는 경우도 그 사실을 말한다 — 그 침묵은 "안 돈다"가 아니라
+// "이 축을 아직 모른다"이고, 둘을 접으면 멀쩡한 서버를 사고로 신고한다.
+//
+// ★ **unchanged 를 실패로 안 찍는다.** 원장이 안 바뀌면 안 쓰는 것이 설계된 동작이라
+// 그 회차는 정상이고 흔하다.
+func ledgerBackupLines(h healthzResponse) []string {
+	lb := h.LedgerBackup
+	if !lb.Running {
+		reason := strings.TrimSpace(lb.Reason)
+		if reason == "" {
+			reason = "사유를 안 냈다 — 이 축을 알리기 전 판일 수 있다"
+		}
+		return []string{"원장 백업  **안 돈다** — " + clip(reason, 300)}
+	}
+	if strings.TrimSpace(lb.LastAt) == "" {
+		// 돌고는 있는데 아직 한 회차도 안 끝났다 — 기동 직후의 짧은 창이다.
+		return []string{"원장 백업  켜져 있다 — 아직 첫 회차가 안 끝났다"}
+	}
+	label := map[string]string{
+		"wrote":     "떴다",
+		"unchanged": "안 바뀌어 건너뛰었다",
+		"failed":    "**실패**",
+	}[lb.Outcome]
+	if label == "" {
+		label = clip(lb.Outcome, 40)
+	}
+	line := "원장 백업  " + label + " — " + clip(lb.LastAt, 40)
+	if r := strings.TrimSpace(lb.Route); r != "" {
+		line += " · " + clip(r, 160)
+	}
+	if d := strings.TrimSpace(lb.Detail); d != "" {
+		line += "\n           " + clip(d, 300)
+	}
+	// ★ 저널 축은 **따로 찍는다.** 저널이 실패해도 JSONL 은 착지했으므로, 한 줄로 접으면
+	// "역사를 못 쌓았다"가 "백업이 실패했다"로 읽힌다 — 처방이 다르다.
+	if jr := strings.TrimSpace(lb.Journal); jr != "" {
+		label := map[string]string{"committed": "세대를 쌓았다", "unchanged": "쌓을 새 세대가 없다"}[jr]
+		if label == "" {
+			label = "**" + clip(jr, 300) + "**"
+		}
+		line += "\n           저널: " + label
+	}
+	return []string{line}
 }

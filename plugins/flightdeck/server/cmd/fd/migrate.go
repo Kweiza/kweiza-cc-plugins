@@ -354,8 +354,13 @@ func (a *App) exportJudgments(ctx context.Context, dbFlag, outDir string, out io
 
 // nowStampString 은 매니페스트에 실을 지금 시각이다. DB 의 저장 표기와 같은 폭 고정
 // 마이크로초를 쓴다 — 산출물 안에서 시각 표기가 두 벌이 되면 안 된다.
+//
+// ★ 레이아웃을 상수로 뺀다 — 주기 백업(ledgerbackup.go)도 같은 표기를 쓰는데, 두 자리에
+// 문자열을 따로 적으면 그 순간 "산출물 안에서 시각 표기가 한 벌"이라는 계약이 깨진다.
+const stampLayout = "2006-01-02T15:04:05.000000Z"
+
 func nowStampString() string {
-	return time.Now().UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
+	return time.Now().UTC().Truncate(time.Microsecond).Format(stampLayout)
 }
 
 // importJudgments 는 `fd import --judgments --from <디렉토리>` 다.

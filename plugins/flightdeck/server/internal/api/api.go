@@ -60,6 +60,11 @@ type Options struct {
 	// /healthz 가 영원히 기동 직후 상태를 낸다.
 	SelfUpdate func() SelfUpdateStatus
 
+	// LedgerBackup 은 판단 원장 주기 백업의 현재 상태를 낸다. nil 이면 "배선 안 됨"으로 답한다.
+	//
+	// ★ SelfUpdate 와 같은 이유로 콜백이다 — 이 값은 회차마다 바뀐다.
+	LedgerBackup func() LedgerBackupStatus
+
 	// InContainer 는 이 서버가 컨테이너 안인가다. **배선이 판정해 준다.**
 	//
 	// ★ 이 표면이 쓰는 곳은 하나뿐이다 — 루프백 면제가 안 닿을 때 **그 사유를 말하는 것**.

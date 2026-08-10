@@ -452,6 +452,18 @@ type healthzResponse struct {
 	// 이 축을 안 내는 옛 서버면 전부 제로값이다 — Watching=false·Reason="" 이 되고,
 	// 그 침묵은 "안 보고 있다"가 아니라 "이 축을 아직 모른다"다. 옛 서버 대조는
 	// Build.Known 이 이미 그 사실을 알린다.
+	// LedgerBackup 은 매시간 판단 원장 백업 축이다(internal/api.LedgerBackupStatus 와 같은 모양).
+	// 이 축을 안 내는 옛 서버면 Running=false·Reason="" 이 되고, 그 침묵은 "안 돌고 있다"가
+	// 아니라 "이 축을 아직 모른다"다 — SelfUpdate 와 같은 갈래이고 Build.Known 이 그것을 알린다.
+	LedgerBackup struct {
+		Running bool   `json:"running"`
+		Reason  string `json:"reason"`
+		LastAt  string `json:"last_at"`
+		Outcome string `json:"outcome"`
+		Detail  string `json:"detail"`
+		Route   string `json:"route"`
+		Journal string `json:"journal"`
+	} `json:"ledger_backup"`
 	SelfUpdate struct {
 		Watching bool   `json:"watching"`
 		Reason   string `json:"reason"`

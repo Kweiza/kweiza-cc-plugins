@@ -332,7 +332,7 @@ func TestAuthNoticeAndHealthzScrub(t *testing.T) {
 		DBPath:    "/home/user/.flightdeck/fd.db",
 		DBError:   "unable to open database file /home/user/.flightdeck/fd.db",
 		DiskError: "statfs /home/user/.flightdeck: no such file",
-	}, true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{})
+	}, true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{}, LedgerBackupStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -438,7 +438,7 @@ func TestUnauthorizedGuidanceScopesTheExemptionWhenLoopbackReaches(t *testing.T)
 // 켰는데 도달이 없는 것인지가 같은 false 로 보인다.
 func TestHealthzLoopbackOpenIsObservedNotConfigured(t *testing.T) {
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
-		true, LoopbackReach{Configured: true, Observed: false}, buildinfo.Coord{}, SelfUpdateStatus{})
+		true, LoopbackReach{Configured: true, Observed: false}, buildinfo.Coord{}, SelfUpdateStatus{}, LedgerBackupStatus{})
 	if body.Auth.LoopbackOpen {
 		t.Fatal("도달한 루프백 요청이 없는데 loopback_open 이 참이다 — 설정을 옮기기만 하면 그것이 거짓 광고다")
 	}
@@ -447,7 +447,7 @@ func TestHealthzLoopbackOpenIsObservedNotConfigured(t *testing.T) {
 	}
 
 	seen := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
-		true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{})
+		true, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{}, LedgerBackupStatus{})
 	if !seen.Auth.LoopbackOpen {
 		t.Fatal("루프백으로 도달한 요청이 있는데 loopback_open 이 거짓이다 — 관측을 안 읽는다")
 	}
@@ -463,7 +463,7 @@ func TestHealthzCarriesSelfUpdateRefusal(t *testing.T) {
 			Watching: true, LastAt: &at,
 			From: "07e5df4", To: "1d044b2",
 			Outcome: "refused", Detail: "selfcheck exit 1 — 증분 계획이 거절된다",
-		})
+		}, LedgerBackupStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -491,7 +491,7 @@ func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
 		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
 			Watching: true,
 			Stalled:  "실행 파일을 못 쟀다: no such file or directory",
-		})
+		}, LedgerBackupStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -501,7 +501,7 @@ func TestHealthzCarriesTheStalledWatcher(t *testing.T) {
 	}
 	// 아무 일도 없을 때는 안 나가야 한다 — 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
 	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
-		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}, LedgerBackupStatus{}))
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestHealthzCarriesTheUncoveredBranch(t *testing.T) {
 		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
 			Watching:  true,
 			Uncovered: "이 실행 파일 이름에는 소스 트리가 박혀 있다(런처 bin/fd)",
-		})
+		}, LedgerBackupStatus{})
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
@@ -533,7 +533,7 @@ func TestHealthzCarriesTheUncoveredBranch(t *testing.T) {
 	}
 	// 덮는 배치에서는 안 나가야 한다. 빈 축이 매번 실리면 읽는 쪽이 그 키를 무시하게 된다.
 	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
-		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}))
+		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{Watching: true}, LedgerBackupStatus{}))
 	if err != nil {
 		t.Fatalf("직렬화 실패: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestHealthzSaysWhenItIsNotWatching(t *testing.T) {
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
 		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
 			Watching: false, Reason: "이 플랫폼은 자기 재기동을 지원하지 않는다",
-		})
+		}, LedgerBackupStatus{})
 	if body.SelfUpdate.Watching {
 		t.Fatal("watching 이 참이다")
 	}
@@ -579,7 +579,7 @@ func TestHealthzOmitsLastAtWhenNoAttemptEver(t *testing.T) {
 	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
 		false, LoopbackReach{Configured: true, Observed: true}, buildinfo.Coord{}, SelfUpdateStatus{
 			Watching: true, // 감시 중이지만 아직 교체를 한 번도 안 봤다 — LastAt 이 nil
-		})
+		}, LedgerBackupStatus{})
 	if body.SelfUpdate.LastAt != nil {
 		t.Fatalf("시도가 없었는데 LastAt 이 채워졌다: %v", body.SelfUpdate.LastAt)
 	}
@@ -612,5 +612,39 @@ func TestClip(t *testing.T) {
 	}
 	if got := clip("a\nb\x00c", 10); got != "a b c" {
 		t.Fatalf("제어문자가 안 걷혔다: %q", got)
+	}
+}
+
+// 판단 원장 백업 축이 본문까지 실려 나간다.
+//
+// ★ 순수 함수(HealthzOf)를 통과시키는 것이 요점이다. 본문 뒤에서 필드를 채우면 그 변환이
+// 어느 시험에도 안 걸리고, 앞선 물결이 자동 갱신 축에서 정확히 그렇게 값을 잃었다.
+func TestHealthzCarriesLedgerBackup(t *testing.T) {
+	at := time.Date(2026, 8, 10, 4, 0, 0, 0, time.UTC)
+	body := HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		true, LoopbackReach{}, buildinfo.Coord{}, SelfUpdateStatus{},
+		LedgerBackupStatus{Running: true, LastAt: &at, Outcome: "failed",
+			Detail: "디스크가 찼다", Route: "/ledger"})
+	if !body.LedgerBackup.Running || body.LedgerBackup.Outcome != "failed" {
+		t.Fatalf("축이 본문에 안 실렸다: %+v", body.LedgerBackup)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	for _, want := range []string{`"ledger_backup"`, `"outcome":"failed"`, `"route":"/ledger"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("%s 가 wire 에 없다:\n%s", want, raw)
+		}
+	}
+	// 회차가 없으면 시각 키가 통째로 빠진다 — 제로값이 1970년으로 나가면 안 된다.
+	quiet, err := json.Marshal(HealthzOf(service.Health{OK: true, APIVersion: "1", DBOK: true},
+		true, LoopbackReach{}, buildinfo.Coord{}, SelfUpdateStatus{},
+		LedgerBackupStatus{Running: true}))
+	if err != nil {
+		t.Fatalf("직렬화 실패: %v", err)
+	}
+	if strings.Contains(string(quiet), `"last_at"`) {
+		t.Errorf("회차가 없는데 last_at 이 실렸다:\n%s", quiet)
 	}
 }

@@ -68,11 +68,11 @@ func TestHealthzResponseReadsLoopbackConfigured(t *testing.T) {
 // "배선과 광고가 어긋났는데 전 스위트가 초록이었다"였다. 조립이 serve 본문
 // 안에만 있으면 축 하나가 빠져도 아무 시험이 안 잡는다 — 그래서 순수 함수로 뽑는다.
 func TestServeAPIOptionsCarriesTheContainerVerdict(t *testing.T) {
-	in := serveAPIOptions("tok", 60, quietLogger(), true, nil)
+	in := serveAPIOptions("tok", 60, quietLogger(), true, nil, nil)
 	if !in.InContainer {
 		t.Fatal("컨테이너 판정이 api 옵션까지 안 간다 — /healthz 와 401 처방이 '왜 면제가 안 닿는가'를 말할 근거를 잃는다")
 	}
-	out := serveAPIOptions("tok", 60, quietLogger(), false, nil)
+	out := serveAPIOptions("tok", 60, quietLogger(), false, nil, nil)
 	if out.InContainer {
 		t.Fatal("컨테이너가 아닌데 컨테이너라고 넘긴다 — 사유가 틀리면 안 말하느니만 못하다")
 	}
