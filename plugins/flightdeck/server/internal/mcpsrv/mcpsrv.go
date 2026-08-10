@@ -840,6 +840,15 @@ func (s *Server) toolFinish(ctx context.Context, sessionID string, raw json.RawM
 	// ★ body 누락을 **여기서 막지 않는다.** 판정은 service.JudgeFinish 하나뿐이고,
 	//   그것이 무엇을 적어야 하는지(넷)를 처방으로 함께 낸다. 여기서 미리 "필수 인자 누락"
 	//   으로 끊으면 그 처방이 사라지고, 이 도구가 지키려는 것이 통째로 없어진다.
+	//
+	// ★★ **후속 도착만은 여기서 막는다 — 안쪽에서는 원리적으로 못 본다.** followups 키가
+	//    왔는데 0건으로 해석됐으면 그것은 뜻이 없거나 전송 계층이 값을 흘린 자국이다.
+	//    안쪽 홉(cmd/fd/wire.go)이 `omitempty` 로 빈 목록을 키째 지우므로 REST 핸들러는
+	//    "안 보냈다"와 "비워 보냈다"를 이미 구분할 수 없다. 근거 전문은 followups_arrival.go 에 있다.
+	if ok, reason := judgeFollowupsArrived(raw, len(a.Followups)); !ok {
+		return textResult(s.withTail(ctx, RenderRefusal("finish", reason,
+			service.FollowupsGuidance), tailOpts{}), true)
+	}
 	fs := make([]service.FollowupInput, 0, len(a.Followups))
 	for _, f := range a.Followups {
 		fs = append(fs, service.FollowupInput{
