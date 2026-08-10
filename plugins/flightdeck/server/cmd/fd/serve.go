@@ -123,7 +123,7 @@ func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContai
 	// 폼 대신 JSON 401 이 뜬다. 그 모양은 운영에서 사람이 봐야 발견되고, 정확히 그런
 	// 침묵이 이 함수를 순수 함수로 뽑게 만든 사고였다(위 ★ 참고).
 	opt.LoginScreen = func(w http.ResponseWriter, r *http.Request, v api.LoginView) {
-		web.LoginScreen(w, r, web.LoginView{Error: v.Error, Next: v.Next})
+		web.LoginScreen(w, r, web.LoginView{Error: v.Error, Next: v.Next, Action: v.Action})
 	}
 	return opt
 }

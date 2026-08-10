@@ -240,3 +240,94 @@ func TestLogoutAfterLoginIsNotConflated(t *testing.T) {
 		t.Fatalf("로그아웃이 %d 다 — 로그인과 같은 슬롯에서 충돌했을 수 있다", rec.Code)
 	}
 }
+
+// TestLoginFormActionReachesLoginRoute 는 **렌더된 폼과 로그인 라우트를 잇는다.**
+//
+// ★ 정확히 이 시험이 없어서 결함이 여덟 태스크를 통과했다. 폼 시험(web)은 action
+// 문자열이 있는지만 봤고, 로그인 시험(여기)은 언제나 `/login` 에 **직접** POST 했다 —
+// 그 둘 사이의 **상대경로 해석**을 재는 자리가 아무 데도 없었다. 그래서 뿌리가 아닌
+// 자리에서 뜬 폼이 `/actions/login` 같은 없는 곳을 가리켜도 전건이 초록이었다.
+//
+// 브라우저가 하는 일을 그대로 한다: 문서 URL 에 폼 action 을 붙여 해석하고(ResolveReference
+// 가 RFC 3986 그대로다), **그 자리에 실제로 제출한다.** 제출이 303 이 아니면 사람은
+// 토큰을 정확히 쳐도 같은 폼을 다시 본다.
+func TestLoginFormActionReachesLoginRoute(t *testing.T) {
+	cases := []struct{ method, doc string }{
+		{"GET", "/"},
+		{"GET", "/?project=kweiza"},
+		{"POST", "/actions/reclaim"},  // 낡은 쿠키로 화면 폼을 제출한 자리
+		{"GET", "/api/v1/items/next"}, // 주소창에 친 REST 경로
+		{"GET", "/events"},            // 화면이 무는 SSE 별칭
+		{"POST", "/actions/reclaim/"}, // 뒤 슬래시 — 깊이가 한 칸 더다
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.doc, func(t *testing.T) {
+			var action string
+			h := NewServer(nil, Options{
+				Token: "s3cret",
+				LoginScreen: func(w http.ResponseWriter, r *http.Request, v LoginView) {
+					action = v.Action // login.gohtml 의 action="{{.Action}}" 이 찍는 값
+					w.WriteHeader(http.StatusUnauthorized)
+				},
+			})
+			req := httptest.NewRequest(c.method, c.doc, nil)
+			req.RemoteAddr = "203.0.113.9:1"
+			req.Header.Set("Accept", "text/html")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("폼이 안 떴다 — 상태가 %d 다", rec.Code)
+			}
+			if action == "" {
+				t.Fatal("폼의 action 이 비었다")
+			}
+
+			base, err := url.Parse("http://fd.example" + c.doc)
+			if err != nil {
+				t.Fatalf("문서 URL 파싱 실패: %v", err)
+			}
+			ref, err := url.Parse(action)
+			if err != nil {
+				t.Fatalf("action 파싱 실패: %v", err)
+			}
+			target := base.ResolveReference(ref)
+			if target.Path != "/login" {
+				t.Fatalf("폼 action %q 가 %q 로 풀린다 — /login 이어야 한다", action, target.Path)
+			}
+
+			// 그리고 그 자리에 실제로 제출한다. 여기서 401 이 나면 무한 폼이다.
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, loginPost(t, target.Path, url.Values{"token": {"s3cret"}}))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("폼이 가리킨 %q 에 제출했더니 %d 다 — 303 이어야 한다", target.Path, rec.Code)
+			}
+			if len(rec.Result().Cookies()) != 1 {
+				t.Fatal("제출이 통했는데 쿠키를 안 구웠다")
+			}
+		})
+	}
+}
+
+// TestLoginNextFoldsNonGET 은 쓰기 자리에서 뜬 폼의 돌아갈 자리를 본다.
+//
+// ★ 로그인 성공은 303 이고 303 은 **언제나 GET 으로 재생된다.** 그래서 POST 전용
+// 경로를 Next 로 실으면 토큰이 맞아도 405/404 로 착지한다 — 로그인은 됐는데 화면이
+// 깨진 것처럼 보이고, 원인이 Next 라는 것이 그 증상에서 안 보인다.
+func TestLoginNextFoldsNonGET(t *testing.T) {
+	var got LoginView
+	h := NewServer(nil, Options{
+		Token: "s3cret",
+		LoginScreen: func(w http.ResponseWriter, r *http.Request, v LoginView) {
+			got = v
+			w.WriteHeader(http.StatusUnauthorized)
+		},
+	})
+	req := httptest.NewRequest("POST", "/actions/reclaim?key=abc", nil)
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Accept", "text/html")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got.Next != "/" {
+		t.Fatalf("돌아갈 자리가 %q 다 — POST 전용 경로라 / 로 접혀야 한다", got.Next)
+	}
+}

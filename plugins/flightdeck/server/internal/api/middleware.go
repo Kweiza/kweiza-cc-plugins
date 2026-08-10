@@ -169,10 +169,18 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 			// ★ HTML 을 읽는 소비자에게는 폼을 낸다. **상태코드는 401 그대로다** —
 			// 리다이렉트로 덮으면 인증 실패가 지표에서 사라지고, /metrics 의
 			// unauthorized 카운터가 "아무도 막히지 않았다"고 거짓말한다.
+			// ★ Action 은 **여기서** 계산한다. 이 401 은 뿌리가 아닌 경로에서도 뜨는데
+			// (JudgeLoginScreen 이 메서드도 경로도 안 본다) 폼 action 은 상대경로라,
+			// 문서 URL 의 깊이만큼 거슬러 올라가지 않으면 /actions/login 처럼 없는 자리를
+			// 가리키고 그 자리도 다시 401 이다 — 무한 폼이다.
+			//
+			// ★ Next 는 JudgeNext 가 아니라 JudgeNextFrom 이다. 이 요청이 GET 이 아니면
+			// 그 URI 로 되돌아갈 수 없다 — 로그인 성공은 303 이고 303 은 GET 으로 재생된다.
 			if s.opt.LoginScreen != nil && JudgeLoginScreen(r.Header.Get("Accept")) {
 				s.opt.LoginScreen(w, r, LoginView{
-					Error: d.Reason,
-					Next:  JudgeNext(r.URL.RequestURI()),
+					Error:  d.Reason,
+					Next:   JudgeNextFrom(r.Method, r.URL.RequestURI()),
+					Action: JudgeLoginAction(r.URL.Path),
 				})
 				return
 			}

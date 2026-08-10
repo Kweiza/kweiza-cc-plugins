@@ -10,7 +10,7 @@ import (
 func TestLoginScreenRendersForm(t *testing.T) {
 	rec := httptest.NewRecorder()
 	LoginScreen(rec, httptest.NewRequest("GET", "/", nil),
-		LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=kweiza"})
+		LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=kweiza", Action: "login"})
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("상태가 %d 다 — 401 이어야 한다", rec.Code)
@@ -55,9 +55,26 @@ func TestLoginScreenEscapes(t *testing.T) {
 // TestLoginScreenFirstVisitHasNoError 는 첫 방문에 빈 오류 자리가 안 뜨는지 본다.
 func TestLoginScreenFirstVisitHasNoError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	LoginScreen(rec, httptest.NewRequest("GET", "/", nil), LoginView{Next: "/"})
+	LoginScreen(rec, httptest.NewRequest("GET", "/", nil), LoginView{Next: "/", Action: "login"})
 	if strings.Contains(rec.Body.String(), `class="err"`) {
 		t.Fatal("사유가 없는데 오류 자리가 떴다")
+	}
+}
+
+// TestLoginScreenUsesGivenAction 은 폼 action 이 **주어진 값**인지 본다.
+//
+// ★ 이 패키지가 깊이를 세면 안 된다. 값을 박아 두면 뿌리가 아닌 자리에서 뜬 폼이
+// /actions/login 처럼 없는 곳을 가리키고, 그 자리도 세션 이전 경로가 아니라 다시 401 이
+// 난다 — 사람은 토큰을 정확히 쳐도 같은 폼을 무한히 다시 본다.
+// 값을 만드는 자리는 api 의 JudgeLoginAction 이고, 그 값과 로그인 라우트를 잇는 왕복
+// 시험은 api/login_test.go 의 TestLoginFormActionReachesLoginRoute 다.
+func TestLoginScreenUsesGivenAction(t *testing.T) {
+	for _, action := range []string{"login", "../login", "../../../login"} {
+		rec := httptest.NewRecorder()
+		LoginScreen(rec, httptest.NewRequest("GET", "/", nil), LoginView{Next: "/", Action: action})
+		if want := `action="` + action + `"`; !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("폼에 %q 가 없다 — 템플릿이 준 값을 안 쓴다", want)
+		}
 	}
 }
 

@@ -195,6 +195,62 @@ func JudgePreSessionPath(path string) bool {
 	return path == "/login" || path == "/logout"
 }
 
+// JudgeLoginAction 은 이 경로에서 뜬 폼의 action 이 가리켜야 할 **상대경로**다. 순수 함수다.
+//
+// ★ 절대경로(`/login`)로 두면 리버스 프록시의 경로 접두 뒤에서 브라우저가 원점의 /login 을
+// 찾아가고 프록시는 그 경로를 모른다 — 이 화면의 폼·SSE 가 전부 상대경로인 이유다
+// (web.go 의 defaultSSEPath 주석). 그런데 상대경로는 **문서 URL 의 깊이**에 붙으므로
+// 뿌리가 아닌 자리에서 뜬 폼은 /actions/login 같은 없는 곳으로 간다. 그 자리도 세션 이전
+// 경로가 아니라 다시 401 이 나고, 사람은 토큰을 정확히 쳐도 같은 폼을 무한히 다시 본다.
+// 401 폼은 POST /actions/* 에서도 뜨므로(JudgeLoginScreen 이 메서드를 안 본다) 이것은
+// 가설이 아니라 그 설계가 명시로 든 시나리오다.
+//
+// 그래서 깊이만큼 거슬러 올라간다. 프록시 접두 안전성은 그대로 유지된다.
+//
+// ★ 깊이는 **마지막 슬래시까지의 슬래시 수**로 센다. RFC 3986 의 상대 해석이 문서 URL 의
+// 마지막 마디를 버리고 남은 자리에 붙이기 때문이다(`/a/b` 의 기준은 `/a/`).
+// 빈 마디(`//`)도 한 마디로 센다 — 해석 알고리즘이 그것을 마디로 세므로, 정규화해서
+// 걷어내면 그만큼 덜 올라가 다시 없는 자리를 가리킨다.
+//
+// ★ 슬래시가 아예 없는 경로(빈 문자열 · OPTIONS 의 `*`)는 뿌리로 본다. 못 읽은 것을
+// 깊이 0 으로 접는 쪽이 안전하다 — 그 경우의 최악은 "이 이상한 자리에서만 폼이 안 통한다"
+// 이고, 반대로 과하게 올라가면 접두 **밖**으로 나가 프록시 배포 전체가 깨진다.
+func JudgeLoginAction(path string) string {
+	// 라우트 등록(api.go 의 "POST /login")의 마지막 마디다.
+	const name = "login"
+	slash := strings.LastIndex(path, "/")
+	if slash < 0 {
+		return name
+	}
+	// 문서 URL 의 디렉토리 부분. 뿌리(`/`)는 슬래시가 하나뿐이라 깊이가 0 이다.
+	depth := strings.Count(path[:slash+1], "/") - 1
+	if depth <= 0 {
+		return name
+	}
+	return strings.Repeat("../", depth) + name
+}
+
+// JudgeNextFrom 은 **401 을 맞은 요청 자체**를 로그인 뒤 돌아갈 자리로 쓸 수 있는지 본다.
+// 순수 함수다.
+//
+// ★ 로그인 성공은 303 이고 303 은 **언제나 GET 으로 재생된다.** 그래서 GET 이 아닌 요청의
+// URI 를 그대로 실으면 토큰이 맞아도 405/404 에 착지한다 — POST 전용인 /actions/* 가
+// 정확히 그 자리다. 로그인은 됐는데 화면이 깨진 것처럼 보이고, 원인이 Next 라는 것이
+// 그 증상에서 안 보인다. 그래서 GET 이 아니면 뿌리로 접는다.
+//
+// ★ HEAD 도 접는다. 303 이 재생하는 것은 GET 하나뿐이라 "같은 요청으로 되돌아간다"가
+// 참인 메서드도 GET 하나다.
+//
+// ★ 값 자체의 안전(오픈 리다이렉트)은 여전히 JudgeNext 가 본다. 이 함수는 그 앞에
+// **메서드 축 하나**를 더할 뿐이고, 두 축을 한 함수로 접지 않는 이유는 폼이 제출한 next
+// 를 검증하는 자리(handleLogin)에는 메서드 축이 없기 때문이다 — 거기는 언제나 POST 다.
+func JudgeNextFrom(method, requestURI string) string {
+	if !strings.EqualFold(strings.TrimSpace(method), "GET") {
+		return "/"
+	}
+	return JudgeNext(requestURI)
+}
+
 // JudgeNext 는 로그인 뒤 돌아갈 자리를 고른다. 순수 함수다.
 //
 // ★ **이 서버 안의 경로만 남긴다.** 스킴이 있거나 // 로 시작하면 브라우저가 다른 호스트로

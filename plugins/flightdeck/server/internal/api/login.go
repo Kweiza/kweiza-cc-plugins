@@ -132,10 +132,16 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // /metrics 의 unauthorized 축과 어긋난다.
 //
 // ★ **시도한 토큰 값을 안 싣는다.** LoginView 에 그 필드가 없는 것이 그 규율의 자리다.
+//
+// ★ Action 을 여기서도 계산한다. 이 자리의 r.URL.Path 는 폼이 제출된 경로이므로 언제나
+// 라우트 그대로인 `/login` 이고(다른 자리로 간 제출은 이 핸들러에 아예 안 닿는다 —
+// 세션 이전 경로가 아니라 withAuth 가 먼저 401 을 낸다), JudgeLoginAction 이 거기서
+// 깊이 0 을 내 `login` 을 돌려준다. 즉 재시도 폼도 같은 자리를 가리킨다.
+// 상수로 박지 않는 이유는 같은 계산이 두 벌이 되지 않게 하기 위해서다.
 func (s *server) loginRefused(w http.ResponseWriter, r *http.Request, why, next string) {
 	s.met.incUnauthorized()
 	if s.opt.LoginScreen != nil && JudgeLoginScreen(r.Header.Get("Accept")) {
-		s.opt.LoginScreen(w, r, LoginView{Error: why, Next: next})
+		s.opt.LoginScreen(w, r, LoginView{Error: why, Next: next, Action: JudgeLoginAction(r.URL.Path)})
 		return
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="flightdeck"`)

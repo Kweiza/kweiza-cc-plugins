@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -726,6 +727,68 @@ func TestJudgeNext(t *testing.T) {
 	for next, want := range cases {
 		if got := JudgeNext(next); got != want {
 			t.Errorf("JudgeNext(%q) = %q, 기대 %q", next, got, want)
+		}
+	}
+}
+
+// TestJudgeLoginAction 은 폼 action 의 깊이 셈을 잠근다.
+//
+// ★ 기대값을 손으로 적는 것으로는 부족하다 — 표가 틀리면 코드와 함께 틀린다. 그래서
+// 각 줄을 **문서 URL 에 실제로 해석해서** /login 에 닿는지 함께 본다(RFC 3986 그대로인
+// url.ResolveReference). 브라우저가 하는 계산이 그것이다.
+func TestJudgeLoginAction(t *testing.T) {
+	cases := map[string]string{
+		"/":                     "login",
+		"/login":                "login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
+		"/events":               "login",
+		"/actions/reclaim":      "../login",
+		"/actions/lane-release": "../login",
+		"/actions/":             "../login", // 뒤 슬래시면 마디가 하나 더다
+		"/api/v1/items/next":    "../../../login",
+		"/a//b":                 "../../login", // 빈 마디도 해석이 한 마디로 센다
+		"":                      "login",       // 못 읽은 것은 뿌리로 접는다
+		"*":                     "login",       // OPTIONS * — 슬래시가 없다
+	}
+	for path, want := range cases {
+		got := JudgeLoginAction(path)
+		if got != want {
+			t.Errorf("JudgeLoginAction(%q) = %q, 기대 %q", path, got, want)
+			continue
+		}
+		// 그리고 그 값이 실제로 /login 으로 풀리는지 본다.
+		if path == "" || path == "*" {
+			continue // 문서 URL 로 성립하지 않는 자리다 — 위 기대값만 잠근다
+		}
+		base, err := url.Parse("http://fd.example" + path)
+		if err != nil {
+			t.Fatalf("문서 URL %q 파싱 실패: %v", path, err)
+		}
+		ref, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("action %q 파싱 실패: %v", got, err)
+		}
+		if p := base.ResolveReference(ref).Path; p != "/login" {
+			t.Errorf("문서 %q 에서 action %q 가 %q 로 풀린다 — /login 이어야 한다", path, got, p)
+		}
+	}
+}
+
+// TestJudgeNextFrom 은 303 이 재생할 수 있는 요청만 돌아갈 자리로 남는지 본다.
+func TestJudgeNextFrom(t *testing.T) {
+	cases := []struct {
+		method, uri, want string
+	}{
+		{"GET", "/?project=kweiza", "/?project=kweiza"},
+		{"get", "/", "/"},                         // 메서드는 대소문자를 안 가린다
+		{"GET", "//evil.com", "/"},                // 오픈 리다이렉트 축은 JudgeNext 가 계속 본다
+		{"POST", "/actions/reclaim?key=abc", "/"}, // 303 은 GET 으로 재생된다 — 405 에 착지한다
+		{"DELETE", "/api/v1/items/x", "/"},
+		{"HEAD", "/", "/"}, // 303 이 재생하는 것은 GET 하나뿐이다
+		{"", "/x", "/"},
+	}
+	for _, c := range cases {
+		if got := JudgeNextFrom(c.method, c.uri); got != c.want {
+			t.Errorf("JudgeNextFrom(%q, %q) = %q, 기대 %q", c.method, c.uri, got, c.want)
 		}
 	}
 }

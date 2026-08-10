@@ -34,8 +34,13 @@ p.err { color:var(--crit); font-size:13px; margin:0 0 12px; }
   {{with .Error}}<p class="err">{{.}}</p>{{end}}
   {{/* ★ action 이 상대경로다. dashboard.gohtml 의 폼·SSE 와 같은 규율 —
        절대경로로 두면 리버스 프록시의 경로 접두 뒤에서 원점의 /login 을 찾아가고,
-       프록시는 그 경로를 모르므로 로그인이 조용히 실패한다. */}}
-  <form method="post" action="login">
+       프록시는 그 경로를 모르므로 로그인이 조용히 실패한다.
+
+       ★ 그런데 상대경로는 **문서 URL 의 깊이**에 붙는다. 이 폼은 뿌리가 아닌 자리에서도
+       뜨므로(POST /actions/reclaim 의 401) 값을 여기 박으면 /actions/login 처럼 없는
+       자리를 가리킨다. 깊이를 세는 것은 api 의 JudgeLoginAction 이고, 여기 오는 것은
+       **이미 계산된 값**이다 — 이 템플릿은 세지 않는다. */}}
+  <form method="post" action="{{.Action}}">
     <input type="hidden" name="next" value="{{.Next}}">
     <label>토큰
       <input type="password" name="token" autocomplete="current-password"

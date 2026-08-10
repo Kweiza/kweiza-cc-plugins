@@ -19,6 +19,10 @@ import (
 type LoginView struct {
 	Error string // 비면 첫 방문이다
 	Next  string // 이미 검증된 값이다 — 여기서 다시 검증하지 않는다
+	// Action 은 폼 action 에 그대로 찍을 **상대경로**다(`login` · `../login` · …).
+	// ★ 이미 계산된 값이다 — 이 패키지는 깊이를 세지 않는다. 세면 그 셈이 api 와 두 벌이
+	// 되고, 이 축의 표류는 "토큰을 정확히 쳐도 폼이 다시 뜬다"로 나타나 원인이 안 보인다.
+	Action string
 }
 
 // LoginScreen 은 토큰 폼을 401 로 낸다.
