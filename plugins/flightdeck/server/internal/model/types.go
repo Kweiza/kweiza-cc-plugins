@@ -364,11 +364,20 @@ type LineDelta struct {
 // 불리언을 만드는 순간 그것이 회수·회피·탈락 셋의 상류가 되고,
 // 그 판정은 실측에서 두 번 틀렸다.
 type SessionView struct {
-	Session      Session
-	Signals      map[SignalKind]time.Time // 없는 종류는 키가 없다. 0값과 부재를 가른다
-	Paths        []string                 // footprint ∪ change_set
-	HasFootprint bool                     // false 면 "발자국 없음"을 명시한다. 침묵하지 않는다
-	Claims       []string                 // 선점한 항목 id
+	Session Session
+	Signals map[SignalKind]time.Time // 없는 종류는 키가 없다. 0값과 부재를 가른다
+	Paths   []string                 // footprint ∪ change_set
+	// PathDelta 는 Paths 중 규모를 잰 것의 증감이다(커밋 구간 + 미커밋 구간의 **합**).
+	//
+	// ★ **없는 키는 0 이 아니라 "못 읽었다"** 다 — 바로 아래 Signals 와 같은 관용이다.
+	// 이진 파일 · 미추적 파일 · footprint 에만 있는 경로 · git 파생 실패가 그 자리다.
+	// Paths 와 합치지 않는 이유가 이것이다: 합치면 "바뀌었는데 못 쟀다"를 표현할 수 없다.
+	//
+	// 두 구간(`forkSHA..branch` 와 `HEAD..worktree`)은 **서로소**라 더하면 갈래 지점
+	// 이후 전부가 정확히 나온다. 어느 쪽이 이기는 규칙이 필요 없다.
+	PathDelta    map[string]LineDelta
+	HasFootprint bool     // false 면 "발자국 없음"을 명시한다. 침묵하지 않는다
+	Claims       []string // 선점한 항목 id
 	LastNote     *Judgment
 	Branch       string
 	BranchSHA    string

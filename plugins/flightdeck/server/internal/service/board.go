@@ -437,12 +437,13 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 				if forkSHA, err := g.MergeBase(ctx, proj.DefaultBranch, card.View.Branch); err != nil {
 					d.fail("merge-base:"+clip(card.View.Branch, 120), err)
 					fails = append(fails, "갈래 지점을 못 읽었다")
-				} else if paths, _, err := g.ChangedPaths(ctx, forkSHA, card.View.Branch); err != nil {
+				} else if paths, delta, err := g.ChangedPaths(ctx, forkSHA, card.View.Branch); err != nil {
 					d.fail("changed-paths:"+clip(card.View.Branch, 120), err)
 					fails = append(fails, "변경 경로를 못 읽었다")
 				} else {
 					d.ok()
 					card.View.Paths = UnionPaths(card.View.Paths, paths)
+					card.View.PathDelta = MergeDelta(card.View.PathDelta, delta)
 					// 보관되는 뜻이 정확해진다 — 갈래 기준 diff 는 forkSHA 로부터의 두 점 diff 와 같다.
 					s.rememberChangeSet(ctx, proj.ID, forkSHA, card.View.BranchSHA, paths)
 				}
@@ -461,6 +462,16 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 			} else {
 				d.ok()
 				card.View.Paths = UnionPaths(card.View.Paths, unc)
+			}
+			// 미커밋 규모 — **위 경로 축과 갈라 둔다.** 이것이 실패해도 위가 살아야 하고
+			// (커밋 전 의도를 나르는 유일한 축이다), 그것이 두 git 호출을 안 합친 이유다.
+			// 이 호출 하나가 이 축에서 새로 드는 비용의 전부다(세션당 4→5).
+			if ud, err := g.UncommittedDelta(ctx, v.Session.Worktree); err != nil {
+				d.fail("uncommitted-delta:"+clip(v.Session.ID, 64), err)
+				fails = append(fails, "미커밋 규모를 못 읽었다")
+			} else {
+				d.ok()
+				card.View.PathDelta = MergeDelta(card.View.PathDelta, ud)
 			}
 		} else {
 			fails = append(fails, "git 파생을 시도하지 않았다(프로젝트 경로 없음)")

@@ -375,6 +375,28 @@ func UnionPaths(sets ...[]string) []string {
 	return out
 }
 
+// MergeDelta 는 규모 맵 여럿을 **더해서** 하나로 만든다. 순수 함수다.
+//
+// ★ 덮어쓰기가 아니라 합이다. 부르는 자리에서 들어오는 두 구간(커밋된 `forkSHA..branch` 와
+// 미커밋 `HEAD..worktree`)이 **서로소**라, 합이 곧 "갈래 지점 이후 전부"다. 덮어쓰면 나중에
+// 온 구간만 남아 규모가 조용히 작아진다.
+//
+// ★ **없는 키를 만들지 않는다.** 어느 맵에도 없던 경로는 결과에도 없다 — 그것이
+// "못 읽었다"를 나르는 유일한 방법이고, 0 으로 채우면 이 축 전체가 뜻을 잃는다.
+func MergeDelta(sets ...map[string]model.LineDelta) map[string]model.LineDelta {
+	var out map[string]model.LineDelta
+	for _, set := range sets {
+		for p, d := range set {
+			if out == nil {
+				out = map[string]model.LineDelta{}
+			}
+			cur := out[p]
+			out[p] = model.LineDelta{Added: cur.Added + d.Added, Removed: cur.Removed + d.Removed}
+		}
+	}
+	return out
+}
+
 // RelPath 는 절대 경로를 저장소 기준 상대 경로로 옮긴다. 순수 함수다.
 //
 // ★ 문자열 접두로 자르지 않는다. 접두로 하면 root="/a/b" 일 때 "/a/bc/d" 가 "c/d" 로

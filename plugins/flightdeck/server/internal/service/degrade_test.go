@@ -197,3 +197,41 @@ func TestBoardEmptiesChangeSetAxisWhenForkPointIsUnreadable(t *testing.T) {
 		t.Fatalf("부분 실패의 신선도가 %+v 다", view.Freshness)
 	}
 }
+
+// ★ 이 시험이 Task 2 에서 UncommittedPaths 와 UncommittedDelta 를 가른 이유를 잠근다.
+func TestUncommittedDeltaFailureKeepsThePathAxisAlive(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	writeFile(t, wt, "pipeline/run.py", "print(1)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "add pipeline")
+	writeFile(t, wt, "pipeline/run.py", "print(1)\nprint(2)\n") // 미커밋
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	// 같은 DB·같은 저장소에, 규모 축만 죽인 서비스를 다시 만든다
+	// (degrade_test.go 의 TestBoardKeepsCoordinatingWhenOneDerivedAxisFails 와 같은 관용).
+	broken := New(st, nil, WithGitFactory(func(repoPath string) GitReader {
+		return flakyReader{GitReader: gitreader.New(repoPath), failUncommittedDelta: true}
+	}))
+	view, err := broken.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("Board 실패: %v", err)
+	}
+	card := view.Sessions[0]
+
+	// 경로 축은 산다 — UncommittedPaths 는 따로 돌기 때문이다.
+	var found bool
+	for _, p := range card.View.Paths {
+		if p == "pipeline/run.py" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("규모를 못 읽었다고 경로까지 사라졌다: %q — 두 호출을 가른 이유가 이것이다", card.View.Paths)
+	}
+	// 그리고 침묵하지 않는다.
+	if !strings.Contains(card.DeriveError, "미커밋 규모를 못 읽었다") {
+		t.Errorf("열화 사유가 안 남았다: %q", card.DeriveError)
+	}
+}

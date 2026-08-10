@@ -409,3 +409,54 @@ func TestBoardRemembersChangeSetKeyedByForkPoint(t *testing.T) {
 		t.Fatalf("보관된 change_set 에 브랜치가 안 만진 파일이 있다: %v", cs.Paths)
 	}
 }
+
+func TestSessionCardSumsCommittedAndUncommittedDelta(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	// ① 커밋된 구간 — 브랜치에 2줄짜리 파일을 새로 넣는다(+2/-0).
+	writeFile(t, wt, "pipeline/run.py", "print(1)\nprint(2)\n")
+	runGit(t, wt, "add", "-A")
+	runGit(t, wt, "commit", "-q", "-m", "add pipeline")
+
+	// ② 미커밋 구간 — 같은 파일에 1줄 더한다(+1/-0).
+	writeFile(t, wt, "pipeline/run.py", "print(1)\nprint(2)\nprint(3)\n")
+
+	sess := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+
+	// ③ footprint 에만 있는 경로 — git 은 이 파일을 아예 모른다.
+	if err := s.Beat(ctx(), sess.Session.ID, model.SignalTool,
+		[]string{filepath.Join(wt, "docs/only-a-footprint.md")}); err != nil {
+		t.Fatalf("Beat 실패: %v", err)
+	}
+
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: sess.Session.ID})
+	if err != nil {
+		t.Fatalf("Board 실패: %v", err)
+	}
+	card := view.Sessions[0]
+
+	// 두 구간은 서로소다 — 합이 갈래 지점 이후 전부다.
+	want := model.LineDelta{Added: 3, Removed: 0}
+	got, ok := card.View.PathDelta["pipeline/run.py"]
+	if !ok {
+		t.Fatalf("규모 키가 없다: %v", card.View.PathDelta)
+	}
+	if got != want {
+		t.Errorf("%+v 를 기대했는데 %+v 다 — 커밋 구간(+2)과 미커밋 구간(+1)의 합이어야 한다", want, got)
+	}
+
+	// ★ footprint 전용 경로는 **경로로는 있고 규모로는 키가 없다.**
+	var sawPath bool
+	for _, p := range card.View.Paths {
+		if p == "docs/only-a-footprint.md" {
+			sawPath = true
+		}
+	}
+	if !sawPath {
+		t.Fatalf("발자국 경로가 카드에서 사라졌다: %q", card.View.Paths)
+	}
+	if d, ok := card.View.PathDelta["docs/only-a-footprint.md"]; ok {
+		t.Errorf("git 이 모르는 경로에 규모 키가 생겼다(%+v) — 못 잰 것은 키가 없어야 한다", d)
+	}
+}
