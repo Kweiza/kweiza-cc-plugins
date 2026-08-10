@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -354,5 +356,221 @@ func TestReadRoundTripsEmptyLedger(t *testing.T) {
 	}
 	if !reflect.DeepEqual(wantM, gotM) {
 		t.Errorf("매니페스트가 달라졌다:\n%+v\n%+v", wantM, gotM)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 순수 판정 셋을 표로 문다 — 지금까지 이 셋을 **직접 부르는 시험이 하나도 없었다**
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 통합 시험이 변이에서 무는 것은 확인됐지만, 판정을 표로 무는 선례가 이 저장소에 있다
+// (legacy/outguard_test.go 의 TestJudgeOutTarget · judge/paths_test.go 의
+// TestJudgePathCoordinate). 판정이 순수 함수인 이유가 "시험이 직접 부른다"인데 아무도
+// 안 부르면 그 이유가 반쯤 비어 있다.
+
+// TestJudgeWriteFailureDoesNotInventLeftovers 는 교체 단의 **세 갈래**를 가른다.
+//
+// ★ moved == total 일 때(데이터를 다 옮기고 매니페스트 rename 만 실패) 예전 문구는
+// 고정으로 "나머지는 옛 세대다"라고 말했다. 그 경우 남은 옛 세대는 **없다.** 행동 지침은
+// 여전히 옳았지만(무효화됐다 · --force 로 재실행), 이 저장소는 모르는 것을 지어내지
+// 않는 것을 규율로 삼는다 — 파생을 사실로 적는 자리였다.
+//
+// moved == 0 도 실재한다: 교체 단 첫 rename 이 실패하면 매니페스트는 이미 걷어냈는데
+// 데이터는 한 개도 안 바뀌었다(Write 의 doc 이 그 창을 이미 적어 뒀다).
+func TestJudgeWriteFailureDoesNotInventLeftovers(t *testing.T) {
+	const total = 6 // 데이터 여섯 + 매니페스트 하나
+
+	t.Run("준비 단은 자리를 안 건드린다", func(t *testing.T) {
+		v := JudgeWriteFailure(StagePrepare, 0, total)
+		if !v.Intact {
+			t.Errorf("준비 단인데 자리가 온전하지 않다고 한다: %+v", v)
+		}
+	})
+
+	// 갈래를 가르는 **실체**는 두 세대가 함께 있느냐다 — 그때만 FK 롤백 피해가 성립한다.
+	// 낱말 하나로 재지 않는다: 정직한 문구는 "남은 옛 세대는 없다"처럼 같은 낱말을 쓰면서
+	// 부정하므로, 부분 문자열로 재면 정직한 쪽이 거짓말하는 쪽과 같아 보인다.
+	cases := []struct {
+		name          string
+		moved         int
+		wantMixedHarm bool // 세대 혼합 피해를 말해야 하는가
+		wantLeftovers bool // "나머지"(남은 옛 세대)가 있다고 말해야 하는가
+	}{
+		{"하나도 못 옮겼다 — 전부 옛 세대다", 0, false, false},
+		{"섞였다", 3, true, true},
+		{"다 옮기고 매니페스트만 못 얹었다 — 옛 세대가 없다", total, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := JudgeWriteFailure(StageCommit, c.moved, total)
+			if v.Intact {
+				t.Errorf("교체 단은 매니페스트를 이미 걷어냈다 — 자리가 온전할 수 없다: %+v", v)
+			}
+			// 어느 갈래든 복구 방법은 같고 반드시 실려야 한다.
+			if !strings.Contains(v.Reason, "--force") {
+				t.Errorf("복구 방법(--force 재실행)이 사유에 없다: %s", v.Reason)
+			}
+			if got := strings.Contains(v.Reason, "세대가 섞인"); got != c.wantMixedHarm {
+				t.Errorf("moved=%d/%d 에서 세대 혼합 피해 언급이 %v 인데 %v 여야 한다 — "+
+					"두 세대가 함께 있을 때만 그 피해가 성립한다:\n  %s",
+					c.moved, total, got, c.wantMixedHarm, v.Reason)
+			}
+			if got := strings.Contains(v.Reason, "나머지"); got != c.wantLeftovers {
+				t.Errorf("moved=%d/%d 에서 '나머지' 언급이 %v 인데 %v 여야 한다 — "+
+					"없는 옛 세대를 말하면 파생을 사실로 적는 것이다:\n  %s",
+					c.moved, total, got, c.wantLeftovers, v.Reason)
+			}
+		})
+	}
+}
+
+// TestCountsOfMapsEveryTable 는 표마다 자기 슬라이스를 센다는 것을 문다.
+// 길이를 전부 다르게 줘서 두 칸이 뒤바뀌면 반드시 걸리게 한다.
+func TestCountsOfMapsEveryTable(t *testing.T) {
+	d := store.LedgerDump{
+		Machines:  make([]store.LedgerMachine, 1),
+		Projects:  make([]store.LedgerProject, 2),
+		Sessions:  make([]store.LedgerSession, 3),
+		Judgments: make([]store.LedgerJudgment, 4),
+		Links:     make([]store.LedgerLink, 5),
+		Snapshots: make([]store.LedgerSnapshot, 6),
+	}
+	want := Counts{Machines: 1, Projects: 2, Sessions: 3, Judgments: 4, Links: 5, Snapshots: 6}
+	if got := CountsOf(d); got != want {
+		t.Errorf("행 수가 표와 안 맞는다(칸이 뒤바뀌었나).\n  얻음: %+v\n  기대: %+v", got, want)
+	}
+}
+
+// TestJudgeCountsNamesEveryMismatchedTable 는 어긋난 표를 **전부** 이름으로 말하는지 본다.
+// 첫 어긋남에서 멈추면 사용자가 한 번에 한 표씩만 알게 된다.
+func TestJudgeCountsNamesEveryMismatchedTable(t *testing.T) {
+	base := Counts{Machines: 1, Projects: 2, Sessions: 3, Judgments: 4, Links: 5, Snapshots: 6}
+	if err := JudgeCounts(base, base); err != nil {
+		t.Fatalf("같은 수인데 어긋났다고 한다: %v", err)
+	}
+
+	got := Counts{Machines: 1, Projects: 9, Sessions: 3, Judgments: 4, Links: 5, Snapshots: 99}
+	err := JudgeCounts(base, got)
+	if err == nil {
+		t.Fatal("두 표가 어긋났는데 통과했다 — 세대가 섞인 원장이 그대로 복원된다")
+	}
+	msg := err.Error()
+	for _, want := range []string{"projects", "snapshots"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("어긋난 표 %q 를 안 부른다:\n  %s", want, msg)
+		}
+	}
+	for _, notWant := range []string{"machines", "sessions", "judgments", "judgment_links"} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("맞는 표 %q 를 어긋났다고 부른다:\n  %s", notWant, msg)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 급사가 남긴 tmp 는 **뒤이은 실행이** 치운다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Write 의 cleanup 은 **자기 실행이 만든** tmp 만 안다. 프로세스가 준비 단에서 급사하면
+// (SIGKILL·전원 차단) 최대 일곱 개가 남고, 뒤이은 성공적 실행도 그것을 안 치운다.
+// 판단 본문이 든 몇 MB 짜리가 급사마다 쌓이고 not-empty 가드가 세는 항목 수를 부풀린다.
+//
+// ★ 나이로 가른다. "저 tmp 를 만든 프로세스가 살아 있나"는 이 자리에서 알 수 없고,
+// pid 의 생사로 판정하는 길은 이 저장소가 이미 기각했다(schema.sql 의 session 표가
+// "pid 死를 근거로 살아 있는 세션을 죽었다고 판정한 사고가 실재한다"고 적어 뒀다).
+func TestSweepStaleTmpsTakesOnlyOldOnesAndOnlyOurs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	names := []string{"judgments.jsonl", ManifestName}
+
+	write := func(fname string, age time.Duration) string {
+		p := filepath.Join(dir, fname)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("픽스처 쓰기 실패(%s): %v", fname, err)
+		}
+		at := now.Add(-age)
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatalf("시각 조정 실패(%s): %v", fname, err)
+		}
+		return p
+	}
+
+	stale := write("judgments.jsonl.999-deadbeef.tmp", 2*time.Hour)
+	staleManifest := write(ManifestName+".999-cafe.tmp", 25*time.Hour)
+	// 살아 있는 실행의 in-flight tmp. 이것을 지우면 그 실행은 교체 단 rename 에서
+	// 죽고, 그때는 매니페스트를 이미 걷어낸 뒤라 **그 자리가 무효화된다.**
+	inflight := write("judgments.jsonl.123-beef.tmp", time.Minute)
+	// 남의 파일. 우리 이름이 아니면 아무리 낡아도 안 건드린다.
+	foreign := write("someone-else.tmp", 100*time.Hour)
+	foreign2 := write("notours.jsonl.1-2.tmp", 100*time.Hour)
+	// 실물 산출물. .tmp 가 아니므로 대상이 아니다.
+	real := write("judgments.jsonl", 100*time.Hour)
+
+	if got := sweepStaleTmps(dir, names, now); got != 2 {
+		t.Errorf("걷어낸 수가 %d다 — 낡은 우리 tmp 둘만 대상이다", got)
+	}
+	for _, p := range []string{stale, staleManifest} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("낡은 잔해가 남았다: %s", p)
+		}
+	}
+	for _, p := range []string{inflight, foreign, foreign2, real} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("건드리면 안 되는 파일이 사라졌다: %s (%v)", p, err)
+		}
+	}
+}
+
+// Write 가 그 청소를 실제로 부르는지 — 순수 함수만 시험하면 배선이 빠져도 초록이다.
+func TestWriteSweepsDebrisFromAnEarlierCrash(t *testing.T) {
+	dir := t.TempDir()
+	debris := filepath.Join(dir, "judgments.jsonl.999-deadbeef.tmp")
+	if err := os.WriteFile(debris, []byte("옛 급사의 잔해"), 0o600); err != nil {
+		t.Fatalf("잔해 쓰기 실패: %v", err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(debris, old, old); err != nil {
+		t.Fatalf("시각 조정 실패: %v", err)
+	}
+
+	if _, err := Write(map[string][]byte{
+		"judgments.jsonl": []byte("{}\n"),
+		ManifestName:      []byte("{}\n"),
+	}, dir); err != nil {
+		t.Fatalf("쓰기 실패: %v", err)
+	}
+	if _, err := os.Stat(debris); !os.IsNotExist(err) {
+		t.Error("성공한 실행이 앞선 급사의 잔해를 그대로 뒀다 — " +
+			"판단 본문이 든 몇 MB 가 급사마다 쌓이고 not-empty 항목 수를 부풀린다")
+	}
+}
+
+// TestJudgeRestoreSchemaRefusesAnyMismatch 는 복원의 **안전핀**을 문다.
+//
+// ★ 지금까지 manifest.schema_version 을 보는 자리가 하나도 없었다 — Read 도
+// store.WriteLedger 도 안 봤고, "무손실의 안전핀"이라는 주석만 있었다. 스키마가 5로
+// 오른 뒤 4로 뜬 원장을 되읽으면 5에서 생긴 컬럼이 JSONL 에 없어 영값으로 들어가고,
+// NULL 이어야 할 자리가 ""가 되거나 NOT NULL 위반으로 트랜잭션 전체가 죽는다.
+// 반대 방향은 이 바이너리가 모르는 컬럼이 실려 오는 것이다.
+//
+// 어느 방향이든 거절한다. 세대를 맞추는 것은 이 명령이 할 수 있는 일이 아니고,
+// 조용히 넣는 것보다 "그 판의 바이너리로 넣어라"가 복구 가능하다.
+func TestJudgeRestoreSchemaRefusesAnyMismatch(t *testing.T) {
+	if err := JudgeRestoreSchema(4, 4); err != nil {
+		t.Errorf("같은 판인데 거절했다: %v", err)
+	}
+	for _, c := range []struct{ ledger, code int }{{3, 4}, {5, 4}} {
+		err := JudgeRestoreSchema(c.ledger, c.code)
+		if err == nil {
+			t.Errorf("원장 %d · 바이너리 %d 를 그대로 통과시켰다 — "+
+				"세대가 다른 원장을 되쓰면 조용히 깨진다", c.ledger, c.code)
+			continue
+		}
+		// 두 수를 다 말해야 운영자가 어느 판의 바이너리를 찾아야 하는지 안다.
+		for _, want := range []string{strconv.Itoa(c.ledger), strconv.Itoa(c.code)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("거절 문구가 %q 를 안 말한다: %v", want, err)
+			}
+		}
 	}
 }

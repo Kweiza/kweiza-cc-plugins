@@ -57,11 +57,42 @@ func (a *App) runImport(ctx context.Context, args []string, out io.Writer) int {
 	dbPath := fs.String("db", "", "SQLite 파일 경로(비면 자동)")
 	apply := fs.Bool("apply", false, "실제로 쓴다. 없으면 예행이다")
 	dryRun := fs.Bool("dry-run", false, "예행(기본값이라 붙일 필요는 없다)")
+	fromJudgments := fs.Bool("judgments", false, "판단 원장(JSONL 일곱)을 빈 DB 에 되쓴다")
+	fromDir := fs.String("from", "", "판단 원장 디렉토리(--judgments 와 함께 쓴다)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *apply && *dryRun {
 		fmt.Fprintln(out, "--apply 와 --dry-run 을 함께 줬다 — 어느 쪽인지 알 수 없으므로 아무것도 하지 않는다")
+		return 2
+	}
+	if *fromJudgments {
+		// ★ 두 이관은 원본도 대상도 다르다. 섞어 주면 어느 쪽을 하려는지 알 수 없다.
+		if strings.TrimSpace(*code) != "" || strings.TrimSpace(*docs) != "" {
+			fmt.Fprintln(out, "--judgments 는 판단 원장을 되쓴다 — "+
+				"--from-code/--from-docs(레거시 이관)와 함께 못 준다")
+			return 2
+		}
+		if strings.TrimSpace(*fromDir) == "" {
+			fmt.Fprintln(out, "--judgments 인데 --from 이 비었다 — 어느 원장을 되쓸지가 없다")
+			return 2
+		}
+		// 원장은 DB 전량이다. export 쪽과 같은 이유로 --project 를 명시하면 거절한다.
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "project" {
+				explicit = true
+			}
+		})
+		if explicit {
+			fmt.Fprintln(out, "판단 원장은 DB 전량이다 — --project 를 받지 않는다")
+			return 2
+		}
+		return a.importJudgments(ctx, *dbPath, *fromDir, *apply, out)
+	}
+	if strings.TrimSpace(*fromDir) != "" {
+		fmt.Fprintln(out, "--from 은 --judgments 와 함께만 쓴다 — "+
+			"레거시 이관의 원본은 --from-code/--from-docs 다")
 		return 2
 	}
 	if strings.TrimSpace(*code) == "" && strings.TrimSpace(*docs) == "" {
@@ -325,4 +356,86 @@ func (a *App) exportJudgments(ctx context.Context, dbFlag, outDir string, out io
 // 마이크로초를 쓴다 — 산출물 안에서 시각 표기가 두 벌이 되면 안 된다.
 func nowStampString() string {
 	return time.Now().UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
+}
+
+// importJudgments 는 `fd import --judgments --from <디렉토리>` 다.
+//
+// ★ **빈 표 전제**다. 폐포 여섯 표가 하나라도 비어 있지 않으면 거절한다.
+// 이미 있는 DB 에 부어넣는 것(병합 복원)은 다른 연산이고, 그것을 이 명령이 조용히
+// 하면 어느 행이 어디서 왔는지 아무도 못 가른다. judgment 는 no_update·no_delete
+// 트리거로 UPDATE·DELETE 가 물리적으로 금지돼 있어 **잘못 들어간 행을 못 고친다** —
+// 그래서 들어가기 전에 막는 것이 유일한 방벽이다.
+//
+// ★ store.Open 을 쓴다(OpenLedger 가 아니다). 되쓰기는 스키마가 이 판과 맞는 DB 를
+// 요구하므로 이행이 필요하면 그것이 먼저 일어나야 한다. 대상은 보통 갓 만든 빈 파일이다.
+func (a *App) importJudgments(ctx context.Context, dbFlag, fromDir string, apply bool, out io.Writer) int {
+	d, m, err := ledger.Read(fromDir)
+	if err != nil {
+		a.log.Error("원장 되읽기 실패", "route", clip(fromDir, 200), "error", err.Error())
+		fmt.Fprintf(out, "원장 되읽기 실패: %s\n", err)
+		return 1
+	}
+	// ★ 안전핀. 세대가 다른 원장을 되쓰면 컬럼이 조용히 어긋난다.
+	if err := ledger.JudgeRestoreSchema(m.SchemaVersion, store.SchemaVersion); err != nil {
+		a.log.Error("원장 세대 불일치 — 되쓰기를 거절한다",
+			"route", clip(fromDir, 200), "ledger_schema", m.SchemaVersion,
+			"code_schema", store.SchemaVersion)
+		fmt.Fprintf(out, "되쓰기 거절: %s\n", err)
+		return 2
+	}
+
+	c := ledger.CountsOf(d)
+	fmt.Fprintf(out, "fd import --judgments · %s → DB\n\n", fromDir)
+	fmt.Fprintf(out, "  판단 %d · 링크 %d · 스냅숏 %d · 세션 %d · 프로젝트 %d · 머신 %d (스키마 %d판)\n",
+		c.Judgments, c.Links, c.Snapshots, c.Sessions, c.Projects, c.Machines, m.SchemaVersion)
+
+	if !apply {
+		// ★ 예행은 **DB 를 열지도 않는다.** 여는 것만으로 WAL·백업·마이그레이션이 나고,
+		//   그러면 "한 바이트도 안 건드린다"가 거짓이 된다(레거시 예행과 같은 규율이다).
+		fmt.Fprintln(out, "\n예행이다 — DB 를 열지도 않았다. 실제로 넣으려면 --apply 를 줘라")
+		a.log.Info("원장 되쓰기 예행", "mode", "dry-run", "route", clip(fromDir, 200),
+			"count", c.Judgments)
+		return 0
+	}
+
+	st, path, err := openDB(a.env, a.log, dbFlag)
+	if err != nil {
+		a.log.Error("되쓰기용 DB 를 열지 못했다", "error", err.Error())
+		fmt.Fprintf(out, "%s\n", err)
+		return 1
+	}
+	defer func() {
+		if cerr := st.Close(); cerr != nil {
+			a.log.Error("DB 닫기 실패", "error", cerr.Error())
+		}
+	}()
+
+	cur, err := st.ReadLedger(ctx)
+	if err != nil {
+		a.log.Error("대상 DB 의 폐포를 재지 못했다", "db_path", path, "error", err.Error())
+		fmt.Fprintf(out, "대상 DB 를 재지 못했다: %s\n", err)
+		return 1
+	}
+	if n := ledger.CountsOf(cur); n != (ledger.Counts{}) {
+		fmt.Fprintf(out, "\n되쓰기 거절: 대상 DB 의 폐포가 비어 있지 않다"+
+			"(판단 %d · 링크 %d · 스냅숏 %d · 세션 %d · 프로젝트 %d · 머신 %d).\n"+
+			"  이 명령은 **빈 DB 복원**이다. 이미 있는 DB 에 부어넣는 것(병합)은 다른 연산이고,\n"+
+			"  judgment 는 UPDATE·DELETE 가 트리거로 금지돼 잘못 들어간 행을 못 고친다 —\n"+
+			"  그래서 들어가기 전에 막는 것이 유일한 방벽이다. 빈 파일을 --db 로 지목해라.\n",
+			n.Judgments, n.Links, n.Snapshots, n.Sessions, n.Projects, n.Machines)
+		a.log.Warn("대상 DB 가 비어 있지 않아 되쓰기를 거절한다", "db_path", path)
+		return 2
+	}
+
+	if err := st.WriteLedger(ctx, d); err != nil {
+		// 한 트랜잭션이다 — 실패하면 아무것도 안 들어갔다. 그 사실을 같은 줄에 적는다.
+		a.log.Error("원장 되쓰기 실패 — 한 트랜잭션이라 아무것도 들어가지 않았다",
+			"db_path", path, "error", err.Error())
+		fmt.Fprintf(out, "\n되쓰기 실패(한 트랜잭션이라 DB 는 그대로다): %s\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "\n넣음 (DB %s)\n", path)
+	a.log.Info("원장 되쓰기 완료", "mode", "apply", "db_path", path,
+		"route", clip(fromDir, 200), "count", c.Judgments)
+	return 0
 }

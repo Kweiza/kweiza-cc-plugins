@@ -148,3 +148,46 @@ func TestLossesNamesTheKnownGaps(t *testing.T) {
 		}
 	}
 }
+
+// ③ SetEscapeHTML(false) 계약 — 판단 본문의 `<`·`>`·`&` 가 그대로 나가야 한다.
+//
+// ★ 이 계약에 시험이 없었다. 픽스처 어디에도 그 세 글자가 없어서 export.go 에서
+// `(false)` → `(true)` 로 바꿔도 전 시험이 초록이었다(실측). 판단 본문에 코드가 자주
+// 들어가는 저장소라 그 치환은 **원문 대조를 깨뜨린다** — DB 의 `<` 가 파일에서 `<`
+// 가 되면 백업이 원문이 아니게 되고, 무손실 등급이 글자 단위에서 무너진다.
+func TestEncodeDoesNotEscapeHTMLInBodies(t *testing.T) {
+	// 따옴표는 일부러 안 넣는다 — `\"` 는 JSON 자신의 이스케이프라 이 축과 무관하고,
+	// 넣으면 원문 대조가 그 이유로 실패해 이 시험이 무엇을 재는지 흐려진다.
+	const raw = `if a < b && c > d { return <tag> }`
+	d := sampleDump()
+	d.Judgments[0].Body = raw
+	d.Judgments[0].Title = ptr(raw)
+
+	files, _, err := Encode(d, 4, "2026-08-06T00:00:00.000000Z")
+	if err != nil {
+		t.Fatalf("Encode 실패: %v", err)
+	}
+	got := string(files[judgmentsFile])
+	// encoding/json 은 HTML 이스케이프가 켜지면 이 셋을 \u00XX 로 바꾼다.
+	for _, esc := range []string{`\u003c`, `\u003e`, `\u0026`} {
+		if strings.Contains(got, esc) {
+			t.Errorf("판단 본문의 글자가 %s 로 이스케이프됐다 — DB 원문과 글자가 달라져 "+
+				"원문 대조가 불가능해진다:\n%s", esc, got)
+		}
+	}
+	if !strings.Contains(got, raw) {
+		t.Errorf("판단 본문이 원문 그대로 안 실렸다:\n  원본: %s\n  파일: %s", raw, got)
+	}
+	// 되읽어도 원문 그대로여야 한다 — 인코딩만 보면 디코딩 쪽 회귀를 못 본다.
+	dir := t.TempDir()
+	if _, err := Write(files, dir); err != nil {
+		t.Fatalf("Write 실패: %v", err)
+	}
+	back, _, err := Read(dir)
+	if err != nil {
+		t.Fatalf("Read 실패: %v", err)
+	}
+	if back.Judgments[0].Body != raw {
+		t.Errorf("왕복에서 본문 글자가 바뀌었다:\n  원본: %s\n  왕복: %s", raw, back.Judgments[0].Body)
+	}
+}

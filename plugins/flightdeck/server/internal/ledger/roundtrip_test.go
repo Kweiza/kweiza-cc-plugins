@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -275,6 +277,19 @@ func seedLedgerFixture(t *testing.T, s *store.Store) {
 		t.Fatalf("판단③ 저장 실패: %v", err)
 	}
 
+	// ★ 막힌 세션 하나 — session.blocked_why 축이다.
+	//
+	// nullable 전제 관문(TestRoundTripFixtureExercisesEveryNullableColumn)이 이 구멍을
+	// 찾아냈다. 이것이 없으면 읽기가 blocked_why 를 버려도 왕복이 원리적으로 못 본다 —
+	// want·final 이 둘 다 ReadLedger 산출물이라 양쪽에 똑같이 없기 때문이다.
+	blocked, _, err := s.OpenSession(ctx, "p", "m1", "/w/cc2", "cc2", "막힌 세션")
+	if err != nil {
+		t.Fatalf("둘째 세션 열기 실패: %v", err)
+	}
+	if err := s.SetSessionState(ctx, blocked.ID, model.SessionBlocked, "왜 막혔는지"); err != nil {
+		t.Fatalf("세션 막기 실패: %v", err)
+	}
+
 	// 스냅숏 둘 — evidence 가 있는 것과 없는 것
 	if err := s.PutSnapshot(ctx, model.Snapshot{
 		Project: "p", Key: "manual-key", Value: "12", Method: model.SnapshotManual,
@@ -287,4 +302,143 @@ func seedLedgerFixture(t *testing.T, s *store.Store) {
 	}); err != nil {
 		t.Fatalf("스냅숏② 저장 실패: %v", err)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 왕복 시험의 **입력**을 지킨다 — 읽기가 버린 값은 왕복이 원리적으로 못 본다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// TestLedgerSurvivesFullRoundTrip 의 want·final 은 **둘 다 ReadLedger 산출물**이다.
+// 그래서 읽기가 버린 컬럼은 양쪽에 똑같이 없고 reflect.DeepEqual 이 원리적으로 감지
+// 못 한다. 리뷰가 실측으로 재현했다 — readLedgerJudgments 에서 `j.Title, j.Supersedes =
+// nil, nil` 로 바꿔도 internal/store·internal/ledger 둘 다 초록이었다.
+//
+// 그래서 want 자체를 본다: **nullable 컬럼마다 값이 실린 행이 하나는 있어야 한다.**
+// 읽기가 그 컬럼을 버리면 want 에 값이 없고 이 단정이 그 자리에서 죽는다.
+// (anyJudgmentHasSession·픽스처 개수 단정이 이미 같은 모양이다 — 이것은 그 축의 완성이다.)
+//
+// ★ 컬럼 목록을 손으로 안 적는다. 스키마에서 nullable 을 뽑고 DTO 의 json 태그로 잇는다.
+// 손으로 적으면 새 nullable 컬럼이 조용해지고, 실제로 이 축을 처방한 항목 본문이 "여섯"을
+// 적었는데 실측하면 **열하나**였다.
+func TestRoundTripFixtureExercisesEveryNullableColumn(t *testing.T) {
+	ctx := context.Background()
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	srcPath := filepath.Join(t.TempDir(), "src.db")
+	src, err := store.OpenWithLogger(srcPath, quiet)
+	if err != nil {
+		t.Fatalf("원본 DB 열기 실패: %v", err)
+	}
+	defer src.Close()
+	seedLedgerFixture(t, src)
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원장 읽기 실패: %v", err)
+	}
+
+	schema := readClosureSchema(t)
+	rows := map[string]any{
+		"project":       want.Projects,
+		"machine":       want.Machines,
+		"session":       want.Sessions,
+		"judgment":      want.Judgments,
+		"snapshot":      want.Snapshots,
+		"judgment_link": want.Links,
+	}
+	checked := 0
+	for _, table := range store.LedgerTableNames() {
+		slice, ok := rows[table]
+		if !ok {
+			t.Fatalf("폐포 표 %q 의 DTO 를 이 시험이 모른다 — 표가 늘었으면 여기도 이어라", table)
+		}
+		for _, col := range schemaNullableColumns(t, schema, table) {
+			checked++
+			assertSomeRowCarries(t, table, col, slice)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("nullable 컬럼을 하나도 못 뽑았다 — 이 관문이 아무것도 안 보면서 초록이 된다")
+	}
+	t.Logf("nullable 컬럼 %d개를 픽스처가 전부 채운다", checked)
+}
+
+// assertSomeRowCarries 는 그 컬럼에 값이 실린 행이 하나라도 있는지 본다.
+func assertSomeRowCarries(t *testing.T, table, col string, slice any) {
+	t.Helper()
+	v := reflect.ValueOf(slice)
+	if v.Kind() != reflect.Slice || v.Len() == 0 {
+		t.Errorf("%s 의 행이 하나도 없다 — nullable 축을 볼 수가 없다", table)
+		return
+	}
+	et := v.Type().Elem()
+	idx := -1
+	for i := 0; i < et.NumField(); i++ {
+		if strings.Split(et.Field(i).Tag.Get("json"), ",")[0] == col {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Errorf("%s.%s 를 담는 DTO 필드가 없다 — 원장이 이 컬럼을 통째로 안 담는다", table, col)
+		return
+	}
+	if et.Field(idx).Type.Kind() != reflect.Ptr {
+		t.Errorf("%s.%s 의 DTO 필드가 포인터가 아니다 — NULL 과 빈 값이 한 값으로 접힌다", table, col)
+		return
+	}
+	for i := 0; i < v.Len(); i++ {
+		if !v.Index(i).Field(idx).IsNil() {
+			return
+		}
+	}
+	t.Errorf("%s.%s 에 값이 실린 행이 픽스처에 하나도 없다.\n"+
+		"왕복 시험은 want·final 이 둘 다 ReadLedger 산출물이라 **읽기가 이 컬럼을 버려도** "+
+		"양쪽에 똑같이 없어 DeepEqual 이 원리적으로 못 본다. 픽스처에 이 컬럼을 채운 행을 "+
+		"넣거나, 읽기가 정말 이 컬럼을 버리고 있는지 확인해라.", table, col)
+}
+
+func readClosureSchema(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join("..", "store", "schema.sql")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("schema.sql 을 못 읽었다(%s): %v", p, err)
+	}
+	return string(b)
+}
+
+// ledgerColumnLineRe 는 컬럼 선언 줄의 이름이다. CHECK 목록의 따옴표 값·제약 줄은 안 걸린다.
+var ledgerColumnLineRe = regexp.MustCompile(`^([a-z_][a-z0-9_]*)\s+\S`)
+
+// schemaNullableColumns 는 표 하나에서 NULL 이 될 수 있는 컬럼을 뽑는다.
+func schemaNullableColumns(t *testing.T, schema, table string) []string {
+	t.Helper()
+	head := "\nCREATE TABLE " + table + " (\n"
+	i := strings.Index(schema, head)
+	if i < 0 {
+		t.Fatalf("%s 표 선언을 못 찾았다 — 이 관문의 좌표가 틀렸다", table)
+	}
+	rest := schema[i+len(head):]
+	j := strings.Index(rest, "\n);\n")
+	if j < 0 {
+		t.Fatalf("%s 표 선언의 끝을 못 찾았다", table)
+	}
+	var out []string
+	for _, raw := range strings.Split(rest[:j], "\n") {
+		ln := strings.TrimSpace(raw)
+		if k := strings.Index(ln, "--"); k >= 0 {
+			ln = strings.TrimSpace(ln[:k])
+		}
+		m := ledgerColumnLineRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue // 제약 줄 · CHECK 목록의 값 · 빈 줄
+		}
+		up := strings.ToUpper(ln)
+		if strings.Contains(up, "NOT NULL") || strings.Contains(up, "PRIMARY KEY") {
+			continue
+		}
+		out = append(out, m[1])
+	}
+	return out
 }

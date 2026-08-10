@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -34,19 +35,44 @@ type WriteVerdict struct {
 // 반쯤 덮였는지가 구분되지 않는데, 그 둘은 사용자가 다음에 할 일이 완전히 다르다 —
 // 전자는 앞선 백업이 살아 있고 후자는 그 자리를 더 이상 백업으로 믿으면 안 된다.
 // 이 저장소의 runFinish 가 "끝났는데 못 닫은 상태를 그대로 낸다"로 규율화한 바로 그 자리다.
-func JudgeWriteFailure(stage WriteStage, moved int) WriteVerdict {
+//
+// ★ total 은 데이터 파일 수다(매니페스트 제외). moved 만으로는 "나머지가 있는지"를 못
+// 말한다 — 예전 문구는 moved 가 몇이든 고정으로 "나머지는 옛 세대다"라고 적었고,
+// 데이터를 다 옮기고 매니페스트 rename 만 실패한 갈래에서는 **남은 옛 세대가 없다.**
+// 행동 지침은 그때도 옳았지만(무효화됐다 · --force 로 재실행) 이 저장소는 모르는 것을
+// 지어내지 않는 것을 규율로 삼는다.
+func JudgeWriteFailure(stage WriteStage, moved, total int) WriteVerdict {
 	if stage == StagePrepare {
 		return WriteVerdict{Code: "untouched", Intact: true,
 			Reason: "되쓸 자리는 한 글자도 안 바뀌었다 — 임시 파일을 쓰는 동안 실패했다. " +
 				"앞선 산출물이 있었다면 그대로 남아 있다"}
 	}
-	return WriteVerdict{Code: "half-covered", Intact: false,
-		Reason: fmt.Sprintf("되쓸 자리가 반쯤 덮였다 — 데이터 파일 %d개가 새 세대로 바뀌었고 나머지는 옛 세대다. "+
-			"세대가 섞인 원장으로 복원하면 새 판단이 가리키는 세션이 옛 파일에 없어 "+
-			"커밋 시점 FK 검사에서 판단 전량이 롤백된다. 그래서 매니페스트(%s)를 걷어내 이 자리를 "+
-			"무효화했다 — 이 자리는 더 이상 원장이 아니다. 실패 원인을 걷어낸 뒤 같은 자리에 "+
-			"--force 로 다시 내보내면 복구된다(무효화된 자리는 자기 산출물로 안 보이므로 --force 가 필요하다)",
-			moved, ManifestName)}
+
+	// 교체 단은 옛 매니페스트를 **먼저** 걷어낸다. 그래서 어느 갈래든 이 자리는 더 이상
+	// 원장이 아니다(Intact=false). 갈리는 것은 데이터 파일이 어느 세대냐다.
+	const recover = "실패 원인을 걷어낸 뒤 같은 자리에 --force 로 다시 내보내면 복구된다" +
+		"(무효화된 자리는 자기 산출물로 안 보이므로 --force 가 필요하다)"
+	const mixedHarm = "세대가 섞인 원장으로 복원하면 새 판단이 가리키는 세션이 옛 파일에 없어 " +
+		"커밋 시점 FK 검사에서 판단 전량이 롤백된다"
+
+	switch {
+	case moved <= 0:
+		return WriteVerdict{Code: "invalidated", Intact: false,
+			Reason: fmt.Sprintf("데이터 파일은 하나도 안 바뀌었다 — 전부 옛 세대 그대로다. "+
+				"다만 매니페스트(%s)를 이미 걷어낸 뒤라 이 자리는 원장이 아니다. "+
+				"세대가 섞이지는 않았다. %s", ManifestName, recover)}
+	case moved >= total:
+		return WriteVerdict{Code: "manifest-missing", Intact: false,
+			Reason: fmt.Sprintf("데이터 파일 %d개를 전부 새 세대로 옮겼고 매니페스트(%s)만 못 얹었다 — "+
+				"남은 옛 세대는 없다. 매니페스트가 이 쓰기의 커밋 지점이라 그것이 없는 자리는 "+
+				"원장이 아니다. %s", moved, ManifestName, recover)}
+	default:
+		return WriteVerdict{Code: "half-covered", Intact: false,
+			Reason: fmt.Sprintf("되쓸 자리가 반쯤 덮였다 — 데이터 파일 %d개가 새 세대로 바뀌었고 "+
+				"나머지 %d개는 옛 세대다. %s. 그래서 매니페스트(%s)를 걷어내 이 자리를 "+
+				"무효화했다 — 이 자리는 더 이상 원장이 아니다. %s",
+				moved, total-moved, mixedHarm, ManifestName, recover)}
+	}
 }
 
 // WriteError 는 원장 쓰기 실패다. **되쓸 자리의 상태 판정을 함께 실어 온다.**
@@ -59,8 +85,8 @@ type WriteError struct {
 func (e *WriteError) Error() string { return fmt.Sprintf("%v — %s", e.Err, e.Verdict.Reason) }
 func (e *WriteError) Unwrap() error { return e.Err }
 
-func newWriteError(stage WriteStage, moved int, err error) error {
-	return &WriteError{Verdict: JudgeWriteFailure(stage, moved), Err: err}
+func newWriteError(stage WriteStage, moved, total int, err error) error {
+	return &WriteError{Verdict: JudgeWriteFailure(stage, moved, total), Err: err}
 }
 
 // Write 는 인코딩된 파일들을 dir 에 쓴다. 만든 파일 이름을 정렬해 낸다.
@@ -94,6 +120,12 @@ func Write(files map[string][]byte, dir string) ([]string, error) {
 	}
 	// ★ map 순회는 순서가 흔들린다. 정렬해야 반환 목록과 출력이 실행마다 같다.
 	sort.Strings(names)
+	// 데이터 파일 수 — 매니페스트는 커밋 지점이라 데이터로 안 센다.
+	// 실패 판정이 "나머지가 있는지"를 말하려면 이 수가 필요하다.
+	dataFiles := len(names) - 1
+
+	// 앞선 급사가 남긴 잔해를 먼저 걷어낸다. 아래 cleanup 은 자기 실행이 만든 것만 안다.
+	sweepStaleTmps(dir, names, time.Now())
 
 	// ── 준비 단 ── 일곱을 다 tmp 로 쓴다. 여기서 실패하면 되쓸 자리는 그대로다.
 	tmps := make(map[string]string, len(names))
@@ -114,7 +146,7 @@ func Write(files map[string][]byte, dir string) ([]string, error) {
 		if err := os.WriteFile(tmp, files[name], 0o600); err != nil {
 			os.Remove(tmp)
 			cleanup()
-			return nil, newWriteError(StagePrepare, 0,
+			return nil, newWriteError(StagePrepare, 0, dataFiles,
 				fmt.Errorf("원장 기록 실패(%q): %w", clip(path, 200), err))
 		}
 		tmps[name] = tmp
@@ -125,7 +157,7 @@ func Write(files map[string][]byte, dir string) ([]string, error) {
 	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
 		// 아직 아무것도 안 옮겼고 매니페스트도 그대로다 — 자리는 온전하다.
 		cleanup()
-		return nil, newWriteError(StagePrepare, 0,
+		return nil, newWriteError(StagePrepare, 0, dataFiles,
 			fmt.Errorf("옛 매니페스트를 걷어내지 못했다(%q): %w", clip(manifestPath, 200), err))
 	}
 
@@ -136,17 +168,90 @@ func Write(files map[string][]byte, dir string) ([]string, error) {
 		}
 		if err := os.Rename(tmps[name], filepath.Join(dir, name)); err != nil {
 			cleanup()
-			return nil, newWriteError(StageCommit, moved,
+			return nil, newWriteError(StageCommit, moved, dataFiles,
 				fmt.Errorf("원장 교체 실패(%q): %w", clip(filepath.Join(dir, name), 200), err))
 		}
 		moved++
 	}
 	if err := os.Rename(tmps[ManifestName], manifestPath); err != nil {
 		cleanup()
-		return nil, newWriteError(StageCommit, moved,
+		return nil, newWriteError(StageCommit, moved, dataFiles,
 			fmt.Errorf("원장 교체 실패(%q): %w", clip(manifestPath, 200), err))
 	}
 	return names, nil
+}
+
+// staleTmpAge 는 남은 tmp 를 **앞선 급사의 잔해**로 보는 나이다.
+//
+// ★ 왜 나이로 재나. "저 tmp 를 만든 프로세스가 살아 있나"는 이 자리에서 알 수 없다.
+// 이름에 pid 를 넣고 그 pid 의 생사를 보는 길은 이 저장소가 이미 기각했다 — schema.sql 의
+// session 표가 "pid 死를 근거로 살아 있는 세션을 죽었다고 판정한 사고가 실재한다"고
+// 적어 뒀다. 나이도 추정이지만, 틀렸을 때의 대가가 한쪽으로 훨씬 무겁다:
+//
+//	너무 짧으면 — 살아 있는 실행의 in-flight tmp 를 지운다. 그 실행은 교체 단 rename 에서
+//	  ENOENT 로 죽는데, 그때는 매니페스트를 이미 걷어낸 뒤라 **그 자리가 무효화된다.**
+//	너무 길면  — 잔해가 좀 더 오래 남는다. 디스크와 not-empty 항목 수가 부풀 뿐이다.
+//
+// 그래서 길게 잡는다. 준비 단은 몇 MB 를 일곱 파일에 쓰는 초 단위 작업이라 한 시간은
+// 세 자릿수 여유다.
+const staleTmpAge = time.Hour
+
+// sweepStaleTmps 는 앞선 급사가 남긴 tmp 를 걷어낸다. 걷어낸 수를 낸다.
+//
+// ★ 왜 필요한가. Write 의 cleanup 은 **자기 실행이 만든** tmp 만 안다. 프로세스가 준비
+// 단에서 급사하면(SIGKILL·전원 차단) 최대 일곱 개가 남고, 뒤이은 성공적 실행도 그것을
+// 안 치운다. 판단 본문이 든 몇 MB 짜리가 급사마다 쌓이고, not-empty 가드가 세는 항목
+// 수를 부풀려 사용자에게 "이미 N개 항목이 있다"를 거짓으로 크게 말한다.
+//
+// ★ 우리 이름만 본다 — `<이 쓰기가 낼 파일 이름>.<nonce>.tmp` 만 대상이다. 남의 .tmp 는
+// 아무리 낡아도 안 건드린다.
+//
+// ★ 걷어낸 수를 화면에 안 낸다. Write 는 출력 채널이 없고, 이 청소는 **이 도구가 만든
+// 자기 잔해**를 치우는 살림이라 사용자의 파일을 조용히 지우는 것이 아니다. 다만 잔해가
+// 계속 나온다는 것 자체는 무언가 급사하고 있다는 신호인데 지금은 그 신호가 어디에도
+// 안 남는다 — 알고 남기는 구멍이다.
+func sweepStaleTmps(dir string, names []string, now time.Time) int {
+	ours := make(map[string]bool, len(names))
+	for _, n := range names {
+		ours[n] = true
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		// 못 읽으면 조용히 건너뛴다 — 곧이어 같은 이유로 쓰기 자체가 죽고, 그쪽이 사유를 말한다.
+		return 0
+	}
+	swept := 0
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		owner, ok := tmpOwnerName(e.Name())
+		if !ok || !ours[owner] {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil || now.Sub(info.ModTime()) < staleTmpAge {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, e.Name())) == nil {
+			swept++
+		}
+	}
+	return swept
+}
+
+// tmpOwnerName 은 `<이름>.<nonce>.tmp` 에서 <이름> 을 뽑는다. 순수 함수다.
+// 이름 자체에 점이 있으므로(judgments.jsonl) 마지막 점 앞까지가 주인이다.
+func tmpOwnerName(fname string) (string, bool) {
+	rest, ok := strings.CutSuffix(fname, ".tmp")
+	if !ok {
+		return "", false
+	}
+	i := strings.LastIndex(rest, ".")
+	if i <= 0 {
+		return "", false
+	}
+	return rest[:i], true
 }
 
 // tmpNonce 는 임시 파일 이름에 붙일 조각이다. pid 만으로는 부족하다 —

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 )
 
 // 판단 원장 내보내기 — `fd export --judgments` 의 저장 계층.
@@ -98,6 +99,67 @@ type LedgerDump struct {
 	Snapshots []LedgerSnapshot
 }
 
+// linkCols 는 judgment_link 표의 컬럼이다. 다른 다섯과 달리 이 표에는 조회 접근자가 없어
+// 상수가 없었고, 읽기와 쓰기가 각자 리터럴을 들고 있었다.
+const linkCols = `judgment_id, target_kind, target_id`
+
+// ledgerTables 는 판단 원장이 담는 FK 폐포 여섯 표다 — **표마다 컬럼 목록이 하나다.**
+//
+// 순서는 되쓰기 순서다: machine·project·session 이 판단보다 먼저 들어가야 FK 가 닫힌다
+// (WriteLedger 의 그 주석 참고).
+//
+// ★ 왜 한 자리에 모으나. 예전에는 읽기가 상수를, 쓰기가 인라인 리터럴을 써서 같은 표에
+// 목록이 **둘**이었다. 스키마에 컬럼이 하나 들어오면 백업이 그것을 버리고(읽기 목록에
+// 없다) 복원도 버리는데(쓰기 목록에 없다), 왕복 시험은 want·final 이 둘 다 ReadLedger
+// 산출물이라 원리적으로 못 본다. 목록이 둘이면 관문도 한쪽만 재게 되고, **재지 않은
+// 쪽이 정확히 그 조용한 손실 자리**가 된다.
+var ledgerTables = []struct {
+	name string
+	cols string
+}{
+	{"machine", machineCols},
+	{"project", projectCols},
+	{"session", sessionCols},
+	{"judgment", judgmentCols},
+	{"judgment_link", linkCols},
+	{"snapshot", snapshotCols},
+}
+
+// LedgerTableNames 는 판단 원장이 담는 폐포 표 이름들이다(선언 순서 = 되쓰기 순서).
+//
+// ★ 왜 내보내나. **복원 결과를 설명하는 쪽**(ledger.Losses)이 "무엇이 복원되는가"를 손으로
+// 적으면 폐포가 바뀔 때 그 설명이 조용히 거짓이 된다. 실제로 그랬다 — session 이 폐포에
+// 들어온 뒤에도 손실 목록은 세션을 가리키는 링크를 손실로 부르고 있었고, 그 링크가
+// 실측 34%였다.
+func LedgerTableNames() []string {
+	out := make([]string, 0, len(ledgerTables))
+	for _, e := range ledgerTables {
+		out = append(out, e.name)
+	}
+	return out
+}
+
+// ledgerColNames 는 컬럼 목록 문자열을 이름 슬라이스로 가른다. 순수 함수다.
+func ledgerColNames(cols string) []string {
+	var out []string
+	for _, c := range strings.Split(cols, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ledgerInsert 는 표 하나의 되쓰기 문장이다. 순수 함수다.
+//
+// ★ `?` 를 손으로 안 적는다. 컬럼을 더한 사람이 목록·자리표·인자 셋을 다 고쳐야 하는데
+// 자리표를 빠뜨리면 런타임에서야 죽는다 — 상수에서 세면 그 자리가 원리적으로 사라진다.
+func ledgerInsert(name, cols string) string {
+	n := len(ledgerColNames(cols))
+	return `INSERT INTO ` + name + `(` + cols + `) VALUES (` +
+		strings.TrimSuffix(strings.Repeat("?, ", n), ", ") + `)`
+}
+
 // ReadLedger 는 여섯 표(FK 폐포 전량)를 **한 트랜잭션 안에서** 읽는다.
 //
 // ★ 왜 트랜잭션인가. 표를 따로 읽으면 그 사이 서버가 커밋한 판단의 **링크만** 산출물에
@@ -174,7 +236,7 @@ func readLedgerJudgments(ctx context.Context, q dbtx) ([]LedgerJudgment, error) 
 // 정렬 셋은 PK 와 같은 순서다 — 재현성을 위해 완전 순서여야 한다.
 func readLedgerLinks(ctx context.Context, q dbtx) ([]LedgerLink, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT judgment_id, target_kind, target_id FROM judgment_link
+		SELECT `+linkCols+` FROM judgment_link
 		ORDER BY judgment_id, target_kind, target_id`)
 	if err != nil {
 		return nil, fmt.Errorf("원장 링크 조회 실패: %w", err)
@@ -344,55 +406,49 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		if _, err := t.tx.ExecContext(t.ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 			return fmt.Errorf("FK 검사 미루기 실패: %w", err)
 		}
+		machineStmt := ledgerInsert("machine", machineCols)
 		for _, m := range d.Machines {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO machine(id, hostname, first_seen, last_seen)
-				VALUES (?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, machineStmt,
 				m.ID, m.Hostname, m.FirstSeen, m.LastSeen); err != nil {
 				return fmt.Errorf("원장 머신 되쓰기 실패(id=%q): %w", clip(m.ID, 64), err)
 			}
 		}
+		projectStmt := ledgerInsert("project", projectCols)
 		for _, p := range d.Projects {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO project(id, path, remote_url, default_branch, config, config_from_sha, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, projectStmt,
 				p.ID, p.Path, p.RemoteURL, p.DefaultBranch,
 				p.Config, p.ConfigFromSHA, p.CreatedAt); err != nil {
 				return fmt.Errorf("원장 프로젝트 되쓰기 실패(id=%q): %w", clip(p.ID, 64), err)
 			}
 		}
+		sessionStmt := ledgerInsert("session", sessionCols)
 		for _, x := range d.Sessions {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO session(id, project, machine_id, worktree, cc_session_id,
-				                    label, state, blocked_why, opened_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, sessionStmt,
 				x.ID, x.Project, x.MachineID, x.Worktree, x.CCSessionID,
 				x.Label, x.State, x.BlockedWhy, x.OpenedAt); err != nil {
 				return fmt.Errorf("원장 세션 되쓰기 실패(id=%q project=%q): %w",
 					clip(x.ID, 64), clip(x.Project, 64), err)
 			}
 		}
+		judgmentStmt := ledgerInsert("judgment", judgmentCols)
 		for _, j := range d.Judgments {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO judgment(id, project, session_id, at, kind, title, body, supersedes)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, judgmentStmt,
 				j.ID, j.Project, j.SessionID, j.At, j.Kind, j.Title, j.Body, j.Supersedes); err != nil {
 				return fmt.Errorf("원장 판단 되쓰기 실패(id=%q kind=%q): %w",
 					clip(j.ID, 64), clip(j.Kind, 32), err)
 			}
 		}
+		linkStmt := ledgerInsert("judgment_link", linkCols)
 		for _, l := range d.Links {
-			if _, err := t.tx.ExecContext(t.ctx,
-				`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, linkStmt,
 				l.JudgmentID, l.TargetKind, l.TargetID); err != nil {
 				return fmt.Errorf("원장 링크 되쓰기 실패(judgment=%q target=%s/%s): %w",
 					clip(l.JudgmentID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
 			}
 		}
+		snapshotStmt := ledgerInsert("snapshot", snapshotCols)
 		for _, sn := range d.Snapshots {
-			if _, err := t.tx.ExecContext(t.ctx, `
-				INSERT INTO snapshot(project, key, value, method, evidence, input_digest, computed_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := t.tx.ExecContext(t.ctx, snapshotStmt,
 				sn.Project, sn.Key, sn.Value, sn.Method,
 				sn.Evidence, sn.InputDigest, sn.ComputedAt); err != nil {
 				return fmt.Errorf("원장 스냅숏 되쓰기 실패(project=%q key=%q): %w",
@@ -401,6 +457,35 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		}
 		return nil
 	})
+}
+
+// ledgerOpenRefusal 은 원장 열기를 거절하는 문구다. 순수 함수다.
+//
+// ★ 왜 갈래를 가르나. 예전에는 non-None 넷을 한 문장으로 뭉쳤다:
+//
+//	"이 바이너리로 열면 DB 가 바뀐다(%s) — … (먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)"
+//
+// 그런데 non-None 중 **셋이 MigrateReject** 이고, 그것은 정의상 "열어도 DB 를 안 바꾼다 —
+// 아예 안 연다"다. 앞 절이 거짓이고, 뒤 절은 어느 갈래도 fd serve 재기동으로 안 풀린다
+// (남의 DB거나 · 끊긴 마이그레이션이라 백업에서 되돌려야 하거나 · 바이너리가 낡았거나).
+//
+// 특히 dbVersion > codeVersion 에서는 한 문장이 **정반대를 말했다**. Reason 은 "바이너리를
+// 올려라"인데 꼬리는 "이 바이너리로 serve 를 올려라"이고, 그 처방을 따르면 selfcheck 가
+// 같은 판정으로 기동도 거절한다. 이 저장소에서 실제로 났던 상황이다(수동 빌드 서버가
+// 19시간·115커밋만큼 낡은 채로 돌았다) — 하필 판단 원장을 뜨는 것이 가장 절실한
+// 상황에서만 보이는 문구였다.
+//
+// ★ MigrateReject 에는 처방을 **일부러 안 붙인다.** Reason 이 갈래마다 다른 처방을 이미
+// 담고 있어서(손으로 확인하라 · 백업에서 되돌려라 · 바이너리를 올려라), 고정 꼬리를 붙이면
+// 그중 하나와 반드시 어긋난다. 갈래를 가르는 선례는 selfcheck.go 가 이미 쓴다.
+func ledgerOpenRefusal(plan MigrationPlan) error {
+	// Reason 은 PlanMigration 이 항상 채운다 — 어느 갈래든 새 사유를 지어내지 않는다.
+	if plan.Action == MigrateReject {
+		return fmt.Errorf("이 바이너리는 이 DB 를 아예 열지 않는다(스키마도 안 바꾼다) "+
+			"— 원장 내보내기를 거절한다: %s", plan.Reason)
+	}
+	return fmt.Errorf("이 바이너리로 열면 DB 가 바뀐다(%s) — 원장 내보내기를 거절한다: %s "+
+		"(먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)", plan.Action, plan.Reason)
 }
 
 // OpenLedger 는 원장을 읽기 위해 DB 를 연다. **스키마를 바꾸지 않는다.**
@@ -419,17 +504,14 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 	if log == nil {
 		log = slog.Default()
 	}
-	// ★ ProbeMigration 이 아니라 원장 전용 갈래다. 그것은 기본 dsn() 을 쓰고 그 안의
-	//   journal_mode(WAL) 이 롤백저널 대상을 되돌릴 수 없이 바꾼다 — "거절한다"고
-	//   인쇄하는 실행조차 아카이브를 변조했다. 판정 로직은 한 벌 그대로다(probe.go 참고).
-	plan, err := probeMigrationLedger(ctx, path)
+	// ★ 이 재기는 대상 파일을 한 바이트도 안 바꾼다 — "거절한다"고 인쇄하는 실행조차
+	//   아카이브를 변조하던 것을 probe.go 가 DSN 에서 막는다(그 함수의 주석 참고).
+	plan, err := ProbeMigration(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("원장을 읽기 전에 DB 상태를 재지 못했다(path=%q): %w", clip(path, 200), err)
 	}
 	if plan.Action != MigrateNone {
-		// Reason 은 PlanMigration 이 항상 채운다 — 새 문구를 지어내지 않는다.
-		return nil, fmt.Errorf("이 바이너리로 열면 DB 가 바뀐다(%s) — 원장 내보내기를 거절한다: %s "+
-			"(먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라)", plan.Action, plan.Reason)
+		return nil, ledgerOpenRefusal(plan)
 	}
 
 	db, err := sql.Open("sqlite", ledgerDSN(path))

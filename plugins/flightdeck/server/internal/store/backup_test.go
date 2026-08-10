@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -685,5 +687,230 @@ func TestWriteLedgerRestoresBlockedSession(t *testing.T) {
 	dst := newStore(t)
 	if err := dst.WriteLedger(ctx, want); err != nil {
 		t.Fatalf("blocked 세션 되쓰기 실패(CHECK 위반?): %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 원장이 담는 컬럼은 **스키마가 정본이다**
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestLedgerColumnListsMatchTheSchema 는 폐포 여섯 표의 컬럼 목록이 스키마와 같은지 잰다.
+//
+// ★ 이 관문이 없으면 무엇이 조용해지나. 여섯 표 중 하나에 nullable 컬럼이 들어오면
+// 백업이 그것을 버리고(읽기 목록에 없다) 복원도 버리는데(쓰기 목록에 없다), 왕복 시험은
+// want·final 이 **둘 다 ReadLedger 산출물**이라 새 컬럼이 양쪽에 똑같이 없어
+// reflect.DeepEqual 이 원리적으로 못 본다 — 전 시험이 초록인 채로 "무손실"이 무손실이
+// 아니게 된다.
+//
+// 두 손실 중 **쓰기 쪽이 더 나쁘다.** 백업이 버린 컬럼은 원본 DB 에 아직 있지만,
+// 복원이 버린 컬럼은 원본이 **이미 없을 때** 잃는 것이다.
+//
+// ★ 그래서 목록은 표당 **하나**다(ledgerTables). 읽기와 쓰기가 각자 목록을 들면 관문이
+// 한쪽만 재게 되고, 재지 않은 쪽이 정확히 위의 조용한 손실 자리가 된다.
+func TestLedgerColumnListsMatchTheSchema(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	// 전제 — 폐포가 여섯 표라는 것 자체를 못박는다. 늘거나 줄면 사람이 판단해야 한다:
+	// 표가 늘면 ReadLedger·WriteLedger 가 그것을 실제로 담는지, 줄면 그 표의 행이
+	// 복원 후 어디서 오는지가 먼저 답해져야 한다.
+	var names []string
+	for _, e := range ledgerTables {
+		names = append(names, e.name)
+	}
+	want := []string{"machine", "project", "session", "judgment", "judgment_link", "snapshot"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("원장 폐포의 표 집합이 달라졌다.\n  발견: %v\n  기대: %v", names, want)
+	}
+
+	for _, e := range ledgerTables {
+		rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?) ORDER BY cid`, e.name)
+		if err != nil {
+			t.Fatalf("%s 의 스키마를 못 읽었다: %v", e.name, err)
+		}
+		var schema []string
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				t.Fatalf("%s 의 컬럼 이름 스캔 실패: %v", e.name, err)
+			}
+			schema = append(schema, n)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s 의 스키마 순회 실패: %v", e.name, err)
+		}
+		rows.Close()
+		if len(schema) == 0 {
+			t.Fatalf("%s 표가 스키마에 없다 — 이 관문의 좌표가 틀렸다(표 이름이 바뀌었나)", e.name)
+		}
+
+		listed := ledgerColNames(e.cols)
+		// 순서가 아니라 **집합**으로 댄다. 목록 안의 순서는 질의 자신의 문제이고
+		// (SELECT 순서 = Scan 순서 · INSERT 순서 = 인자 순서), 스키마 순서와 같을
+		// 의무가 없다. 이 관문이 재는 것은 "빠뜨린 것이 있나"다.
+		missing := ledgerColsMinus(schema, listed)
+		extra := ledgerColsMinus(listed, schema)
+		if len(missing) > 0 {
+			t.Errorf("원장이 %s 의 컬럼 %v 를 안 담는다.\n"+
+				"백업은 그것을 버리고 복원도 버리는데, 왕복 시험은 양쪽이 다 ReadLedger "+
+				"산출물이라 원리적으로 못 본다 — 무손실을 표방하는 백업이 조용히 무손실이 "+
+				"아니게 된다. 목록에 더하고 DTO·Scan·INSERT 인자를 함께 맞춰라.", e.name, missing)
+		}
+		if len(extra) > 0 {
+			t.Errorf("원장의 %s 목록에 스키마에 없는 컬럼 %v 가 있다 — "+
+				"질의가 런타임에 죽는다(그리고 이 목록이 다음 사람에게 거짓을 말한다).", e.name, extra)
+		}
+	}
+}
+
+// ledgerColsMinus 는 a 에는 있고 b 에는 없는 이름들이다(집합 차). 순수 함수다.
+func ledgerColsMinus(a, b []string) []string {
+	in := make(map[string]bool, len(b))
+	for _, x := range b {
+		in[x] = true
+	}
+	var out []string
+	for _, x := range a {
+		if !in[x] {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// TestLedgerSQLHasNoInlineColumnLists 는 위 관문의 **입력**을 지킨다.
+//
+// TestLedgerColumnListsMatchTheSchema 는 ledgerTables 의 목록만 잰다. 그러니 누가
+// backup.go 안에서 손으로 컬럼을 적은 질의를 하나 쓰면, 그 질의는 관문 밖에 산다 —
+// 상수는 스키마와 여전히 맞으니 초록인데 그 질의만 컬럼을 빠뜨린 채로. 그것이 정확히
+// 이 항목이 닫으러 온 결함의 모양이다(예전 WriteLedger 의 여섯 INSERT 가 그랬다).
+//
+// 그래서 폐포 여섯 표에 대해서는 backup.go 안에 **손으로 적은 컬럼 목록이 0개**여야 한다.
+// 질의는 전부 `+<표>Cols+` 형태로 상수를 끼워 넣는다.
+func TestLedgerSQLHasNoInlineColumnLists(t *testing.T) {
+	b, err := os.ReadFile("backup.go")
+	if err != nil {
+		t.Fatalf("backup.go 를 못 읽었다: %v", err)
+	}
+	src := string(b)
+
+	closure := map[string]bool{}
+	for _, e := range ledgerTables {
+		closure[e.name] = true
+	}
+
+	// `INSERT INTO <표>(` 뒤에 곧바로 식별자가 오면 손으로 적은 목록이다.
+	// 상수를 끼우면 그 자리에 백틱(원문 문자열의 끝)이 온다.
+	insertRe := regexp.MustCompile(`INSERT INTO (\w+)\(\s*\w`)
+	// `SELECT <식별자…> FROM <표>` 도 같다.
+	selectRe := regexp.MustCompile(`SELECT\s+\w[\w,\s]*\s+FROM\s+(\w+)`)
+
+	var bad []string
+	for _, m := range insertRe.FindAllStringSubmatch(src, -1) {
+		if closure[m[1]] {
+			bad = append(bad, "INSERT INTO "+m[1])
+		}
+	}
+	for _, m := range selectRe.FindAllStringSubmatch(src, -1) {
+		if closure[m[1]] {
+			bad = append(bad, "SELECT … FROM "+m[1])
+		}
+	}
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		t.Errorf("backup.go 에 손으로 적은 컬럼 목록이 %d곳 있다:\n  %s\n\n"+
+			"이 자리들은 TestLedgerColumnListsMatchTheSchema 의 격자 **밖**이다 — 스키마에 "+
+			"컬럼이 하나 들어와도 상수는 여전히 맞으니 관문은 초록인데, 이 질의만 그 컬럼을 "+
+			"조용히 빠뜨린다. ledgerTables 의 상수를 `+…+` 로 끼워 넣어라.",
+			len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 원장 열기 거절 문구는 **갈래마다 다른 사실**을 말한다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 예전에는 non-None 넷을 한 문장으로 뭉쳤다. 그런데 그중 셋이 MigrateReject 이고
+// 그것은 정의상 "열어도 DB 를 안 바꾼다 — 아예 안 연다"라서, 앞 절("이 바이너리로 열면
+// DB 가 바뀐다")이 거짓이고 뒤 절("먼저 fd serve 를 이 바이너리로 올려 스키마를 맞춰라")은
+// 어느 갈래도 그 방법으로 안 풀린다.
+//
+// ★ dbVersion > codeVersion 에서는 한 문장이 **정반대를 말했다**: Reason 은 "바이너리를
+// 올려라"인데 꼬리는 "이 바이너리로 serve 를 올려라"였고, 그 처방을 따르면 같은 판정으로
+// 기동도 거절된다. 이 저장소에서 실제로 났던 상황이고(수동 빌드 서버가 19시간·115커밋
+// 만큼 낡은 채로 돌았다), 하필 판단 원장을 뜨는 것이 가장 절실한 상황에서만 보인다.
+func TestLedgerOpenRefusalSpeaksPerAction(t *testing.T) {
+	// 계획을 손으로 짓지 않는다 — PlanMigration 을 통과시켜야 이 시험이 실제 판정에 묶인다.
+	cases := []struct {
+		name                   string
+		hasTable               bool
+		dbVersion, objects     int
+		wantAction             MigrationAction
+		wantsServePrescription bool
+		wantsChangesTheDBClaim bool
+	}{
+		{"빈 DB — 열면 스키마가 적용된다", false, 0, 0, MigrateApply, true, true},
+		{"버전표만 있다 — 열면 다시 적용된다", true, 0, 1, MigrateApply, true, true},
+		{"증분이 얹힌다", true, SchemaVersion - 1, 12, MigrateUpgrade, true, true},
+		{"버전표 없이 객체가 있다 — 안 연다", false, 0, 12, MigrateReject, false, false},
+		{"객체는 있는데 버전 기록이 없다 — 안 연다", true, 0, 12, MigrateReject, false, false},
+		{"구 바이너리 · 신 DB — 안 연다", true, SchemaVersion + 1, 12, MigrateReject, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plan := PlanMigration(c.hasTable, c.dbVersion, c.objects, SchemaVersion)
+			if plan.Action != c.wantAction {
+				t.Fatalf("이 시험의 좌표가 틀렸다 — 판정이 %q 인데 %q 를 기대했다: %s",
+					plan.Action, c.wantAction, plan.Reason)
+			}
+			msg := ledgerOpenRefusal(plan).Error()
+
+			// 어느 갈래든 Reason 은 그대로 실린다 — 새 문구를 지어내지 않는다는 규율이다.
+			if !strings.Contains(msg, plan.Reason) {
+				t.Errorf("거절 문구가 판정의 사유를 안 싣는다.\n  문구: %s\n  사유: %s", msg, plan.Reason)
+			}
+			if got := strings.Contains(msg, "fd serve"); got != c.wantsServePrescription {
+				if got {
+					t.Errorf("안 여는 갈래(%s)에 `fd serve` 처방이 붙었다 — 그 처방으로는 "+
+						"안 풀리고, 구 바이너리·신 DB 갈래에서는 사유와 **정반대**를 말한다:\n  %s",
+						plan.Action, msg)
+				} else {
+					t.Errorf("DB 가 실제로 바뀌는 갈래(%s)에 처방이 없다 — 운영자가 "+
+						"무엇을 해야 하는지 못 읽는다:\n  %s", plan.Action, msg)
+				}
+			}
+			if got := strings.Contains(msg, "DB 가 바뀐다"); got != c.wantsChangesTheDBClaim {
+				if got {
+					t.Errorf("안 여는 갈래(%s)가 'DB 가 바뀐다'고 말한다 — 거짓이다:\n  %s",
+						plan.Action, msg)
+				} else {
+					t.Errorf("바뀌는 갈래(%s)가 그 사실을 안 말한다:\n  %s", plan.Action, msg)
+				}
+			}
+		})
+	}
+}
+
+// OpenLedger 가 그 문구를 실제로 쓰는지 — 순수 함수만 시험하면 배선이 빠져도 초록이다.
+func TestOpenLedgerRefusesOldBinaryWithoutSayingRunServe(t *testing.T) {
+	s := newStore(t)
+	path := s.path
+	// 이 바이너리보다 높은 버전을 기록해 "구 바이너리 · 신 DB" 를 만든다.
+	if _, err := s.db.ExecContext(context.Background(),
+		`UPDATE schema_version SET version = ?`, SchemaVersion+1); err != nil {
+		t.Fatalf("버전 올리기 실패: %v", err)
+	}
+	s.Close()
+
+	_, err := OpenLedger(context.Background(), path, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("구 바이너리가 신 DB 의 원장을 열었다 — 모르는 스키마 위에서 읽는다")
+	}
+	if strings.Contains(err.Error(), "fd serve") {
+		t.Errorf("거절이 `fd serve` 를 처방한다 — 같은 판정으로 기동도 거절되므로 "+
+			"운영자를 막다른 길로 보낸다:\n  %v", err)
+	}
+	if strings.Contains(err.Error(), "DB 가 바뀐다") {
+		t.Errorf("안 여는 갈래인데 'DB 가 바뀐다'고 말한다:\n  %v", err)
 	}
 }

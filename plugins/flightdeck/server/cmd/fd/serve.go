@@ -214,8 +214,15 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// ★ 판단 원장 주기 백업(설계 §7). serve 가 소유하는 티커다 — selfwatch 와 같은 모양이고,
+	//   이 프로세스가 이미 그 DB 를 쥐고 있어 여는 쪽을 한 벌 더 만들 이유가 없다.
+	//   ctx 로 묶여 있어 종료·자동 갱신 드레인에서 함께 선다.
+	ledgerOut := LedgerOutDir(env, home, inContainer)
+	go runLedgerBackup(ctx, log, st, ledgerOut, ledgerBackupInterval)
+
 	log.Info("기동", "route", clip(*addr, 120), "db_path", clip(path, 200),
-		"api_version", service.APIVersion, "auth_required", token != "")
+		"api_version", service.APIVersion, "auth_required", token != "",
+		"ledger_out", clip(ledgerOut, 200))
 
 	return serveWithWatcher(ctx, *addr, handler, log, watcher)
 }
