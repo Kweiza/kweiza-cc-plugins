@@ -157,11 +157,49 @@ fd project rm --project <id> --reason <사유> --yes    # 실제로 지운다
 - **항목이 하나라도 있으면 `--yes` 가 있어도 거절한다.** 639항목짜리를 한 명령으로 날리는
   길을 안 만든다. 강제 플래그는 **안 만든다** — 정말 필요해지면 그때 만든다.
 - 사유는 필수다. 화면의 보관과 달리 **되돌릴 수 없기 때문**이고, 그것이 §2 가 사유를 가른 축
-  그대로다. 원장에 `event`(`project.remove`)로 남는다 — 프로젝트가 사라져도 그 사실은 남는다.
+  그대로다. 원장에 `event`(`project.remove`)로 남는다.
 
-서버 쪽은 `internal/api/handlers_projects.go` 에 `GET /projects` 와
-`POST /projects/{id}/remove` 를 둔다. `DELETE` 를 안 쓰는 이유는 이 API 의 다른 쓰기와 같은
-모양(POST + 사유 + 멱등 키)을 유지하기 위해서다.
+### 5.1 원장이 정한 제약 둘 — 설계가 아니라 스키마가 정했다
+
+**⒜ 판단이 하나라도 있으면 못 지운다.** `judgment.project` 는 `project(id)` 를 참조하는 FK 이고
+`judgment` 에는 `judgment_no_delete` 트리거가 있다(`schema.sql:260`) — 판단은 원리적으로 못
+지운다. 그러면 FK 가 프로젝트 행을 붙잡으므로 삭제가 불가능하다. **이것은 우회하지 않는다.**
+`PRAGMA foreign_keys=OFF` 도 트리거 드롭도 안 쓴다 — 잔해 몇 건 때문에 원장의 가장 강한
+보증을 깨는 값이 아니다.
+
+지금 원장의 실측이 이 제약을 정확히 가른다:
+
+| 프로젝트 | 판단 | 지울 수 있나 |
+|---|---|---|
+| `console-screen-landing` · `t6-…` · `upload-staging-…` · `machine-probe` · `aaron` · `infra` · `figma-agent` | 0 | **된다** |
+| `design-context-platform` (5) · `stt-meetings` (1) | 있다 | 안 된다 → 보관으로 간다 |
+| `context-platform` · `kweiza-cc-plugins` | 1448 / 551 | 안 된다 (항목으로도 이미 거절) |
+
+**치우려던 잔해 넷은 전부 판단 0이라 지울 수 있다.** 판단이 있는 둘은 화면의 보관이 받는다 —
+두 처방이 각자 덮는 자리가 여기서 정확히 맞물린다.
+
+**⒝ `event` 는 안 지운다. 그리고 안 지워도 된다.** `event.project` 는 컬럼일 뿐 FK 가 아니다
+(`schema.sql:366` — `project TEXT,`). 프로젝트 행이 사라져도 이벤트는 그대로 남고 FK 도 안
+운다. 그래서 **「이런 프로젝트가 있었고 언제 지워졌다」가 원장에 남는다.** 지우는 명령이
+자기 흔적을 남길 수 있는 이유가 이것이다.
+
+### 5.2 지우는 순서 — 목록을 코드에 두고 시험이 스키마와 대조한다
+
+`project(id)` 를 참조하는 표는 **10개**다(`session` · `session_workspace` · `ref_state` ·
+`change_set` · `item` · `judgment` · `snapshot` · `counter` · `resource_hold` · `job`).
+그중 `judgment` 는 §5.1 ⒜ 로 0건이 전제고, 나머지 아홉을 자식부터 지운다.
+
+FK 는 없지만 `project` 컬럼을 들고 있어 **고아가 되는** 표가 둘 더 있다 —
+`item_dependents` · `pick_eval`. FK 가 안 우니 안 지워도 삭제는 성공하고, 그래서 더 위험하다.
+목록에 함께 넣는다.
+
+★ 순서를 주석으로만 두지 않는다. **`store` 시험이 `schema.sql` 을 정규식으로 훑어
+`project(id)` 참조 표 전부가 그 목록에 있는지 대조한다.** 표가 하나 늘면 그 시험이 빨개진다 —
+안 그러면 새 표가 조용히 고아 행을 남기고, 그 사실은 아무 화면에도 안 뜬다.
+
+서버 쪽은 `internal/api/handlers_projects.go` 에 `GET /api/v1/projects` 와
+`POST /api/v1/projects/{id}/remove` 를 둔다. `DELETE` 를 안 쓰는 이유는 이 API 의 다른 쓰기와
+같은 모양(POST + 사유 + 멱등 키)을 유지하기 위해서다.
 
 ## 6. 시험
 
@@ -170,7 +208,10 @@ fd project rm --project <id> --reason <사유> --yes    # 실제로 지운다
 - ★ **`UpsertProject` 가 핀·보관을 안 지운다** — 핀을 켠 뒤 upsert 를 돌리고 다시 읽는다.
   이 시험이 없으면 §3 의 함정이 조용히 재발한다(세션 하나 열릴 때마다 핀이 날아간다).
 - `ListProjects` 가 두 값을 제대로 채운다(컬럼 순서 어긋남을 잡는다).
-- 프로젝트 삭제가 딸린 행들을 함께 지우고, 항목이 있으면 거절한다.
+- 프로젝트 삭제가 딸린 행들을 함께 지운다 · **항목이 있으면 거절** · **판단이 있으면 거절**.
+- ★ **삭제 순서 목록이 스키마와 일치한다** — `schema.sql` 에서 `project(id)` 참조 표를
+  정규식으로 뽑아 목록과 대조한다. 표가 늘면 빨개진다(§5.2).
+- 삭제 뒤에도 그 프로젝트의 `event` 행이 남는다(§5.1 ⒝ 의 단정).
 
 **web**
 - 핀 0 이면 전부 펴지고 「핀이 없다」 문구가 난다.
@@ -196,3 +237,6 @@ fd project rm --project <id> --reason <사유> --yes    # 실제로 지운다
   주 저장소 루트를 쓰는데도 잔해 3건이 생긴 경위가 안 밝혀졌다. 그 항목이 닫히기 전까지는
   **지운 프로젝트가 다시 생길 수 있다**는 것이 이 설계의 알려진 한계다.
 - **보관의 자동 해제** — §4.1 에서 기각했다.
+- **FK·트리거 우회** — 판단이 있는 프로젝트를 지우려고 `PRAGMA foreign_keys=OFF` 를 쓰거나
+  `judgment_no_delete` 를 드롭하는 길. §5.1 ⒜ 에서 기각했다. 그 둘은 증분 가드의
+  `neverExempt`(`DROP TABLE`·`DROP COLUMN`·`RENAME`)가 노리는 것과 같은 부류의 손실이다.
