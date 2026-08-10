@@ -93,9 +93,13 @@ type GitReader interface {
 	Refs(ctx context.Context) ([]model.RefState, error)
 	Ref(ctx context.Context, ref string) (model.RefState, error)
 	Worktrees(ctx context.Context) ([]gitreader.Worktree, error)
-	ChangedPaths(ctx context.Context, base, head string) ([]string, error)
+	ChangedPaths(ctx context.Context, base, head string) ([]string, map[string]model.LineDelta, error)
 	MergeBase(ctx context.Context, a, b string) (string, error)
 	UncommittedPaths(ctx context.Context, worktree string) ([]string, error)
+	// UncommittedDelta 는 UncommittedPaths **옆에** 선다 — 위쪽이 미추적 파일과 이름 변경
+	// 원본 경로를 나르고, 이쪽이 추적 파일의 증감을 나른다. 둘 다 필요하고, 갈라져 있어야
+	// 이쪽이 실패해도 경로 축이 산다.
+	UncommittedDelta(ctx context.Context, worktree string) (map[string]model.LineDelta, error)
 	AheadBehind(ctx context.Context, ref, base string) (ahead, behind int, err error)
 	Ancestry(ctx context.Context, sha, tip string) (judge.AncestryResult, error)
 }

@@ -18,9 +18,10 @@ import (
 // 나머지 축은 전부 실물 git 이 답한다(가짜가 실물을 대신하지 않는다).
 type flakyReader struct {
 	GitReader
-	failChanged   bool
-	failAhead     bool
-	failMergeBase bool
+	failChanged          bool
+	failAhead            bool
+	failMergeBase        bool
+	failUncommittedDelta bool
 }
 
 var errInjected = errors.New("주입된 실패: 변경 경로를 못 읽는다")
@@ -32,11 +33,20 @@ func (f flakyReader) MergeBase(ctx context.Context, a, b string) (string, error)
 	return f.GitReader.MergeBase(ctx, a, b)
 }
 
-func (f flakyReader) ChangedPaths(ctx context.Context, base, head string) ([]string, error) {
+func (f flakyReader) ChangedPaths(ctx context.Context, base, head string) ([]string, map[string]model.LineDelta, error) {
 	if f.failChanged {
-		return nil, errInjected
+		return nil, nil, errInjected
 	}
 	return f.GitReader.ChangedPaths(ctx, base, head)
+}
+
+// ★ **UncommittedPaths 는 안 감싼다.** 이 fake 의 요점이 "규모 축만 죽여도 경로 축이 사는가"라서,
+// 둘을 같이 죽이면 그 단정이 성립하지 않는다.
+func (f flakyReader) UncommittedDelta(ctx context.Context, worktree string) (map[string]model.LineDelta, error) {
+	if f.failUncommittedDelta {
+		return nil, errInjected
+	}
+	return f.GitReader.UncommittedDelta(ctx, worktree)
 }
 
 func (f flakyReader) AheadBehind(ctx context.Context, ref, base string) (int, int, error) {

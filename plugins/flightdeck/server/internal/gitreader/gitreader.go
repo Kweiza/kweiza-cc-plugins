@@ -255,19 +255,33 @@ func (r *Reader) Ref(ctx context.Context, ref string) (model.RefState, error) {
 // 그 경로를 만지는 세션이 겹침 축에 안 걸린다 — 침묵하는 손실이라 화면 어디에도 안 나온다.
 // 실물로 확인한 모양: 내용이 같은 두 파일이 갈래마다 하나씩 있으면 git 이 그 둘을
 // R100 한 건으로 접어 두 경로 중 하나만 낸다.
-func (r *Reader) ChangedPaths(ctx context.Context, base, head string) ([]string, error) {
+//
+// ★ **`--numstat` 이다(2026-08-11 개정. `--name-only` 였다).** 겹침 줄이 상대 세션의 변경
+// 규모를 함께 내야 하는데, numstat 은 경로를 **덤으로** 준다 — 즉 같은 프로세스 하나로
+// 경로와 규모를 둘 다 얻는다. 따로 메서드를 두면 git 프로세스가 하나 더 늘고, 이 축을
+// 꼬리 겹침에만 실은 근거(비용이 안 는다)가 거기서 무너진다.
+//
+// ★ **반환이 셋인 것이 요점이다.** 이진 파일은 경로로는 남고 규모로는 안 남는다 —
+// 하나로 접으면 "바뀌었는데 못 쟀다"를 표현할 수 없다(parseNumstatZ 주석).
+func (r *Reader) ChangedPaths(ctx context.Context, base, head string) ([]string, map[string]model.LineDelta, error) {
 	if err := validateRev("base", base); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateRev("head", head); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out, err := r.run(ctx, "", "diff", "--name-only", "-z", "--no-renames", base, head, "--")
+	out, err := r.run(ctx, "", "diff", "--numstat", "-z", "--no-renames", base, head, "--")
 	if err != nil {
 		r.log.ErrorContext(ctx, "변경 경로 관측 실패", "base", base, "head", head, "error", err.Error())
-		return nil, fmt.Errorf("변경 경로 관측 실패(%s..%s): %w", base, head, err)
+		return nil, nil, fmt.Errorf("변경 경로 관측 실패(%s..%s): %w", base, head, err)
 	}
-	return parseNameOnlyZ(out), nil
+	paths, delta, skipped := parseNumstatZ(out)
+	if len(skipped) > 0 {
+		// 조용히 버리지 않는다 — 규모가 왜 비었는지 남는 유일한 자리다.
+		r.log.WarnContext(ctx, "numstat 레코드를 버렸다(그 경로만 규모가 빈다)",
+			"base", base, "head", head, "dropped", len(skipped), "first_reason", skipped[0])
+	}
+	return paths, delta, nil
 }
 
 // MergeBase 는 두 ref 의 갈래 지점 커밋이다(`git merge-base a b`).
@@ -410,4 +424,35 @@ func (r *Reader) UncommittedPaths(ctx context.Context, worktree string) ([]strin
 		return nil, fmt.Errorf("미커밋 경로 해석 실패(%s): %w", worktree, perr)
 	}
 	return paths, nil
+}
+
+// UncommittedDelta 는 워크트리의 미커밋 증감이다 — 스테이징 + 미스테이징(추적 파일).
+//
+// ★ **UncommittedPaths 를 대체하지 않는다. 그 옆에 선다.** 이유 둘이고 둘 다 실물 관측이다:
+//
+//	① `status --porcelain` 만이 **미추적 파일과 이름 변경 원본 경로**를 낸다. numstat 은
+//	   미추적 파일을 아예 안 본다 — 그것들은 경로로는 남고 규모로는 키가 없어야 맞다.
+//	② **별개 호출이라 이것이 실패해도 경로 축이 산다.** UncommittedPaths 의 독스트링이
+//	   "커밋 전 의도를 나르는 유일한 축이라 조용히 짧아지면 안 된다"고 못박은 그 축이다.
+//	   합쳤다면 규모를 못 읽은 순간 경로도 같이 사라진다.
+//
+// ★ **이것이 이 축에서 유일하게 새로 드는 git 호출이다**(세션당 4→5). 커밋 구간은
+// ChangedPaths 가 numstat 으로 바뀌면서 공짜가 됐다. 이 하나를 내는 이유는 이 축을 낳은
+// 손 앵커들이 대부분 **랜딩 전 구간**이기 때문이다 — 안 재면 조율이 가장 필요한 창이 빈다.
+//
+// 커밋이 하나도 없는 저장소에서는 `HEAD` 가 없어 실패한다. **특례를 안 만든다** —
+// 호출부(service.sessionCardsAndRoots)의 바로 이웃 줄인 Ref(기본 브랜치)가 같은 저장소에서
+// 이미 같은 모양으로 실패를 낸다. 특례를 만들면 붙어 있는 두 줄의 관용이 갈린다.
+func (r *Reader) UncommittedDelta(ctx context.Context, worktree string) (map[string]model.LineDelta, error) {
+	out, err := r.run(ctx, worktree, "diff", "--numstat", "-z", "--no-renames", "HEAD", "--")
+	if err != nil {
+		r.log.ErrorContext(ctx, "미커밋 규모 관측 실패", "worktree", worktree, "error", err.Error())
+		return nil, fmt.Errorf("미커밋 규모 관측 실패(%s): %w", worktree, err)
+	}
+	_, delta, skipped := parseNumstatZ(out)
+	if len(skipped) > 0 {
+		r.log.WarnContext(ctx, "numstat 레코드를 버렸다(그 경로만 규모가 빈다)",
+			"worktree", worktree, "dropped", len(skipped), "first_reason", skipped[0])
+	}
+	return delta, nil
 }

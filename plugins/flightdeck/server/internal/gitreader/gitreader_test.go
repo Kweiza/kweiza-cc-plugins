@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
+	"github.com/kweiza/flightdeck/internal/model"
 )
 
 // 이 파일의 시험은 **실물 git 저장소**를 임시 디렉토리에 만들어서 돈다.
@@ -364,7 +365,7 @@ func TestChangedPathsHandlesSpacesAndUnicodeAndNewlines(t *testing.T) {
 		t.Fatal("준비 실패: 커밋이 안 생겼다")
 	}
 
-	got, err := New(repo).ChangedPaths(ctxT(t), base, head)
+	got, _, err := New(repo).ChangedPaths(ctxT(t), base, head)
 	if err != nil {
 		t.Fatalf("ChangedPaths 실패: %v", err)
 	}
@@ -400,7 +401,7 @@ func TestChangedPathsIsTwoDotDiff(t *testing.T) {
 	write(t, repo, "main-only.txt", "1\n")
 	mainTip := commit(t, repo, "본류 작업")
 
-	got, err := New(repo).ChangedPaths(ctxT(t), mainTip, head)
+	got, _, err := New(repo).ChangedPaths(ctxT(t), mainTip, head)
 	if err != nil {
 		t.Fatalf("ChangedPaths 실패: %v", err)
 	}
@@ -439,7 +440,7 @@ func TestChangedPathsKeepsBothSidesOfARename(t *testing.T) {
 		t.Fatalf("준비 실패: git 이 이름 변경으로 안 접었다: %q", raw)
 	}
 
-	got, err := New(repo).ChangedPaths(ctxT(t), base, head)
+	got, _, err := New(repo).ChangedPaths(ctxT(t), base, head)
 	if err != nil {
 		t.Fatalf("ChangedPaths 실패: %v", err)
 	}
@@ -452,6 +453,26 @@ func TestChangedPathsKeepsBothSidesOfARename(t *testing.T) {
 	}
 	if !set["tools/new-name.sh"] {
 		t.Errorf("이름 변경의 목적지 경로가 빠졌다: %q", got)
+	}
+}
+
+func TestChangedPathsCarriesLineDelta(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "t.txt", "a\nb\nc\n")
+	base := commit(t, repo, "기준")
+	write(t, repo, "t.txt", "a\nB\nc\nd\n") // b→B 가 +1/-1, d 가 +1 = +2/-1
+	head := commit(t, repo, "고침")
+
+	paths, delta, err := New(repo).ChangedPaths(ctxT(t), base, head)
+	if err != nil {
+		t.Fatalf("ChangedPaths 실패: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "t.txt" {
+		t.Fatalf("경로 [t.txt] 를 기대했는데 %q 다", paths)
+	}
+	want := model.LineDelta{Added: 2, Removed: 1}
+	if got := delta["t.txt"]; got != want {
+		t.Errorf("규모 %+v 를 기대했는데 %+v 다", want, got)
 	}
 }
 
@@ -608,6 +629,34 @@ func TestUncommittedPathsOnCleanWorktree(t *testing.T) {
 	}
 }
 
+func TestUncommittedDeltaCoversStagedAndUnstaged(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "s.txt", "a\n")
+	write(t, repo, "u.txt", "a\n")
+	commit(t, repo, "기준")
+
+	write(t, repo, "s.txt", "a\nb\n") // 스테이징할 것
+	runGit(t, repo, "add", "s.txt")
+	write(t, repo, "u.txt", "a\nb\nc\n") // 미스테이징
+	write(t, repo, "new.txt", "x\n")     // 미추적 — commit 뒤에 쓰므로 추적 안 된다
+
+	delta, err := New(repo).UncommittedDelta(ctxT(t), repo)
+	if err != nil {
+		t.Fatalf("UncommittedDelta 실패: %v", err)
+	}
+	if got, want := delta["s.txt"], (model.LineDelta{Added: 1, Removed: 0}); got != want {
+		t.Errorf("스테이징된 것: %+v 를 기대했는데 %+v 다", want, got)
+	}
+	if got, want := delta["u.txt"], (model.LineDelta{Added: 2, Removed: 0}); got != want {
+		t.Errorf("미스테이징된 것: %+v 를 기대했는데 %+v 다", want, got)
+	}
+	// ★ 미추적 파일은 numstat 에 아예 안 나온다(Task 1 의 실물 관측). 0 이 아니라 **키가 없다**.
+	if d, ok := delta["new.txt"]; ok {
+		t.Errorf("미추적 파일의 규모 키가 생겼다(%+v) — numstat 은 그것을 못 본다. "+
+			"키가 있으면 화면이 못 잰 것을 잰 척한다", d)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AheadBehind
 // ─────────────────────────────────────────────────────────────────────────────
@@ -698,7 +747,7 @@ func TestReaderNeverMutatesTheRepository(t *testing.T) {
 	if _, err := r.Ref(ctx, "main"); err != nil {
 		t.Fatalf("Ref: %v", err)
 	}
-	if _, err := r.ChangedPaths(ctx, first, second); err != nil {
+	if _, _, err := r.ChangedPaths(ctx, first, second); err != nil {
 		t.Fatalf("ChangedPaths: %v", err)
 	}
 	if _, err := r.Ancestry(ctx, first, second); err != nil {
@@ -780,7 +829,7 @@ func TestMergeBaseGivesTheForkPointNotEitherTip(t *testing.T) {
 	}
 
 	// 그 sha 를 base 로 넘기면 남의 변경이 빠진다 — board 가 쓰는 조합 그대로.
-	paths, err := r.ChangedPaths(ctxT(t), got, "feat")
+	paths, _, err := r.ChangedPaths(ctxT(t), got, "feat")
 	if err != nil {
 		t.Fatalf("ChangedPaths 실패: %v", err)
 	}

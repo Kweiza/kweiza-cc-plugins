@@ -437,7 +437,7 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 				if forkSHA, err := g.MergeBase(ctx, proj.DefaultBranch, card.View.Branch); err != nil {
 					d.fail("merge-base:"+clip(card.View.Branch, 120), err)
 					fails = append(fails, "갈래 지점을 못 읽었다")
-				} else if paths, err := g.ChangedPaths(ctx, forkSHA, card.View.Branch); err != nil {
+				} else if paths, _, err := g.ChangedPaths(ctx, forkSHA, card.View.Branch); err != nil {
 					d.fail("changed-paths:"+clip(card.View.Branch, 120), err)
 					fails = append(fails, "변경 경로를 못 읽었다")
 				} else {
