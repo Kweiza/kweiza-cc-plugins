@@ -345,6 +345,28 @@ func TestOverlapSortIsDeterministicOnTies(t *testing.T) {
 	}
 }
 
+// TestPartiallyUnknownSessionOutranksAFullyKnownBiggerOne 은 겹친 경로가 여럿일 때
+// **하나라도 못 읽으면 그 세션 전체가 `+∞`** 임을 잠근다.
+//
+// 위의 네 시험은 전부 세션당 겹침 경로가 하나뿐이라 "하나라도 못 읽으면"과
+// "전부 못 읽었을 때만"을 가르지 못한다. 이 시험은 s-partial 이 경로 둘(하나는
+// 작게 알고 하나는 모름)을 겹치고, s-big 은 경로 하나(크게 앎)만 겹치게 해서
+// 그 둘을 가른다 — s-partial 이 s-big 보다 위여야 한다.
+func TestPartiallyUnknownSessionOutranksAFullyKnownBiggerOne(t *testing.T) {
+	live := []LiveSession{
+		{ID: "s-big", CCSessionID: "cc-big", Paths: []string{"a.go"},
+			Delta: map[string]model.LineDelta{"a.go": {Added: 99}}}, // 크지만 전부 앎
+		{ID: "s-partial", CCSessionID: "cc-partial", Paths: []string{"a.go", "b.go"},
+			Delta: map[string]model.LineDelta{"a.go": {Added: 1}}}, // b.go 는 못 읽었다
+	}
+	got := OverlapsWithLive([]string{"a.go", "b.go"}, live, "me", "cc-me")
+	if got[0].SessionID != "s-partial" {
+		t.Fatalf("일부만 못 읽어도 그 세션 전체가 +∞ 여야 한다 — %q 가 먼저다. "+
+			"s-partial(일부 못 읽음)이 s-big(전부 알고 규모가 큼)보다 위여야 한다",
+			got[0].SessionID)
+	}
+}
+
 func TestSelfClaimIsItsOwnCode(t *testing.T) {
 	_, rejected := EligibleBundle(EligibleInput{
 		Self:       "S1",

@@ -214,7 +214,7 @@ type Overlap struct {
 
 **아래로 밀지 않는 이유.** 밀면 절단될 때 **제일 먼저 사라지는 것이 못 잰 것**이 된다.
 이 저장소가 반복해서 고발한 침묵이 정확히 그 모양이고, 같은 규율이 세 자리에 이미 적혀 있다 —
-`judge/prescribe.go` 의 `comparablePath`("못 읽었다는 없다가 아니다"),
+`judge/prescribe.go` 의 `uncoveredByClosed`("못 읽었다는 없다가 아니다"),
 `sameConversation`("빈 값끼리는 같지 않다. 못 읽었다를 같다로 접으면 겹침 축이 조용히 꺼진다"),
 `board.go:469` 의 `HasFootprint`("발자국이 없다는 사실을 침묵하지 않는다"). 모르는 것은 클 수
 있으니 크게 친다. 규칙이 **하나**여야 하므로 계층을 두지 않는다.
