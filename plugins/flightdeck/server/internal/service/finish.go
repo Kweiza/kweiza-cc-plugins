@@ -103,6 +103,28 @@ type FinishResult struct {
 	// (finish_followups.go 가 갈라진 것과 같은 이유).
 	QueueBalance *QueueBalance `json:"queue_balance,omitempty"`
 
+	// AfterCandidate 는 이번에 만든 후속이 선행(`dep_sha`)으로 걸 수 있는 sha 다.
+	// **이 세션의 브랜치 head 가 실제로 기본 브랜치의 조상일 때만** 채워진다.
+	//
+	// ★ 왜 이 칸이 있나. `landed_ref` 는 Tier A 에서 영영 NULL 이다(§3 — "러너가 실제로
+	// fast-forward 한 sha 만" 들어가는데 Tier A 에 러너가 없다). 그것 자체는 의도인데,
+	// **대가로 후속을 쓰는 사람이 걸 sha 를 어디서도 못 얻는다.** 실측된 사고가 있다:
+	// 전제가 3일 미랜딩인 항목이 선행 없이 큐에 남아 기아 78h 1순위로 추천됐고, 집은
+	// 세션이 코드를 열고서야 전제 부재를 발견했다. 배제 축(`after-unmet-sha`)은 살아
+	// 있었다 — 그 축에 **넣을 값이 안 나오는 것**이 병목이었다.
+	//
+	// ★ **기본 브랜치의 지금 HEAD 가 아니라 이 브랜치의 head 다.** §3 이 없앤 결함이
+	// 정확히 "메인 트리의 지금 HEAD 를 적어 남의 커밋이 박히던"(3회 관측) 것이다.
+	// 브랜치 head 는 이 작업 자신이라 그 결함을 원리적으로 안 밟고, 조건도 더 정확하다 —
+	// "내 작업이 랜딩된 뒤"이지 "그 시각에 우연히 tip 이던 남의 커밋 뒤"가 아니다.
+	//
+	// ★ **조상일 때만 낸다.** 랜딩 전에 내면 후속이 그 sha 를 걸어도 이미 충족이라
+	// 아무것도 안 기다린다 — 안 내느니만 못하다(거짓 안심).
+	//
+	// 빈 문자열은 "안 냈다"이고 그 사유는 Failures 에 있다(못 읽었나 · 아직 조상이
+	// 아닌가). 후속을 안 만든 호출에서는 아예 계산하지 않는다 — 아래 afterCandidate 참조.
+	AfterCandidate string `json:"after_candidate,omitempty"`
+
 	Derived
 }
 
@@ -504,9 +526,11 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	// 말할 수 있고, 못 읽은 것은 항목 **전문**(제목·본문·경로)뿐이다 — 그 사실을 item 축으로
 	// 고백한다.
 	//
-	// ★ derive 에 넣어도 신선도는 안 다친다 — 마무리에는 git 읽기가 0이라 FreshnessOf 가
-	// 어차피 db·낡음을 낸다(failures 로 git 축이 낡는 것은 reads>0 일 때다. StillHeld 주석의
-	// 우려는 Board 쪽 이야기다). 실리는 것은 Failures 목록뿐이고 렌더가 그것을 낸다.
+	// ★ derive 에 넣어도 신선도는 안 다친다 — 마무리는 **git reads 를 0으로 유지하므로**
+	// FreshnessOf 가 어차피 db·낡음을 낸다(failures 로 git 축이 낡는 것은 reads>0 일 때다.
+	// StillHeld 주석의 우려는 Board 쪽 이야기다). 실리는 것은 Failures 목록뿐이고 렌더가
+	// 그것을 낸다. (afterCandidate 가 git 을 부를 수 있지만 reads 를 안 올린다 — 이유는
+	// 그 함수와 아래 d.result 줄에 있다.)
 	d := &derive{}
 	if item, ierr := s.st.GetItem(ctx, in.Project, in.ItemID); ierr != nil {
 		s.log.WarnContext(ctx, "마무리 뒤 항목 되읽기 실패 — 커밋된 사실로 응답한다",
@@ -520,7 +544,14 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	} else {
 		out.Item = item
 	}
-	out.Derived = d.result(now) // 마무리에는 git 파생이 없다. 그 사실도 사유로 남는다
+	// ★ 후속을 만들었을 때만 선행 후보를 잰다. 후속이 0건이면 git 을 한 번도 안 부른다.
+	out.AfterCandidate = s.afterCandidate(ctx, in.Project, in.SessionID, len(out.Followups), d)
+
+	// ★ 마무리는 **git reads 를 0으로 유지한 채** 신선도를 낸다 — afterCandidate 가 git 을
+	// 부를 때도 사유만 옮기고 reads 는 안 올린다. 그 축이 내는 것은 부가 한 줄이고 화면의
+	// 주 값(항목·판단·후속·수지)은 전부 DB 라, reads 를 올리면 Freshness 가 Source="git" 으로
+	// 승격해 **DB 에서 온 값들이 git 관측인 것처럼 말한다.**
+	out.Derived = d.result(now)
 	s.log.InfoContext(ctx, "마무리",
 		"project", in.Project, "session_id", in.SessionID, "item", in.ItemID,
 		"mode", string(in.Outcome), "count", len(out.Followups), "released", len(out.Released))

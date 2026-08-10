@@ -1547,3 +1547,46 @@ func TestRenderAddSaysBodyCannotBeAmended(t *testing.T) {
 		t.Errorf("정정 수단의 id 가 항목을 안 따라간다 — 남의 항목을 가리키는 지시가 된다:\n%s", other)
 	}
 }
+
+// TestRenderFinishOffersAfterCandidateOnlyToBareFollowups 는 선행 후보 줄이 **선행 없이
+// 등록된 후속이 있을 때만** 뜨는지 못박는다.
+//
+// ★ 이 줄이 존재하는 이유: `landed_ref` 가 Tier A 에서 영영 NULL 이라(설계 §3) 후속을
+// 쓰는 사람이 걸 sha 를 어디서도 못 얻는다. 실측된 사고 — 전제가 3일 미랜딩인 항목이
+// 선행 없이 큐에 남아 기아 78h 1순위로 추천됐다.
+//
+// ★ 그리고 **못 붙인다는 사실을 함께 말해야 한다.** 열린 항목에 선행을 더하는 표면이
+// 없는데(item_after INSERT 는 AddItem 안에만 있다) "걸어라"만 적으면 세션이 지금 고칠 수
+// 있다고 믿고 방법을 찾는 데 시간을 쓴다.
+func TestRenderFinishOffersAfterCandidateOnlyToBareFollowups(t *testing.T) {
+	const sha = "9dea44e1234567"
+	base := func(followups []model.Item, cand string) string {
+		return RenderFinish(service.FinishResult{
+			Item:           model.Item{ID: "closing", State: model.ItemDone},
+			Judgment:       model.Judgment{ID: "j1", Kind: model.JudgmentHandoff, Body: "본문"},
+			Followups:      followups,
+			AfterCandidate: cand,
+		})
+	}
+
+	bare := []model.Item{{ID: "spawned"}}
+	got := base(bare, sha)
+	if !strings.Contains(got, sha) {
+		t.Errorf("선행 없이 등록된 후속이 있는데 후보 sha 가 화면에 없다 — "+
+			"이 값이 없으면 다음 사람도 sha 를 손으로 찾아야 한다:\n%s", got)
+	}
+	if !strings.Contains(got, "지금은 못 붙인다") {
+		t.Errorf("못 붙인다는 사실이 빠졌다 — 세션이 고칠 수 있다고 믿고 방법을 찾는다:\n%s", got)
+	}
+
+	// 이미 선행이 걸린 후속만 있으면 이 줄은 소음이다.
+	linked := []model.Item{{ID: "spawned", After: []model.After{{SHA: sha}}}}
+	if out := base(linked, sha); strings.Contains(out, "선행 없이 등록된 후속") {
+		t.Errorf("후속에 이미 선행이 걸렸는데 안내가 떴다 — 매번 뜨면 배경이 되어 안 읽힌다:\n%s", out)
+	}
+
+	// 후보를 못 냈으면(랜딩 전·못 읽음) 아무 말도 하지 않는다. 없는 sha 를 지어내지 않는다.
+	if out := base(bare, ""); strings.Contains(out, "선행 없이 등록된 후속") {
+		t.Errorf("후보가 없는데 안내가 떴다 — 걸 값이 없으면 지시할 것도 없다:\n%s", out)
+	}
+}
