@@ -16,14 +16,14 @@ func TestClosingAnItemReleasesItsClaim(t *testing.T) {
 	ctx := context.Background()
 	_ = s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"})
 	_ = s.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "h"})
-	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨")
+	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AddItem(ctx, model.Item{Project: "p", ID: "x", Title: "t", Body: "b", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimItem(ctx, "p", "x", sess.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "x", sess.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	// 대조 전제: 지금은 정말로 선점돼 있다.
@@ -46,7 +46,7 @@ func TestLiveClaimDistinguishesLiveFromReleasedAndMissing(t *testing.T) {
 	ctx := context.Background()
 	_ = s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"})
 	_ = s.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "h"})
-	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨")
+	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestLiveClaimDistinguishesLiveFromReleasedAndMissing(t *testing.T) {
 		t.Fatalf("선점 행이 없는데 NotFound 가 아니다: %v", err)
 	}
 
-	if _, err := s.ClaimItem(ctx, "p", "x", sess.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "x", sess.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Tx(ctx, func(tx *Tx) error {

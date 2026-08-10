@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -163,7 +164,7 @@ func TestClaimWithUnknownSessionIsMissingRef(t *testing.T) {
 		t.Fatalf("전제가 깨졌다 — 항목 등록 실패: %v", err)
 	}
 
-	_, err := s.ClaimItem(ctx, "p", "t9-c", "없는세션")
+	_, err := s.ClaimItem(ctx, "p", "t9-c", "없는세션", time.Time{})
 	if err == nil {
 		t.Fatal("없는 세션이 선점에 성공했다 — FK 가 안 물고 있다")
 	}

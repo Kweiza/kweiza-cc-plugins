@@ -472,7 +472,7 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 			"item": item.ID, "paths": len(item.Paths), "overlaps": len(res.Overlaps),
 			"outside": len(outside), "dropped_paths": clipDroppedPaths(outside),
 		})
-		c, err := t.ClaimItem(proj.ID, item.ID, in.SessionID)
+		c, err := t.ClaimItem(proj.ID, item.ID, in.SessionID, now)
 		if err != nil {
 			return err
 		}

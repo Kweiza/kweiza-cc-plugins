@@ -33,7 +33,7 @@ func TestNowSectionShowsOnlyClaimedCards(t *testing.T) {
 	_, html := f.get("")
 	now := nowSectionOf(t, html)
 
-	mustContain(t, html, "① 지금 — 잡혀 있는 작업",
+	mustContain(t, now, "① 지금 — 잡혀 있는 작업",
 		"라벨이 옛 이름이면 화면이 '생존'을 말하는 셈이 된다")
 	// 카드는 짧은 id 로 찍는다(format.short). 좌표계를 화면에 맞춰 잰다.
 	mustContain(t, now, short(held.ID), "선점을 든 카드가 없다")
@@ -96,17 +96,12 @@ func TestClaimedCardCarriesActivityBadge(t *testing.T) {
 //
 // ★ 단정을 페이지 전체에 걸면 다른 절이 우연히 같은 문자열을 내는 순간 조용히
 // 거짓 초록이 된다 — 이 패키지가 실제로 그것을 겪었다(lane_panel_test 머리말).
+//
+// 자르는 일 자체는 sectionOf 가 한다(section_test.go — 경계가 참인지를 재는 시험이
+// 거기 붙어 있다). 이 이름은 호출부가 많아 얇은 껍질로 남긴다.
 func nowSectionOf(t *testing.T, html string) string {
 	t.Helper()
-	i := strings.Index(html, `<section id="now">`)
-	if i < 0 {
-		t.Fatal("섹션 ①이 화면에 없다")
-	}
-	sec := html[i+1:]
-	if j := strings.Index(sec, "<section"); j > 0 {
-		sec = sec[:j]
-	}
-	return sec
+	return sectionOf(t, html, "now")
 }
 
 // 창 밖인데 항목을 쥔 세션이 **①에 나온다.**
@@ -126,6 +121,10 @@ func TestNowSectionKeepsClaimHoldersOutsideTheWindow(t *testing.T) {
 	// ★ 신호는 안 심는다 — openSession + claimOne(pick) 둘 다 Beat 를 안 부르므로
 	// 이 세션은 애초에 signal 행이 0건이다. opened_at 만으로 ListLive 의 창 판정과
 	// ActivityOf 의 "활동 없음" 판정이 둘 다 완결된다.
+	//
+	// ★ 이 SQL 우회도 이제 필수가 아니다(Tx.OpenSession 이 시각을 주입받는다 —
+	// injected_clock_test.go). 남긴 이유는 형제 시험과 같다: 이 시험이 재는 것은 창 판정이
+	// 아니라 **창 밖 선점자가 ①에 남는다**는 필터의 성질이다.
 	old := time.Now().UTC().Add(-12 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
 	if _, err := f.st.DB().Exec(`UPDATE session SET opened_at = ? WHERE id = ?`, old, stale.ID); err != nil {
 		t.Fatalf("개시 시각 되돌리기 실패: %v", err)

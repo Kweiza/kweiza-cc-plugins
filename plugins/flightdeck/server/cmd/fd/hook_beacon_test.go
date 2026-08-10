@@ -106,7 +106,7 @@ func TestClearKeepsOneCardAndItsClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("항목 등록 실패: %v", err)
 	}
-	if _, err := h.st.ClaimItem(ctx, h.project, itemID, cardA.ID); err != nil {
+	if _, err := h.st.ClaimItem(ctx, h.project, itemID, cardA.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 	if got, _ := h.st.ClaimedItems(ctx, cardA.ID); len(got) != 1 {
@@ -359,7 +359,7 @@ func TestABeaconFromAnotherWorktreeIsNotOurs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("항목 등록 실패: %v", err)
 	}
-	if _, err := h.st.ClaimItem(ctx, h.project, itemID, otherCard.ID); err != nil {
+	if _, err := h.st.ClaimItem(ctx, h.project, itemID, otherCard.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 

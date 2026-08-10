@@ -30,9 +30,10 @@ func claimed(t *testing.T) (*fixture, string) {
 	}
 	// ★ 전제 단정 — 선점이 실제로 걸렸는가. 안 걸렸으면 아래 회수 시험은
 	//   "회수됐다"가 아니라 "애초에 없었다"를 통과시킨다.
-	//   (폐기 폼에도 같은 id 의 option 이 있으므로 **회수 폼의 줄 모양**으로 단정한다)
+	//   (폐기 폼에도 같은 id 의 option 이 있으므로 **회수 폼의 줄 모양**으로 단정한다.
+	//   그 줄 모양에 더해 ① 안에서 재면 두 표면이 두 축으로 갈린다)
 	_, html := f.get("")
-	if !strings.Contains(html, `<option value="t5-a">t5-a ←`) {
+	if !strings.Contains(nowSectionOf(t, html), `<option value="t5-a">t5-a ←`) {
 		t.Fatalf("전제 실패 — 선점이 회수 대상으로 화면에 없다")
 	}
 	return f, sess.ID
@@ -52,9 +53,9 @@ func TestReclaimWithoutReasonIsRefusedAndClaimSurvives(t *testing.T) {
 			t.Fatalf("거절 사유가 응답에 없다: %q", rec.Body.String())
 		}
 	}
-	// 그리고 선점은 그대로 살아 있다.
+	// 그리고 선점은 그대로 살아 있다 — 회수 폼(①)에서 잰다.
 	_, html := f.get("")
-	mustContain(t, html, `<option value="t5-a">t5-a ←`, "거절됐는데 선점이 사라졌다")
+	mustContain(t, nowSectionOf(t, html), `<option value="t5-a">t5-a ←`, "거절됐는데 선점이 사라졌다")
 }
 
 func TestReclaimReleasesClaimAndLeavesJudgment(t *testing.T) {
@@ -78,14 +79,18 @@ func TestReclaimReleasesClaimAndLeavesJudgment(t *testing.T) {
 	f.h.ServeHTTP(rec2, req)
 	html := rec2.Body.String()
 
+	// 알림은 <main> 밖(header 바로 아래)이라 절이 없다 — 페이지 전체가 맞다.
 	mustContain(t, html, "선점을 회수했다", "회수 알림이 화면에 없다")
 	// 회수 행위 자체가 추가 전용 판단으로 남는다(설계 §4).
-	mustContain(t, html, "선점 회수: t5-a", "회수가 판단(decision)으로 안 남았다")
-	mustContain(t, html, "[decision]", "판단 종류가 decision 이 아니다")
-	mustContain(t, html, "근거 다섯 축을 보고 회수한다", "회수 사유가 원장에 안 남았다")
-	// 그리고 선점은 사라지고 항목은 다시 열린다.
-	mustNotContain(t, html, `<option value="t5-a">t5-a ←`, "회수했는데 선점이 남아 있다")
-	mustContain(t, html, "t5-a", "항목 자체가 큐에서 사라졌다 — 회수는 폐기가 아니다")
+	// 질의가 없으면 ⑥이 "최근 판단"을 내므로 그 절에서 잰다 — 판단은 ⑤(막힘·요청)에도
+	// 같은 note 템플릿으로 찍히니 페이지 전체에 걸면 어느 절이 말했는지가 안 정해진다.
+	search := sectionOf(t, html, "search")
+	mustContain(t, search, "선점 회수: t5-a", "회수가 판단(decision)으로 안 남았다")
+	mustContain(t, search, "[decision]", "판단 종류가 decision 이 아니다")
+	mustContain(t, search, "근거 다섯 축을 보고 회수한다", "회수 사유가 원장에 안 남았다")
+	// 그리고 선점은 사라지고(① 회수 폼) 항목은 큐에 다시 열린다(③ 표).
+	mustNotContain(t, nowSectionOf(t, html), `<option value="t5-a">t5-a ←`, "회수했는데 선점이 남아 있다")
+	mustContain(t, sectionOf(t, html, "queue"), "t5-a", "항목 자체가 큐에서 사라졌다 — 회수는 폐기가 아니다")
 }
 
 func TestReclaimOfItemWithoutLiveClaimIs404(t *testing.T) {
@@ -121,10 +126,14 @@ func TestDropMarksItemDroppedWithReason(t *testing.T) {
 	f.h.ServeHTTP(rec2, req)
 	html := rec2.Body.String()
 
+	// 알림은 절 밖이라 페이지 전체가 맞다.
 	mustContain(t, html, "항목을 폐기했다", "폐기 알림이 화면에 없다")
-	mustContain(t, html, "dropped", "폐기 상태가 이력에 없다")
-	mustContain(t, html, "설계에서 빠진 축이라", "폐기 사유가 화면에 없다 — 사유 없는 폐기는 되짚을 수 없다")
-	mustContain(t, html, "항목 폐기: t5-c", "폐기가 판단(decision)으로 안 남았다")
+	// 폐기된 항목은 ④ 랜딩 이력의 종료 표로 간다.
+	mustContain(t, sectionOf(t, html, "landing"), "dropped", "폐기 상태가 ④ 이력에 없다")
+	// 사유는 두 자리에 남는다 — ④의 사유 칸과 ⑥의 판단. 각각을 그 자리에서 잰다.
+	mustContain(t, sectionOf(t, html, "landing"), "설계에서 빠진 축이라",
+		"폐기 사유가 ④ 이력에 없다 — 사유 없는 폐기는 되짚을 수 없다")
+	mustContain(t, sectionOf(t, html, "search"), "항목 폐기: t5-c", "폐기가 판단(decision)으로 안 남았다")
 }
 
 func TestDropRefusesAlreadyClosedItem(t *testing.T) {
@@ -152,9 +161,10 @@ func TestDropRefusesAlreadyClosedItem(t *testing.T) {
 	}
 	mustContain(t, rec.Body.String(), "이미 종료된 항목", "거절 사유가 없다")
 
-	// 그리고 원래 결과가 안 덮였다.
+	// 그리고 원래 결과가 안 덮였다. ④의 이력 표가 그 사실을 내는 자리다 —
+	// "done" 은 세 글자라 페이지 전체에 걸면 어느 절의 어느 낱말이든 만족시킨다.
 	_, html := f.get("")
-	mustContain(t, html, "done", "종료 결과가 폐기로 덮였다")
+	mustContain(t, sectionOf(t, html, "landing"), "done", "종료 결과가 폐기로 덮였다")
 }
 
 // 폐기는 그 항목의 선점을 **사유째로** 닫는다.
@@ -242,9 +252,9 @@ func TestDropClosesTheClaimWithTheDropReason(t *testing.T) {
 				}
 			}
 
-			// 그리고 그 사실을 화면이 말한다.
+			// 그리고 그 사실을 화면이 말한다 — 판단 본문이므로 ⑥에서 잰다.
 			_, html := f.get("")
-			mustContain(t, html, c.wantLine,
+			mustContain(t, sectionOf(t, html, "search"), c.wantLine,
 				"선점을 어떻게 처리했는지가 판단에 안 남았다 — force_reason 은 어느 화면도 안 읽는다")
 		})
 	}

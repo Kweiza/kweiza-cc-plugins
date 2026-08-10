@@ -184,7 +184,7 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 			return err
 		}
 
-		sess, created, err = t.OpenSession(in.Project, in.MachineID, in.Worktree, in.CCSessionID, in.Label)
+		sess, created, err = t.OpenSession(in.Project, in.MachineID, in.Worktree, in.CCSessionID, in.Label, now)
 		if err != nil {
 			return err
 		}

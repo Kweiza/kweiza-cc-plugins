@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -70,7 +71,7 @@ func TestMoveItemCarriesEveryRowKeyedByProject(t *testing.T) {
 	// 선점했다가 반납한다 — 반납해도 claim 행 자체는 남는다(released_at 만 찍힌다).
 	// 실제로 옮겨야 할 항목들이 이 모양이라 이 조건을 그대로 재현한다.
 	sess := mustSession(t, s, "from-proj", "cc-1")
-	if _, err := s.ClaimItem(ctx, "from-proj", "it-1", sess.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "from-proj", "it-1", sess.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 	if err := s.ReleaseClaim(ctx, "from-proj", "it-1", sess.ID); err != nil {
@@ -142,7 +143,7 @@ func TestMoveItemRefusesWhileClaimedAndNamesTheHolder(t *testing.T) {
 	seed(t, s, "to-proj")
 	mustItem(t, s, "from-proj", "it-1")
 	sess := mustSession(t, s, "from-proj", "cc-1")
-	if _, err := s.ClaimItem(ctx, "from-proj", "it-1", sess.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "from-proj", "it-1", sess.ID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패: %v", err)
 	}
 

@@ -23,7 +23,7 @@ func TestCountOpenIsTheSamePredicateAsListOpen(t *testing.T) {
 	if err := s.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "h"}); err != nil {
 		t.Fatal(err)
 	}
-	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨")
+	sess, _, err := s.OpenSession(ctx, "p", "m", "/wt", "cc1", "라벨", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestCountOpenIsTheSamePredicateAsListOpen(t *testing.T) {
 	}
 	// c 는 선점(claimed), d 는 종료(done), e 는 폐기(dropped). 셋 다 열림이 아니다.
 	// dropped 는 close_reason 이 비면 스키마 CHECK 가 막는다(schema.sql:155).
-	if _, err := s.ClaimItem(ctx, "p", "c", sess.ID); err != nil {
+	if _, err := s.ClaimItem(ctx, "p", "c", sess.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetItemState(ctx, "p", "d", model.ItemDone, ""); err != nil {

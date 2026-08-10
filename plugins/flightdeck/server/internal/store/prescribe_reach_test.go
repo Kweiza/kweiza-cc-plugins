@@ -45,15 +45,15 @@ func TestAckReachSplitsDenominatorByJudgmentPresence(t *testing.T) {
 
 	// 카드 셋: id1 은 판단이 있고 ack 도 했다 · id2 는 발화만 받고 판단이 0이다 ·
 	// id3 은 발화 자체가 없다.
-	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "")
+	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt1: %v", err)
 	}
-	s2, _, err := s.OpenSession(ctx, "p", "m", "/wt2", "cc-2", "")
+	s2, _, err := s.OpenSession(ctx, "p", "m", "/wt2", "cc-2", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt2: %v", err)
 	}
-	if _, _, err := s.OpenSession(ctx, "p", "m", "/wt3", "cc-3", ""); err != nil {
+	if _, _, err := s.OpenSession(ctx, "p", "m", "/wt3", "cc-3", "", time.Time{}); err != nil {
 		t.Fatalf("OpenSession wt3: %v", err)
 	}
 
@@ -107,11 +107,11 @@ func TestAckReachCountsCardsNotEvents(t *testing.T) {
 		t.Fatalf("머신 등록 실패: %v", err)
 	}
 
-	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "")
+	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt1: %v", err)
 	}
-	s2, _, err := s.OpenSession(ctx, "p", "m", "/wt2", "cc-2", "")
+	s2, _, err := s.OpenSession(ctx, "p", "m", "/wt2", "cc-2", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt2: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestAckReachCutsRecentByWindow(t *testing.T) {
 
 	sess := make([]model.Session, 0, 6)
 	for i := 1; i <= 6; i++ {
-		got, _, err := s.OpenSession(ctx, "p", "m", fmt.Sprintf("/wt%d", i), fmt.Sprintf("cc-%d", i), "")
+		got, _, err := s.OpenSession(ctx, "p", "m", fmt.Sprintf("/wt%d", i), fmt.Sprintf("cc-%d", i), "", time.Time{})
 		if err != nil {
 			t.Fatalf("OpenSession wt%d: %v", i, err)
 		}
@@ -268,11 +268,11 @@ func TestAckReachCountsConversationsNotCards(t *testing.T) {
 
 	// 한 대화("cc-1")가 워크트리를 옮겨 카드 둘이 됐다 — 이 레포에서 매일 나는 모양이다.
 	// 처방은 먼저 열린 카드에 떴고, 판단은 워크트리로 들어간 뒤 쌓였다.
-	first, _, err := s.OpenSession(ctx, "p", "m", "/repo/p", "cc-1", "")
+	first, _, err := s.OpenSession(ctx, "p", "m", "/repo/p", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession 저장소 루트: %v", err)
 	}
-	moved, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/x", "cc-1", "")
+	moved, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/x", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession 워크트리: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestAckReachCountsConversationsNotCards(t *testing.T) {
 	}
 
 	// 갈리지 않은 대화 하나를 나란히 둔다 — 값이 전부 1이 되어 시험이 퇴화하는 것을 막는다.
-	solo, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/y", "cc-2", "")
+	solo, _, err := s.OpenSession(ctx, "p", "m", "/repo/p/.flightdeck/worktrees/y", "cc-2", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession 단독: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestAckReachCountsConversationsNotCards(t *testing.T) {
 	if err := s.UpsertMachine(ctx, model.Machine{ID: "m2", Hostname: "other"}); err != nil {
 		t.Fatalf("둘째 머신 등록 실패: %v", err)
 	}
-	elsewhere, _, err := s.OpenSession(ctx, "p", "m2", "/repo/p", "cc-1", "")
+	elsewhere, _, err := s.OpenSession(ctx, "p", "m2", "/repo/p", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession 다른 머신: %v", err)
 	}
@@ -344,14 +344,14 @@ func TestAckReachIsScopedToItsProject(t *testing.T) {
 	}
 
 	// p 는 한 장, q 는 두 장. 새면 p 조회가 q 의 것까지 세어 수가 커진다.
-	mine, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "")
+	mine, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt1: %v", err)
 	}
 	s.LogEvent(ctx, "prescribe", "p", mine.ID, map[string]any{"key": "k"})
 	s.LogEvent(ctx, "prescribe_ack", "p", mine.ID, map[string]any{"keys": []string{"k"}})
 	for i, cc := range []string{"cc-2", "cc-3"} {
-		other, _, err := s.OpenSession(ctx, "q", "m", fmt.Sprintf("/wtq%d", i), cc, "")
+		other, _, err := s.OpenSession(ctx, "q", "m", fmt.Sprintf("/wtq%d", i), cc, "", time.Time{})
 		if err != nil {
 			t.Fatalf("OpenSession %s: %v", cc, err)
 		}
@@ -399,7 +399,7 @@ func TestAckReachDoesNotCutJudgmentAge(t *testing.T) {
 	if err := s.UpsertMachine(ctx, model.Machine{ID: "m", Hostname: "dev"}); err != nil {
 		t.Fatalf("머신 등록 실패: %v", err)
 	}
-	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "")
+	s1, _, err := s.OpenSession(ctx, "p", "m", "/wt1", "cc-1", "", time.Time{})
 	if err != nil {
 		t.Fatalf("OpenSession wt1: %v", err)
 	}

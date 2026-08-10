@@ -34,7 +34,14 @@ import (
 // label 은 표시 전용이라 재개 때 최신 선언이 이긴다. 그리고 **state 가 done 이면 active 로
 // 되살린다** — 여는 것은 관측이고, 사실이 앞선 판정을 이겨야 하기 때문이다(아래 ★ 참고).
 // 그 둘 말고 다른 컬럼은 건드리지 않는다 — 재개는 관측이지 재선언이 아니다.
-func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string) (model.Session, bool, error) {
+// at 은 **개시 시각**이다. 영값이면 지금이다(Beat·Touch 와 같은 문법).
+//
+// ★ 이 값이 화면 축이라 주입을 받는다. ①은 카드마다 `열림 N` 을 찍고, 창 판정
+// (ListLive)도 이 컬럼 하나로 완결된다 — 저장층이 실시계를 찍으면 시험이 화면과 다른
+// 좌표계를 재게 되어 그 두 축이 원리적으로 검증되지 않는다. 재개 경로는 이 값을
+// 안 쓴다(재개는 관측이지 재선언이 아니다 — opened_at 을 갱신하면 "언제부터 열려
+// 있었나"가 통째로 사라진다).
+func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string, at time.Time) (model.Session, bool, error) {
 	if project == "" || machineID == "" || worktree == "" || ccSessionID == "" {
 		return model.Session{}, false, fmt.Errorf(
 			"세션 3중키와 프로젝트는 전부 필요하다(project=%q machine=%q worktree=%q cc_session=%q)",
@@ -82,7 +89,7 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 		CCSessionID: ccSessionID,
 		Label:       label,
 		State:       model.SessionActive,
-		OpenedAt:    nowStamp(),
+		OpenedAt:    atStamp(at),
 	}
 	// UNIQUE 위반은 그대로 올린다. 여기 오는 유일한 경로는 위 조회 이후 남이 같은
 	// 3중키를 넣은 것인데, 이 트랜잭션은 BEGIN IMMEDIATE 라 그 창이 없다.
@@ -101,12 +108,12 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 }
 
 // OpenSession 은 단발 트랜잭션으로 감싼 것이다.
-func (s *Store) OpenSession(ctx context.Context, project, machineID, worktree, ccSessionID, label string) (model.Session, bool, error) {
+func (s *Store) OpenSession(ctx context.Context, project, machineID, worktree, ccSessionID, label string, at time.Time) (model.Session, bool, error) {
 	var out model.Session
 	var created bool
 	err := s.Tx(ctx, func(t *Tx) error {
 		var e error
-		out, created, e = t.OpenSession(project, machineID, worktree, ccSessionID, label)
+		out, created, e = t.OpenSession(project, machineID, worktree, ccSessionID, label, at)
 		return e
 	})
 	return out, created, err

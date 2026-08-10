@@ -262,7 +262,7 @@ func claimItemForPrescribeTest(t *testing.T, s *Service, st *store.Store, sessio
 		t.Fatalf("세션 조회 실패: %v", err)
 	}
 	addItem(t, s, sess.Project, itemID, paths, nil)
-	if _, err := st.ClaimItem(ctx(), sess.Project, itemID, sessionID); err != nil {
+	if _, err := st.ClaimItem(ctx(), sess.Project, itemID, sessionID, time.Time{}); err != nil {
 		t.Fatalf("선점 실패(%s): %v", itemID, err)
 	}
 }

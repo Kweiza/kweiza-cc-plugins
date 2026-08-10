@@ -46,7 +46,7 @@ func Apply(ctx context.Context, st *store.Store, p ImportPlan, projectPath strin
 
 		// ── 세션과 그 절
 		for _, ps := range p.Sessions {
-			s, _, err := tx.OpenSession(p.Project, LegacyMachineID, ps.Card.Worktree, ps.CCSessionID, ps.Card.Desc)
+			s, _, err := tx.OpenSession(p.Project, LegacyMachineID, ps.Card.Worktree, ps.CCSessionID, ps.Card.Desc, time.Time{})
 			if err != nil {
 				return fmt.Errorf("세션 등록 실패(%s): %w", clip(ps.Card.File, 64), err)
 			}
