@@ -369,7 +369,7 @@ type SessionView struct {
 	Paths   []string                 // footprint ∪ change_set
 	// PathDelta 는 Paths 중 규모를 잰 것의 증감이다(커밋 구간 + 미커밋 구간의 **합**).
 	//
-	// ★ **없는 키는 0 이 아니라 "못 읽었다"** 다 — 바로 아래 Signals 와 같은 관용이다.
+	// ★ **없는 키는 0 이 아니라 "못 읽었다"** 다 — 바로 위 Signals 와 같은 관용이다.
 	// 이진 파일 · 미추적 파일 · footprint 에만 있는 경로 · git 파생 실패가 그 자리다.
 	// Paths 와 합치지 않는 이유가 이것이다: 합치면 "바뀌었는데 못 쟀다"를 표현할 수 없다.
 	//

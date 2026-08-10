@@ -51,6 +51,65 @@ func TestUnionPathsDedupesSortsAndDropsEmpty(t *testing.T) {
 	}
 }
 
+// MergeDelta 가 "합이냐 덮어쓰기냐"라는 이 기능의 불변식이 사는 유일한 자리다.
+// 여기가 덮어쓰기로 조용히 바뀌면 규모가 작아지는데, board.go 를 거치는 통합 시험
+// 하나로는 그 경계가 안 잡힌다.
+
+func TestMergeDeltaSumsOverlappingKeysInsteadOfOverwriting(t *testing.T) {
+	committed := map[string]model.LineDelta{"pipeline/run.py": {Added: 2, Removed: 1}}
+	uncommitted := map[string]model.LineDelta{"pipeline/run.py": {Added: 1, Removed: 0}}
+	got := MergeDelta(committed, uncommitted)
+	want := model.LineDelta{Added: 3, Removed: 1}
+	if got["pipeline/run.py"] != want {
+		t.Fatalf("MergeDelta 가 겹치는 키를 %+v 로 냈다, 기대 %+v — 덮어쓰기면 나중 집합만 남는다",
+			got["pipeline/run.py"], want)
+	}
+}
+
+func TestMergeDeltaAddsThreeOrMoreSets(t *testing.T) {
+	a := map[string]model.LineDelta{"x": {Added: 1}}
+	b := map[string]model.LineDelta{"x": {Added: 1}}
+	c := map[string]model.LineDelta{"x": {Added: 1}}
+	got := MergeDelta(a, b, c)
+	want := model.LineDelta{Added: 3}
+	if got["x"] != want {
+		t.Fatalf("3-way 합이 %+v 다, 기대 %+v — 가변 인자가 둘로 굳어 있으면 셋째 집합이 조용히 빠진다",
+			got["x"], want)
+	}
+}
+
+func TestMergeDeltaNeverInventsAKeyAbsentFromAllInputs(t *testing.T) {
+	a := map[string]model.LineDelta{"x": {Added: 1}}
+	var b map[string]model.LineDelta // nil 이 섞여도 안전해야 한다
+	got := MergeDelta(a, b)
+	if _, ok := got["y"]; ok {
+		t.Fatalf("어느 입력에도 없던 키 y 가 결과에 생겼다: %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("nil 맵이 섞이면 안전해야 하는데 결과가 %v 다", got)
+	}
+}
+
+func TestMergeDeltaOfNothingIsNilAndSafeToRangeOrLookup(t *testing.T) {
+	got := MergeDelta()
+	if got != nil {
+		t.Fatalf("입력이 없으면 nil 이어야 한다: %v", got)
+	}
+	// board.go 는 이 반환값을 그대로 card.View.PathDelta 에 담고 다음 호출의 입력으로
+	// 다시 넘긴다 — 여기서 순회·조회가 패닉이면 그 재사용 전체가 죽는다.
+	for range got {
+		t.Fatalf("nil 맵은 아무것도 순회하면 안 된다")
+	}
+	if v, ok := got["아무거나"]; ok || v != (model.LineDelta{}) {
+		t.Fatalf("nil 맵 조회가 안전하지 않다: v=%+v ok=%v", v, ok)
+	}
+
+	empty := map[string]model.LineDelta{}
+	if got := MergeDelta(empty, empty, nil); got != nil {
+		t.Fatalf("전부 비어 있으면(빈 맵·nil 맵 섞여도) nil 이어야 한다: %v", got)
+	}
+}
+
 func TestFreshnessOfSeparatesUnreadFromPartial(t *testing.T) {
 	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
