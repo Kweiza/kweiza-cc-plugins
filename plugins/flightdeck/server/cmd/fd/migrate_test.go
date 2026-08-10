@@ -342,3 +342,69 @@ func TestExportJudgmentsLeavesDBUntouched(t *testing.T) {
 			before.Size(), before.ModTime(), after.Size(), after.ModTime())
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ② `ours` 우회의 **음성** 시험 — 되돌릴 수 없는 덮어쓰기를 막는 가드다
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// migrate.go 의 우회는 셋을 곱한다:
+//
+//	ours := *toJudgments && v.Code == "not-empty" && ledger.IsOurOutput(*outDir)
+//
+// 그런데 이 셋 중 뒤 둘을 지우고 `ours := *toJudgments` 로 낮춰도 `go test ./cmd/fd/...`
+// 가 초록이었다(리뷰가 변이로 재현). 즉 **덮어쓰기를 막는 가드에 시험이 없었다** —
+// 자기 산출물을 알아보는 쪽(TestExportJudgmentsRerunNeedsNoForce)만 있었다.
+//
+// 아래 둘이 그 곱을 각각 잠근다.
+
+// 남의 파일이 있는 자리는 --judgments 라도 거절한다. 자기 산출물이 아니기 때문이다.
+func TestExportJudgmentsRefusesSomeoneElsesDirectory(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	outDir := filepath.Join(t.TempDir(), "남의자리")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("자리 만들기 실패: %v", err)
+	}
+	// 우리 매니페스트가 아니다 — IsOurOutput 이 거짓이어야 한다.
+	if err := os.WriteFile(filepath.Join(outDir, "누군가의-메모.txt"), []byte("건드리지 마라"), 0o600); err != nil {
+		t.Fatalf("남의 파일 쓰기 실패: %v", err)
+	}
+
+	rc, out := h.run("", "export", "--judgments", "--out", outDir, "--db", h.db)
+	if rc == 0 {
+		t.Fatalf("남의 파일이 있는 자리에 --force 없이 내보냈다 — 되돌릴 수 없는 덮어쓰기다:\n%s", out)
+	}
+	mustContain(t, "거절 문구", out, "되쓰기 거절", "not-empty")
+	// 남의 파일이 그대로 있어야 한다.
+	if _, err := os.Stat(filepath.Join(outDir, "누군가의-메모.txt")); err != nil {
+		t.Errorf("거절했다면서 남의 파일을 건드렸다: %v", err)
+	}
+}
+
+// git 작업 트리는 --judgments 에 --force 를 줘도 안 뚫린다(ForceAllows 가 안 허용한다).
+func TestExportJudgmentsRefusesGitWorktreeEvenWithForce(t *testing.T) {
+	h := newHarness(t)
+	h.closeStore()
+	defer h.openStore()
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("레포 흉내 실패: %v", err)
+	}
+	outDir := filepath.Join(repo, "ledger-out")
+
+	for _, force := range []bool{false, true} {
+		args := []string{"export", "--judgments", "--out", outDir, "--db", h.db}
+		if force {
+			args = append(args, "--force")
+		}
+		rc, out := h.run("", args...)
+		if rc == 0 {
+			t.Fatalf("git 작업 트리 안에 내보냈다(force=%v) — 판단 본문 몇 MB 가 "+
+				"레포에 섞여 들어간다:\n%s", force, out)
+		}
+		mustContain(t, "거절 문구", out, "되쓰기 거절", "git-worktree")
+	}
+}
