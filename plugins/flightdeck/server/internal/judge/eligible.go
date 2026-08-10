@@ -268,6 +268,9 @@ func OverlapsWithLive(paths []string, live []LiveSession, self, selfCC string) [
 			}
 			o.TheirDelta[p[1]] = d
 		}
+		// ★ 쌍도 여기서 세운다 — 호출부가 따로 부르게 두면 그 호출을 빠뜨린 표면이 생기고,
+		//   그것이 곧 "판정이 두 자리"다(이 패키지가 워크트리·머신·프로젝트 축에서 세 번 겪었다).
+		SortPairsBySize(o)
 		out = append(out, o)
 	}
 	SortOverlapsBySize(out)
@@ -304,6 +307,51 @@ func SortOverlapsBySize(os []Overlap) {
 		}
 		return os[i].SessionID < os[j].SessionID
 	})
+}
+
+// SortPairsBySize 는 겹침 하나의 **경로쌍**을 상대 규모 큰 순으로 세운다(제자리). 순수 함수다.
+//
+// ★ **규칙은 세션 층(SortOverlapsBySize)과 같은 하나다** — 못 읽은 것 먼저(`+∞`) · 그다음
+// 증감합 내림차순 · 동점은 경로 이름. 두 층에 다른 규칙을 두면 머리줄의 "상대 규모 큰 순"이라는
+// 한 문장이 두 뜻이 되고, 읽는 쪽은 어느 층을 말하는지 모른다.
+//
+// ★ **왜 필요한가.** 화면은 한 세션의 쌍을 앞 4개만 낸다(mcpsrv 의 쌍 절단). 정렬이 없으면
+// 그 넷이 내 경로 오름차순이라, 제일 큰 개정이 알파벳상 다섯째에 있으면 **그 세션이 맨 위에
+// 서는 이유가 화면에 안 보인다.** 순서에 뜻이 생겼는데 화면이 그것을 못 보여 주는 상태다.
+//
+// ★★ **처방은 이 정렬에 안 걸린다 — 그것이 이 설계가 성립하는 조건이다.**
+// prescribe.go 의 overlapPrescriptions 는 `Overlap.Pairs` 를 **안 읽고** `OverlapPairs` 를
+// 자기가 다시 부른다(그 함수는 입력 순서를 그대로 낸다). 그래서 여기서 순서를 바꿔도 처방이
+// 지목하는 경로는 안 바뀐다. 걸렸다면 못 바꿨을 것이다 — 처방 경로는 git 을 안 돌아 규모를
+// **원리적으로** 모르므로(설계 §6), 두 표면의 쌍 순서가 갈렸을 것이기 때문이다.
+// TestOverlapPairsIsUntouchedByPrescriptions 가 그 전제를 잠근다.
+func SortPairsBySize(o Overlap) {
+	sort.SliceStable(o.Pairs, func(i, j int) bool {
+		ui, si := pairWeight(o, o.Pairs[i])
+		uj, sj := pairWeight(o, o.Pairs[j])
+		if ui != uj {
+			return ui // 못 읽은 쪽이 위
+		}
+		if si != sj {
+			return si > sj
+		}
+		if o.Pairs[i][1] != o.Pairs[j][1] {
+			return o.Pairs[i][1] < o.Pairs[j][1]
+		}
+		return o.Pairs[i][0] < o.Pairs[j][0]
+	})
+}
+
+// pairWeight 는 쌍 하나의 정렬 키다 — (규모를 못 읽었나, 증감합).
+//
+// 세션 층의 overlapWeight 와 달리 **최대가 아니라 그 쌍 자신의 합**이다. 쌍은 하나뿐이므로
+// 최대라는 개념이 없다 — 같은 규칙의 같은 자리에서 층만 다른 것이다.
+func pairWeight(o Overlap, p [2]string) (unknown bool, sum int) {
+	d, ok := o.TheirDelta[p[1]]
+	if !ok {
+		return true, 0
+	}
+	return false, d.Added + d.Removed
 }
 
 // overlapWeight 는 정렬 키다 — (못 읽은 쌍이 하나라도 있나, 아는 쌍 중 최대 증감합).
