@@ -1212,7 +1212,18 @@ type Leftover struct {
 	// 든 옛 자리가 고유 0 이라 **디렉토리째 화면에서 사라진다** — 조용히 버리는 것이
 	// 하나도 없어야 한다(설계 §9). 줄 수가 존재 판정이고 판단 수는 요약이다.
 	RejectedJudgments int
-	Err               string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
+	// RejectedBytes 는 그 자리의 격리가 차지한 바이트다.
+	//
+	// ★★ **이 필드가 없어서 화면이 어긋났다.** 「보관 자리」 줄은 `Outbox.Retention()` 을
+	// 쓰는데 그것은 **고정 자리만** 잰다. 그래서 옛 채널 자리에 격리가 남아 있어도
+	// `격리 0바이트` 로 나오고, **바로 아래 줄이 같은 자리를 「격리 기록 1건」이라고 말한다**
+	// (실측 2026-08-11 0.16.0: 그 1건이 577바이트였다). 사람은 두 줄 중 무엇이 참인지 골라야 했다.
+	//
+	// ★ 합산하지 않고 **자리별로** 낸다. 이 자리들은 채널마다 갈려 있던 시절의 잔재라
+	// 개수가 머신마다 다르고, 합치면 "어디를 지워야 하나"가 화면에서 사라진다 —
+	// 보관소는 제 큐 옆에 남는 것이 설계이므로(§7) 그 자리 이름이 곧 처방이다.
+	RejectedBytes int64
+	Err           string // 셀 수 없었으면 그 사유. 비어 있을 수 있다
 }
 
 // leftover 는 이 큐에 남은 것을 **읽기만 해서** 센다.
@@ -1231,6 +1242,13 @@ func (o *Outbox) leftover() Leftover {
 	} else {
 		tal := TallyRejected(rs)
 		lo.Rejected, lo.RejectedJudgments = tal.Lines, tal.Judgments
+	}
+	// ★ 크기는 **같은 Retention 함수**로 잰다. 여기서 따로 세면 두 화면이 같은 파일에
+	//   다른 수를 말하게 되고, 그 어긋남이 정확히 이 항목이 고치는 것이다.
+	ret := o.Retention()
+	lo.RejectedBytes = ret.Rejected
+	if ret.Err != "" {
+		lo.Err = strings.TrimSpace(lo.Err + " " + ret.Err)
 	}
 	return lo
 }

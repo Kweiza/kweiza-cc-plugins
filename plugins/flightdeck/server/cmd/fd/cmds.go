@@ -1075,12 +1075,18 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 근거 없이 회전을 만들면 "어느 시점 이후를 못 본다"는 새 구멍이 열린다. 여기서 하는
 	// 것은 **그 사실을 화면에 두는 것**이다: 언젠가 커졌을 때 그 수가 거기 있고, 그때
 	// 근거를 갖고 판정한다. 상한 없는 자리를 화면 밖에 두는 것이 이 항목이 지적한 결함이다.
+	// ★ **자리를 함께 찍는다.** 앞선 판은 이 줄만 자리를 안 밝혔고(바로 위 「아웃박스 대기」는
+	// 괄호로 찍는다), 이 수가 **고정 자리만** 재는 것이라 옛 채널 자리에 격리가 남아 있으면
+	// `격리 0바이트` 다음 줄에 「옛 자리 … 격리 기록 1건」이 오는 화면이 됐다
+	// (실측 2026-08-11 0.16.0). 사람은 두 줄 중 무엇이 참인지 골라야 했다.
+	// 옛 자리의 크기는 아래 옛 자리 줄이 **자기 자리 이름과 함께** 낸다 — 합치지 않는 이유는
+	// 보관소가 제 큐 옆에 남는 것이 설계라(§7) 그 자리 이름이 곧 처방이기 때문이다.
 	if ret := a.cli.Outbox.Retention(); ret.Err != "" {
 		fmt.Fprintf(out, "  ! 보관 자리를 재다 걸렸다: %s\n", clip(ret.Err, 200))
 	} else {
-		fmt.Fprintf(out, "  보관 자리 — 격리 %s · 잠금실패 기록 %s "+
+		fmt.Fprintf(out, "  보관 자리 %s — 격리 %s · 잠금실패 기록 %s "+
 			"(**둘 다 비우는 경로가 없다** — 지우려면 사람이 지운다)\n",
-			humanBytes(ret.Rejected), humanBytes(ret.FailOpen))
+			a.cli.Outbox.Dir(), humanBytes(ret.Rejected), humanBytes(ret.FailOpen))
 	}
 	//
 	// ★ 격리 쪽은 고정 자리와 **같은 축으로** 가른다. 이 자리를 빼면 처방이 이 머신에 안
@@ -1088,8 +1094,10 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 	// 1줄이 전부이고 고정 자리에는 파일이 없다. 여기서 안 가르면 겹친 재생의 흔적이
 	// 이 머신에서는 영영 건수 하나로만 보인다.
 	for _, lo := range a.cli.LegacyLeftovers() {
-		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 기록 %d건 · 고유 판단 %d건(그 자리에 남는다)\n",
-			lo.Dir, lo.Pending, lo.Rejected, lo.RejectedJudgments)
+		// ★ **크기를 함께 낸다.** 건수만 내면 위 「보관 자리」 줄의 바이트와 나란히 놓였을 때
+		//   그 자리가 0 바이트인 것으로 읽힌다 — 이 자리도 비우는 경로가 없는데.
+		fmt.Fprintf(out, "  ! 옛 자리 %s — 대기 %d건(다음 재생이 보낸다) · 격리 기록 %d건 · 고유 판단 %d건 · %s(그 자리에 남는다)\n",
+			lo.Dir, lo.Pending, lo.Rejected, lo.RejectedJudgments, humanBytes(lo.RejectedBytes))
 		if lo.Err != "" {
 			fmt.Fprintf(out, "      ! 세다 걸렸다: %s\n", clip(lo.Err, 200))
 		}

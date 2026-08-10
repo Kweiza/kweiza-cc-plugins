@@ -484,3 +484,65 @@ func TestRetentionCountsBothQuarantineFormats(t *testing.T) {
 			legacyOnly.Rejected, both.Rejected)
 	}
 }
+
+// ── 보관 축이 자리를 밝힌다 ──────────────────────────────────────────────────
+
+// 옛 채널 자리에만 격리가 있을 때 **화면이 자기모순을 안 만든다.**
+//
+// ★★ 이것이 `fd-retention-axis-blind-to-legacy-channel-dirs` 의 본체다. 0.16.0 실물
+// 화면에서 이렇게 나왔다:
+//
+//	보관 자리 — 격리 0바이트 · 잠금실패 기록 0바이트 (**둘 다 비우는 경로가 없다** …)
+//	! 옛 자리 …/outbox — 대기 0건 · 격리 기록 1건 · 고유 판단 1건(그 자리에 남는다)
+//
+// 그 1건은 **577바이트**다. `Outbox.Retention()` 이 고정 자리만 재는데 그 줄이 자리를
+// 안 밝혀서, 두 줄이 같은 것을 두고 서로 다른 말을 하는 것으로 읽혔다.
+//
+// ★ 고친 방향은 **합산이 아니라 자리 밝히기**다. 보관소는 제 큐 옆에 남는 것이 설계라
+// (§7) 그 자리 이름이 곧 처방이고, 합치면 "어디를 지워야 하나"가 화면에서 사라진다.
+func TestDoctorNeverSaysZeroBytesWhileNamingALegacyQuarantine(t *testing.T) {
+	h := newHarness(t)
+	legacyHome := filepath.Join(h.home, ".local", "state", "flightdeck", "outbox")
+	seedRejected(t, legacyHome, [2]string{"old:aaaa", "서버가 409 로 거절했다: 가리키는 좌표가 없다"})
+
+	code, out := h.run("", "doctor")
+	if code != 0 {
+		t.Fatalf("doctor 가 %d 로 끝났다:\n%s", code, out)
+	}
+	// ① 보관 자리 줄이 **어느 자리인지** 밝힌다. 안 밝히면 아래 옛 자리 줄과 같은 것을
+	//    말하는 줄로 읽힌다.
+	fixed, _ := OutboxPath(envOf(h.env), homeDir(envOf(h.env)))
+	if !strings.Contains(out, "보관 자리 "+fixed) {
+		t.Errorf("보관 자리 줄이 자리를 안 찍는다 — 어느 자리의 0바이트인지 알 수 없다:\n%s", out)
+	}
+	// ② 옛 자리 줄이 **크기를 낸다.** 건수만 내면 위 줄의 0바이트와 나란히 놓여
+	//    그 자리도 비어 있는 것으로 읽힌다.
+	if !strings.Contains(out, "고유 판단 1건 · ") {
+		t.Fatalf("옛 자리 줄에 크기가 없다:\n%s", out)
+	}
+	if strings.Contains(out, "고유 판단 1건 · 0바이트") {
+		t.Errorf("옛 자리에 격리를 심었는데 크기가 0바이트다 — 재는 자리가 그 파일에 안 닿는다:\n%s", out)
+	}
+}
+
+// 옛 자리의 크기는 **보관 자리 줄과 같은 함수**로 잰다.
+//
+// ★ 두 화면이 같은 파일에 다른 수를 말하면 그 자체가 이 항목이 고친 결함의 재발이다.
+// `leftover()` 가 크기를 따로 세지 않고 `Retention()` 을 부르는 것을 여기서 붙든다.
+func TestLeftoverBytesMatchRetention(t *testing.T) {
+	o := mkOutbox(t)
+	seedRejected(t, o.Dir(), [2]string{"s1:aaaa", "옛 형식 줄"})
+	if err := o.quarantine(RejectedEntry{
+		Entry: entry("s1:bbbb"), Reason: "새 형식 사건", At: o.stamp()}); err != nil {
+		t.Fatalf("격리를 못 심었다: %v", err)
+	}
+	lo := o.leftover()
+	ret := o.Retention()
+	if lo.RejectedBytes != ret.Rejected {
+		t.Errorf("옛 자리 줄이 %d바이트, 보관 자리 줄이 %d바이트다 — 같은 파일에 두 수를 말한다",
+			lo.RejectedBytes, ret.Rejected)
+	}
+	if lo.RejectedBytes == 0 {
+		t.Error("두 형식을 심었는데 0바이트다 — 두 수가 같기만 하고 둘 다 안 재는 갈래다")
+	}
+}
