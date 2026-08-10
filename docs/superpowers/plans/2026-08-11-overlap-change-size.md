@@ -1186,13 +1186,31 @@ func renderDelta(m map[string]model.LineDelta, path string) string {
 			"겹침 %d건 (거르지 않고 알린다 · 상대 규모 큰 순):", len(in.Overlaps)))
 ```
 
-`:1734-1736`(절단 줄) — **순서에 뜻이 생겼으므로 무엇이 잘렸는지 말한다.** 화면이 말 안 한 주장을 하면 안 된다.
+`:1734-1751`(절단 줄) — **순서에 뜻이 생겼으므로 무엇이 잘렸는지 말한다.** 화면이 말 안 한 주장을 하면 안 된다.
+
+**절단 줄은 조건부다.** 정렬(`judge.SortOverlapsBySize`)이 못 읽은 것을 맨 위로 올리지만,
+그것은 잘리는 쪽에 못 읽은 것이 **못 섞인다**는 보장이 아니다 — 못 읽은 겹침이
+`tailOverlapLimit` 보다 많으면(git 파생이 통째로 실패하면 전부가 그렇다) 잘리는 쪽에도
+섞인다. 그때 무조건 "제일 작은 쪽"이라 말하면 거짓이다. 판정은 정렬이 쓰는 것과 같은 한
+자리(`judge.OverlapHasUnknownSize`, 공개 함수로 `judge/eligible.go` 에 신설하고
+`overlapWeight` 도 그것을 쓰도록 고친다)로 한다:
 
 ```go
+		cutReason := "제일 작은 쪽이다"
+		if len(in.Overlaps) > tailOverlapLimit {
+			for _, c := range in.Overlaps[tailOverlapLimit:] {
+				if judge.OverlapHasUnknownSize(c) {
+					cutReason = "규모를 못 읽은 것이 섞여 있다 — 작다는 뜻이 아니다"
+					break
+				}
+			}
+		}
+
+		for i, o := range in.Overlaps {
 			if i >= tailOverlapLimit {
 				lines = append(lines, fmt.Sprintf(
-					"  · … %d건 더(제일 작은 쪽이다) — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
-					len(in.Overlaps)-tailOverlapLimit))
+					"  · … %d건 더(%s) — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
+					len(in.Overlaps)-tailOverlapLimit, cutReason))
 				break
 			}
 ```

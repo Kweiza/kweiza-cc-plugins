@@ -1743,11 +1743,29 @@ func RenderTail(in TailInput) string {
 	default:
 		lines = append(lines, fmt.Sprintf(
 			"겹침 %d건 (거르지 않고 알린다 · 상대 규모 큰 순):", len(in.Overlaps)))
+
+		// ★ 정렬(judge.SortOverlapsBySize)이 못 읽은 것을 맨 위로 올리므로, 잘리는 쪽
+		// (in.Overlaps[tailOverlapLimit:])에도 못 읽은 것이 섞일 수 있다 — git 파생이
+		// 통째로 실패하면(프로젝트 경로를 모를 때 · git 이 없을 때) 모든 겹침이 한꺼번에
+		// 못 읽음이 되고, 그 열화 상태에서는 "제일 작은 쪽"이 거짓이 된다. 잘리는 쪽을
+		// 실제로 살펴 갈라 말한다 — 판정은 judge.OverlapHasUnknownSize 한 자리다
+		// (정렬이 쓰는 판정과 다른 판정을 쓰면 정렬은 위로 올리는데 문구는 아래라고
+		// 말하는 어긋남이 생긴다).
+		cutReason := "제일 작은 쪽이다"
+		if len(in.Overlaps) > tailOverlapLimit {
+			for _, c := range in.Overlaps[tailOverlapLimit:] {
+				if judge.OverlapHasUnknownSize(c) {
+					cutReason = "규모를 못 읽은 것이 섞여 있다 — 작다는 뜻이 아니다"
+					break
+				}
+			}
+		}
+
 		for i, o := range in.Overlaps {
 			if i >= tailOverlapLimit {
 				lines = append(lines, fmt.Sprintf(
-					"  · … %d건 더(제일 작은 쪽이다) — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
-					len(in.Overlaps)-tailOverlapLimit))
+					"  · … %d건 더(%s) — 수는 위 머리줄이 전부 센 값이다. 이름까지는 board 가 낸다",
+					len(in.Overlaps)-tailOverlapLimit, cutReason))
 				break
 			}
 			pairs := make([]string, 0, len(o.Pairs))

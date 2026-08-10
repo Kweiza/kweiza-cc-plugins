@@ -311,10 +311,10 @@ func SortOverlapsBySize(os []Overlap) {
 // ★ 합이 아니라 **최대**다. 겹침이 여럿일 때 알아야 하는 것은 "제일 큰 것이 얼마나 큰가"이지
 // 총량이 아니다 — 작은 파일 열 개가 47줄 개정 하나보다 위로 오면 안 된다.
 func overlapWeight(o Overlap) (unknown bool, max int) {
+	unknown = OverlapHasUnknownSize(o)
 	for _, p := range o.Pairs {
 		d, ok := o.TheirDelta[p[1]]
 		if !ok {
-			unknown = true
 			continue
 		}
 		if s := d.Added + d.Removed; s > max {
@@ -322,4 +322,19 @@ func overlapWeight(o Overlap) (unknown bool, max int) {
 		}
 	}
 	return unknown, max
+}
+
+// OverlapHasUnknownSize 는 이 겹침에 규모를 못 읽은 경로쌍이 하나라도 있는지다. 순수 함수다.
+//
+// ★ **판정이 한 자리인 것이 요점이다.** 이것을 쓰는 곳이 둘이다 — 정렬(overlapWeight 가
+// 못 읽은 것을 +∞ 로 친다)과 화면(절단 줄이 "제일 작은 쪽"이라고 말해도 되는지). 두 자리가
+// 각자 판정하면 정렬은 위로 올리는데 문구는 아래라고 말하는 어긋남이 생기고, 그 어긋남은
+// 화면에 안 뜬다.
+func OverlapHasUnknownSize(o Overlap) bool {
+	for _, p := range o.Pairs {
+		if _, ok := o.TheirDelta[p[1]]; !ok {
+			return true
+		}
+	}
+	return false
 }

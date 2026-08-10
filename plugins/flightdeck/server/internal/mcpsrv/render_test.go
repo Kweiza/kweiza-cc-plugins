@@ -140,6 +140,8 @@ func TestTailNeverRendersUnknownSizeAsZero(t *testing.T) {
 	}
 }
 
+// ★ 잘리는 쪽(마지막 2건)도 전부 TheirDelta 를 가진다 — "제일 작은 쪽이다"라고
+// 단언해도 되는 입력이라는 것을 이 시험 스스로가 보장한다.
 func TestTailSaysWhatWasCutWhenOverlapsAreTruncated(t *testing.T) {
 	var os []judge.Overlap
 	for i := 0; i < tailOverlapLimit+2; i++ {
@@ -154,6 +156,29 @@ func TestTailSaysWhatWasCutWhenOverlapsAreTruncated(t *testing.T) {
 	out := RenderTail(TailInput{NotesObserved: true, OverlapsObserved: true, Overlaps: os})
 	if !strings.Contains(out, "제일 작은 쪽") {
 		t.Errorf("잘린 것이 무엇인지 안 말한다 — 정렬에 뜻이 생겼으면 화면이 그것을 말해야 한다:\n%s", out)
+	}
+}
+
+// TestTailCutLineAdmitsUnknownSizeWhenAllOverlapsAreUnmeasured 는 git 파생이 통째로
+// 실패한 상태(프로젝트 경로를 모를 때 · git 이 없을 때)를 흉내낸다 — 그때는 겹침 전부가
+// 한꺼번에 규모 미상이 된다. 정렬(judge.SortOverlapsBySize)이 못 읽은 것을 맨 위로
+// 올려도, 상한을 넘기면 잘리는 쪽에도 여전히 못 읽은 것이 섞여 있다 — 그 상태에서
+// "제일 작은 쪽"이라 단언하면 거짓말이다.
+func TestTailCutLineAdmitsUnknownSizeWhenAllOverlapsAreUnmeasured(t *testing.T) {
+	var os []judge.Overlap
+	for i := 0; i < tailOverlapLimit+2; i++ {
+		os = append(os, judge.Overlap{
+			SessionID: fmt.Sprintf("01KZPALLUNK%016d", i),
+			Pairs:     [][2]string{{"a.go", "a.go"}},
+			// TheirDelta 가 nil 이다 — 전부 규모 미상이다.
+		})
+	}
+	out := RenderTail(TailInput{NotesObserved: true, OverlapsObserved: true, Overlaps: os})
+	if strings.Contains(out, "제일 작은 쪽") {
+		t.Fatalf("전부 규모 미상인데 '제일 작은 쪽'이라 단언했다 — 못 읽은 것이 잘리는 쪽에도 섞여 있을 수 있다:\n%s", out)
+	}
+	if !strings.Contains(out, "작다는 뜻이 아니다") {
+		t.Fatalf("못 읽은 것이 섞였다는 사실이 절단 줄에 없다:\n%s", out)
 	}
 }
 
