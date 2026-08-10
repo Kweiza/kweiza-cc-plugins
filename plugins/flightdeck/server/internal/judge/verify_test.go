@@ -189,6 +189,46 @@ func TestQuotedProseWouldHavePassedSubstringSearch(t *testing.T) {
 	}
 }
 
+// TestTopLevelAlternationStaysFullyAnchored 는 anchorFullLine 이 `(?:…)` 로 감싸는
+// 이유를 못박는다. 그 함수의 주석이 위험을 이미 적어 뒀지만 **재는 시험이 없었다** —
+// 비캡처그룹을 지워도 전 스위트가 초록이었다(2026-08-10 돌연변이 실측).
+//
+// 지워지면 `^` + `PASS|CI OK` + `$` 가 되어 최상위 교대가 `^PASS` 와 `CI OK$` 로
+// 쪼개지고 **한쪽만 앵커된다.** 그 순간 이 판정은 교대 패턴에 한해 부분 문자열
+// 검색으로 되돌아간다 — TestQuotedProseWouldHavePassedSubstringSearch 가 고발한
+// 그 결함이다. 랜딩 게이트의 유일한 판정식이라(DESIGN §8) 여기가 새면 깨진
+// 브랜치가 main 에 오른다.
+//
+// ★ 반례는 **한쪽 앵커에 걸리는** 줄이어야 한다. "xxx PASS yyy" 처럼 양쪽 다 안
+// 걸리는 줄을 쓰면 두 판이 똑같이 0건이라 아무것도 안 가린다.
+func TestTopLevelAlternationStaysFullyAnchored(t *testing.T) {
+	for _, line := range []string{
+		"PASS extra junk", // `^PASS` 에 걸린다 — 앞만 앵커된 경우
+		"junk CI OK",      // `CI OK$` 에 걸린다 — 뒤만 앵커된 경우
+	} {
+		hits, err := VerifyMatchLines([]string{line}, "PASS|CI OK")
+		if err != nil {
+			t.Fatalf("%q: 판정 불가 — %v", line, err)
+		}
+		if len(hits) != 0 {
+			t.Errorf("%q 가 매치했다(%v) — 교대의 한쪽만 앵커됐다. 줄 전체가 표식일 때만 통과여야 한다",
+				line, hits)
+		}
+	}
+
+	// 대조: 줄 전체가 표식이면 교대의 **양쪽 다** 통과해야 한다.
+	// 이 대조가 없으면 위 단정은 "이 패턴이 아무것도 매치 안 한다"와 구분되지 않는다.
+	for _, line := range []string{"PASS", "CI OK"} {
+		hits, err := VerifyMatchLines([]string{line}, "PASS|CI OK")
+		if err != nil {
+			t.Fatalf("%q: 판정 불가 — %v", line, err)
+		}
+		if len(hits) != 1 {
+			t.Errorf("%q 가 %d건이다 — 줄 전체가 표식이면 1건이어야 한다", line, len(hits))
+		}
+	}
+}
+
 func TestVerifyMatchLinesGivesCoordinates(t *testing.T) {
 	tail := []string{
 		"1행",
