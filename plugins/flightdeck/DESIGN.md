@@ -791,8 +791,9 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 `selfcheck` 가 그중 하나다 — 자동 갱신 축이 새 바이너리를 **자식으로 돌려 검증**할 때만 쓴다(§7).
 
 **`fd project ls|rm` 은 사람의 표면이다**(`claim release` 와 같은 갈래). 세션이 프로젝트를
-만드는 것은 자동 등록이라(§8) 여기 없고, 여기 있는 것은 등록된 것을 보고 죽은 것을 치우는
-길뿐이다.
+만드는 것은 자동 등록이라(`internal/service/session.go` 의 `OpenSession` — 등록 안 된
+프로젝트를 처음 여는 세션이 `UpsertProject` 로 즉석에서 만든다) 여기 없고, 여기 있는 것은
+등록된 것을 보고 죽은 것을 치우는 길뿐이다.
 
 **진짜 삭제는 화면에 없다.** 되돌릴 수 없는 일을 클릭 하나에 두지 않는다. 그리고 지울 수
 있는 것에 한계가 **셋** 있다.
@@ -1072,9 +1073,10 @@ fail-open 기록은 없다. 압력이 실물로 관측된 적이 없고, 근거 
 없고, 증분 가드의 `neverExempt`(구조가 사라지는 조작은 예외로도 못 연다)가 노리는 것과
 같은 부류의 손실이다.
 
-**`projectRefTables`(§6 의 CLI 절) 는 삭제 순서이기도 하고, 그 순서를 사람의 기억이 아니라 살아
-있는 DB 스키마가 지킨다.** 처음 이 목록을 짤 때 `schema.sql` 만 훑어 `landing_queue`
-(증분 003 에서 생긴 표라 `schema.sql` 자체엔 없다)를 놓쳤다. 그 발견을 밀어붙이자
+**`projectRefTables`(`internal/store/project.go`) 는 `RemoveProject` 가 도는 삭제 순서
+목록이고, 그 순서를 사람의 기억이 아니라 살아 있는 DB 스키마가 지킨다.** 처음 이 목록을
+짤 때 `schema.sql` 만 훑어 `landing_queue`(증분 003 에서 생긴 표라 `schema.sql` 자체엔
+없다)를 놓쳤다. 그 발견을 밀어붙이자
 `claim`·`resource_hold`·`job` 도 `session` **뒤**에 있었다 — 목록 순서 그대로 `DELETE` 를
 돌리면 그 넷이 `session` 삭제보다 늦어 FK 위반이 났을 자리였다. 지금은 `sqlite_master`
 (표 전수) + `PRAGMA table_info`(project 컬럼 유무)를 읽는 시험
