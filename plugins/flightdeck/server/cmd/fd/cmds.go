@@ -1138,6 +1138,128 @@ func urlPath(s string) string {
 	return strings.ReplaceAll(urlValue(s), "+", "%20")
 }
 
+const afterCutHelp = "fd after cut <item-id> --item <dep> | --job <잡> | --sha <커밋>  — 걸린 선행 하나를 끊는다"
+
+// runAfter 는 `fd after …` 의 하위 명령을 가른다.
+func (a *App) runAfter(ctx context.Context, args []string, out io.Writer) int {
+	// 선두가 플래그면 하위 명령을 빼먹은 것이다(runClaim·runLane 과 같은 갈래) — 그대로 두면
+	// `fd after --item x` 가 "모르는 하위 명령: --item" 이라는 엉뚱한 말을 한다.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(out, "after 하위 명령을 줘라. 지금 있는 것은 cut 하나다:")
+		fmt.Fprintln(out, "  "+afterCutHelp)
+		return 2
+	}
+	switch args[0] {
+	case "cut":
+		return a.runAfterCut(ctx, args[1:], out)
+	default:
+		fmt.Fprintf(out, "모르는 after 하위 명령: %s\n  %s\n", clip(args[0], 40), afterCutHelp)
+		return 2
+	}
+}
+
+// runAfterCut 은 `fd after cut <item-id> --item <dep>` 이다.
+//
+// ★ **`after-dropped-dep` 의 유일한 탈출구다.** judge.AfterSatisfied 는 선행 항목이 폐기되면
+// "기다려도 안 풀린다 — 선행을 고쳐라"를 내는데, 그 명령을 집행할 동사가 하나도 없었다:
+// add·claim·finish·move·note·land·alloc·snapshot 어느 것도 item_after 행을 못 지운다.
+// 처방이 있는데 수단이 없으면 항목은 영구히 굶고, `pick` 추천 1순위로는 영영 안 뜬다.
+// 실측 피해 2건(image-model-8b-swap · t3-gpu-perf-measure)이 그 모양으로 멈춰 있었고,
+// 그 전에도 같은 벽이 두 번 나와 둘 다 close_reason 으로 우회됐다.
+//
+// ★ 축을 **세 플래그로 가른다**(--dep 하나로 받지 않는다). item·job·sha 는 서로 다른 칸이고
+// 처방도 다르다 — 한 칸으로 받으면 서버가 어느 축인지 추측해야 하고, 추측이 틀리면
+// "그런 선행이 없다"가 나가는데 진짜 사유는 축을 틀린 것이 된다.
+//
+// ★ 고칠 수 있는 것은 **선행 한 축뿐이다.** 항목 본문(title·body)은 만들어진 시점의 사진이고
+// 변경은 판단으로 나른다(DESIGN §11). 일반 amend 로 번지지 않게 여기서 막는다 — move 와 같은 규율이다.
+func (a *App) runAfterCut(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("after cut")
+	depItem := fs.String("item", "", "끊을 선행 항목 id(after-dropped-dep 이 가리키는 것)")
+	depJob := fs.String("job", "", "끊을 선행 잡 id")
+	depSHA := fs.String("sha", "", "끊을 선행 커밋 sha(after-bad-ref 면 이쪽이다)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "선행을 끊을 항목 id 를 줘라:")
+		fmt.Fprintln(out, "  "+afterCutHelp)
+		return 2
+	}
+
+	// ★ 축 수를 **여기서** 센다. 빈 요청을 보내도 서버가 거절하지만, 그 왕복은 오프라인에서
+	// 아웃박스에 쌓이는 쓰기가 된다 — 되돌릴 수 없는 명령은 알 수 있는 오류로 미리 세운다.
+	dep := afterWire{
+		Item: strings.TrimSpace(*depItem),
+		Job:  strings.TrimSpace(*depJob),
+		SHA:  strings.TrimSpace(*depSHA),
+	}
+	n := 0
+	for _, v := range []string{dep.Item, dep.Job, dep.SHA} {
+		if v != "" {
+			n++
+		}
+	}
+	if n != 1 {
+		fmt.Fprintf(out, "끊을 선행의 축을 정확히 하나 줘라(지금 %d개다):\n", n)
+		fmt.Fprintln(out, "  "+afterCutHelp)
+		fmt.Fprintln(out, "지금 무엇이 걸려 있는지는 fd pick <item-id> 의 항목 절이 낸다.")
+		return 2
+	}
+
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, "after cut", afterCutPath(itemID), afterCutReq{
+		Project: a.proj.ID, SessionID: sess, Dep: dep,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "선행을 못 끊었다: %v\n", err)
+		return 1
+	}
+	var got struct {
+		Cut  model.After `json:"cut"`
+		Item struct {
+			ID    string        `json:"ID"`
+			Title string        `json:"Title"`
+			After []model.After `json:"After"`
+		} `json:"item"`
+	}
+	if uerr := json.Unmarshal(res.Body, &got); uerr != nil {
+		fmt.Fprintf(out, "끊었으나 응답을 못 읽었다: %v\n", uerr)
+		return 1
+	}
+	fmt.Fprintf(out, "after cut · %s 에서 선행 %s 를 끊었다\n", got.Item.ID, afterOneLine(got.Cut))
+	// ★ **남은 선행을 낸다.** 이 명령은 하나씩 끊으므로, 남은 것이 안 보이면 "이제 집을 수 있나"에
+	// 답하려고 pick 을 다시 불러야 하고 "하나 풀었더니 또 하나"가 반복된다.
+	if len(got.Item.After) == 0 {
+		fmt.Fprintln(out, "남은 선행: 없다 — 이제 이 항목은 선행 축에서 안 막힌다.")
+	} else {
+		fmt.Fprintf(out, "남은 선행 %d건:\n", len(got.Item.After))
+		for _, a := range got.Item.After {
+			fmt.Fprintf(out, "  · %s\n", afterOneLine(a))
+		}
+	}
+	return 0
+}
+
+// afterOneLine 은 선행 하나를 축 이름과 함께 한 줄로 낸다.
+// 축을 안 적으면 같은 값이 항목 id 인지 sha 인지 화면에서 안 갈린다.
+func afterOneLine(a model.After) string {
+	switch {
+	case a.Job != "":
+		return "job=" + clip(a.Job, 100)
+	case a.SHA != "":
+		return "sha=" + clip(a.SHA, 40)
+	default:
+		return "item=" + clip(a.Item, 100)
+	}
+}
+
 // runMove 는 `fd move <item-id> --project <대상>` 이다.
 //
 // 왜 이 명령이 있나: 항목을 잘못된 프로젝트에 등록하면 되돌릴 길이 **0** 이었다.

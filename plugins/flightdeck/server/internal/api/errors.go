@@ -188,6 +188,11 @@ var notFoundGuidance = map[store.NotFoundKind]string{
 	store.NFLiveLandingRow: "줄에 선 적이 없거나 이미 빠졌다 — 빠졌다면 보고·이탈·마무리·회수 " +
 		"어느 쪽으로든 닫힌 것이다. 지금 누가 레인을 쥐고 줄이 어떻게 서 있는지는 " +
 		"board 의 랜딩 레인 절이 내고, 다시 서려면 land 다.",
+	// ★ 처방이 **어느 축을 틀렸나**로 갈린다. 끊으라는 선행 셋(item·job·sha)은 서로 다른 칸이라,
+	//   dep 이름은 맞는데 축을 틀리게 준 경우가 "그런 선행이 없다"의 가장 흔한 모양이다.
+	//   현재 걸린 선행을 어디서 보는지 안 적으면 사람은 dep 이름만 계속 고쳐 본다.
+	store.NFItemAfter: "그 선행이 이 항목에 안 걸려 있다 — dep 이름이 틀렸거나 축(item·job·sha)을 " +
+		"잘못 골랐다. 지금 걸린 선행 전부는 pick <id> 의 항목 절이 낸다.",
 }
 
 // NotFoundAdvice 는 없음 하나를 소비자가 읽을 응답으로 옮긴다. 순수 함수다.

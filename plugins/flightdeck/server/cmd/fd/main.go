@@ -43,6 +43,8 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
+  fd after cut <item-id> --item <dep>     걸린 선행 하나를 끊는다(--job·--sha 도 된다).
+                                          선행이 폐기됐거나 sha 가 해석 불가일 때의 **유일한 탈출구**
   fd land [--ok|--fail <사유>|--leave <사유>]
                                           랜딩 줄에 선다. 인자가 없으면 서거나 내 자리를 다시 묻는다.
                                           **내 차례가 아니면 종료코드 1** — "fd land && <랜딩>" 이 성립하게
@@ -129,6 +131,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runClose(ctx, args[1:], stdout)
 	case "move":
 		return app.runMove(ctx, args[1:], stdout)
+	case "after":
+		return app.runAfter(ctx, args[1:], stdout)
 	case "land":
 		return app.runLand(ctx, args[1:], stdout)
 	case "lane":
