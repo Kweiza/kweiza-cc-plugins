@@ -194,11 +194,30 @@ func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived 
 }
 
 // projectRefTables 는 project(id) 를 참조하거나 project 컬럼으로 프로젝트에 묶이는 표 중
-// **삭제할 때 사람이 직접 다뤄야 하는 것**이다. 삭제 순서이기도 하다 — 자식부터 부모 순이다.
+// **삭제할 때 사람이 직접 다뤄야 하는 것**이다. **삭제 순서이기도 하다 — 자식부터 부모
+// 순이다**, 그리고 이 말은 문자 그대로다: 목록의 i 번째 표를 지우는 시점에 그 뒤(i+1 이후)
+// 어느 표에도 아직 이 프로젝트의 session 을 가리키는 행이 남아 있으면 안 된다 — session
+// 삭제(6번째)가 그 행 때문에 FK 위반으로 막힌다.
 //
-// item_after · claim 은 여기 없다. 둘 다 (project, item_id) 로 item(project, id) 를
-// ON DELETE CASCADE 로 참조해서, item 을 지우면 자동으로 함께 사라진다 — 이 목록이
-// 답해야 하는 "지우기 전에 손으로 볼 것"에 안 든다.
+// ★ landing_queue · claim · resource_hold · job 넷은 그래서 **session 보다 앞**에 있다.
+// 넷 다 session_id 로 session(id) 를 CASCADE 없이 참조한다(schema.sql: landing_queue —
+// 증분 003, claim·resource_hold·job — 기본 스키마). 처음엔 landing_queue 만 옮기고 나머지
+// 셋은 session 뒤에 그대로 뒀었다 — 이 파일이 스스로 못박은 "자식부터 부모 순"을 스스로
+// 어긴 상태였다. claim 이 특히 잘 걸린다: 항목을 한 번이라도 선점한 프로젝트면 claim 행이
+// 항상 있어서 landing_queue 보다 훨씬 흔한 경로다.
+//
+// ★ claim 은 예전엔 이 목록에 아예 없었다("item CASCADE 로 함께 사라지니 뺐다"는 근거였다).
+// **그 근거는 절반만 참이었다.** claim 의 (project, item_id) → item(project, id) FK 는
+// 정말 ON DELETE CASCADE 라 item 을 지우면(9번째) 자동으로 함께 사라지지만, claim 이
+// 따로 갖는 session_id → session(id) FK 는 별개이고 CASCADE 가 아니다. item 삭제보다
+// session 삭제가 이 목록에서 훨씬 앞이므로, 그 시점엔 item 도 claim 도 아직 그대로다 —
+// item CASCADE 하나로는 session 삭제를 못 지킨다. 그래서 claim 을 목록에 새로 넣었다
+// (부수 효과: ProjectRefCounts 가 이제 선점 이력 행 수도 사람에게 보여준다 — 전에는
+// 그 축이 안 보였다).
+//
+// item_after 는 여전히 이 목록에 없다. (project, item_id) 로 item(project, id) 만 보고
+// session 을 안 본다 — item 삭제 CASCADE 하나로 충분하고, claim 과 달리 session 삭제
+// 순서에 안 걸린다.
 //
 // ★ 뒤의 둘(item_dependents · pick_eval)은 FK 가 아니라 컬럼으로만 묶인다. FK 가 안 우니
 // 안 지워도 삭제는 성공하고, 그래서 더 위험하다 — 조용히 고아 행이 남는다.
@@ -208,16 +227,20 @@ func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived 
 //
 // ★ event 는 여기 없다. event.project 는 FK 가 아니라 그냥 컬럼이고(schema.sql 의 그 자리),
 // 프로젝트가 사라져도 남는다 — 그것이 옳다. "이런 프로젝트가 있었고 언제 지워졌다"가
-// 원장에 남는 유일한 길이다.
+// 원장에 남는 유일한 길이다. (ProjectRefCounts 는 이 표를 별도 질의로 여전히 센다 —
+// 안 세는 것이 아니라 삭제 순서 목록에 안 둘 뿐이다.)
 //
-// ★ landing_queue(증분 003)는 project(id) 와 session(id) 를 **둘 다** FK 로 참조하고
-// 어느 쪽도 CASCADE 가 아니다(schema_table_count_test.go 의 TestDeclaredTablesMatchDesign 이
-// 이 표가 실재함을 못박는다). session 보다 앞에 둔 이유: session 을 먼저 지우면 그 세션을
-// 가리키는 landing_queue 행이 FK 위반으로 삭제 전체를 막는다 — 자식(landing_queue)이 부모
-// (session) 보다 먼저다.
+// ★ 이 목록이 project 컬럼을 가진 표 전부를 실제로 덮는지는 사람이 손으로 대조하지
+// 않는다 — TestProjectRefTablesCoverEveryProjectColumn(project_ref_counts_test.go)이
+// 살아 있는 DB 의 스키마(sqlite_master + PRAGMA table_info)를 읽어 기계로 대조한다.
+// landing_queue 가 이 목록에서 처음에 빠졌던 것도 schema.sql 을 정규식으로 읽는 방식으로는
+// 못 잡았을 결함이다(그 표는 증분에만 있다) — 그 시험이 실제 DB 를 보는 이유가 그것이다.
 var projectRefTables = []string{
 	"session_workspace",
 	"landing_queue",
+	"claim",
+	"resource_hold",
+	"job",
 	"session",
 	"ref_state",
 	"change_set",
@@ -225,8 +248,6 @@ var projectRefTables = []string{
 	"judgment",
 	"snapshot",
 	"counter",
-	"resource_hold",
-	"job",
 	"item_dependents",
 	"pick_eval",
 }

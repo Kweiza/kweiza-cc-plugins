@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -59,7 +60,16 @@ func (a *App) runProjectLs(ctx context.Context, args []string, out io.Writer) in
 		fmt.Fprintln(out, "등록된 프로젝트가 없다.")
 		return 0
 	}
-	fmt.Fprintf(out, "%-34s %-6s %6s %8s %8s %s\n", "프로젝트", "상태", "항목", "세션", "판단", "마지막 세션")
+	// ★ %-34s 류를 안 쓴다. Go 의 폭 지정은 룬 수로 채우는데 한글은 터미널에서 2칸을
+	// 먹어서, 한글 헤더와 ASCII 데이터가 같은 %-Ns 를 타면 칸이 어긋난다(실측: 헤더
+	// "프로젝트"가 38칸, 데이터 "junk"가 34칸 — 4칸 밀림. env.go 의 padDisplay 주석에
+	// 그 계산을 적어 뒀다). padDisplay/padDisplayRight 는 표시 폭으로 채워서 헤더와
+	// 행이 같은 계산을 탄다.
+	fmt.Fprintln(out, strings.Join([]string{
+		padDisplay("프로젝트", 34), padDisplay("상태", 6),
+		padDisplayRight("항목", 6), padDisplayRight("세션", 8), padDisplayRight("판단", 8),
+		"마지막 세션",
+	}, " "))
 	for _, p := range resp.Projects {
 		state := "-"
 		switch {
@@ -73,8 +83,13 @@ func (a *App) runProjectLs(ctx context.Context, args []string, out io.Writer) in
 			// ★ humanAge 는 이미 "…전" 을 붙여 낸다(env.go) — 여기서 또 붙이면 "3초 전 전"이 된다.
 			last = humanAge(time.Since(p.LastSessionAt))
 		}
-		fmt.Fprintf(out, "%-34s %-6s %6d %8d %8d %s\n",
-			clip(p.ID, 34), state, p.Items, p.Sessions, p.Judgments, last)
+		fmt.Fprintln(out, strings.Join([]string{
+			padDisplay(clip(p.ID, 34), 34), padDisplay(state, 6),
+			padDisplayRight(strconv.Itoa(p.Items), 6),
+			padDisplayRight(strconv.Itoa(p.Sessions), 8),
+			padDisplayRight(strconv.Itoa(p.Judgments), 8),
+			last,
+		}, " "))
 	}
 	// ★ 지울 수 있는지를 여기서 말한다 — 사람이 rm 을 쳐 보고서야 알게 두지 않는다.
 	// 판단이 못 지워지는 이유는 정책이 아니라 원장이 정한 제약이다(judgment_no_delete 트리거).
