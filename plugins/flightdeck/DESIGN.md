@@ -128,15 +128,16 @@ REST 가 없으면 서버를 만지는 순간 전 세션의 조정이 끊기고,
 
 ```
 [서버 머신]
-  컨테이너 flightdeck   (Go 정적 바이너리 + SQLite, 볼륨 1개)
+  컨테이너 flightdeck   (Go 정적 바이너리 + SQLite, 볼륨 2개)
     :7420  GET  /                서버 렌더 HTML 한 장 (읽기 전용 대시보드)
            GET  /events          SSE
            POST /api/v1/...      REST (정본)
            GET  /healthz         {ok, api_version, db_ok, disk_free_pct, self_update}
            GET  /metrics         Prometheus
     -v ~/.flightdeck:/data  →  /data/fd.db   (SQLite, WAL, busy_timeout=5000)
-                               /data/journal.git  (판단 백업 bare 레포)
                                /data/logs/
+    -v $FD_LEDGER_HOST:/ledger → /ledger/*.jsonl + manifest.json  (판단 원장, 매시간)
+                               ※ bare 레포(journal.git)는 아직 없다 — 아래 §7 표
 
 [모든 세션 머신]
   플러그인 flightdeck
@@ -872,7 +873,7 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 | 컨테이너 크래시 | `restart: unless-stopped` + HEALTHCHECK + 배너 |
 | 나쁜 스키마 변경으로 크래시루프 | 마이그레이션을 **별도 one-shot 컨테이너**로 분리 + 기동 전 DB 백업 + 롤백 명령. **셋 중 백업만 구현돼 있다 — 아래 각주** |
 | 포트 선점 | 기동 시 확인 후 **사유를 남기고 종료** |
-| 볼륨·DB 손상 | 6시간 `VACUUM INTO` + **매시간 판단 git 백업**. **넷 중 하나만 구현돼 있다 — 아래 각주** |
+| 볼륨·DB 손상 | 6시간 `VACUUM INTO` + **매시간 판단 백업**. **다섯 중 셋이 구현돼 있다 — 아래 각주**(git 커밋과 정기 `VACUUM INTO` 가 아직 없다) |
 | 디스크 고갈 | 임계 감시 + 대시보드 배너 |
 | 클라이언트·서버 버전 스큐 | `/healthz` 의 `api_version` 비교 → `additionalContext` 에 **명시 배너**. 플러그인은 자동 갱신되므로 스큐는 운영자가 아무것도 안 해도 발생한다 |
 | 서버만 낡은 채로 돈다(플러그인은 갱신됐다) | 실행 파일 교체를 감지해 **검증 후 스스로 재기동**(아래). **단 플러그인 버전이 오르는 갱신은 이 축이 안 덮는다** — 런처가 짓는 이름에 소스 트리가 박혀 있고 `${CLAUDE_PLUGIN_ROOT}` 에 버전이 들어가므로, 갱신은 **다른 이름의 새 파일**을 만들고 도는 서버가 문 파일은 영영 안 바뀐다. 그 갈래는 `/healthz` 의 `self_update.uncovered` 가 말하고(화면은 `자동 갱신  **한 갈래를 못 덮는다**`) **재기동은 사람이 한다.** 감시를 아예 못 켜는 배치는 `self_update.reason` 이 사유를 말한다 |
@@ -949,8 +950,9 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 | 처방 | 상태 | 실제 |
 |---|---|---|
 | 판단을 DB 밖으로 내보내기 | 있음 | `fd export --judgments` 가 FK 폐포 여섯 표(`judgment`·`judgment_link`·`snapshot`·`session`·`project`·`machine`) 전량을 JSONL 로 낸다. 손으로 부른다 |
-| 매시간 자동 실행 | **없음** | 주기 작업 자리가 없다. 티커는 SSE 하트비트와 `selfwatch` 둘뿐이고, 컨테이너에 cron 이 없으며 `compose.yaml` 은 서비스가 하나다 |
-| DB 와 다른 볼륨 | **없음** | `compose.yaml` 이 "DB 와 백업을 같은 볼륨에 두는 것은 Tier A 의 한계다 — 백업 잡이 생기는 시점에 별도 볼륨으로 가른다"로 접어 뒀다 |
+| 매시간 자동 실행 | 있음 | `fd serve` 가 소유하는 티커다(`cmd/fd/ledgerbackup.go`). 기동 직후 한 번, 그 뒤 매시간. **안 바뀌었으면 안 쓴다** — 데이터 여섯이 바이트 동일하면 건너뛴다(매니페스트의 `exported_at` 은 회차마다 달라지므로 비교에서 뺀다) |
+| DB 와 다른 볼륨 | 있음 | `compose.yaml` 이 `$FD_LEDGER:/ledger` 를 따로 붙인다. **기본값은 여전히 같은 디스크다**(`~/.flightdeck-ledger` 는 `~/.flightdeck` 의 형제다) — 이 줄이 사는 것은 *가를 수 있는 자리*이지 분리 그 자체가 아니다. 진짜 분리는 `FD_LEDGER_HOST` 를 다른 매체로 겨눠야 성립한다 |
+| bare 레포 커밋(`journal.git`) | **없음** | `legacy.JudgeOutTarget` 이 git 작업 트리를 금지하고 `ForceAllows` 도 그 코드를 안 뚫는다. 그 가드를 어떻게 다룰지가 먼저인데 `journal.git` 이 아직 없어 "아직 오지 않은 요구로 지금 있는 안전장치를 빼지 않는다"가 그대로 성립한다 |
 | 6시간 `VACUUM INTO` | **없음** | `VACUUM INTO` 는 있지만 마이그레이션 직전 1회다(`Store.backup`). 정기 작업이 아니다 |
 
 **실측 (2026-08-06 19:43 KST).** `judgment` 1,157행 · `judgment_link` 1,734행 · `snapshot` 12행 ·
@@ -971,13 +973,22 @@ worktree 축을 빼면 그 축은 아무 데서도 복구되지 않는다** — 
 **`grep -rn "journal" server/ --include=*.go` 를 근거로 쓰지 마라.** 그 grep 은 지금 10건을
 내는데 전부 SQLite `journal_mode(WAL)` 이다. 판단 저널과 무관하다.
 
-**이 판단이 뒤집히는 조건은 하나다 — 손으로 부르는 것을 아무도 안 부르는 순간.**
-그때 주기 실행(호스트 cron · `serve` 안 티커 · compose 두 번째 서비스 중 하나)과
-별도 볼륨을 세운다. 셋 다 지금 코드에 선례가 0건이라 이번에 함께 하지 않았다(§11 —
-"전부 아니면 무로 제시하면 1인 운영자가 착수하지 못한다").
+**그 조건이 충족돼 두 행이 뒤집혔다.** 주기 실행 자리 셋(호스트 cron · `serve` 안 티커 ·
+compose 두 번째 서비스) 중 **티커**를 골랐다. `selfwatch` 가 정확히 그 모양의 선례이고
+(serve 가 소유하는 티커가 주기마다 실제 일을 한다), 나머지 둘은 각각 컨테이너 자족성을
+깨거나 잡 하나에 배포 표면을 두 배로 만든다. 그리고 이 프로세스는 **이미 그 DB 를 쥐고
+있어** 여는 쪽을 한 벌 더 만들 이유가 없다.
 
-**그 조건은 시험이 못 지킨다** — "매시간 도는가"는 코드 안에서 관측되지 않는다.
-그래서 만료 조건의 보관소는 fd 큐다: 후속 항목이 이 각주를 대체할 때까지 이 표가 정본이다.
+**관측되는 자리는 로그 하나뿐이다.** 회차마다 INFO(`outcome=wrote|unchanged`), 실패마다
+ERROR 를 남긴다. `/healthz` 에 축을 안 냈다 — **이것은 알고 남기는 구멍이다.** 잡이 조용히
+실패하면 `docker logs` 를 보기 전까지 아무도 모르고, 그동안 이 문서는 "백업이 돈다"고
+말한다. 즉 위험이 "아무도 안 부른다"에서 "조용히 실패한다"로 **옮겨간 것이지 사라진 것이
+아니다.** 그 축을 내는 것은 후속 항목이고, 그때까지 만료 조건의 보관소는 여전히 fd 큐다.
+
+**"매시간 도는가"는 여전히 코드 안에서 관측되지 않는다.** 시험이 무는 것은 회차 하나의
+행동(`ledgerBackupOnce` — 쓴다 · 안 바뀌면 건너뛴다 · 늘면 다시 쓴다)과 자리 계산
+(`LedgerOutDir`)이지 주기 그 자체가 아니다. 티커의 간격은 상수 하나이고, 그것이 실제로
+한 시간마다 발화하는지는 이 문서가 단정할 수 있는 것이 아니다.
 
 ### 서버는 자기 실행 파일 교체를 감지해 스스로 재기동한다
 
