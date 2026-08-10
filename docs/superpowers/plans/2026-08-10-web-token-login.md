@@ -203,7 +203,7 @@ JudgeNext 는 오픈 리다이렉트를 막는다. 아직 아무도 이 셋을 �
 
 - [ ] **Step 1: 시험 테이블을 새 시그니처로 바꾸고 축을 더한다**
 
-`pure_test.go` 의 `TestJudgeAuth` 를 통째로 갈아끼운다. 기존 15케이스를 **하나도 안 지우고** 필드만 옮긴다:
+`pure_test.go` 의 `TestJudgeAuth` 를 통째로 갈아끼운다. 기존 14케이스를 **하나도 안 지우고** 필드만 옮기고, 쿠키 축 7개를 더한다(합 21):
 
 ```go
 func TestJudgeAuth(t *testing.T) {
