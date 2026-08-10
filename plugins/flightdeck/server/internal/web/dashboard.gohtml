@@ -18,6 +18,9 @@
 body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 ui-sans-serif,system-ui,
        "Noto Sans KR","Apple SD Gothic Neo",sans-serif; }
 header { padding:14px 18px; border-bottom:1px solid var(--line); }
+header { position:relative; }
+form.logout { position:absolute; top:12px; right:18px; margin:0; }
+form.logout button { font-size:12px; padding:2px 8px; color:var(--dim); }
 h1 { font-size:16px; margin:0 0 4px; letter-spacing:.02em; }
 h2 { font-size:15px; margin:0; }
 h3 { font-size:13px; margin:14px 0 6px; color:var(--dim); }
@@ -88,6 +91,11 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     {{range .Projects}}<a class="{{if eq .ID $.Project.ID}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a>{{end}}
   </nav>
   {{end}}
+  {{/* ★ POST 다. GET 링크로 두면 브라우저·확장의 링크 프리페치가 눌러서 로그아웃이
+       사람 의사 없이 일어난다. 상대경로인 이유는 이 페이지의 다른 폼과 같다.
+       ★ 인증이 꺼진 서버에서도 보인다 — 그 사실을 화면에 실으려면 Page 에 축이 하나
+       늘고, 눌러도 303 으로 여기 돌아올 뿐이라 틀린 동작이 아니다. */}}
+  <form class="logout" method="post" action="logout"><button type="submit">로그아웃</button></form>
 </header>
 
 {{with .Notice}}<p class="notice" style="padding:0 18px">{{.}}</p>{{end}}

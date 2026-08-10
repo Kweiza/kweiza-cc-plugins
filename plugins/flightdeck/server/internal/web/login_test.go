@@ -60,3 +60,21 @@ func TestLoginScreenFirstVisitHasNoError(t *testing.T) {
 		t.Fatal("사유가 없는데 오류 자리가 떴다")
 	}
 }
+
+// TestDashboardHasLogout 은 대시보드에 쿠키를 지울 길이 있는지 본다.
+//
+// ★ 로그아웃이 없으면 쿠키를 버릴 수단이 브라우저 설정뿐이다. 수명이 10년이라 그 길이
+// 없으면 남의 머신에서 한 번 본 것이 사실상 영구히 남는다.
+func TestDashboardHasLogout(t *testing.T) {
+	src, err := files.ReadFile("dashboard.gohtml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if !strings.Contains(body, `action="logout"`) {
+		t.Error(`로그아웃 폼이 없다 (action="logout" — 상대경로여야 한다)`)
+	}
+	if !strings.Contains(body, `method="post"`) {
+		t.Error("로그아웃이 POST 가 아니다 — GET 이면 링크 프리페치로 눌린다")
+	}
+}
