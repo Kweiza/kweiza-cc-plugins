@@ -149,6 +149,17 @@ func NoticeText(code, item string) string {
 	case string(ActionLaneRelease):
 		return fmt.Sprintf("랜딩 줄 행 %s 를 회수했다. 사유와 함께 **서버가 관측한 것**"+
 			"(획득 경과 · 마지막 신호 나이 · 그때 줄에 있던 사람)이 판단(decision)으로 남았다.", it)
+	// ★ 아래 넷은 projectAxes 의 값과 그대로 같다 — projectView 핸들러가 notice 코드로
+	// 축 이름 자체를 싣는다. 사유가 없는 축이라 판단(decision)에는 안 남지만, 화면에
+	// "무엇을 했다"는 확인 문장은 있어야 클릭이 씹혔는지 실제로 됐는지가 구분된다.
+	case "pin":
+		return fmt.Sprintf("핀을 켰다: %s. 프로젝트 줄에 남는다.", it)
+	case "unpin":
+		return fmt.Sprintf("핀을 껐다: %s. 다른 핀이 남아 있으면 접힌 쪽으로 옮겨간다.", it)
+	case "archive":
+		return fmt.Sprintf("보관했다: %s. 프로젝트 줄에서 뺐다 — 접근은 그대로 열려 있고 언제든 되돌릴 수 있다.", it)
+	case "unarchive":
+		return fmt.Sprintf("보관을 풀었다: %s. 핀이 없으면 접힌 쪽에, 있으면 보통 줄로 돌아간다.", it)
 	default:
 		return ""
 	}
@@ -484,8 +495,13 @@ func (h *handler) projectView(w http.ResponseWriter, r *http.Request) {
 	h.log.InfoContext(ctx, "프로젝트 표시 축", "route", "POST /actions/project-view",
 		"project", Clip(in.Target, 64), "axis", in.Axis)
 
+	// ★ notice 코드로 축 이름 자체(pin/unpin/archive/unarchive)를 싣는다 — "project-view"
+	// 라는 코드를 실었었는데 NoticeText 의 고정 목록에 그 이름이 없어 default 로 빠져
+	// 빈 문장이 됐다(리뷰 Minor-5, 실측). item 도 함께 실어 대상을 문장에 담는다
+	// (drop/reclaim 등 다른 쓰기의 back() 과 같은 모양).
 	q := url.Values{}
 	q.Set("project", in.Project)
-	q.Set("notice", "project-view")
+	q.Set("notice", in.Axis)
+	q.Set("item", in.Target)
 	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
 }

@@ -327,7 +327,15 @@ type Page struct {
 	Title      string
 	Projects   []model.Project
 	// Nav 는 위 Projects 를 화면 모양으로 접은 것이다. 템플릿은 이쪽만 읽는다.
-	Nav        ProjectNav
+	Nav ProjectNav
+	// Current 는 헤더의 표시 축 폼(.pview)이 project 히든 필드에 싣는 값이다 — Nav 를
+	// 만들 때 쓴 것과 같은 해결값이다(buildPage 의 그 ★ 주석). **`.Project.ID` 가 아니다.**
+	// NotFound 갈래(요청한 프로젝트가 등록돼 있지 않은 경우)에서는 p.Project 가 아직
+	// 제로값인 채로 return 하는데, 그 화면에서도 헤더의 프로젝트 줄은 그대로 나간다(위
+	// Nav 주석) — `.Project.ID` 를 썼다면 그 줄의 핀·보관 버튼이 전부 "돌아갈 프로젝트가
+	// 비었다"로 400 이었을 자리다(리뷰 Important-4). 그 화면에서도 다른 프로젝트를
+	// 핀·보관하는 것 자체는 성립하는 조작이라 버튼이 살아 있어야 한다.
+	Current    string
 	Project    model.Project
 	HasProject bool
 	Notice     string
@@ -488,6 +496,9 @@ func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 	if current == "" && len(projects) > 0 {
 		current = projects[0].ID
 	}
+	// p.Current 도 여기서 함께 채운다 — 아래의 모든 조기 return(0건·NotFound) 갈래에서도
+	// 헤더 폼의 히든 필드가 값을 가져야 한다(Current 필드 주석 참고).
+	p.Current = current
 	p.Nav = buildProjectNav(projects, current, h.archivedSessionAges(ctx, projects, now))
 
 	// 건강은 프로젝트와 무관하게 항상 낸다 — 프로젝트가 하나도 없을 때가

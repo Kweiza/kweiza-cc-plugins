@@ -99,11 +99,29 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{/* ★ 폼 하나에 버튼 여럿이다. 프로젝트마다 폼을 만들면 폼이 프로젝트 수만큼 늘고,
        render_test.go 의 상한이 세는 축이 통째로 무의미해진다. */}}
   <form class="pview" method="post" action="actions/project-view?key={{.WriteKey "project-view"}}">
-  <input type="hidden" name="project" value="{{.Project.ID}}">
+  {{/* ★ .Project.ID 가 아니라 .Current 다 — NotFound 갈래에서도 이 줄의 버튼이 살아
+       있어야 하는데, 그 갈래는 .Project 가 아직 제로값이다(Page.Current 주석 참고). */}}
+  <input type="hidden" name="project" value="{{.Current}}">
+  {{/* ★ 버튼마다 formaction 으로 자기만의 멱등 키를 낸다("project-view:<축>:<대상 id>").
+       WriteKey 는 렌더 시각(초 단위)만 넣으므로, 폼의 action 키 하나를 버튼 전부가
+       공유하면 303 리다이렉트 뒤 같은 초 안에 그려진 새 페이지에서 **다른** 버튼을
+       눌렀을 때 같은 키·다른 본문이 되어 Fingerprint 불일치로 409(Conflict)가 난다
+       (리뷰 Important-2, 실측). 회수·폐기는 사유를 적어야 해서 왕복이 길어 이 함정을
+       안 겪었지만, 핀·보관은 줄을 정리하려고 연달아 누르는 것이 정상 사용 흐름이라
+       왕복이 짧다.
+       ★ 대상 id 뿐 아니라 **축까지** 키에 넣는다 — id 만 넣으면 같은 프로젝트를
+       핀→(리로드)→보관처럼 같은 초 안에 연달아 눌러도 여전히 같은 키·다른 본문으로
+       충돌한다. 축까지 넣으면 그 조합도 서로 다른 키가 되어 각각 독립된 쓰기로
+       처리된다 — 정확히 같은 버튼을 두 번 누르는 것(더블클릭)만 같은 키·같은 본문이
+       되어 멱등의 원래 의미(재생)대로 접힌다. */}}
   <nav>프로젝트:
     {{range .Nav.Shown}}<a class="{{if .On}}on{{end}}" href="?project={{.ID}}">{{.ID}}</a
-      >{{if .Pinned}}<button class="ax" name="axis" value="unpin:{{.ID}}" title="핀 해제">★</button
-      >{{else}}<button class="ax" name="axis" value="pin:{{.ID}}" title="핀">☆</button>{{end}}{{end}}
+      >{{if .Pinned}}<button class="ax" name="axis" value="unpin:{{.ID}}"
+          formaction="actions/project-view?key={{$.WriteKey (printf "project-view:unpin:%s" .ID)}}"
+          title="핀 해제">★</button
+      >{{else}}<button class="ax" name="axis" value="pin:{{.ID}}"
+          formaction="actions/project-view?key={{$.WriteKey (printf "project-view:pin:%s" .ID)}}"
+          title="핀">☆</button>{{end}}{{end}}
     {{with .Nav.NoPins}}<span class="k">{{.}}</span>{{end}}
     {{/* 접기는 <details> 다 — JS 를 안 쓴다. 이 페이지의 다른 접기(.fold/.more)는 스크립트로
          접어서 JS 가 없으면 전부 펴지는데, 그 폴백은 긴 목록에는 옳지만 이 줄에는 반대다:
@@ -111,13 +129,19 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     {{with .Nav.FoldedLine}}
     <details class="pfold"><summary>{{.}}</summary>
       {{range $.Nav.Folded}}<a href="?project={{.ID}}">{{.ID}}</a
-        ><button class="ax" name="axis" value="pin:{{.ID}}" title="핀">☆</button
-        ><button class="ax" name="axis" value="archive:{{.ID}}" title="보관 — 줄에서 뺀다">보관</button>{{end}}
+        ><button class="ax" name="axis" value="pin:{{.ID}}"
+            formaction="actions/project-view?key={{$.WriteKey (printf "project-view:pin:%s" .ID)}}"
+            title="핀">☆</button
+        ><button class="ax" name="axis" value="archive:{{.ID}}"
+            formaction="actions/project-view?key={{$.WriteKey (printf "project-view:archive:%s" .ID)}}"
+            title="보관 — 줄에서 뺀다">보관</button>{{end}}
       {{if $.Nav.Archived}}
       <div class="k">보관:
         {{range $.Nav.Archived}}<a class="dim" href="?project={{.ID}}">{{.ID}}</a>
           <span class="k">({{.LastSession}})</span
-          ><button class="ax" name="axis" value="unarchive:{{.ID}}" title="되돌린다">되돌리기</button>{{end}}
+          ><button class="ax" name="axis" value="unarchive:{{.ID}}"
+              formaction="actions/project-view?key={{$.WriteKey (printf "project-view:unarchive:%s" .ID)}}"
+              title="되돌린다">되돌리기</button>{{end}}
       </div>
       {{end}}
     </details>
