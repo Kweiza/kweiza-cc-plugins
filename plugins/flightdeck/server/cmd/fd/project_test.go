@@ -157,7 +157,7 @@ func TestProjectRmWithoutYesOnlyCounts(t *testing.T) {
 		t.Fatalf("어떻게 실제로 지우는지를 안 말한다\n%s", out)
 	}
 	// 무엇이 함께 지워질지 먼저 보여주는 것이 이 명령의 절반이다 — 표 이름과 수가
-	// 실제로 출력에 찍히는지 잰다(cmd/fd/project.go 의 "  %-20s %d\n" 형식).
+	// 실제로 출력에 찍히는지 잰다(cmd/fd/project.go 의 `padDisplay(k, 20)` + "  %s %d\n").
 	if !regexp.MustCompile(`(?m)^\s*session\s+1\s*$`).MatchString(out) {
 		t.Fatalf("자식 행 카운트(session 1)가 출력에 안 보인다\n%s", out)
 	}
