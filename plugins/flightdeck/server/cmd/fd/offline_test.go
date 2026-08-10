@@ -42,6 +42,11 @@ func TestJudgeOfflineTable(t *testing.T) {
 		{CmdLandLeave, OfflineRefuse, "남의 점유를 반납한다"},
 		{CmdLaneRelease, OfflineRefuse, "사람의 판단이라 재생 대상이 아니다"},
 		{CmdClaimRelease, OfflineRefuse, "사람의 판단이라 재생 대상이 아니다"},
+		// 프로젝트 삭제 — 아는 명령이라 명시 갈래다(최종 리뷰 Important-3). 사유가
+		// default("정의돼 있지 않다")와 달라야 한다 — 서버가 죽은 머신은 정확히 사람이
+		// 잔해를 치우려 드는 순간이라, "이 명령은 설계가 안 됐다"로 읽히는 사유는 여기서
+		// 제일 나쁘게 걸린다.
+		{CmdProjectRemove, OfflineRefuse, "지금 상태"},
 	}
 	for _, c := range cases {
 		t.Run(c.cmd, func(t *testing.T) {
@@ -88,7 +93,8 @@ func TestJudgeOfflineUnknownCommandRefusesAndSaysWhy(t *testing.T) {
 func TestJudgeOfflineAlwaysGivesReason(t *testing.T) {
 	for _, cmd := range []string{"note", "status", "beat", "pick", "open", "add",
 		"finish", "alloc", "board", "next", "doctor", "무엇이든",
-		CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease, CmdClaimRelease} {
+		CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease, CmdClaimRelease,
+		CmdProjectRemove} {
 		if strings.TrimSpace(JudgeOffline(cmd).Reason) == "" {
 			t.Fatalf("%q 의 사유가 비었다", cmd)
 		}

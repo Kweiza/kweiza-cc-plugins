@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -687,6 +688,51 @@ func TestWriteLedgerRestoresBlockedSession(t *testing.T) {
 	dst := newStore(t)
 	if err := dst.WriteLedger(ctx, want); err != nil {
 		t.Fatalf("blocked 세션 되쓰기 실패(CHECK 위반?): %v", err)
+	}
+}
+
+// TestWriteLedgerRestoresProjectViewAxisInOrder 는 pinned_at 과 archived_at 이 원장
+// 왕복에서 뒤바뀌지 않는지를 GetProject 로 직접 잰다.
+//
+// ★ 왜 dump↔dump DeepEqual 로는 안 되나. TestWriteLedgerRestoresRowsVerbatim 류는
+// ReadLedger 결과끼리(want·got) 비교하는데, readLedgerProjects 의 Scan 인자 순서가
+// `&pinned, &archived` 대신 `&archived, &pinned` 로 뒤집혀도 원본·복원본 양쪽에 **똑같이**
+// 뒤집혀 실리므로 두 dump 는 여전히 서로 같다 — 시험은 초록인데 사람이 고정한 프로젝트가
+// 실제로는 접힌 채 복원된다(이 태스크가 막으려는 바로 그 손실). 그래서 여기서는 SetProjectView
+// 로 넣은 **원래 값**과 dst.GetProject 가 돌려주는 값을 직접 견준다 — 자기 자신과 비교하지
+// 않는다.
+func TestWriteLedgerRestoresProjectViewAxisInOrder(t *testing.T) {
+	src := newStore(t)
+	ctx := context.Background()
+	seed(t, src, "p") // p·기본 머신을 만든다.
+	if err := src.UpsertProject(ctx, model.Project{ID: "q", Path: "/repo/q"}); err != nil {
+		t.Fatalf("프로젝트 q 등록 실패: %v", err)
+	}
+	pin := time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC)
+	arc := time.Date(2026, 8, 12, 4, 5, 6, 0, time.UTC)
+	if err := src.SetProjectView(ctx, "p", pin, arc); err != nil {
+		t.Fatalf("p 표시 축 설정 실패: %v", err)
+	}
+
+	want, err := src.ReadLedger(ctx)
+	if err != nil {
+		t.Fatalf("원본 읽기 실패: %v", err)
+	}
+
+	dst := newStore(t)
+	if err := dst.WriteLedger(ctx, want); err != nil {
+		t.Fatalf("WriteLedger 실패: %v", err)
+	}
+
+	got, err := dst.GetProject(ctx, "p")
+	if err != nil {
+		t.Fatalf("복원본 조회 실패: %v", err)
+	}
+	if !got.PinnedAt.Equal(pin) {
+		t.Errorf("복원된 PinnedAt 이 %v 다, want %v — ArchivedAt 과 뒤바뀌었을 수 있다", got.PinnedAt, pin)
+	}
+	if !got.ArchivedAt.Equal(arc) {
+		t.Errorf("복원된 ArchivedAt 이 %v 다, want %v — PinnedAt 과 뒤바뀌었을 수 있다", got.ArchivedAt, arc)
 	}
 }
 

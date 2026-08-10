@@ -736,3 +736,62 @@ func humanAge(d time.Duration) string {
 		return fmt.Sprintf("%d일 전", int(d.Hours()/24))
 	}
 }
+
+// runeDisplayWidth 는 문자 하나의 터미널 표시 폭이다(1 또는 2).
+//
+// UAX #11(동아시아 폭)을 완전히 구현하지 않는다 — 이 저장소의 화면은 전부 한글이라
+// 실제로 걸리는 범위는 한글 완성형(가-힣) · 한글 자모 · 한글 호환 자모뿐이다. 그 범위만
+// 폭 2로 세고 나머지는(ASCII 뿐 아니라 이 함수가 모르는 다른 스크립트도) 전부 폭 1로
+// 다룬다 — **넓히는 쪽으로만 틀리게 둔다.** 좁히는 쪽으로 틀리면(폭 2인 문자를 1로 세면)
+// 그 문자 뒤의 칸이 밀려 표가 겹친다. 폭 1인 문자를 2로 잘못 세면 그 칸만 한 칸 더
+// 벌어질 뿐이라 훨씬 덜 나쁘다.
+func runeDisplayWidth(r rune) int {
+	switch {
+	case r >= 0xAC00 && r <= 0xD7A3: // 한글 음절(가-힣)
+		return 2
+	case r >= 0x1100 && r <= 0x11FF: // 한글 자모
+		return 2
+	case r >= 0x3130 && r <= 0x318F: // 한글 호환 자모
+		return 2
+	default:
+		return 1
+	}
+}
+
+// displayWidth 는 문자열 전체의 터미널 표시 폭이다.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeDisplayWidth(r)
+	}
+	return w
+}
+
+// padDisplay 는 s 를 표시 폭 기준으로 왼쪽 정렬한다(오른쪽에 공백을 채운다).
+//
+// Go 의 `%-Ns` 는 **룬 수**로 패딩하는데 한글은 터미널에서 2칸을 먹는다. 그래서 한글
+// 헤더와 ASCII 데이터가 같은 `%-Ns` 를 타면 칸이 어긋난다 — `fd project ls` 실측:
+// 헤더 "프로젝트"(4룬)는 `%-34s` 를 타면 34룬(한글 4개 + 공백 30개)이 되어 표시 폭
+// 4*2+30=38칸이지만, 데이터 "junk"(4룬)는 같은 34룬이 표시 폭 4*1+30=34칸이라 4칸이
+// 밀린다. 상태 칸도 마찬가지로 행마다 다르게 밀린다("보관" 8칸 · "핀" 7칸 · "-" 6칸).
+// 이 함수는 룬 수가 아니라 표시 폭을 기준으로 채워서 헤더와 행이 같은 계산을 타게 한다.
+//
+// clip 이 자르며 붙이는 "…" 도 별도 처리가 필요 없다 — runeDisplayWidth 의 기본 갈래(폭 1)를
+// 타서 자동으로 표시 폭 계산에 들어간다.
+func padDisplay(s string, width int) string {
+	w := displayWidth(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
+// padDisplayRight 는 s 를 표시 폭 기준으로 오른쪽 정렬한다(왼쪽에 공백을 채운다) —
+// padDisplay 와 짝이다. 숫자 칸(항목·세션·판단 수)에 쓴다.
+func padDisplayRight(s string, width int) string {
+	w := displayWidth(s)
+	if w >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-w) + s
+}

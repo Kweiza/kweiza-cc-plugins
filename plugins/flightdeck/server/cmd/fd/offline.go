@@ -62,6 +62,12 @@ const (
 	CmdLaneRelease = "lane release"
 	// CmdClaimRelease 는 사람이 죽은 세션의 선점을 회수하는 것이다.
 	CmdClaimRelease = "claim release"
+	// CmdProjectRemove 는 잔해 프로젝트를 지우는 것이다(`fd project rm`).
+	//
+	// ★ 값이 cmd/fd/project.go 의 a.cli.Write 호출부와 글자 그대로 같아야 한다 — 어긋나면
+	// 아래 JudgeOffline·outbox.go 의 IdempotencyStable 이 이 상수로 잡아 둔 갈래를 안 타고
+	// default(최종 리뷰 Important-3)로 조용히 떨어진다.
+	CmdProjectRemove = "project-remove"
 )
 
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
@@ -103,6 +109,16 @@ func JudgeOffline(cmd string) OfflineVerdict {
 	case "alloc":
 		return OfflineVerdict{OfflineRefuse,
 			"발번은 원자 카운터다 — 오프라인에서 발급하면 두 세션이 같은 번호를 쓴다(락이 원리적으로 못 막는 자리다)"}
+	case CmdProjectRemove:
+		// ★ 표 밖으로 떨어뜨려 default 를 태우지 않는다(최종 리뷰 Important-3). 서버 미도달일
+		//   때 default 로 빠지면 사유가 "명령의 열화 정책이 정의돼 있지 않다"가 되는데, 그
+		//   문구는 "이 명령은 설계가 안 됐다 = 서버 결함"으로 읽힌다 — 하필 서버가 죽은
+		//   머신은 정확히 사람이 잔해(죽은 프로젝트)를 치우려 드는 순간이라 이 오독이
+		//   제일 나쁘게 걸린다. 동작(거절)은 default 와 같지만 사유가 다르다.
+		return OfflineVerdict{OfflineRefuse,
+			"삭제 판정은 원장의 지금 상태(항목·판단·다른 프로젝트의 판단 수)를 실시간으로 세어 " +
+				"내린다 — 되돌릴 수 없는 삭제를 오프라인의 낡은 셈으로 실행하면 그 사이 새로 " +
+				"생긴 항목·판단을 못 보고 지울 위험이 있다. 서버가 돌아오면 다시 실행하라"}
 
 	// ── 랜딩 레인 넷. 전부 거절이지만 **사유가 셋으로 갈린다.**
 	//

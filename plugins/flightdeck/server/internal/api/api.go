@@ -341,6 +341,11 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/snapshots/{key}", s.handleGetSnapshot)
 	mux.HandleFunc("PUT /api/v1/snapshots/{key}", s.handlePutSnapshot)
 
+	// 프로젝트 축. 화면 없이(fd project ls) 등록된 프로젝트와 그 실적을 보는 유일한 길이다.
+	mux.HandleFunc("GET /api/v1/projects", s.handleListProjects)
+	// 잔해 삭제 — 이 계획에서 유일하게 되돌릴 수 없는 표면이다. 안전판은 service 가 쥔다.
+	mux.HandleFunc("POST /api/v1/projects/{id}/remove", s.handleRemoveProject)
+
 	// 화면·알림·진단.
 	mux.HandleFunc("GET /api/v1/dashboard.json", s.handleDashboard)
 	mux.HandleFunc("GET /api/v1/notices", s.handleNotices) // 꼬리 전용. 세션 카드 파생을 안 돈다

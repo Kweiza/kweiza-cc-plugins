@@ -117,6 +117,11 @@ type Project struct {
 	Config        string // .flightdeck.yaml 캐시(JSON). 정본은 레포 안의 파일
 	ConfigFromSHA string
 	CreatedAt     time.Time
+	// PinnedAt·ArchivedAt 는 **표시 축**이다. 제로값이 "아님"이고, 둘 다 사람이 화면에서
+	// 정한다. 판정 경로(겹침·처방·추천)는 이 둘을 안 읽는다 — 읽는 순간 접어 둔 프로젝트가
+	// 조용히 조율에서 빠진다.
+	PinnedAt   time.Time
+	ArchivedAt time.Time
 }
 
 type Machine struct {

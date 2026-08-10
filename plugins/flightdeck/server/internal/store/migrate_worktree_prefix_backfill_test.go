@@ -66,6 +66,10 @@ func TestMigration006DeletesWorktreePrefixedFootprints(t *testing.T) {
 	// ★ 리터럴 5다. SchemaVersion-1 이 아니다 — 이 시험이 재현하는 옛 상태는 "006 직전"이고
 	//   그 사실은 006 파일에 고정돼 있어 뒤에 무슨 증분이 더 붙든 안 변한다.
 	const prev = 5
+	// 007 증분(project.pinned_at·archived_at)이 prev(5) 뒤에 온다(dropNonIdempotentColumns
+	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
+	// 만들어 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
+	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	if _, err := s.db.Exec(
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev)); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)

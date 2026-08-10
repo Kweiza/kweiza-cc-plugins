@@ -683,6 +683,23 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 
 ### 웹 UI — 읽기 전용 HTML 한 장, 섹션 6개, 쓰기 버튼 5개(살아 있는 것은 셋)
 
+**헤더의 프로젝트 줄은 사람이 고른 것만 편다.** `project.pinned_at`·`archived_at` 두 축이고,
+핀과 지금 보고 있는 프로젝트만 줄에 남으며 나머지는 `<details>` 하나로 접힌다. **JS 를 안
+쓴다** — 이 페이지의 다른 접기(`.fold`/`.more`)는 스크립트로 접어서 없으면 전부 펴지는데,
+그 폴백은 긴 목록에는 옳지만 이 줄에는 반대다: 스크립트가 없어도 접혀 있어야 이 축이 성립한다.
+
+- **핀이 0이면 아무것도 안 접는다.** 핀이 없다는 사실을 자동 판정(활동이 있는 것만 편다)으로
+  덮으면, 사람이 접은 것과 규칙이 접은 것이 화면에서 같은 모양이 되고 「왜 사라졌나」에
+  답할 수 없다. 그래서 이 축에 자동 판정을 안 둔다.
+- **접은 수와 보관 수를 함께 말한다**(`OutOfWindow`·`Folded` 와 같은 규율) — "나머지 N
+  (보관 M 포함)".
+- **해결된 현재 프로젝트는 핀이 아니어도 편다** — `?project=` 가 없어도다. 그 값은
+  `pickProject` 와 같은 규칙으로 정한 것이고, 안 펴면 화면이 자기 위치를 안 말한다.
+- **보관은 접근 차단이 아니다** — 접힌 프로젝트도 `?project=` 로 그대로 열린다. `<details>`
+  는 줄에서만 닫아 둘 뿐이고, 원장·라우팅은 그 축을 안 본다.
+- **보관은 자동으로 안 풀린다.** 풀면 훅이 연 세션 하나로 잔해가 다시 튀어나온다. 대신 보관
+  목록이 마지막 세션 나이를 함께 내고(`LastSession`), 다시 도는 것이 보이면 사람이 푼다.
+
 1. **지금 — 잡혀 있는 작업.** **선점을 든 카드만** 낸다. 카드 머리줄이 선점 항목 id 이고,
    배지 하나가 활동 신호(`prompt`·`tool`·`commit`) 유무를 말한다. 그 아래에 신호 넷 ·
    발자국 · 최근 판단 한 줄.
@@ -724,11 +741,21 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 **그 외 쓰기는 없다** — 파생물에 손을 대는 순간 대시보드가 다시 손 기재 저장소가 되고 그 락이 부활한다.
 이 두 수 중 **잠기는 것은 "셋"뿐이고, 그것도 버튼이 아니라 폼으로 잠긴다.**
 `web/render_test.go` 의 `TestWriteFormsAreAtMostFourAndAllRequireReason` 이 세는 축은 넷이다:
-`<form` **≤ 4**(쓰기 셋 + 프로젝트 고르기 GET 하나) · `method="post"` **== 3** ·
+`<form` **≤ 4**(쓰기 셋 + 판단 검색 GET 하나) · `method="post"` **== 3** ·
 `name="reason" required` **== 3** · Tier B 비활성 버튼 둘의 문구가 **있는지**.
 
 **헤더의 로그아웃 폼은 이 셈에서 빠진다** — 쿠키 하나를 지울 뿐 원장에도 파생물에도 아무것도
-안 남기기 때문이고, 그래서 실제 페이지의 폼 5개·POST 4개가 위 수와 어긋나지 않는다:
+안 남기기 때문이다.
+
+**표시 축 폼(`.pview`, 핀·보관)도 이 셈에서 빠진다.** 로그아웃과 **같은 부류의 다른 근거**다
+— 로그아웃은 원장에 아무것도 안 남겨서 빠졌고, 이 폼은 원장에 쓴다(`pinned_at`·`archived_at`).
+빼는 근거는 그 두 컬럼이 항목·판단·선점·랜딩 어디에도 안 닿는다는 것이고, 그 증거는 접힌
+프로젝트도 `?project=` 로 그대로 열린다는 시험이다(`web/project_nav_test.go` 의
+`TestArchivedProjectStillOpens`). 그 시험이 빨개지면 이 면제의 근거도 함께 무너진다 —
+**두 자리가 한 판정을 나눠 든다.** 사유도 안 받는다: 사유가 필수인 셋(선점 회수·항목 폐기·
+랜딩 줄 행 회수)은 전부 남의 일을 뺏거나 되돌릴 수 없는 것인데 핀·보관은 둘 다 아니다.
+
+그래서 실제 페이지의 폼 6개·POST 5개가 위 수와 어긋나지 않는다:
 **상한 넷은 "파생물에 쓰는 폼"의 불변**이지 태그 총수가 아니다. 상한을 올려 통과시키는 쪽을
 기각한 이유가 그것이다 — 한 번 올리면 다음 사람의 여섯째 폼에 "저번에도 올렸잖나"가 근거가 된다.
 
@@ -758,10 +785,43 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 
 ### CLI `bin/fd`
 
-`status open beat note next pick add finish alloc doctor export import watch`
+`status open beat note next pick add finish alloc project doctor export import watch`
 
 **`serve`·`mcp`·`hook` 처럼 사람이 직접 안 부르는 서브명령이 이 목록 밖에 있다.**
 `selfcheck` 가 그중 하나다 — 자동 갱신 축이 새 바이너리를 **자식으로 돌려 검증**할 때만 쓴다(§7).
+
+**`fd project ls|rm` 은 사람의 표면이다**(`claim release` 와 같은 갈래). 세션이 프로젝트를
+만드는 것은 자동 등록이라(`internal/service/session.go` 의 `OpenSession` — 등록 안 된
+프로젝트를 처음 여는 세션이 `UpsertProject` 로 즉석에서 만든다) 여기 없고, 여기 있는 것은
+등록된 것을 보고 죽은 것을 치우는 길뿐이다.
+
+**진짜 삭제는 화면에 없다.** 되돌릴 수 없는 일을 클릭 하나에 두지 않는다. 그리고 지울 수
+있는 것에 한계가 **셋** 있다.
+
+**① 항목이 있으면 정책으로 거절한다.** 639항목짜리를 한 명령으로 날리는 길을 안 만든다.
+강제 플래그도 안 만든다.
+
+**② 판단이 있으면 원장이 거절한다.** `judgment_no_delete` 트리거가 판단 삭제를 막고
+`judgment.project` FK 가 프로젝트 행을 붙잡는다.
+
+**③ 다른 프로젝트의 판단이 이 프로젝트의 세션을 가리켜도 거절한다.** `judgment.session_id`
+는 CASCADE 없이 `session(id)` 를 참조하고 `judgment.project` 와는 독립 컬럼이라, 다른
+프로젝트의 판단이 이 프로젝트의 세션을 가리킬 수 있다(`ProjectRefCounts` 의
+`judgment_foreign` 축). 이 축은 **사전에 센다** — `RemoveProject` 가 자기 트랜잭션 안에서
+다시 세고 다시 판정하므로(`_txlock=immediate` 가 재-셈과 삭제 사이의 끼어듦을 막는다),
+이 축의 경합은 여기서 이미 닫혀 실제 FK 위반까지 안 간다. 같은 모양의 위험이
+`ProjectRefCounts` 가 **미리 안 세는 나머지 넷**(`claim`·`resource_hold`·`job`·
+`landing_queue` — 전부 `session(id)` 를 CASCADE 없이 참조한다)에도 있고, 이 넷이 실제로
+걸리면 삭제 도중 진짜 FK 위반이 나 `RemovalBlockedError` 로 번역돼 409 로 나간다
+(드라이버 원문 "FOREIGN KEY constraint failed" 를 그대로 보여주지 않는다 —
+`TestRemoveProjectTranslatesForeignLandingQueueFKViolation` 이 그 경로를 잰다).
+
+②③ 의 우회(`PRAGMA foreign_keys=OFF` · 트리거 드롭)는 기각이다 — 잔해 몇 건과 바꿀 값이
+아니고, 증분 가드의 `neverExempt` 가 노리는 것과 같은 부류의 손실이다. 죽었지만 판단이 남은
+프로젝트는 삭제가 아니라 화면의 보관이 받는다.
+
+**`event` 는 안 지운다.** `event.project` 는 FK 가 아니라 컬럼이라 프로젝트가 사라져도 남고,
+그것이 「이런 프로젝트가 있었고 언제 지워졌다」가 원장에 남는 유일한 길이다.
 
 ---
 
@@ -992,6 +1052,38 @@ fail-open 기록은 없다. 압력이 실물로 관측된 적이 없고, 근거 
 재생 시점에 항목 상태가 이미 달라져 있으면 판단만 남고 종료는 실패하는 반쪽이 생기고,
 그때 원장에 "끝냈다는 판단"과 "안 끝난 항목"이 함께 남는다. **그것이 이 제품이 없애려는 표류의 정확한 모양이다.**
 그래서 거절하고, 판단만 따로 `note` 로 남기라고 그 자리에서 처방한다.
+
+**프로젝트 줄 접기에 자동 판정을 안 둔다.** 핀이 0일 때 "활동이 있는 프로젝트만 편다"는
+규칙을 대신 둘 수도 있었지만 기각했다 — 사람이 접은 것과 규칙이 접은 것이 화면에서 같은
+모양(닫힌 `<details>`)이 되면 「왜 사라졌나」에 답할 축이 없어진다. `buildProjectNav`(§6)는
+그래서 `pinned == 0` 하나만 보고, 활동 신호는 안 본다.
+
+**표시 축 폼(`.pview`, 핀·보관)을 「파생물에 쓰는 폼」 상한 넷에서 뺐다.** 로그아웃과
+같은 부류의 **다른** 근거다 — 로그아웃은 원장에 아무것도 안 남겨서 빠졌고, 이 폼은
+`pinned_at`·`archived_at` 을 원장에 쓴다. 빼는 근거는 그 두 컬럼이 항목·판단·선점·랜딩
+어디에도 안 닿는다는 것이고, 그 증거는 **시험이 든다**: `web/project_nav_test.go` 의
+`TestArchivedProjectStillOpens` 가 접힌(보관된) 프로젝트도 `?project=` 로 그대로 열린다는
+것을 잰다. 그 시험이 빨개지면 이 면제의 근거도 함께 무너진다 — **두 자리(이 문단과 그
+시험)가 한 판정을 나눠 든다.**
+
+**판단이 있는 프로젝트는 `fd project rm` 으로 못 지운다 — 정책이 아니라 원장 제약이다.**
+`judgment_no_delete` 트리거가 판단 행 자체의 삭제를 막고 `judgment.project` FK 가 그
+프로젝트 행을 붙잡는다. 우회(`PRAGMA foreign_keys=OFF` 로 FK 를 끄거나 트리거를 드롭하는
+것)는 기각이다 — 잔해 몇 건을 줄이자고 판단(원장에 남는 유일한 근거 기록)을 잃을 값이
+없고, 증분 가드의 `neverExempt`(구조가 사라지는 조작은 예외로도 못 연다)가 노리는 것과
+같은 부류의 손실이다.
+
+**`projectRefTables`(`internal/store/project.go`) 는 `RemoveProject` 가 도는 삭제 순서
+목록이고, 그 순서를 사람의 기억이 아니라 살아 있는 DB 스키마가 지킨다.** 처음 이 목록을
+짤 때 `schema.sql` 만 훑어 `landing_queue`(증분 003 에서 생긴 표라 `schema.sql` 자체엔
+없다)를 놓쳤다. 그 발견을 밀어붙이자
+`claim`·`resource_hold`·`job` 도 `session` **뒤**에 있었다 — 목록 순서 그대로 `DELETE` 를
+돌리면 그 넷이 `session` 삭제보다 늦어 FK 위반이 났을 자리였다. 지금은 `sqlite_master`
+(표 전수) + `PRAGMA table_info`(project 컬럼 유무)를 읽는 시험
+(`store/project_ref_counts_test.go` 의 `TestProjectRefTablesCoverEveryProjectColumn` ·
+`TestProjectRefTablesOrdersSessionAfterItsNonCascadingReferers`)이 "project 컬럼을 가진
+표 전부가 목록에 있는가"와 "session 을 참조하는 표가 session 보다 앞에 있는가"를 기계적으로
+잡는다 — 사람이 목록을 손으로 갱신하는 것을 잊어도 이 둘이 대신 빨개진다.
 
 ### 실제로 분리 가능한 실패에 투자한다
 

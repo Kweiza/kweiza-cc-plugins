@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -148,6 +149,17 @@ func NoticeText(code, item string) string {
 	case string(ActionLaneRelease):
 		return fmt.Sprintf("랜딩 줄 행 %s 를 회수했다. 사유와 함께 **서버가 관측한 것**"+
 			"(획득 경과 · 마지막 신호 나이 · 그때 줄에 있던 사람)이 판단(decision)으로 남았다.", it)
+	// ★ 아래 넷은 projectAxes 의 값과 그대로 같다 — projectView 핸들러가 notice 코드로
+	// 축 이름 자체를 싣는다. 사유가 없는 축이라 판단(decision)에는 안 남지만, 화면에
+	// "무엇을 했다"는 확인 문장은 있어야 클릭이 씹혔는지 실제로 됐는지가 구분된다.
+	case "pin":
+		return fmt.Sprintf("핀을 켰다: %s. 프로젝트 줄에 남는다.", it)
+	case "unpin":
+		return fmt.Sprintf("핀을 껐다: %s. 다른 핀이 남아 있으면 접힌 쪽으로 옮겨간다.", it)
+	case "archive":
+		return fmt.Sprintf("보관했다: %s. 프로젝트 줄에서 뺐다 — 접근은 그대로 열려 있고 언제든 되돌릴 수 있다.", it)
+	case "unarchive":
+		return fmt.Sprintf("보관을 풀었다: %s. 핀이 없으면 접힌 쪽에, 있으면 보통 줄로 돌아간다.", it)
 	default:
 		return ""
 	}
@@ -349,5 +361,168 @@ func (h *handler) back(w http.ResponseWriter, r *http.Request, in ActionInput, c
 	q.Set("project", in.Project)
 	q.Set("notice", string(code))
 	q.Set("item", in.Item)
+	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 표시 축 — 핀·보관
+//
+// ★ 위의 ActionKind 셋과 **한 자리에 안 섞는다.** 그 셋은 사유를 요구하는 판정이고
+// (JudgeAction 이 reasonMin 을 든다), 이 축은 사유가 없다. 섞으면 "사유가 없으면 거절"이
+// 이 축 때문에 헐거워지고, 그 헐거움은 회수·폐기·줄 회수 쪽에서 터진다.
+//
+// ★ 이 축이 사유를 안 받는 근거: 사유가 필수인 셋은 전부 **남의 일을 뺏거나 되돌릴 수
+// 없는** 것이다. 핀과 보관은 둘 다 아니다 — 내 판이고 클릭 하나로 돌아온다. 요구하면
+// 원장에 의미 없는 문자열만 쌓이고 화면에는 프로젝트마다 입력칸이 붙는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ProjectViewInput 은 표시 축 폼에서 온 것 전부다.
+type ProjectViewInput struct {
+	Project string // 눌렀을 때 보고 있던 프로젝트. 돌아갈 자리다
+	Target  string // 축을 바꿀 프로젝트
+	Axis    string // pin · unpin · archive · unarchive
+}
+
+// projectAxes 는 허용하는 축 전부다. 목록 밖은 거절이다 —
+// 화이트리스트가 아니면 오타가 조용히 아무 일도 안 하는 성공이 된다.
+var projectAxes = map[string]bool{"pin": true, "unpin": true, "archive": true, "unarchive": true}
+
+// ParseProjectAxis 는 버튼 값 "pin:<id>" 를 축과 대상으로 가른다. 순수 함수다.
+//
+// ★ 토글("이 프로젝트를 뒤집어라")이 아니라 **명시적 값**인 이유는 멱등이다. 화면 쓰기는
+// 렌더 시각 키로 멱등을 걸고 있는데(Page.WriteKey), 토글이면 같은 키의 재전송이 상태를
+// 뒤집어 그 멱등이 거짓말이 된다. pin 을 두 번 보내면 두 번 다 핀이다.
+//
+// ★ 첫 콜론에서만 가른다 — 프로젝트 id 는 [A-Za-z0-9._/-] 이라 콜론이 없어야 정상이지만,
+// 여기서 뒤를 통째로 대상으로 두면 이상한 id 가 "없는 프로젝트"로 정확히 거절된다.
+// 뒤에서 또 자르면 엉뚱한 프로젝트에 맞을 수 있다.
+func ParseProjectAxis(raw string) (axis, target string) {
+	a, t, ok := strings.Cut(strings.TrimSpace(raw), ":")
+	if !ok || a == "" || t == "" {
+		return "", ""
+	}
+	return a, t
+}
+
+// JudgeProjectView 는 표시 축 요청이 성립하는지 판정한다. 순수 함수다.
+// known 은 등록된 프로젝트 id 전부다.
+func JudgeProjectView(in ProjectViewInput, known []string) ActionVerdict {
+	if strings.TrimSpace(in.Project) == "" {
+		return ActionVerdict{Reason: "돌아갈 프로젝트가 비었다 — 폼의 project 필드가 안 왔다"}
+	}
+	if strings.TrimSpace(in.Axis) == "" {
+		return ActionVerdict{Reason: "축이 비었다 — 버튼 값이 pin:<id> 꼴이어야 한다"}
+	}
+	if !projectAxes[in.Axis] {
+		return ActionVerdict{Reason: fmt.Sprintf("모르는 축 %q — pin·unpin·archive·unarchive 넷뿐이다",
+			Clip(in.Axis, 32))}
+	}
+	if strings.TrimSpace(in.Target) == "" {
+		return ActionVerdict{Reason: "대상 프로젝트가 비었다"}
+	}
+	for _, k := range known {
+		if k == in.Target {
+			return ActionVerdict{OK: true, Reason: "등록된 프로젝트다"}
+		}
+	}
+	return ActionVerdict{Reason: fmt.Sprintf("프로젝트 %q 가 등록돼 있지 않다", Clip(in.Target, 64))}
+}
+
+// projectView 는 표시 축을 바꾼다. 사유가 없으므로 formInput 을 안 탄다.
+func (h *handler) projectView(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "폼을 읽지 못했다: "+Clip(err.Error(), 200), http.StatusBadRequest)
+		return
+	}
+	axis, target := ParseProjectAxis(r.PostFormValue("axis"))
+	in := ProjectViewInput{
+		Project: strings.TrimSpace(r.PostFormValue("project")),
+		Target:  target,
+		Axis:    axis,
+	}
+
+	ctx := r.Context()
+	st := h.svc.Store()
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		h.log.ErrorContext(ctx, "프로젝트 목록 조회 실패",
+			"route", "POST /actions/project-view", "error", err.Error())
+		http.Error(w, "프로젝트 목록을 읽지 못했다. 잠시 뒤 다시 하라.", http.StatusInternalServerError)
+		return
+	}
+	known := make([]string, 0, len(projects))
+	for _, p := range projects {
+		known = append(known, p.ID)
+	}
+	if v := JudgeProjectView(in, known); !v.OK {
+		http.Error(w, fmt.Sprintf("표시 축 거절: %s\n대상: %s\n뒤로 가서 다시 하라.",
+			v.Reason, Clip(in.Target, 64)), http.StatusBadRequest)
+		return
+	}
+
+	// 지금 값을 읽어 바꿀 축 하나만 갈아 끼운다 — 다른 축을 덮지 않는다.
+	//
+	// ★ 읽기(GetProject)와 쓰기(SetProjectView)를 **같은 Tx 안**에서 한다. store/project.go:167-172
+	// 의 SetProjectView 계약이 그것을 명시로 요구한다 — "한 축만 바꾸고 싶으면 이 함수를
+	// 부르기 전에 같은 Tx 안에서 GetProject 로 다른 축의 현재 값을 읽어 그대로 함께 실어야
+	// 한다." 예전엔 이 둘을 별도 트랜잭션(st.GetProject · st.SetProjectView)으로 불렀다 —
+	// 읽기와 쓰기 사이에 다른 클릭(이 저장소는 20~30 동시 세션이 돈다)이 끼면 그 클릭이
+	// 정한 축이 이 쓰기의 SetProjectView 에 조용히 덮여 사라졌다. 손실은 작지만(표시 축,
+	// 클릭 하나로 복구) 주석이 참이 아닌 불변을 서술한 채로 남는 것이 더 큰 문제였다
+	// (최종 리뷰 Important-1). 원자성 자체를 재는 경합 시험은 안 만든다 — 비싸고, 여기서
+	// 잠그려는 것은 "같은 Tx 를 쓰는가"라는 구조이지 SQLite 잠금 타이밍이 아니다.
+	now := h.now()
+	err = st.Tx(ctx, func(t *store.Tx) error {
+		cur, err := t.GetProject(in.Target)
+		if err != nil {
+			return err
+		}
+		pinned, archived := cur.PinnedAt, cur.ArchivedAt
+		switch in.Axis {
+		case "pin":
+			pinned = now
+			// ★ 핀과 보관은 함께 설 수 없다. 핀은 "줄에 남긴다"이고 보관은 "줄에서 뺀다"라
+			//   둘 다 켜지면 화면이 둘 중 하나를 말없이 이긴다. 핀을 찍으면 보관이 풀린다.
+			archived = time.Time{}
+		case "unpin":
+			pinned = time.Time{}
+		case "archive":
+			archived = now
+			pinned = time.Time{}
+		case "unarchive":
+			archived = time.Time{}
+		}
+		return t.SetProjectView(in.Target, pinned, archived)
+	})
+	if err != nil {
+		// ★ "없는 대상"과 "서버 결함"은 처방이 다르다(h.fail 의 같은 규율). GetProject·
+		// SetProjectView 둘 다 실패하면 store.NotFoundError 를 낸다(둘 다 notFound(NFProject,…)
+		// 로 보낸다) — JudgeProjectView 가 이미 known 목록으로 존재를 확인했으므로 여기서
+		// 나는 NotFound 는 그 확인과 이 Tx 사이에 프로젝트가 지워진 경합뿐이다. 클라이언트가
+		// 들고 있던 목록이 낡았다는 뜻이라 400 이 맞다 — 서버 결함이 아니다.
+		var nf *store.NotFoundError
+		if errors.As(err, &nf) {
+			h.log.ErrorContext(ctx, "프로젝트 조회 실패",
+				"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
+			http.Error(w, "프로젝트를 읽지 못했다: "+Clip(err.Error(), 200), http.StatusBadRequest)
+			return
+		}
+		h.log.ErrorContext(ctx, "표시 축 갱신 실패",
+			"route", "POST /actions/project-view", "project", Clip(in.Target, 64), "error", err.Error())
+		http.Error(w, "표시 축을 바꾸지 못했다.", http.StatusInternalServerError)
+		return
+	}
+	st.LogEvent(ctx, "web.project.view", in.Target, "", map[string]any{"axis": in.Axis})
+	h.log.InfoContext(ctx, "프로젝트 표시 축", "route", "POST /actions/project-view",
+		"project", Clip(in.Target, 64), "axis", in.Axis)
+
+	// ★ notice 코드로 축 이름 자체(pin/unpin/archive/unarchive)를 싣는다 — "project-view"
+	// 라는 코드를 실었었는데 NoticeText 의 고정 목록에 그 이름이 없어 default 로 빠져
+	// 빈 문장이 됐다(리뷰 Minor-5, 실측). item 도 함께 실어 대상을 문장에 담는다
+	// (drop/reclaim 등 다른 쓰기의 back() 과 같은 모양).
+	q := url.Values{}
+	q.Set("project", in.Project)
+	q.Set("notice", in.Axis)
+	q.Set("item", in.Target)
 	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
 }

@@ -634,6 +634,72 @@ func TestHumanBytesUsesDecimalMegabytesAndNamesTheUnit(t *testing.T) {
 	}
 }
 
+// TestDisplayWidthCountsHangulAsTwo 는 runeDisplayWidth/displayWidth 의 계약이다.
+//
+// ★ 리뷰가 잡은 결함: `fmt` 의 `%-Ns` 는 룬 수로 채우는데 한글은 터미널에서 2칸을
+// 먹는다. displayWidth 가 그 계산을 정확히 하는지가 padDisplay/padDisplayRight 전체의
+// 기초다 — 여기가 틀리면 아래 두 시험도 뜻 없이 통과한다.
+func TestDisplayWidthCountsHangulAsTwo(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"빈 문자열", "", 0},
+		{"ASCII 만", "junk", 4},
+		{"한글 넷", "프로젝트", 8},       // 4룬 × 2
+		{"한글 둘", "보관", 4},         // 2룬 × 2
+		{"한글 하나", "핀", 2},         // 1룬 × 2
+		{"섞임", "junk-1", 6},       // ASCII 뿐이라 룬 수와 같다
+		{"말줄임표 포함", "junk-1…", 7}, // clip 이 붙이는 "…" 는 기본 갈래(폭 1)를 탄다
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := displayWidth(c.in); got != c.want {
+				t.Fatalf("displayWidth(%q) = %d, %d 를 기대했다", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPadDisplayAlignsHangulAndASCIIToTheSameVisualColumn 은 padDisplay/padDisplayRight
+// 가 한글 헤더와 ASCII 데이터를 **같은 표시 폭**으로 맞추는지 본다.
+//
+// ★ 리뷰가 실측한 어긋남을 그대로 재현해 잠근다: `%-34s` 로 "프로젝트"(4룬)를 채우면
+// 표시 폭 38칸, "junk"(4룬)를 채우면 34칸이 나왔다(4칸 밀림). padDisplay 는 **표시 폭**
+// 34칸으로 정확히 채워야 한다 — 두 값이 반환한 문자열의 displayWidth 가 서로 같아야
+// "칸이 안 어긋난다"는 것을 뜻한다.
+func TestPadDisplayAlignsHangulAndASCIIToTheSameVisualColumn(t *testing.T) {
+	header := padDisplay("프로젝트", 34)
+	data := padDisplay("junk", 34)
+	if w := displayWidth(header); w != 34 {
+		t.Fatalf("padDisplay(%q, 34) 의 표시 폭이 %d다, 34 를 기대했다", "프로젝트", w)
+	}
+	if w := displayWidth(data); w != 34 {
+		t.Fatalf("padDisplay(%q, 34) 의 표시 폭이 %d다, 34 를 기대했다", "junk", w)
+	}
+	if displayWidth(header) != displayWidth(data) {
+		t.Fatalf("헤더 표시 폭 %d ≠ 데이터 표시 폭 %d — 표가 어긋난다",
+			displayWidth(header), displayWidth(data))
+	}
+
+	// 오른쪽 정렬(숫자 칸)도 같은 계약이다: "상태" 헤더(2룬)와 "-"(1룬) 데이터가
+	// 같은 표시 폭 6으로 맞아야 한다.
+	stateHeader := padDisplay("상태", 6)
+	stateData := padDisplay("-", 6)
+	if displayWidth(stateHeader) != 6 || displayWidth(stateData) != 6 {
+		t.Fatalf("상태 칸 표시 폭이 6 이 아니다: 헤더=%d 데이터=%d",
+			displayWidth(stateHeader), displayWidth(stateData))
+	}
+
+	itemsHeader := padDisplayRight("항목", 6)
+	itemsData := padDisplayRight("0", 6)
+	if displayWidth(itemsHeader) != 6 || displayWidth(itemsData) != 6 {
+		t.Fatalf("항목 칸 표시 폭이 6 이 아니다: 헤더=%d 데이터=%d",
+			displayWidth(itemsHeader), displayWidth(itemsData))
+	}
+}
+
 // TestRevParseCoordsKeepsTheArgumentOrder 는 두 값이 뒤바뀌지 않음을 못 박는다.
 //
 // ★ 이 순수 함수가 따로 있는 이유가 이 시험이다. 호출부에서 줄 번호로 집으면 인자를

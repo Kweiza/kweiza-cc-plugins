@@ -293,6 +293,31 @@ type SearchPanel struct {
 	Empty   string
 }
 
+// ProjectRow 는 프로젝트 줄의 한 칸이다.
+type ProjectRow struct {
+	ID       string
+	On       bool // 지금 보고 있는 것
+	Pinned   bool
+	Archived bool
+	// LastSession 은 마지막 세션의 나이다("3일 전"). 보관 목록에서만 쓴다 —
+	// 보관해 둔 것이 다시 돌기 시작하면 그 사실이 보여야 사람이 풀 수 있다.
+	LastSession string
+}
+
+// ProjectNav 는 헤더의 프로젝트 줄 전부다.
+//
+// ★ 접는 것과 지우는 것은 다르다. 접힌 것도 Folded·Archived 에 그대로 실려 HTML 에
+// 나가고 <details> 가 닫아 둘 뿐이다 — 열면 보이고, ?project= 로는 언제나 열린다.
+type ProjectNav struct {
+	Shown    []ProjectRow // 핀 + 지금 보고 있는 것
+	Folded   []ProjectRow // 핀도 보관도 아닌 것
+	Archived []ProjectRow
+	// FoldedLine 은 "나머지 3 (보관 1 포함)" 이다. 비면 접을 것이 없다는 뜻이다.
+	FoldedLine string
+	// NoPins 는 핀이 하나도 없을 때의 안내다. 그때는 아무것도 안 접는다.
+	NoPins string
+}
+
 // Page 는 렌더 한 장의 전부다.
 type Page struct {
 	Now string
@@ -301,6 +326,16 @@ type Page struct {
 	RenderedAt int64
 	Title      string
 	Projects   []model.Project
+	// Nav 는 위 Projects 를 화면 모양으로 접은 것이다. 템플릿은 이쪽만 읽는다.
+	Nav ProjectNav
+	// Current 는 헤더의 표시 축 폼(.pview)이 project 히든 필드에 싣는 값이다 — Nav 를
+	// 만들 때 쓴 것과 같은 해결값이다(buildPage 의 그 ★ 주석). **`.Project.ID` 가 아니다.**
+	// NotFound 갈래(요청한 프로젝트가 등록돼 있지 않은 경우)에서는 p.Project 가 아직
+	// 제로값인 채로 return 하는데, 그 화면에서도 헤더의 프로젝트 줄은 그대로 나간다(위
+	// Nav 주석) — `.Project.ID` 를 썼다면 그 줄의 핀·보관 버튼이 전부 "돌아갈 프로젝트가
+	// 비었다"로 400 이었을 자리다(리뷰 Important-4). 그 화면에서도 다른 프로젝트를
+	// 핀·보관하는 것 자체는 성립하는 조작이라 버튼이 살아 있어야 한다.
+	Current    string
 	Project    model.Project
 	HasProject bool
 	Notice     string
@@ -333,6 +368,110 @@ func (p Page) WriteKey(kind string) string {
 	return "web:" + kind + ":" + strconv.FormatInt(p.RenderedAt, 10)
 }
 
+// buildProjectNav 는 프로젝트 목록을 화면 모양으로 접는다. 순수 함수다.
+//
+// ★ 핀이 0이면 아무것도 안 접는다. 이것이 이 화면의 정직함이다 — 핀이 없다는 사실을
+// 자동 판정(활동이 있는 것만 편다)으로 덮으면, 사람이 접은 것과 규칙이 접은 것이 화면에서
+// 같은 모양이 되고 "왜 사라졌나"에 답할 수 없다.
+//
+// ★ 지금 보고 있는 것은 핀이 아니어도 편다. 안 그러면 화면이 자기 위치를 안 말한다.
+func buildProjectNav(projects []model.Project, current string, ages map[string]string) ProjectNav {
+	var nav ProjectNav
+	// ★ archived 도 이 첫 루프에서 함께 센다. pinned == 0 갈래는 아래에서 전원을
+	// nav.Shown 으로 보내므로(row.Archived 를 안 본다) 렌더된 행만 보고는 몇 건이
+	// 보관 상태인지 되짚을 수 없다 — 이 카운트가 그 유일한 자리다(최종 리뷰 Minor-1).
+	pinned, archived := 0, 0
+	for _, p := range projects {
+		if !p.PinnedAt.IsZero() {
+			pinned++
+		}
+		if !p.ArchivedAt.IsZero() {
+			archived++
+		}
+	}
+
+	for _, p := range projects {
+		row := ProjectRow{
+			ID:          p.ID,
+			On:          p.ID == current,
+			Pinned:      !p.PinnedAt.IsZero(),
+			Archived:    !p.ArchivedAt.IsZero(),
+			LastSession: ages[p.ID],
+		}
+		// ★ row.Pinned 를 row.Archived 보다 먼저 본다. projectView 핸들러(actions.go)가
+		// pin 을 찍으면 archived 를 지우고 archive 를 찍으면 pinned 를 지워 상호배타를
+		// 만들지만, SetProjectView 자체는 두 축을 안 묶는다 — 원장은 둘 다 켜진 조합을
+		// 여전히 담을 수 있다(옛 값·수동 UPDATE·경합). 그 조합이 실제로 생겨도 화면이
+		// 결정론적으로 한쪽을 골라야 하므로 여기서 순서로 정한다. Shown 쪽을 이기게
+		// 두는 이유는, 접힌 것을 펴는 대가(줄이 붐빈다)가 펼 것을 접는 대가(찾던 것이
+		// 사라진 줄 안다)보다 싸기 때문이다.
+		switch {
+		case pinned == 0:
+			nav.Shown = append(nav.Shown, row)
+		case row.Pinned || row.On:
+			nav.Shown = append(nav.Shown, row)
+		case row.Archived:
+			nav.Archived = append(nav.Archived, row)
+		default:
+			nav.Folded = append(nav.Folded, row)
+		}
+	}
+
+	if pinned == 0 {
+		nav.NoPins = "핀이 없다 — ★ 로 남길 것을 고르면 나머지가 접힌다"
+		// ★ 이 화면의 규율은 "0건과 접힘을 침묵으로 뭉개지 않는다"이고 OutOfWindow·Folded
+		// 가 이미 그것을 지킨다(FoldedLine 의 그 계산). 핀이 0이면 위 switch 가 보관된
+		// 프로젝트까지 전원 nav.Shown 으로 펴는데, 그 사실을 이 문구가 안 말하면 사람이
+		// 보관을 걸어 둔 뒤 핀을 전부 풀었을 때 보관해 둔 것들이 아무 표시 없이 되돌아온
+		// 것처럼 보인다(최종 리뷰 Minor-1). 보관이 0건이면 괄호 자체를 안 붙인다 — 없는
+		// 사실을 있는 것처럼 괄호로 강조할 이유가 없다.
+		if archived > 0 {
+			nav.NoPins += fmt.Sprintf("(보관 %d건도 지금은 함께 펴져 있다)", archived)
+		}
+		return nav
+	}
+	if n := len(nav.Folded) + len(nav.Archived); n > 0 {
+		nav.FoldedLine = fmt.Sprintf("나머지 %d", n)
+		if a := len(nav.Archived); a > 0 {
+			nav.FoldedLine += fmt.Sprintf(" (보관 %d 포함)", a)
+		}
+	}
+	return nav
+}
+
+// archivedSessionAges 는 **보관된 프로젝트만** 마지막 세션 나이를 읽는다.
+//
+// ★ 전건을 안 읽는다. 이 줄은 페이지 머리라 매 렌더 도는데, 프로젝트가 늘수록 질의가
+// 함께 느는 자리를 머리에 두면 화면 전체가 그 비용을 문다. 보관 목록에만 필요한 값이다 —
+// 보관해 둔 것이 다시 돌기 시작하면 사람이 그것을 보고 풀어야 하기 때문이다.
+func (h *handler) archivedSessionAges(ctx context.Context, projects []model.Project,
+	now time.Time) map[string]string {
+
+	ages := map[string]string{}
+	for _, p := range projects {
+		if p.ArchivedAt.IsZero() {
+			continue
+		}
+		at, err := h.svc.Store().LastSessionAt(ctx, p.ID)
+		if err != nil {
+			h.log.ErrorContext(ctx, "마지막 세션 시각 조회 실패",
+				"project", Clip(p.ID, 64), "error", err.Error())
+			ages[p.ID] = "모름"
+			continue
+		}
+		if at.IsZero() {
+			ages[p.ID] = "세션 없음"
+			continue
+		}
+		// ★ 여기서 " 전" 을 덧붙이지 않는다. web.Age 는 이미 "3일 전" 처럼 접미사를
+		// 포함해서 낸다(format.go:64) — 밖에서 다시 붙이면 "3일 전 전" 이 된다.
+		// 이 페이지의 다른 나이 표시(OpenedAge·Signal·Held 등)도 전부 Age 를 이렇게
+		// 그대로 쓴다. 새 관례를 만들지 않는다.
+		ages[p.ID] = Age(now.Sub(at))
+	}
+	return ages
+}
+
 // buildPage 는 화면 한 장을 조립한다.
 //
 // ★ 한 축이 실패해도 나머지는 낸다. 조정 화면이 파생 실패로 통째로 사라지면
@@ -357,6 +496,25 @@ func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 		return p
 	}
 	p.Projects = projects
+	// Nav 는 요청한 프로젝트를 못 찾아 아래에서 일찍 return 하는 갈래(NotFound)에서도
+	// 헤더의 프로젝트 줄이 그대로 나가야 하므로 그 판정보다 앞에서 만든다. (프로젝트가
+	// 0건인 갈래는 이 자리와 무관하다 — dashboard.gohtml 의 {{if .Projects}} 가드가
+	// 그때는 <nav> 를 통째로 지운다.)
+	//
+	// ★ req.project **원문**이 아니라 pickProject 와 같은 규칙으로 해결한 값을 넘긴다.
+	// req.project 는 질의 문자열 그대로라 "/" 로 들어오면 ""(web.go) 인데, 실제로
+	// 그려지는 프로젝트는 pickProject 가 정한 id 순 첫 번째다. 원문을 그대로 넘기면
+	// 그 프로젝트의 On 이 전부 false 가 되어, 핀이 하나라도 있고 id 순 첫 프로젝트가
+	// 핀이 아닐 때 "지금 보드가 그려진 바로 그 프로젝트"가 스스로 접힌 <details> 안에
+	// 들어간다 — 화면이 자기 위치를 안 말하는 사고(리뷰 Important-1)다.
+	current := req.project
+	if current == "" && len(projects) > 0 {
+		current = projects[0].ID
+	}
+	// p.Current 도 여기서 함께 채운다 — 아래의 모든 조기 return(0건·NotFound) 갈래에서도
+	// 헤더 폼의 히든 필드가 값을 가져야 한다(Current 필드 주석 참고).
+	p.Current = current
+	p.Nav = buildProjectNav(projects, current, h.archivedSessionAges(ctx, projects, now))
 
 	// 건강은 프로젝트와 무관하게 항상 낸다 — 프로젝트가 하나도 없을 때가
 	// 오히려 "서버는 사는데 아무도 안 붙었다"를 확인해야 하는 순간이다.

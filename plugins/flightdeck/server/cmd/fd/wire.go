@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/kweiza/flightdeck/internal/service"
+)
 
 // REST 본문 타입 — **internal/api 의 요청 구조체와 필드 이름이 1:1 이어야 한다.**
 //
@@ -98,6 +102,28 @@ type allocResp struct {
 	Project string `json:"project"`
 	Counter string `json:"counter"`
 	Value   int64  `json:"value"`
+}
+
+// projectsResp 는 GET /api/v1/projects 의 응답 껍데기다.
+//
+// allocResp 와 같은 이유로 있다 — handleListProjects 가 내는 것은 service.ProjectSummary
+// 를 감싼 map[string]any 라, 그 껍데기(키 "projects")를 벗길 타입이 필요하다. 안의 항목은
+// service.ProjectSummary 를 그대로 다시 쓴다 — 그 타입에 이미 json 태그가 있고, 이 파일
+// 머리의 규율(요청 본문은 internal/api 의 비공개 타입과 이름을 맞추려 사본을 둔다)은
+// **쓰기** 요청에 대한 것이다. 이건 읽기 응답이고 원본이 이미 공개(exported)라 사본을
+// 새로 정의할 이유가 없다.
+type projectsResp struct {
+	Projects []service.ProjectSummary `json:"projects"`
+}
+
+// projectRemoveReq 는 프로젝트 삭제 요청이다. 필드 이름이 internal/api 의 handleRemoveProject
+// 요청 구조체와 어긋나면 서버가 조용히 0값을 받는다 — confirm 이 빈 채 닿으면 되돌릴 수 없는
+// 삭제가 "확인 없음"으로 항상 접혀서(안전한 방향이라 시끄럽지 않다), --yes 를 줘도 아무 일도
+// 안 일어나는 조용한 실패가 된다.
+type projectRemoveReq struct {
+	Actor   string `json:"actor"`
+	Reason  string `json:"reason"`
+	Confirm bool   `json:"confirm"`
 }
 
 // errBody 는 서버의 오류 응답이다(internal/api.ErrorBody 와 같은 모양).

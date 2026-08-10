@@ -97,8 +97,14 @@ func WithSSEPath(p string) Option {
 
 // Handler 는 읽기 전용 대시보드를 낸다.
 //
-// 라우트는 넷뿐이다: GET / (한 장) · POST actions/reclaim · POST actions/drop ·
-// POST actions/lane-release.
+// 라우트는 다섯이다: GET / (한 장) · POST actions/reclaim · POST actions/drop ·
+// POST actions/lane-release · POST actions/project-view.
+//
+// ★ 앞의 셋만 파생물·원장의 사실에 쓰는 "쓰기"다. project-view 도 원장에 쓰지만
+// (project.pinned_at·archived_at), 그 두 컬럼은 누가 무엇을 보느냐만 정하고 항목·판단·
+// 선점·랜딩 어디에도 안 닿는다 — 그것이 render_test.go 의 폼 상한에서 이 폼을 빼는
+// 근거고, 그 근거의 증거는 접힌 프로젝트도 ?project= 로 그대로 열린다는 것이다
+// (project_nav_test.go 의 TestArchivedProjectStillOpens).
 //
 // 쓰기가 셋인 이유는 설계 §6 의 버튼 다섯 중 **뒤 둘**만 여전히 Tier B 이기
 // 때문이다 — 줄 행 회수는 이 서버가 하는 일이라 열렸고(자동 만료가 없으므로 사람이
@@ -125,6 +131,7 @@ func New(svc *service.Service, opts ...Option) http.Handler {
 	h.mux.HandleFunc("POST /actions/reclaim", h.reclaim)
 	h.mux.HandleFunc("POST /actions/drop", h.drop)
 	h.mux.HandleFunc("POST /actions/lane-release", h.laneRelease)
+	h.mux.HandleFunc("POST /actions/project-view", h.projectView)
 	h.mux.HandleFunc("/", h.notFound)
 	return h
 }

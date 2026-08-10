@@ -57,6 +57,10 @@ func TestMigration005DeletesAbsoluteFootprints(t *testing.T) {
 	//   005_footprint_absolute_backfill.sql 에 고정돼 있고 뒤에 무슨 증분이 더 붙든 안 변한다.
 	//   migrate_test.go:216 이 같은 함정을 주석으로 못박아 뒀다.
 	const prev = 4
+	// 007 증분(project.pinned_at·archived_at)이 prev(4) 뒤에 온다(dropNonIdempotentColumns
+	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
+	// 만들어 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
+	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	if _, err := s.db.Exec(
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev)); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)
@@ -148,6 +152,10 @@ func TestMigration005IsIdempotent(t *testing.T) {
 			t.Fatalf("표본 심기 실패(%s): %v", p, err)
 		}
 	}
+	// 007 증분(project.pinned_at·archived_at)이 4 뒤에 온다(dropNonIdempotentColumns
+	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
+	// 만들어 뒀으므로, 안 걷으면 아래의 재열기(1회차)가 007 을 다시 돌려다 죽는다.
+	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	if _, err := s.db.Exec(`DELETE FROM schema_version WHERE version > 4`); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)
 	}
@@ -176,15 +184,21 @@ func TestMigration005IsIdempotent(t *testing.T) {
 	// schema_version 을 4로 되돌려 **2회차 적용을 강제한다** — 그냥 다시 열면 이미 5라
 	// 증분이 안 돌아 아래 단정이 공허해진다. 멱등이 필요한 이유는 되돌리기가 백업 파일
 	// 손 복사뿐이라 복구 도중 증분이 다시 도는 경로가 실재하기 때문이다.
-	if _, err := func() (sql.Result, error) {
-		raw, err := sql.Open("sqlite", dsn(path))
-		if err != nil {
-			return nil, err
-		}
-		defer raw.Close()
-		return raw.Exec(`DELETE FROM schema_version WHERE version > 4`)
-	}(); err != nil {
+	//
+	// ★ 1회차 재열기가 이미 007 을 다시 돌려 pinned_at·archived_at 을 물리적으로 되만들어
+	// 놨다. 그 컬럼을 또 걷지 않으면 2회차 재열기도 같은 "duplicate column name" 으로
+	// 죽는다 — 이 시험이 재는 것은 005 의 멱등성이지 007 의 멱등성이 아니므로,
+	// dropNonIdempotentColumns 로 007 이 막 재적용될 수 있게 매 회차 앞에서 걷어 준다.
+	raw, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatalf("2회차 구성 실패(열기): %v", err)
+	}
+	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return raw.Exec(q) })
+	if _, err := raw.Exec(`DELETE FROM schema_version WHERE version > 4`); err != nil {
 		t.Fatalf("2회차 구성 실패: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("2회차 구성 실패(닫기): %v", err)
 	}
 	if second := count("2회차"); second != first {
 		t.Errorf("2회차 뒤 발자국이 %d건이다, want %d — 증분이 멱등이 아니다", second, first)

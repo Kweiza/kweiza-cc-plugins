@@ -202,6 +202,9 @@ func TestIdempotencyStableTable(t *testing.T) {
 		// 회수 둘 — 아는 명령이라 명시 갈래다. 기본 문구("모르는 명령")를 보고
 		// 다음 사람이 고정 목록에 넣는 표류를 막는다.
 		{CmdLaneRelease, false}, {CmdClaimRelease, false},
+		// 프로젝트 삭제 — 아는 명령이라 명시 갈래다(최종 리뷰 Important-3). 기본값과
+		// 결과(false)는 같지만, 아래에서 사유가 default 문구와 다르다는 것까지 잰다.
+		{CmdProjectRemove, false},
 		{"모르는명령", false}, // ★ 표 밖: 기본값은 고정하지 않는 쪽이다
 		{"", false},
 	}
@@ -213,6 +216,12 @@ func TestIdempotencyStableTable(t *testing.T) {
 		if strings.TrimSpace(reason) == "" {
 			t.Fatalf("%q: 사유가 비었다", c.cmd)
 		}
+	}
+	// CmdProjectRemove 는 "모르는 명령이라" default 문구를 타면 안 된다 — 명시 갈래가
+	// 없어졌다는 뜻이고, 그러면 다음 사람이 "표에 없으니 넣어야겠다" 하고 고정 쪽에 넣을 위험이
+	// 그대로 되살아난다.
+	if _, reason := IdempotencyStable(CmdProjectRemove); strings.Contains(reason, "모르는 명령이라") {
+		t.Fatalf("CmdProjectRemove 가 default 사유를 탔다: %q — 명시 갈래가 없어졌다", reason)
 	}
 	// 같은 세션·같은 명령이라도 고정이 아니면 키가 달라야 한다.
 	if FreshKey("s") == FreshKey("s") {
