@@ -1486,6 +1486,32 @@ func RenderFinish(r service.FinishResult) string {
 				"이 중 **본문이 곧 패치**인 것이 있으면 pick(item_ids=[…]) 으로 지금 이어받아 "+
 				"이 세션에서 닫아라. 같은 검증 축인 것들은 한 항목으로 묶을 수 있었는지 보라.\n", len(ids))
 		}
+		// ★ 선행 없이 등록된 후속에만 낸다. `landed_ref` 가 Tier A 에서 영영 NULL 이라
+		//   (설계 §3) 후속을 쓰는 사람은 걸 sha 를 어디서도 못 얻는데, 그 값이 **지금
+		//   이 자리에서는 파생된다** — 서버가 이 브랜치 head 를 알고, 그것이 기본 브랜치의
+		//   조상일 때만 AfterCandidate 가 채워진다.
+		//
+		//   실측된 사고가 이 줄의 근거다: 전제가 3일 미랜딩인 항목이 선행 없이 큐에 남아
+		//   기아 78h 1순위로 추천됐고, 집은 세션이 코드를 열고서야 전제 부재를 알았다.
+		//
+		//   **못 붙인다는 사실을 함께 말한다.** 열린 항목에 선행을 더하는 표면이 없어서
+		//   (item_after INSERT 는 AddItem 안에만 있다) "다음에 걸어라"만 적으면 세션은
+		//   지금 고칠 수 있다고 믿고 방법을 찾다가 시간을 쓴다.
+		if r.AfterCandidate != "" {
+			bare := make([]string, 0, len(r.Followups))
+			for _, f := range r.Followups {
+				if len(f.After) == 0 {
+					bare = append(bare, f.ID)
+				}
+			}
+			if len(bare) > 0 {
+				fmt.Fprintf(&b, "  선행 없이 등록된 후속 %d건(%s) — 이 작업 뒤에 와야 하는 것이 있었다면 "+
+					"`after: [{sha: \"%s\"}]` 였다(이 브랜치 head 이고 이미 랜딩됐다). "+
+					"**지금은 못 붙인다** — 열린 항목에 선행을 더하는 표면이 없다. "+
+					"그래도 필요하면 note(item_id=…) 로 남겨라(집을 때 전문으로 온다).\n",
+					len(bare), strings.Join(bare, ", "), r.AfterCandidate)
+			}
+		}
 	}
 	// ★ 이은 것은 **따로** 낸다. 등록과 한 줄에 담으면 "후속 2건 등록"이라고 말하는데
 	// 큐에는 1건만 늘어, 세션이 자기가 큐에 무엇을 했는지 못 본다.
