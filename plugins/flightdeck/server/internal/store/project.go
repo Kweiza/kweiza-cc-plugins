@@ -158,6 +158,13 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 // ★ 이 축은 표시 계층이라 사유를 안 받는다. 이 화면에서 사유가 필수인 셋(선점 회수 ·
 // 항목 폐기 · 줄 회수)은 전부 남의 일을 뺏거나 되돌릴 수 없는 것인데, 핀과 보관은 둘 다
 // 아니다 — 내 판이고 클릭 하나로 돌아온다. 되짚을 거리는 시각과 event 가 남긴다.
+//
+// ★ 이 UPDATE 는 두 축을 **통째로** 덮어쓴다 — "핀만 바꾼다"는 계약이 아니다. 호출자가
+// archived 자리에 제로값을 넘기면 기존 보관이 있어도 조용히 풀린다(TestSetProjectViewOverwritesBothAxesTogether
+// 가 그 동작을 의도로 못박아 둔다). 한 축만 바꾸고 싶으면 이 함수를 부르기 전에 같은 Tx
+// 안에서 GetProject 로 다른 축의 현재 값을 읽어 그대로 함께 실어야 한다 — 그러지 않으면
+// UpsertProject 에 대해 이미 막은 것과 같은 모양의 손실이 난다(핀 토글 처리기가
+// `SetProjectView(ctx, id, time.Now(), time.Time{})` 라고만 쓰면 보관이 날아간다).
 func (t *Tx) SetProjectView(id string, pinned, archived time.Time) error {
 	res, err := t.tx.ExecContext(t.ctx, `
 		UPDATE project SET pinned_at = ?, archived_at = ? WHERE id = ?`,
@@ -171,8 +178,12 @@ func (t *Tx) SetProjectView(id string, pinned, archived time.Time) error {
 	if err != nil {
 		return fmt.Errorf("프로젝트 표시 축 갱신 결과 확인 실패(id=%q): %w", clip(id, 64), err)
 	}
+	// ★ ErrNotFound 를 fmt.Errorf 로 직접 감싸지 않는다. getProject(project.go 위쪽)가
+	//   쓰는 notFound(NFProject, ...) 와 같은 길로 보내야 internal/api 의 errors.As(*NotFoundError)
+	//   가 좌표·처방을 붙일 수 있다 — sentinel 로 새면 일반 404 문구로 접혀 "무엇이
+	//   없었는지"가 응답에서 사라진다(notfound.go 의 그 타입 주석이 이 실패를 이미 적어 뒀다).
 	if n == 0 {
-		return fmt.Errorf("프로젝트 %q: %w", clip(id, 64), ErrNotFound)
+		return notFound(NFProject, "", id)
 	}
 	return nil
 }

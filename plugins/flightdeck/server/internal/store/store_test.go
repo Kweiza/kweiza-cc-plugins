@@ -64,6 +64,38 @@ func mustItem(t *testing.T, s *Store, project, id string) {
 	}
 }
 
+// dropNonIdempotentColumns 는 "옛 버전인 척" 픽스처가 schema_version 행을 되돌리기
+// **직전에** 불러야 한다.
+//
+// ★ 왜 필요한가. 이 패키지의 마이그레이션 시험들은 전부 같은 기법을 쓴다 — 먼저
+// OpenWithLogger 로 최신판까지 물리적으로 다 올린 뒤, schema_version 표의 행만 지워
+// 옛 버전인 척한다(makeV1DB 의 주석이 이 규율을 이미 적어 뒀다). DELETE FROM 류 증분은
+// 재적용이 안전하지만 ALTER TABLE ADD COLUMN 류(007…)는 이미 있는 컬럼을 또 만들려다
+// "duplicate column name" 으로 죽는다 — 007 SQL 자신의 주석이 "멱등이 아니어도 족하다,
+// 증분은 schema_version 으로 정확히 한 번만 돈다" 고 적은 전제가 이 픽스처 기법과
+// 정확히 어긋나는 자리다.
+//
+// ★ 왜 한 자리인가. 이 함수가 없으면 되돌리기 지점마다(지금 여섯 곳) 같은 ALTER 두 줄을
+// 복제해야 하고, 새 비멱등 증분이 생길 때마다 그 여섯 곳을 전부 찾아 고쳐야 한다 —
+// 하나라도 빠뜨리면 그 시험만 "duplicate column name" 으로 조용히 깨진다. scanProject 를
+// 하나로 모은 것과 같은 이유다: 컬럼을 나열하는 자리가 여럿이면 하나만 고쳐지고
+// 나머지는 다음 증분에서 깨진다. 새 비멱등 증분은 여기 목록 한 줄만 늘리면 된다.
+//
+// exec 는 `*sql.DB.Exec`·`*sql.Tx.Exec` 를 감싼 것이다 — 두 타입 다 variadic 이라
+// `func(string) (sql.Result, error)` 에 그대로 안 맞으므로 호출부가 감싼다.
+func dropNonIdempotentColumns(t *testing.T, exec func(string) (sql.Result, error)) {
+	t.Helper()
+	for _, q := range []string{
+		// 007 · project.pinned_at·archived_at
+		`ALTER TABLE project DROP COLUMN pinned_at`,
+		`ALTER TABLE project DROP COLUMN archived_at`,
+	} {
+		if _, err := exec(q); err != nil {
+			t.Fatalf("비멱등 증분 컬럼 걷기 실패(%s): %v", q, err)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 열기 · 마이그레이션
 // ─────────────────────────────────────────────────────────────────────────────
