@@ -1385,7 +1385,7 @@ go test ./cmd/fd/ -run TestServeAPIOptionsWiresLoginScreen -count=1
 	}
 ```
 
-`serve.go` 의 import 에 `net/http` 와 `github.com/kweiza/flightdeck/internal/web` 가 없으면 더한다(둘 다 이미 쓰고 있을 것이다 — `buildHandler` 가 `http.Handler` 를, `runServe` 가 `web.New` 를 쓴다).
+import 은 더할 것이 없다 — `net/http`·`internal/api`·`internal/web` 셋 다 `serve.go` 가 이미 쓰고 있다(`main@7e98e7e` 기준 확인).
 
 - [ ] **Step 4: 통과를 확인한다**
 
