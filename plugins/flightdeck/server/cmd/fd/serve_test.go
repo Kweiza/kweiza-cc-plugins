@@ -350,9 +350,13 @@ func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
 	}
 
 	// 실제로 폼을 그리는지 본다. nil 아님만 재면 func(...){} 빈 몸통도 통과한다.
+	//
+	// ★ 필드마다 **서로 구분되는** 값을 준다 — 같은 타입의 문자열 셋이라 어댑터가 둘을
+	// 맞바꿔도 컴파일이 통과한다. Action 은 뿌리 값(`login`)이 아니라 `../login` 이다:
+	// 뿌리 값은 제로값과 구분은 되지만 "옮겨졌다"를 덜 확실하게 보인다.
 	rec := httptest.NewRecorder()
 	opt.LoginScreen(rec, httptest.NewRequest("GET", "/", nil),
-		api.LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=x"})
+		api.LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=x", Action: "../login"})
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("상태가 %d 다 — 401 이어야 한다", rec.Code)
@@ -368,5 +372,13 @@ func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
 	}
 	if !strings.Contains(body, `value="/?project=x"`) {
 		t.Fatal("돌아갈 자리가 안 실렸다 — 어댑터가 Next 를 잘못 옮겼다")
+	}
+	// ★ Action 은 빠지면 **조용히 고장을 되살린다.** 이름 있는 복합 리터럴이라 어댑터가
+	// 이 필드를 안 옮겨도 컴파일이 통과하는데, 제로값("")은 폼을 문서 URL 자신으로
+	// 제출시켜 뿌리 밖에서 뜬 폼이 영원히 자기에게 POST 하는 그 결함이 그대로 돌아온다.
+	// Error·Next 는 빠져도 화면이 좀 이상할 뿐이라 이 축만 실패 모양이 다르다.
+	if !strings.Contains(body, `action="../login"`) {
+		t.Fatal(`폼 action 이 안 실렸다 — 어댑터가 Action 을 잘못 옮겼다. ` +
+			`빈 값이면 폼이 문서 URL 자신으로 제출돼 무한 폼이 된다`)
 	}
 }
