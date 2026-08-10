@@ -125,6 +125,20 @@ var ledgerTables = []struct {
 	{"snapshot", snapshotCols},
 }
 
+// LedgerTableNames 는 판단 원장이 담는 폐포 표 이름들이다(선언 순서 = 되쓰기 순서).
+//
+// ★ 왜 내보내나. **복원 결과를 설명하는 쪽**(ledger.Losses)이 "무엇이 복원되는가"를 손으로
+// 적으면 폐포가 바뀔 때 그 설명이 조용히 거짓이 된다. 실제로 그랬다 — session 이 폐포에
+// 들어온 뒤에도 손실 목록은 세션을 가리키는 링크를 손실로 부르고 있었고, 그 링크가
+// 실측 34%였다.
+func LedgerTableNames() []string {
+	out := make([]string, 0, len(ledgerTables))
+	for _, e := range ledgerTables {
+		out = append(out, e.name)
+	}
+	return out
+}
+
 // ledgerColNames 는 컬럼 목록 문자열을 이름 슬라이스로 가른다. 순수 함수다.
 func ledgerColNames(cols string) []string {
 	var out []string
