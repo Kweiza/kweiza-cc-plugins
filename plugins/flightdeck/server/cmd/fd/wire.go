@@ -116,6 +116,16 @@ type projectsResp struct {
 	Projects []service.ProjectSummary `json:"projects"`
 }
 
+// projectRemoveReq 는 프로젝트 삭제 요청이다. 필드 이름이 internal/api 의 handleRemoveProject
+// 요청 구조체와 어긋나면 서버가 조용히 0값을 받는다 — confirm 이 빈 채 닿으면 되돌릴 수 없는
+// 삭제가 "확인 없음"으로 항상 접혀서(안전한 방향이라 시끄럽지 않다), --yes 를 줘도 아무 일도
+// 안 일어나는 조용한 실패가 된다.
+type projectRemoveReq struct {
+	Actor   string `json:"actor"`
+	Reason  string `json:"reason"`
+	Confirm bool   `json:"confirm"`
+}
+
 // errBody 는 서버의 오류 응답이다(internal/api.ErrorBody 와 같은 모양).
 // request_id 를 그대로 사람에게 보여준다 — 응답과 서버 로그를 잇는 유일한 열쇠다.
 type errBody struct {

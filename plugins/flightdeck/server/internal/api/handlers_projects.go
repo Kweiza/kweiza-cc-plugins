@@ -14,3 +14,23 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeJSON(w, r, http.StatusOK, map[string]any{"projects": list})
 }
+
+// handleRemoveProject 는 프로젝트를 지운다. **되돌릴 수 없다.** 사유가 필수고, confirm 이
+// 없으면 세기만 한다 — 그 두 안전판은 service.RemoveProject 가 지킨다(여기서 다시 판정하지
+// 않는다. 두 벌이 되면 반드시 표류한다).
+func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Actor   string `json:"actor"`
+		Reason  string `json:"reason"`
+		Confirm bool   `json:"confirm"`
+	}
+	if !s.decode(w, r, &req) {
+		return
+	}
+	res, err := s.svc.RemoveProject(r.Context(), r.PathValue("id"), req.Actor, req.Reason, req.Confirm)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, res)
+}

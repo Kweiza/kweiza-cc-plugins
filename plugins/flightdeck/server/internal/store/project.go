@@ -254,8 +254,13 @@ var projectRefTables = []string{
 
 // ProjectRefCounts 는 이 프로젝트에 묶인 행 수를 표별로 센다.
 // 지우기 전에 무엇이 함께 갈지 보여주는 자리다.
+//
+// ★ "event" 와 "judgment_foreign" 은 projectRefTables 에 없는 **합성 키**다 — 표 이름이
+// 아니라서 RemoveProject 의 삭제 루프(projectRefTables 를 그대로 도는)는 이 둘을 안 본다.
+// event 는 지우지 않아서(위 주석), judgment_foreign 은 아예 이 프로젝트가 소유하지 않는
+// 남의 판단이라 지울 권한이 없어서(아래 주석) 그렇다.
 func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int, error) {
-	out := make(map[string]int, len(projectRefTables)+1)
+	out := make(map[string]int, len(projectRefTables)+2)
 	for _, tbl := range projectRefTables {
 		var n int
 		// ★ 표 이름은 위 projectRefTables 상수에서만 온다(외부 입력이 아니다) — 그래서
@@ -273,7 +278,141 @@ func (s *Store) ProjectRefCounts(ctx context.Context, id string) (map[string]int
 		return nil, fmt.Errorf("이벤트 수 조회 실패(project=%q): %w", clip(id, 64), err)
 	}
 	out["event"] = ev // 세기만 한다 — 안 지운다
+
+	// ★ judgment.session_id 는 session(id) 를 CASCADE 없이 참조하고 judgment.project 와는
+	// **독립 컬럼**이다(schema.sql:230-231) — 그래서 다른 프로젝트의 판단이 이 프로젝트의
+	// 세션을 가리킬 수 있다. 실물 경로: service.NoteInput 은 Project 와 SessionID 를 각자
+	// 받고(finish.go) 서로 같은 프로젝트인지 검증하지 않는다 — 세션은 맞게 골랐는데
+	// --project 를 오타 내거나 다른 값으로 주면 이 모양의 행이 생긴다.
+	//
+	// 위 루프의 "judgment" 카운트(project = id)는 이 판단들을 못 잡는다 — project 컬럼이
+	// 다르기 때문이다. 그런데 이 판단은 삭제 금지 트리거(judgment_no_delete)가 걸려 있어
+	// RemoveProject 도 못 지운다 — 그 판단이 하나라도 남아 있으면 session 삭제(여섯 번째
+	// 단계)가 FK 위반으로 죽는다. 그래서 별도 질의로 센다: 이 축을 안 세면
+	// JudgeProjectRemoval 이 이 경로를 못 보고 통과시키고, 사람은 드라이버 원문 그대로의
+	// FK 오류("FOREIGN KEY constraint failed")만 받는다 — 무엇이 막았는지 아무도 모른다.
+	var foreignJudgment int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM judgment
+		WHERE session_id IN (SELECT id FROM session WHERE project = ?)
+		  AND (project IS NULL OR project <> ?)`, id, id).Scan(&foreignJudgment); err != nil {
+		return nil, fmt.Errorf("교차 프로젝트 판단 수 조회 실패(project=%q): %w", clip(id, 64), err)
+	}
+	out["judgment_foreign"] = foreignJudgment
 	return out, nil
+}
+
+// JudgeProjectRemoval 은 프로젝트를 지워도 되는지 판정한다. 순수 함수다.
+//
+// ★ 막는 축이 셋이고 성격이 둘로 갈린다.
+//
+//	⒜ 항목 — **정책**이다. 639항목짜리 프로젝트를 한 명령으로 날리는 길을 안 만든다.
+//	   강제 플래그도 안 만든다: 한 번 만들면 다음 사람이 그것을 쓴다.
+//	⒝ 이 프로젝트 자신의 판단 · ⒞ 다른 프로젝트가 이 프로젝트의 세션을 가리키는 판단 —
+//	   **둘 다 원장이 정한 제약**이다. judgment_no_delete 트리거가 판단 삭제를 원리적으로
+//	   막고, ⒝ 는 judgment.project 가, ⒞ 는 judgment.session_id → session(id) 가 각각
+//	   FK 로 행을 붙잡는다(ProjectRefCounts 의 그 주석). 우회는 기각이다 —
+//	   PRAGMA foreign_keys=OFF 도 트리거 드롭도 잔해 몇 건과 바꿀 값이 아니다.
+//	   줄에서만 빼면 되는 경우라 화면의 보관이 그 자리를 받는다.
+//
+// ★ ⒞ 를 왜 pragma defer_foreign_keys(move.go 의 선례)로 안 미루는가: defer 는 **트랜잭션
+// 끝까지 미룬 뒤에도 그 사이 부모·자식이 결국 같은 그림으로 맞춰지는** 경우에만 의미가
+// 있다(move.go 는 item 을 옮기는 동안 FK 검사를 커밋 시점으로 미뤄서 "부모 먼저" 대
+// "자식 먼저" 문제를 해소한다 — 끝나면 둘 다 새 프로젝트를 가리켜 앞뒤 상관없이 맞는다).
+// 여기는 다르다: 남의 판단은 트리거 때문에 이 함수가 절대 못 건드리므로, 미뤄 봤자
+// 커밋 시점에도 여전히 죽은 세션을 가리키는 채로 남는다 — 미루는 것은 실패를 뒤로
+// 늦출 뿐 없애지 못한다. 그래서 여기서는 **미리 세어 거절**한다(RemoveProject 를 아예
+// 안 부른다). 왜 "시도하고 잡아서 번역"(옵션 B) 을 1차 방어로 안 쓰는가: 그러면 매번
+// DELETE 를 실제로 던져 봐야 알 수 있고, 사람은 --yes 를 준 뒤에야 거절을 본다 —
+// 이 명령의 절반("무엇이 함께 지워질지 먼저 보여준다")이 --yes 없이도 성립해야 하는데
+// 시도-후-번역은 그 절반을 지키지 못한다. 다만 2차 방어로는 남겨 둔다(RemoveProject 의
+// 그 주석) — 판정과 삭제 사이의 레이스까지 사람이 읽을 사유를 받게 하기 위해서다.
+func JudgeProjectRemoval(counts map[string]int) (bool, string) {
+	if n := counts["item"]; n > 0 {
+		return false, fmt.Sprintf("큐 항목이 %d건 있다 — 항목이 있는 프로젝트는 지우지 않는다. "+
+			"줄에서만 빼려면 대시보드에서 보관하라", n)
+	}
+	if n := counts["judgment"]; n > 0 {
+		return false, fmt.Sprintf("판단이 %d건 있다 — 판단은 원장이라 삭제 금지 트리거가 있고, "+
+			"그것이 이 프로젝트 행을 붙잡는다(FK). 줄에서만 빼려면 대시보드에서 보관하라", n)
+	}
+	if n := counts["judgment_foreign"]; n > 0 {
+		return false, fmt.Sprintf("다른 프로젝트의 판단이 %d건, 이 프로젝트의 세션을 가리키고 "+
+			"있다 — judgment.session_id 는 session(id) 를 FK 로 참조하고 judgment.project 와는 "+
+			"독립이라 이 프로젝트의 판단 수만으로는 안 잡힌다. 그 판단도 삭제 금지 트리거가 "+
+			"걸려 있어 이쪽에서 지울 수 없고, 그대로 두면 이 프로젝트의 세션을 못 지운다(FK). "+
+			"줄에서만 빼려면 대시보드에서 보관하라", n)
+	}
+	return true, "지울 수 있다 — 항목도 판단도 없다"
+}
+
+// RemoveProject 는 프로젝트와 거기 묶인 행 전부를 지운다.
+//
+// ★ 판정은 부르는 쪽이 한다(JudgeProjectRemoval). 여기서 다시 세면 판정이 두 벌이 되고,
+// 두 벌은 반드시 표류한다.
+//
+// ★ event 는 안 지운다 — projectRefTables 의 그 주석대로다.
+func (s *Store) RemoveProject(ctx context.Context, id string) error {
+	return s.Tx(ctx, func(t *Tx) error {
+		// 지운다는 사실을 **먼저** 예약한다. 예약 이벤트는 롤백 뒤에도 흘러서
+		// 아래가 통째로 죽어도 "무엇을 지우려 했나"가 원장에 남는다.
+		t.LogEvent("project.remove", id, "", map[string]any{"project": clip(id, 64)})
+
+		for _, tbl := range projectRefTables {
+			if tbl == "judgment" {
+				// 판단은 트리거가 막는다. 여기 오면 판정이 먼저 거절했어야 한다 —
+				// 0건이면 DELETE 가 무해하므로 그대로 두면 조용히 통과하고,
+				// 0건이 아니면 트리거가 정확한 말로 죽인다. 건너뛰지 않는 이유가 그것이다.
+				continue
+			}
+			if _, err := t.tx.ExecContext(t.ctx,
+				`DELETE FROM `+tbl+` WHERE project = ?`, id); err != nil {
+				if ferr := removalFKMessage(tbl, id, err); ferr != nil {
+					return ferr
+				}
+				return fmt.Errorf("행 삭제 실패(table=%s, project=%q): %w", tbl, clip(id, 64), err)
+			}
+		}
+		res, err := t.tx.ExecContext(t.ctx, `DELETE FROM project WHERE id = ?`, id)
+		if err != nil {
+			if ferr := removalFKMessage("project", id, err); ferr != nil {
+				return ferr
+			}
+			return fmt.Errorf("프로젝트 삭제 실패(id=%q): %w", clip(id, 64), err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("프로젝트 삭제 결과 확인 실패(id=%q): %w", clip(id, 64), err)
+		}
+		if n == 0 {
+			// ★ fmt.Errorf(...ErrNotFound...) 로 직접 감싸지 않는다 — SetProjectView 의 그
+			// 주석과 같은 이유다. notFound 로 보내야 internal/api 의 errors.As(*NotFoundError)
+			// 가 좌표·처방을 붙일 수 있다.
+			return notFound(NFProject, "", id)
+		}
+		return nil
+	})
+}
+
+// removalFKMessage 는 RemoveProject 의 **2차 방어**다. 삭제 도중 FK 위반이 나면 드라이버
+// 원문 대신 사람이 읽을 사유를 낸다. FK 위반이 아니면 nil 이다(호출부가 원래 오류를 그대로
+// fmt.Errorf 로 감싼다).
+//
+// ★ 1차 방어는 JudgeProjectRemoval 이다(judgment·judgment_foreign 카운트로 미리 거절) —
+// 정상 경로는 여기 절대 안 온다. 이 함수가 잡는 것은 **판정과 삭제 사이의 레이스**뿐이다:
+// ProjectRefCounts 로 센 시점과 이 DELETE 사이에 다른 세션이 이 프로젝트의 세션을 가리키는
+// 새 판단을 남기면(극히 드묾 — 사람이 --yes 를 눌러 부르는 단발 명령이라 창이 밀리초 단위다)
+// 여기로 온다. 그때도 "FOREIGN KEY constraint failed" 원문만 올리면 무엇이 막았는지
+// 아무도 모른다 — 그래서 한 번 더 번역한다.
+func removalFKMessage(tbl, id string, err error) error {
+	if JudgeConstraintCode(ConstraintCode(err)).Kind != ConflictMissingRef {
+		return nil
+	}
+	return fmt.Errorf(
+		"표 %s 를 지우는 중 참조 무결성 위반이 났다 — 세었을 때는 없던 참조가 그 사이 생겼을 "+
+			"수 있다(대개 다른 프로젝트의 판단이 이 프로젝트의 세션을 새로 가리켰다). "+
+			"`fd project rm` 을 다시 실행해 사유를 다시 확인하라(table=%s, project=%q): %w",
+		tbl, tbl, clip(id, 64), err)
 }
 
 // nullTime 은 제로값을 NULL 로 낸다.
