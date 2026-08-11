@@ -572,7 +572,11 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 
 ### REST `/api/v1/` — 정본
 
-```
+이 블록의 펜스 태그(` ```routes `)는 **기계가 읽는 표식**이다 — `internal/api` 의 mux 등록과
+이 표를 양방향으로 대조하는 시험이 그것으로 표를 찾는다(`api/design_route_table_test.go`).
+지우면 그 시험이 "정본이 없다"로 빨강이 된다. 표를 옮기거나 쪼갤 때는 태그를 함께 옮겨라.
+
+```routes
 POST   /sessions                    PATCH  /sessions/{id}
 GET    /sessions?machine&worktree&cc   (조회 전용 — 3중키. 없으면 404 다, 만들지 않는다)
 GET    /sessions?id=<카드>             (카드 id 로 지목 — 좌표 해석이 없는 유일한 축. 선점을 함께 낸다)
@@ -582,12 +586,23 @@ GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
 POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropped-dep`·`after-bad-ref` 의 유일한 탈출구)
+POST   /items/{id}/move             (고칠 수 있는 축은 프로젝트 하나뿐 — 본문·제목은 못 바꾼다)
+POST   /landing                     (줄 서기·보고·이탈 셋이 한 표면 — 셋 다 자기 줄 행 하나를 다룬다)
+POST   /landing/rows/{id}/release   (물린 줄 행을 사람이 회수 — 남의 점유를 끊는 일이라 위와 갈랐다)
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
+GET    /projects                    POST   /projects/{id}/remove  (잔해 지우기 — `--yes` 없이는 세기만 한다)
 GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /sessions/{id}/prescriptions (세션 카드 파생 안 돎)
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
+GET|POST /login                     POST   /logout       (화면 토큰 로그인 — 아래 ★)
 ```
+
+**이 표는 `/api/v1` 밖의 표면도 적는다.** 헤더의 접두는 *대부분이 그것*이라는 뜻이지
+경계가 아니다 — `/healthz`·`/metrics`·`/events`(짧은 별칭, 화면이 이걸 문다)·`/login`·
+`/logout` 은 접두 밖이고, 그래도 이 서버가 내는 HTTP 표면이라 여기 있다. **접두를 경계로
+읽으면 그 다섯이 표에서 빠지고, 실제로 로그인 표면 셋이 그렇게 빠져 있었다**(2026-08-11
+기계 대조에서 드러났다 — `internal/web` 의 화면 라우트는 별개 mux 라 여전히 이 표 밖이다).
 
 **`GET /sessions` 는 카드를 두 축으로 지목한다 — 3중키와 카드 id.**
 3중키는 훅의 복구 갈래가 쓴다(rekey 하기 전에 옛 cc 의 카드를 찾는다). 카드 id 는 사람이
