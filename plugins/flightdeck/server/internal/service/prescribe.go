@@ -64,9 +64,48 @@ type PrescribeResult struct {
 }
 
 // prescribePayload 는 event.payload 의 모양이다.
+//
+// ★ **판정을 가른 축을 함께 싣는다(2026-08-11 개정).** 앞선 판은 `key`·`reason` 뿐이었고,
+// 그래서 "이 발화가 왜 떴나"에 원장이 답을 못 했다. 실물 대가: unclaimed 118건의 성격을
+// 가르려고 `item.claim`·`item.finish`·`claim.reclaim` 을 시간순으로 재생하는 일회용
+// 스크립트가 필요했고, 그것이 그 조사의 대부분이었다.
+//
+// ★ **항목 id 만 싣는다 — 경로는 안 싣는다.** judge 쪽 `SiblingClaims`·`WorkspaceClaims`
+// 주석의 논거가 그대로 걸린다. 덤으로 payload 가 발자국 수에 비례해 붓지 않는다.
+//
+// ★ **이것만으로는 거짓 양성을 못 센다.** 여기 남는 것은 판정이 **본** 것이고, 거짓 양성은
+// 판정이 **못 본** 것 때문에 난다. 세상의 진실은 `store.ClaimHolderAt` 이 낸다 —
+// 둘을 나란히 놓아야 "판정은 비었는데 세상엔 점유자가 있었다"가 세어진다.
+// 그래서 이 구조체가 답하는 질문은 **"판정이 무엇을 보고 그렇게 말했나"** 하나다.
+//
+// ★ 빈 축은 `[]` 로 나간다(`omitempty` 를 안 쓴다). 없는 것과 빈 것을 원장에서 가르려면
+// 키가 있어야 한다 — 이 형태 이전의 옛 행은 키 자체가 없어서 그 둘이 저절로 갈린다.
 type prescribePayload struct {
 	Key    string `json:"key"`
 	Reason string `json:"reason"`
+	// 아래 넷이 judge.PrescribeInput 의 같은 이름 축 그대로다.
+	Claims          []string `json:"claims"`
+	SiblingClaims   []string `json:"sibling_claims"`
+	WorkspaceClaims []string `json:"workspace_claims"`
+	Closed          []string `json:"closed"`
+}
+
+// claimViewIDs 는 ClaimView 목록에서 항목 id 만 뽑는다. **nil 대신 빈 슬라이스**를 낸다 —
+// 위 구조체가 빈 축을 `[]` 로 내보내기로 한 결정이 여기 걸려 있다.
+func claimViewIDs(vs []judge.ClaimView) []string {
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, v.ItemID)
+	}
+	return out
+}
+
+// idsOrEmpty 는 nil 을 빈 슬라이스로 바꾼다. 같은 이유다.
+func idsOrEmpty(ids []string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	return ids
 }
 
 // prescribeFoldedPayload 는 접힌 턴 하나의 흔적이다. **재측이 읽는 것이 이 모양 전부다.**
@@ -283,9 +322,18 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	// **위 루프가 표시분만 도는 한 영구히 0을 낸다** — 상한이 구조적으로 3을 넘기지 못하게
 	// 막기 때문이다. 그래서 접힌 턴이 자기 이름의 이벤트 하나를 남기고, 그때부터 재측은
 	// `kind='prescribe_folded'` 를 세는 일이 된다(위 129/15 를 그 축으로 다시 만든다).
+	// ★ 축은 루프 **밖**에서 한 번 뽑는다. 한 턴의 발화들은 같은 판정 입력에서 나왔으므로
+	// 행마다 다시 계산할 것이 없고, 다시 계산하면 행마다 다른 값이 실릴 자리가 생긴다.
+	axes := prescribePayload{
+		Claims:          claimViewIDs(in.Claims),
+		SiblingClaims:   idsOrEmpty(in.SiblingClaims),
+		WorkspaceClaims: idsOrEmpty(in.WorkspaceClaims),
+		Closed:          claimViewIDs(in.Closed),
+	}
 	for _, p := range shown {
-		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID,
-			prescribePayload{Key: p.Key, Reason: p.Reason})
+		row := axes
+		row.Key, row.Reason = p.Key, p.Reason
+		s.st.LogEvent(ctx, eventPrescribe, sess.Project, sessionID, row)
 	}
 	if folded > 0 {
 		keys := make([]string, 0, folded)

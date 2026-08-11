@@ -1044,6 +1044,69 @@ func (s *Store) ReleasedItems(ctx context.Context, sessionID string, since time.
 	return out, nil
 }
 
+// ClaimHolderAt 는 **시각 at 에** 이 항목을 쥐고 있던 세션 id 다. 아무도 안 쥐었으면 빈 문자열.
+//
+// ★ 왜 `claim` 표를 안 읽는가. 그 표는 `PRIMARY KEY (project, item_id)` 라 **항목 하나에
+// 행 하나**다 — 반납은 `released_at` 을 채우고 재선점은 그 행을 덮는다. 그래서 과거를 물으면
+// 답이 없는 것이 아니라 **조용히 틀린 답**이 나온다: 지금 쥔 사람이 그때 쥔 사람인 것처럼 나온다.
+// 오류도 경고도 없다. 2026-08-11 에 처방 118건을 가르다가 실물로 걸렸다.
+//
+// 답이 있는 곳은 추가 전용 원장뿐이다(`event_no_update`·`event_no_delete` 가 잠근다).
+// 그 재생 지식이 일회용 스크립트에만 있으면 다음 사람이 같은 함정을 다시 밟는다 —
+// 이 함수의 존재 이유가 그것이다.
+//
+// 세는 kind 는 넷이고, **안 세는 것들이 같이 중요하다**:
+//
+//	item.claim         점유자가 이 세션이 된다
+//	item.finish        반납이다
+//	claim.reclaim      사람이 회수했다 — project 가 NULL 이라 항목 이름으로만 걸린다
+//	web.claim.reclaim  같다(웹에서 온 회수)
+//	─────────────────────────────────────────────────────────────
+//	item.claim.fail     선점이 **거절**됐다 — 점유자는 그대로다
+//	item.finish.refused 마무리가 관문에 막혔다 — 반납이 안 일어났다
+//	item.finish.fail    같다
+//	item.resume         **이미 자기 선점일 때만** 난다(service/pick.go 의 resume 갈래) — 주인 불변
+//
+// ★ 회수 이벤트는 `project` 가 NULL 이고 `session_id` 도 없다. 그래서 프로젝트 축을
+// `project = ? OR project IS NULL` 로 느슨하게 걸 수밖에 없다 — 항목 id 가 프로젝트를
+// 가로질러 같을 수 있으므로 **이론적으로 남의 프로젝트 회수가 섞일 수 있다.** 섞이는 방향은
+// "쥐고 있는데 안 쥔 것으로 본다"(거짓 음성)라 안전한 쪽이고, 그 대가로 회수를 놓치지 않는다.
+// 반대로 짜면 회수된 선점을 살아 있는 것으로 봐서 조용한 오답이 다시 생긴다.
+//
+// ★ 정렬에 `id` 를 함께 쓴다. 같은 마이크로초에 선점과 반납이 들어오면 `at` 만으로는
+// 순서가 안 정해지고, 그 경계에서 답이 뒤집힌다. `id` 는 AUTOINCREMENT 라 삽입 순서다.
+func (s *Store) ClaimHolderAt(ctx context.Context, project, itemID string, at time.Time) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT kind, COALESCE(session_id, '') FROM event
+		WHERE kind IN ('item.claim','item.finish','claim.reclaim','web.claim.reclaim')
+		  AND (project = ? OR project IS NULL)
+		  AND json_extract(payload, '$.item') = ?
+		  AND at <= ?
+		ORDER BY at, id`, project, itemID, fmtTime(at))
+	if err != nil {
+		return "", fmt.Errorf("선점 이력 조회 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	defer rows.Close()
+
+	holder := ""
+	for rows.Next() {
+		var kind, sessionID string
+		if err := rows.Scan(&kind, &sessionID); err != nil {
+			return "", fmt.Errorf("선점 이력 행 해석 실패: %w", err)
+		}
+		if kind == "item.claim" {
+			holder = sessionID
+			continue
+		}
+		holder = "" // 반납·회수
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("선점 이력 순회 실패: %w", err)
+	}
+	return holder, nil
+}
+
 // SiblingClaimedItems 는 **같은 대화의 다른 카드**가 지금 쥔 항목 id 를 낸다.
 //
 // 대화는 (project, machine_id, cc_session_id) 다 — 정체 3중키에서 worktree 축만 뺀 것이다.
