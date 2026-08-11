@@ -197,6 +197,36 @@ func conventionRoots(p string) []string {
 	return out
 }
 
+// WorkspaceItemID 는 이 워크트리가 **어느 항목의 작업공간인지**다. 순수 함수다.
+// `<repo>/.flightdeck/worktrees/<항목 id>` 일 때만 그 id 를 내고, 아니면 빈 문자열이다.
+//
+// ★ conventionRoots 보다 **좁다**. 그쪽 질문은 "여기가 워크트리인가"라 `.claude/worktrees/`
+// 도 같이 보지만, 이쪽 질문은 "여기가 어느 **항목**의 것인가"다. basename 이 항목 id 라는
+// 보장은 `pick` 응답이 스스로 출력하는 자리 — `.flightdeck/worktrees/<항목 id>` — 에만 있다.
+// `.claude/worktrees/<이름>` 은 하네스가 만드는 자리라 그 보장이 없다.
+//
+// ★ **뿌리에서만 읽는다.** 그 안의 하위 경로는 안 읽는다. 세션 표에 들어오는 워크트리는
+// 트리 루트라(store/session.go 의 3중키) 좁혀도 실물이 안 빠지고, 넓히면 트리 안의 우연한
+// 이름이 항목으로 읽힐 자리가 생긴다.
+//
+// ★ 거짓 음성 쪽으로 틀리게 뒀다. 못 읽으면 처방이 뜰 뿐이고(옛 동작), 잘못 읽으면 남의
+// 선점이 이 카드를 조용하게 만든다 — 뒤엣것이 훨씬 비싸다. conventionRoots 가 같은 방향을
+// 택한 근거(거짓 양성으로 두 번 신뢰를 잃었다)가 여기서도 그대로다.
+func WorkspaceItemID(worktree string) string {
+	p := strings.TrimSpace(worktree)
+	if p == "" {
+		return ""
+	}
+	segs := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
+	if len(segs) < 3 {
+		return ""
+	}
+	if segs[len(segs)-3] != ".flightdeck" || segs[len(segs)-2] != "worktrees" {
+		return ""
+	}
+	return segs[len(segs)-1]
+}
+
 // CarriesWorktreePrefix 는 **이미 상대화된 경로**가 관례 워크트리 루트를 성분으로
 // 이고 있는지다. 발자국의 포함 축이 이것으로 트리 밖을 한 겹 더 가른다.
 //
