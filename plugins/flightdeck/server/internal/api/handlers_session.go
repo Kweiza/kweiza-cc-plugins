@@ -61,8 +61,28 @@ func (s *server) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 // handleFindSession 은 3중키로 세션을 찾는다. **만들지 않는다.**
 //
 // 이 자리가 없어서 복구 갈래가 upsert 를 조회로 쓰고 있었고, 그것이 빈 카드를 낳았다.
+// ★ **id 가 오면 좌표 해석을 아예 끈다.** 이 갈래를 새 라우트로 가르지 않은 이유는
+// 대체재다(설계 §6 이 `POST /footprints` 를 지우고 `/workspaces` 를 남긴 그 기준) —
+// 여기가 이미 "세션 하나를 찾는다"는 표면이고, 갈리는 것은 **무엇으로 지목하느냐**뿐이다.
+// cc 축은 rekey 를 못 견디므로(service.SessionByID 주석) id 축이 그 대체가 아니라 짝이다.
 func (s *server) handleFindSession(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if id := strings.TrimSpace(q.Get("id")); id != "" {
+		sess, claims, err := s.svc.SessionByID(r.Context(), id)
+		if err != nil {
+			s.fail(w, r, err) // 없으면 notFound 가 404 로 나간다
+			return
+		}
+		infoFrom(r.Context()).setSession(sess.ID)
+		// ★ claims 에 omitempty 를 **안 붙인다.** 붙이면 "선점 0건"과 "이 서버는 선점을
+		// 안 센다"가 같은 응답이 되고, 그 둘을 구분 못 하는 클라이언트는 낡은 서버를 만난 날
+		// 선점을 든 카드를 조용히 닫는다. 빈 배열은 **센 결과**다.
+		if claims == nil {
+			claims = []string{}
+		}
+		s.writeJSON(w, r, http.StatusOK, map[string]any{"session": sess, "claims": claims})
+		return
+	}
 	sess, err := s.svc.FindSession(r.Context(),
 		strings.TrimSpace(q.Get("machine")),
 		strings.TrimSpace(q.Get("worktree")),

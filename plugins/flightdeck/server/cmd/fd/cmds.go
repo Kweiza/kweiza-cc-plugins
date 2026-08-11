@@ -489,17 +489,74 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	return 0
 }
 
-// runClose 는 이 세션을 닫는다.
+// runClose 는 카드 하나를 닫는다. 입구가 둘이다 — 좌표(cc)로 찾거나 **카드 id 로 지목**하거나.
 //
 // ★ 선점이 남아 있으면 거절한다. 닫힌 카드는 ListLive 에서 빠지고, 그러면 그 선점이
 // **아무에게도 안 보인다** — 항목을 아무도 못 집는데 누가 잡았는지도 안 보이는 상태가 된다.
-// 우회 플래그는 두지 않는다: 우회할 필드가 있으면 우회된다.
+// 우회 플래그는 두지 않는다: 우회할 필드가 있으면 우회된다. 그 가드는 입구가 아니라
+// 공통 꼬리(closeCard)에 있다 — 입구가 셋이 되어도 지날 문은 그것 하나다.
+//
+// ★★ **`--session` 은 이 명령에만 있다. 다른 CLI 명령에는 안 낸다** — 항목 본문 3항의 판정이다.
+// 기준은 "그 명령이 **누구의 일**을 하느냐"다. `open`·`beat`·`note`·`next`·`pick`·`add`·
+// `finish`·`land` 는 전부 **이 세션이 자기 일**을 하는 명령이라, 거기서 남의 카드를 지목하는 것은
+// 조정이 아니라 사칭이다(남의 이름으로 판단을 남기고 남의 이름으로 선점한다). 그 명령들의
+// `--cc-session` 은 카드를 **고르는** 축이 아니라 환경에서 못 읽었을 때 자기 정체를 **주는**
+// 자리다 — 축이 같아 보여도 하는 일이 반대다.
+//
+// `claim release`·`lane release` 는 남의 것을 다루지만 지목 축이 이미 있다(`--item`·`--row`).
+// 세션을 지목할 자리가 없어서가 아니라 **필요가 없어서** 안 낸다 — 회수는 항목·줄에 걸린 일이지
+// 카드에 걸린 일이 아니다. `status` 는 프로젝트 전체를 내므로 지목할 카드가 없다.
+//
+// 남는 것은 `close` 하나다: **자기 것이 아닌 카드를 다루는 유일한 명령**이고, 그래서 여기만
+// 카드를 지목하는 축이 필요하다.
+//
+// ★★★ **좌표(프로젝트·워크트리)를 다시 검사하지 않는다.** 그 검사를 넣으면 이 입구의 존재
+// 이유가 사라진다 — 좌표 해석이 갈리는 것이 애초의 결함이었다. 대신 셋이 피해를 막는다:
+// 선점 가드(위), 닫기가 **관측이지 판정이 아니라는 것**(다음 신호에 되살아난다), 그리고
+// 사람이 이 id 를 얻는 자리가 배너뿐이라는 것(배너는 같은 워크트리의 카드만 낸다).
 func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("close")
 	why := fs.String("why", "", "닫는 사유(표시 전용)")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	card := fs.String("session", "", "카드 id(보드 배너가 내는 값) — 좌표 해석을 건너뛴다")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	set := flagsSet(fs)
+
+	// ★ 둘을 함께 주면 **거절한다.** 우선순위를 정해 한쪽을 이기게 하면, 진 축을 준 사람은
+	// 자기가 지목한 것과 다른 카드가 닫혀도 그 사실을 모른다 — 이 명령이 고치려는 결함이
+	// 바로 "화면이 낸 값과 손이 닿는 카드가 다르다"이므로 같은 모양을 여기서 다시 만들 수 없다.
+	//
+	// **값이 아니라 준 사실로 판정한다**(flagsSet). 값으로 접으면 `--cc-session ""` 이
+	// "안 줬다"와 구분되지 않아 조용히 id 갈래로 흐른다 — LandExitCode 위 주석의 그 함정이다.
+	if set["session"] && set["cc-session"] {
+		fmt.Fprintln(out, "안 닫았다 — --session 과 --cc-session 은 함께 못 준다. 카드를 지목하는 축이 둘이면 어느 쪽이 닫혔는지 알 수 없다.")
+		fmt.Fprintln(out, "카드 id 를 안다면 --session 하나만 줘라 — 그 축은 /clear 를 건너 보존된다.")
+		return 2
+	}
+
+	// ★ **카드 id 가 오면 좌표를 아예 안 푼다.** 아래 cc 갈래는 (machine, worktree, cc)
+	// 셋을 이 프로세스에서 풀어 카드를 찾는데, 그 셋 중 cc 는 rekey 로 갈린다 —
+	// `/clear` 뒤에 배너가 인쇄한 cc 는 어떤 카드도 갖지 않은 값이고, 사람이 그 값으로
+	// 할 수 있는 일은 하나도 없었다. id 는 그 전환을 건너 보존되므로 그 축으로 지목하면
+	// 세 입구가 갈려도 같은 카드를 가리킨다.
+	if id := strings.TrimSpace(*card); id != "" {
+		sess, claims, err := a.SessionByID(ctx, id)
+		if err != nil {
+			fmt.Fprintf(out, "안 닫았다 — 카드 %s 를 못 찾았다: %v\n", clip(id, 64), err)
+			fmt.Fprintln(out, "여기서 카드를 만들지는 않는다 — 보드 배너가 낸 id 를 그대로 넣었는지 확인해라.")
+			// ★ 위 사유는 **서버가 준 것**이라 이 갈래를 모를 수 있다. 실물로 그랬다
+			// (2026-08-11, 도는 서버 0.17.0): `id=` 를 모르는 서버는 그것을 무시하고 3중키로
+			// 조회하므로, 카드 id 로 지목한 사람이 「좌표에 해당하는 세션이 없다」를 듣고
+			// 「fd open 으로 열어라」를 처방으로 받는다 — 둘 다 그 사람이 한 일과 무관하고,
+			// 카드를 정리하려던 사람에게 새로 열라는 말은 이 항목이 없애려는 그 결함이다.
+			// 서버 사유는 지우지 않는다(진짜 원인이 거기 있다). 대신 갈래를 이름으로 말한다.
+			fmt.Fprintln(out, "위 사유가 3중키(머신·워크트리·cc)를 말하거나 fd open 을 권하면 그것은 이 입구의 처방이 아니다 —")
+			fmt.Fprintln(out, "서버가 카드 id 입구를 모르는 낡은 버전이라 좌표로 찾은 것이다: fd update")
+			return 1
+		}
+		return a.closeCard(ctx, sess.ID, claims, *why, out)
 	}
 
 	cc := a.ccSessionID(*session)
@@ -531,15 +588,27 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "세션 좌표를 못 얻어 닫지 못했다: %v\n", err)
 		return 1
 	}
-	if len(res.Claims) > 0 {
+	return a.closeCard(ctx, res.Session.ID, res.Claims, *why, out)
+}
+
+// closeCard 는 **카드가 정해진 뒤**의 공통 꼬리다. 어느 입구로 왔든 여기서 갈리지 않는다.
+//
+// ★ 입구가 둘이 된 순간 이 자리를 함수로 뽑았다. 복제하면 한쪽에만 붙는 문구가 생기고,
+// 그러면 사람이 받는 처방이 **어느 플래그를 썼느냐로 달라진다.**
+//
+// ★★ **선점 가드가 여기 있는 것이 요점이다.** 입구마다 가드를 두면 다음에 입구를 내는
+// 사람이 그것을 빠뜨릴 수 있고, 빠뜨린 갈래는 시험이 그 조합을 따로 잡을 때까지 조용하다.
+// 카드를 닫는 문이 이 함수 하나뿐이면 가드를 우회하려면 **이 줄을 지워야** 한다 —
+// 우회할 필드가 없으면 검사할 것도 우회할 것도 없다(handlers_session.go 머리말과 같은 어법).
+func (a *App) closeCard(ctx context.Context, sessionID string, claims []string, why string, out io.Writer) int {
+	if len(claims) > 0 {
 		fmt.Fprintf(out, "안 닫았다 — 선점 %d건이 남아 있다: %s\n",
-			len(res.Claims), strings.Join(res.Claims, ", "))
+			len(claims), strings.Join(claims, ", "))
 		fmt.Fprintln(out, "닫으면 이 선점이 보드에서 사라진다 — 보드 ①은 선점을 든 카드만 낸다.")
 		fmt.Fprintln(out, "먼저 끝내라: fd finish <item-id> --body …")
 		return 1
 	}
-
-	sess, err := a.CloseSession(ctx, res.Session.ID, *why)
+	sess, err := a.CloseSession(ctx, sessionID, why)
 	if err != nil {
 		fmt.Fprintf(out, "닫지 못했다: %v\n", err)
 		return 1

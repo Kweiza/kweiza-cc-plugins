@@ -574,6 +574,8 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 
 ```
 POST   /sessions                    PATCH  /sessions/{id}
+GET    /sessions?machine&worktree&cc   (조회 전용 — 3중키. 없으면 404 다, 만들지 않는다)
+GET    /sessions?id=<카드>             (카드 id 로 지목 — 좌표 해석이 없는 유일한 축. 선점을 함께 낸다)
 POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라이언트 0건(아래)
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
 GET    /items/next                  POST   /items
@@ -586,6 +588,16 @@ GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
 ```
+
+**`GET /sessions` 는 카드를 두 축으로 지목한다 — 3중키와 카드 id.**
+3중키는 훅의 복구 갈래가 쓴다(rekey 하기 전에 옛 cc 의 카드를 찾는다). 카드 id 는 사람이
+쓴다 — cc 는 rekey 를 못 견디므로 `/clear` 를 겪은 카드에 손이 닿는 축은 그것뿐이고,
+`fd close --session` 이 그 유일한 소비처다. 새 라우트로 안 가른 기준은 아래 `/footprints`
+판정과 같은 **대체재**다: 여기가 이미 「세션 하나를 찾는다」는 표면이고 갈리는 것은
+무엇으로 지목하느냐뿐이다. **id 갈래만 `claims` 를 함께 낸다** — 카드를 닫아도 되는지를
+그 응답 하나로 판정하기 때문이고(따로 물으면 두 호출 사이가 창이다), 그래서 그 필드에는
+`omitempty` 가 없다. 없으면 「선점 0건」과 「이 서버는 선점을 안 센다」가 같은 응답이 되고,
+그 둘을 구분 못 하는 클라이언트는 낡은 서버를 만난 날 선점을 든 카드를 조용히 닫는다.
 
 **`POST /footprints` 는 이 표에서 지웠다(2026-08-05, 실제로 코드에서 제거).**
 신호 없이 발자국만 남기는 표면이었고 `origin=declared|claimed` 를 받을 수 있어
