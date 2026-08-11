@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,14 @@ import (
 // 이 이벤트가 관문을 "벽"이 아니라 "관문"으로 만든다 — 아래 judgeMissingFollowups 를 보라.
 const followupsMissingEvent = "item.finish_followups_missing"
 
+// followupCreatedEvent 는 **이 마무리가 후속 항목을 만들었다**는 사실이다.
+//
+// ★ item.add 와 **다른 kind 로 두는 것이 판정이다.** 소비자 둘의 요구가 정반대다 —
+// 자격(classifyFollowups)은 이 항목을 봐야 하고, 관문(judgeMissingFollowups)의 "바닥에
+// 떨어뜨린 것"에는 들지 않아야 한다(이미 판단에 매달렸으므로 떨어진 것이 아니다).
+// 한 kind 로 접으면 그 둘을 가를 축이 원장에서 사라진다.
+const followupCreatedEvent = "item.followup_created"
+
 // FollowupsGuidance 는 후속을 안 실은 세션에게 그 자리에서 내는 문구다.
 //
 // HandoffGuidance 와 같은 자리에서 같은 이유로 나간다: 규율 산문을 도구 설명이나
@@ -33,7 +42,8 @@ const FollowupsGuidance = `후속은 followups 로 **같은 호출에** 넣어�
 
 ★ 위에 이름이 나온 항목들은 **이미 만들어져 있으니 followups 에 id 만 넣어라** — 새로 만들지
 않고 이 판단에 잇는다. 제목·본문은 다시 안 적는다(그 항목의 것을 안 덮는다).
-이을 수 있는 것은 **이 선점 뒤에 이 세션이 add 로 만든, 아직 열린 항목**뿐이다 —
+이을 수 있는 것은 **이 선점 뒤에 이 세션이 만든, 아직 열린 항목**뿐이다(add 로 만든 것과
+앞선 finish 의 followups 로 만든 것 둘 다다) —
 그 밖의 id 를 실으면 거절한다(오타로 남의 항목이 이 판단에 붙는 것을 막는 유일한 자리다).
 이번 작업의 후속이 아닌 항목은 그대로 두고, 판단만 걸려면 note(kind='handoff', item_id=…) 를 쓴다.
 
@@ -110,18 +120,29 @@ func (s *Service) judgeMissingFollowups(ctx context.Context, in FinishInput) *Re
 // 하나로 접으면 그 둘이 같은 값이 되어, 다음 개정이 한쪽을 고치며 다른 쪽을 조용히 뒤집는다.
 // FinishResult 의 StillHeld·QueueBalance 를 포인터로 둔 것과 같은 규율이다(finish.go:78·97).
 //
-// ★ **item.add 이벤트로만 판정한다.** 그 이벤트를 남기는 자리는 Service.AddItem(pick.go:1164)
-// 하나뿐이라, **finish 의 후속으로 만들어진 항목은 여기 안 걸린다.** 그것까지 세려면 finish 도
-// item.add 를 남겨야 하는데, 그러면 관문의 사정거리가 함께 넓어져 거짓 거절이 는다 —
-// 별개 축이라 후속 항목으로 낸다. 거절 문구가 이 부류를 갈라 말한다.
+// ★ **두 kind 를 본다: item.add 와 item.followup_created**(2026-08-11에 둘째가 들어왔다).
+// 앞 판은 `item.add` 만 봤고, 그 이벤트를 남기는 자리가 Service.AddItem 하나였다 — 그래서
+// **finish 의 후속으로 만들어진 항목이 여기 안 걸리고, 같은 세션이 앞선 마무리에서 만든
+// 후속을 다음 마무리에서 이을 수 없었다.** 만든 경로가 add 든 finish 든 성질은 같다:
+// 같은 세션이 같은 작업 중에 만든 열린 항목이다.
+//
+// ★ **그때 걱정한 "관문 사정거리가 함께 넓어진다"는 여기서 안 막는다 — followupCandidates
+// 가 막는다.** 그 함수가 술어를 갈라 "아직 어느 판단에도 안 매달린 것"만 관문에 넘긴다.
+// 이 함수는 **자격의 정의**이고, 자격은 넓은 것이 맞다.
 func (s *Service) sessionSpawnedOpen(ctx context.Context, in FinishInput) ([]string, bool) {
 	claim, err := s.st.GetClaim(ctx, in.Project, in.ItemID)
 	if err != nil || claim.At.IsZero() {
 		return nil, false // 언제부터 쥐었는지 모르면 자를 지점이 없다
 	}
-	evs, err := s.st.ListSessionEvents(ctx, in.SessionID, "item.add", claim.At)
-	if err != nil {
-		return nil, false
+	// ★ 두 질의를 합친다. kind 를 빈 문자열로 주면 전 kind 가 오는데(ListSessionEvents 의
+	// `? = ''` 갈래) 그러면 이 세션의 beat 수천 건을 훑게 된다 — kind 를 명시해 둘만 읽는다.
+	var evs []model.Event
+	for _, kind := range []string{"item.add", followupCreatedEvent} {
+		part, err := s.st.ListSessionEvents(ctx, in.SessionID, kind, claim.At)
+		if err != nil {
+			return nil, false // 한쪽이라도 못 읽으면 "관측 못 했다"다 — 반쪽 목록은 거짓이다
+		}
+		evs = append(evs, part...)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -137,6 +158,9 @@ func (s *Service) sessionSpawnedOpen(ctx context.Context, in FinishInput) ([]str
 		}
 		out = append(out, id)
 	}
+	// 두 질의를 이어 붙였으므로 시각 순서가 깨져 있다. 정렬해 둔다 — 이 목록이 거절
+	// 문구와 안내에 그대로 실리고, 순서가 흔들리면 같은 상태에 다른 응답이 나간다.
+	sort.Strings(out)
 	return out, true
 }
 
@@ -145,6 +169,21 @@ func (s *Service) sessionSpawnedOpen(ctx context.Context, in FinishInput) ([]str
 //
 // 관측을 못 하면 빈 목록이다 — 관문은 그때 **안 막는다**(fail-open). 계측 하나가
 // 실패했다고 마무리를 잃는 것이 훨씬 나쁘고, 그 판정은 이 파일이 아니라 원장이 내려야 한다.
+// ★★ **여기가 자격과 관문을 가르는 자리다**(2026-08-11). sessionSpawnedOpen 은 "이 세션이
+// 이 선점 뒤 만든 열린 항목"을 전부 낸다 — 자격은 그것이 맞다. 그러나 관문이 묻는 것은
+// 다른 질문이다: **바닥에 떨어뜨린 것이 있나.**
+//
+// `finish` 의 후속으로 만들어진 항목은 **이미 그 마무리의 판단에 매달려 있다.** 떨어진 것이
+// 아니라 이어진 것이다. 그것을 관문이 붙잡으면 성실하게 후속을 남긴 세션이 다음 마무리에서
+// "후속을 안 실었다"는 거짓 거절을 받는다 — 앞 판이 finish 에 창설 이벤트를 안 남긴 이유가
+// 그 두려움이었고, 그 두려움은 옳았다. 틀린 것은 처방이다: 이벤트를 안 남기는 대신
+// **술어를 갈라야** 한다.
+//
+// 그래서 자격 목록에서 **판단에 매달린 것을 뺀다.** 판정 축은 judgment_link 이고, 그것은
+// 형제 색인(pick 의 siblingIndex)이 쓰는 것과 같은 조회다.
+//
+// ★ 링크를 못 읽으면 **관문을 끈다**(빈 목록). 이 함수의 계약이 이미 그쪽이다 — 계측 하나가
+// 실패했다고 마무리를 잃는 것이 훨씬 나쁘다. 반대로 접으면 조회 실패가 거짓 거절이 된다.
 func (s *Service) followupCandidates(ctx context.Context, in FinishInput) []string {
 	ids, observed := s.sessionSpawnedOpen(ctx, in)
 	if !observed {
@@ -154,10 +193,27 @@ func (s *Service) followupCandidates(ctx context.Context, in FinishInput) []stri
 	for _, f := range in.Followups {
 		given[f.ID] = true
 	}
-	out := make([]string, 0, len(ids))
+	rest := make([]string, 0, len(ids))
 	for _, id := range ids {
 		if given[id] {
 			continue
+		}
+		rest = append(rest, id)
+	}
+	if len(rest) == 0 {
+		return nil
+	}
+	linked, err := s.st.JudgmentLinksForItems(ctx, in.Project, rest)
+	if err != nil {
+		s.log.WarnContext(ctx, "후속 관문 — 판단 링크를 못 읽어 관문을 끈다",
+			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"count", len(rest), "error", err.Error())
+		return nil
+	}
+	out := make([]string, 0, len(rest))
+	for _, id := range rest {
+		if len(linked[id]) > 0 {
+			continue // 이미 어느 판단에 매달렸다 — 바닥에 떨어진 것이 아니다
 		}
 		out = append(out, id)
 	}
@@ -328,7 +384,7 @@ func refuseIneligibleFollowup(nth int, id, itemID string, eligible []string, obs
 	case !observed:
 		why = fmt.Sprintf("%s 를 언제 선점했는지 원장에서 못 읽어 자격을 판정할 수 없다", clip(itemID, 64))
 	case len(eligible) == 0:
-		why = "이 세션이 이 선점 뒤에 add 로 만든 열린 항목이 하나도 없다"
+		why = "이 세션이 이 선점 뒤에 만든 열린 항목이 하나도 없다"
 	default:
 		why = fmt.Sprintf("이을 수 있는 것은 %s 뿐이다", strings.Join(eligible, ", "))
 	}
@@ -336,10 +392,10 @@ func refuseIneligibleFollowup(nth int, id, itemID string, eligible []string, obs
 		What: "finish",
 		Reason: fmt.Sprintf("%d번째 후속(%s)은 이미 있는 항목인데 이을 자격이 없다 — %s",
 			nth, clip(id, 64), why),
-		Guidance: `이을 수 있는 것은 **이 세션이 이 선점 뒤에 add 로 만든, 아직 열린 항목**뿐이다.
+		Guidance: `이을 수 있는 것은 **이 세션이 이 선점 뒤에 만든, 아직 열린 항목**뿐이다 —
+add 로 만든 것과 **앞선 finish 의 followups 로 만든 것** 둘 다다.
 남의 항목 · 이미 닫힌 항목 · 선점 전에 만든 항목은 못 잇는다 — 오타 하나로 남의 항목이
-내 판단에 이어지는 것을 막는 유일한 자리다. finish 의 후속으로 만들어진 항목도 못 잇는다
-(원장에 "이 세션이 만들었다"가 안 남는다).
+내 판단에 이어지는 것을 막는 유일한 자리다.
 
 내용이 다르면 다른 id 로 add 해서 이번 followups 에 실어라.
 그 항목에 판단만 걸고 싶으면 note(kind='handoff', item_id=<그 항목>) 를 쓴다.`,

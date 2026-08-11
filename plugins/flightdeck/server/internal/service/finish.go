@@ -420,6 +420,22 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				//   문구는 앞 판과 글자 그대로 같다 — 그것을 단정하는 시험이 있다.
 				return &followupWriteError{ID: it.ID, Err: err}
 			}
+			// ★ **이 세션이 만들었다**를 원장에 남긴다(2026-08-11). 이 이벤트가 없던 동안
+			// sessionSpawnedOpen 이 item.add 만 봤고, 그래서 **같은 세션이 앞선 마무리에서
+			// 만든 후속을 다음 마무리에서 이을 수 없었다** — 이 기능이 권하는 사용법이 정확히
+			// 막혀 있었다.
+			//
+			// ★ **item.add 를 쓰지 않는다.** 그 이벤트는 Service.AddItem 하나가 남기는 것으로
+			// 두고 별도 kind 로 가른다. 이유는 소비자가 둘이고 요구가 다르기 때문이다 —
+			// 자격(classifyFollowups)은 이 항목을 **봐야** 하고, 관문(judgeMissingFollowups)이
+			// 보는 "바닥에 떨어뜨린 것"에는 **들지 않아야** 한다(이미 판단에 매달렸으므로).
+			// 한 kind 로 접으면 그 둘을 가를 축이 원장에서 사라진다. 술어를 가르는 자리는
+			// followupCandidates 이고, 그 짝을 시험 둘이 잠근다
+			// (finish_followup_created_eligibility_test.go).
+			t.LogEvent(followupCreatedEvent, in.Project, in.SessionID, map[string]any{
+				"item": it.ID,
+				"why":  "이 마무리의 followups 로 만들었다 — 다음 마무리에서 이을 수 있다",
+			})
 			out.Followups = append(out.Followups, it)
 		}
 
