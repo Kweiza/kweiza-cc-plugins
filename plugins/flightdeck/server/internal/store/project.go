@@ -381,7 +381,12 @@ func projectRefCounts(ctx context.Context, q dbtx, id string) (map[string]int, e
 // 필요하다).
 func JudgeProjectRemoval(counts map[string]int) (bool, string) {
 	if n := counts["item"]; n > 0 {
-		return false, fmt.Sprintf("큐 항목이 %d건 있다 — 항목이 있는 프로젝트는 지우지 않는다. "+
+		// ★ "큐 항목"이 아니라 "항목"이고 **종료된 것을 포함한다**. 이 셈은
+		//   `SELECT count(*) FROM item WHERE project = ?` 이라 done·dropped 도 들어온다
+		//   (항목은 종료돼도 행이 남는다). 정책으로는 그것이 옳다 — 닫힌 항목도 원장의
+		//   사실이고 지우면 이력이 사라진다. 틀린 것은 문구였다: 닫힌 항목 20건짜리
+		//   죽은 프로젝트에서 "큐 항목이 20건 있다"는 **살아 있는 큐를 시사한다.**
+		return false, fmt.Sprintf("항목이 %d건 있다(종료된 것 포함) — 항목이 있는 프로젝트는 지우지 않는다. "+
 			"줄에서만 빼려면 대시보드에서 보관하라", n)
 	}
 	if n := counts["judgment"]; n > 0 {

@@ -193,6 +193,12 @@ func (a *App) runProjectRm(ctx context.Context, args []string, out io.Writer) in
 		fmt.Fprintf(out, "\n지웠다. 프로젝트 %s 는 원장에서 사라졌다.\n", rr.Project)
 		fmt.Fprintln(out, "그 경로에서 세션이 다시 열리면 자동 등록으로 다시 생긴다 — "+
 			"워크트리 잔해라면 그 경로부터 없애라.")
+		// ★ counter 를 함께 지웠다는 사실을 말한다. projectRefTables 가 그 표를 도므로
+		//   같은 이름으로 프로젝트가 재등록되면 항목 번호가 1부터 다시 시작하는데,
+		//   **옛 번호는 event 페이로드에 그대로 남아 있다**(event 는 안 지운다).
+		//   말 안 하면 나중에 같은 번호 둘이 원장에 있는 것을 보고 원인을 못 찾는다.
+		fmt.Fprintln(out, "발번 카운터도 함께 지웠다 — 같은 이름으로 다시 등록되면 항목 번호가 "+
+			"1부터 다시 시작한다. 옛 번호는 안 지운 event 에 그대로 남아 있다.")
 	}
 	return 0
 }

@@ -426,7 +426,9 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 		// 것처럼 보인다(최종 리뷰 Minor-1). 보관이 0건이면 괄호 자체를 안 붙인다 — 없는
 		// 사실을 있는 것처럼 괄호로 강조할 이유가 없다.
 		if archived > 0 {
-			nav.NoPins += fmt.Sprintf("(보관 %d건도 지금은 함께 펴져 있다)", archived)
+			// ★ 앞에 공백을 둔다. 같은 함수의 형제 문구(FoldedLine 의 " (보관 %d 포함)")가
+			//   그렇게 쓰고, 안 두면 "…접힌다(보관 1건도…" 로 붙어 읽힌다.
+			nav.NoPins += fmt.Sprintf(" (보관 %d건도 지금은 함께 펴져 있다)", archived)
 		}
 		return nav
 	}
