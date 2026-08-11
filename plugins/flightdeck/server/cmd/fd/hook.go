@@ -279,6 +279,11 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		}
 	}
 
+	// ★ I-1(최종 리뷰). OpenSession(아래) 은 요청한 프로젝트가 미등록이면 서버가 실제로
+	// 연 프로젝트를 a.proj.ID 에 이미 채택해 둔다(app.go 의 adoptResolvedProject — 그래야
+	// 이 프로세스의 후속 쓰기가 정상 프로젝트로 간다). 그 채택이 일어났는지는 여기서
+	// **호출 전 값을 남겨 뒀다가** 비교해야만 안다 — a.proj.ID 는 그 함수가 직접 고친다.
+	requestedProject := a.proj.ID
 	res, stale, err := a.OpenSession(ctx, cc, "")
 	if err != nil {
 		a.log.Error("훅에서 세션 열기 실패", "mode", "session-start", "error", err.Error())
@@ -289,6 +294,15 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 		in.SessionID, in.Created, in.Claims = res.Session.ID, res.Created, res.Claims
 		if stale {
 			in.Notice = strings.TrimSpace(in.Notice + " 이 세션 정보는 캐시다 — 서버에 아직 등록되지 않았다.")
+		}
+		// ★ 채택이 실제로 일어났으면 화면에도 옮긴다. 지금까지 이 사실은 서버 로그
+		// (session.project.mismatch 이벤트)로만 나갔고, 그 자리는 에이전트가 실제로
+		// 읽는 자리가 아니다 — 그래서 프로젝트가 왜 요청과 다른지 아무도 몰랐다.
+		if a.proj.ID != requestedProject {
+			in.Notice = strings.TrimSpace(in.Notice + fmt.Sprintf(
+				" 요청한 프로젝트 %q 는 등록돼 있지 않다 — 이 세션은 %q 다.", requestedProject, a.proj.ID))
+			// 머리줄도 실제 프로젝트를 말해야 한다 — 안 그러면 헤더와 notice 가 서로 반박한다.
+			in.Project = a.proj.ID
 		}
 	}
 
@@ -465,6 +479,13 @@ func (a *App) hookPreCompact(ctx context.Context, p HookPayload) {
 		a.log.Error("pre-compact: 세션 좌표를 못 얻었다", "error", err.Error())
 		return
 	}
+	// ★ I-1: 이 함수는 아래에서 noteReq{Project: a.proj.ID, …} 로 **프로젝트 좌표를 실어
+	// 쓴다** — hookSessionStart 와 달리 이 훅이 실제로 그 값을 소비하는 자리다. 별도
+	// 처리가 필요 없는 이유는 여기가 아니라 위 OpenSession 호출 자체에 있다:
+	// a.OpenSession → a.openSession 이 성공하면 서버가 실제로 연 프로젝트로 a.proj.ID 를
+	// 이미 채택한 뒤다(app.go 의 adoptResolvedProject) — 그래서 몇 줄 아래의 a.proj.ID 는
+	// 항상 서버가 방금 이 세션에 실제로 매긴 값이고, 이 함수가 화면에 알림을 못 내는 것
+	// (이 훅은 additionalContext 에 notice 채널이 없다)도 문제가 안 된다.
 	var b strings.Builder
 	fmt.Fprintf(&b, "압축 직전 자동 초안(trigger=%s).\n", clip(p.Trigger, 40))
 	if len(res.Claims) > 0 {
@@ -535,6 +556,11 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Wr
 	}
 	a.cli.Session = res.Session.ID
 
+	// ★ I-1: 이 훅은 a.proj.ID 를 **안 싣는다** — 본문은 빈 구조체이고 경로는
+	// 세션 id(res.Session.ID)뿐이라 프로젝트 좌표가 요청에 아예 없다. 그래서 위
+	// OpenSession 이 프로젝트를 다른 것으로 채택했더라도(app.go 의 adoptResolvedProject)
+	// 이 쓰기는 애초에 그 값을 안 보므로 영향이 없다 — 별도 처리가 필요 없다.
+	//
 	// ★ 리터럴 "prescriptions" 대신 CmdPrescriptions 를 쓴다(CmdProjectRemove 와 같은
 	// 이유) — offline.go·outbox.go 가 이 이름으로 명시 갈래를 잡아 뒀다.
 	wr, err := a.cli.Write(ctx, CmdPrescriptions,
@@ -572,6 +598,9 @@ func (a *App) beatFromHook(ctx context.Context, p HookPayload, kind model.Signal
 		return ""
 	}
 	a.cli.Session = res.Session.ID
+	// ★ I-1: beatReq 에도 프로젝트 필드가 없다(wire.go) — 신호는 세션 id 경로 하나로
+	// 귀속된다. hookStop 과 같은 이유로 이 쓰기는 a.proj.ID 를 안 읽으므로 프로젝트
+	// 채택 여부와 무관하다.
 	if _, werr := a.cli.Write(ctx, "beat",
 		"/api/v1/sessions/"+urlPath(res.Session.ID)+"/signals",
 		beatReq{Kind: string(kind), Paths: paths}); werr != nil {
@@ -612,6 +641,10 @@ func (a *App) hookSessionEnd(ctx context.Context, p HookPayload) {
 		a.log.Warn("session-end: 세션 좌표를 못 얻었다", "error", err.Error())
 		return
 	}
+	// ★ I-1: 아래 CloseSession 은 PATCH 본문에 상태·사유만 싣고 경로가 세션 id 다
+	// (patchStateReq, wire.go) — 프로젝트 좌표가 요청에 없다. hookStop·beatFromHook 과
+	// 같은 이유로 이 쓰기는 a.proj.ID 를 안 읽는다.
+	//
 	// ★ 선점을 든 카드는 안 닫는다. rekey 가 거절되면 그 선점이 통째로 안 보이게 되고,
 	// 그러면 항목을 아무도 못 집는데 누가 잡았는지도 안 보인다.
 	if len(res.Claims) > 0 {

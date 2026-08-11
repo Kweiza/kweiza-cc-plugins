@@ -1,12 +1,15 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 func TestOpenSessionResumesSameTripleAndSplitsOnNewCCSession(t *testing.T) {
@@ -393,4 +396,62 @@ func TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple(t *testin
 	if second.Session.Project != "real" {
 		t.Fatalf("세션의 프로젝트가 %q 다 — 기존 것(real)이어야 한다", second.Session.Project)
 	}
+
+	// ⑷ I-3(최종 리뷰): 이 함수 머리말이 "거절하지 않고 **대신 관측을 남긴다**"고 적은
+	// 그 관측이 실제로 남는다. 이 단정이 없으면 session.go 의 t.LogEvent 줄을 통째로
+	// 지워도 이 시험은 초록으로 남는다 — 관측이 거절을 안 하는 대가로 산 것인데
+	// 그 대가가 실제로 지불됐는지 아무도 안 쟀다는 뜻이다.
+	evs := mismatchEvents(t, st, second.Session.ID)
+	if len(evs) != 1 {
+		t.Fatalf("mismatch 이벤트가 %d건이다 — 1건이어야 한다: %+v", len(evs), evs)
+	}
+	if evs[0].Requested != "지어낸이름" || evs[0].Using != "real" {
+		t.Fatalf("이벤트 payload 가 %+v 다 — requested=지어낸이름 · using=real 이어야 한다", evs[0])
+	}
+
+	// ⑸ I-2: 같은 (세션, 요청 프로젝트) 조합을 또 보내도 이벤트는 **늘지 않는다**.
+	// 억제가 없으면 이 3중키가 사는 동안 OpenSession 이 불릴 때마다(훅 진입점 넷~
+	// 다섯 자리, 프롬프트마다) event 표에 지울 수 없는 행이 하나씩 쌓인다
+	// (event_no_delete 트리거 — schema.sql).
+	third := openSession(t, s, "지어낸이름", repo, repo, "cc-1", "정상")
+	if third.Session.ID != first.Session.ID || third.Session.Project != "real" {
+		t.Fatalf("세 번째 호출도 같은 세션·같은 프로젝트여야 한다: %+v", third.Session)
+	}
+	if evs := mismatchEvents(t, st, second.Session.ID); len(evs) != 1 {
+		t.Fatalf("같은 요청을 두 번 냈는데 mismatch 이벤트가 %d건이다 — "+
+			"억제가 없으면 이 세션이 사는 동안 무한히 증폭된다", len(evs))
+	}
+}
+
+// mismatchPayload 는 session.project.mismatch 이벤트의 payload 모양이다(session.go 의
+// LogEvent 호출부와 필드가 같아야 한다).
+type mismatchPayload struct {
+	Requested string `json:"requested"`
+	Using     string `json:"using"`
+}
+
+// mismatchEvents 는 원장에 남은 session.project.mismatch 이벤트를 세션별로 낸다(I-3).
+//
+// 좌표계를 원장으로 잡은 이유는 divergence_test.go 의 countDivEvents 와 같다 — 로그는
+// 형식이 안 정해져 단정할 수 없고, 원장은 이 기능이 남기기로 한 바로 그것이다.
+//
+// ★ divKind 처럼 이 시험 파일에 kind 문자열을 또 안 둔다. session.go 가 이제
+// eventSessionProjectMismatch 를 패키지 상수로 갖고 있고 이 시험은 같은 패키지(service)
+// 안이라 그것을 그대로 쓸 수 있다 — 문자열을 셋째 자리(발화부·억제 조회·시험)에 또
+// 베끼면 그중 하나만 바뀌는 날 시험이 조용히 무의미해진다.
+func mismatchEvents(t *testing.T, st *store.Store, sessionID string) []mismatchPayload {
+	t.Helper()
+	evs, err := st.ListSessionEvents(context.Background(), sessionID, eventSessionProjectMismatch, time.Time{})
+	if err != nil {
+		t.Fatalf("mismatch 이벤트 조회 실패: %v", err)
+	}
+	out := make([]mismatchPayload, 0, len(evs))
+	for _, e := range evs {
+		var p mismatchPayload
+		if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
+			t.Fatalf("mismatch 이벤트 payload 해석 실패: %v (payload=%s)", err, e.Payload)
+		}
+		out = append(out, p)
+	}
+	return out
 }

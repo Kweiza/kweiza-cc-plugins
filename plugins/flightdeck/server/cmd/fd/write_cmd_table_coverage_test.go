@@ -59,7 +59,7 @@ type cmdSite struct {
 
 func (s cmdSite) String() string { return fmt.Sprintf("%s:%d", s.file, s.line) }
 
-// cmdFacts 는 cmd/fd 소스를 한 번 훑어 얻은 세 사실이다.
+// cmdFacts 는 cmd/fd 소스를 한 번 훑어 얻은 네 사실이다.
 type cmdFacts struct {
 	// write 는 **정본**이다 — a.cli.Write(또는 그 자리를 대신하는 b.app.cli.Write) 로
 	// 실제 나간 명령 이름 → 그 이름이 나온 자리 전부.
@@ -67,6 +67,14 @@ type cmdFacts struct {
 	// judgeOffline · idempotencyStable 은 각 표의 case 값 → 그 case 가 나온 자리.
 	judgeOffline      map[string]cmdSite
 	idempotencyStable map[string]cmdSite
+	// cliDo 는 I-4(최종 리뷰)의 대상이다 — Client.Write 를 안 거치고 a.cli.do 로 직접
+	// 나가는 서버 변경 호출. 두 표(JudgeOffline·IdempotencyStable)는 Client.Write 의
+	// cmd 인자만 보므로 이 탈출구를 **구조적으로 못 본다** — write 표처럼 명령 이름이
+	// 아니라 **감싸는 함수 이름**으로 키를 삼는다(a.cli.do 호출 자체에는 이 시험이
+	// 정책표에서 찾을 만한 명령 이름이 없다 — HTTP 메서드+경로뿐이다). 줄 번호 대신
+	// 함수 이름을 키로 쓰는 이유: 파일이 조금만 바뀌어도 줄 번호는 흔들리지만
+	// 함수 이름은 그 호출의 정체를 그대로 말한다.
+	cliDo map[string]cmdSite
 }
 
 // cmdFDSourceDir 는 이 시험 파일이 사는 디렉토리다 — cmd/fd 자신. 시험이 어느 cwd 에서
@@ -296,32 +304,61 @@ func extractCmdFacts(t *testing.T) cmdFacts {
 		write:             map[string][]cmdSite{},
 		judgeOffline:      map[string]cmdSite{},
 		idempotencyStable: map[string]cmdSite{},
+		cliDo:             map[string]cmdSite{},
 	}
 
-	// ── 정본: a.cli.Write / b.app.cli.Write 로 나간 명령 ───────────────────────
+	// ── 정본: a.cli.Write / b.app.cli.Write 로 나간 명령, 그리고 a.cli.do 로 직접
+	// 나간 탈출구(I-4) ──────────────────────────────────────────────────────
 	for _, ac := range allCalls {
 		sel, ok := ac.call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Write" {
+		if !ok {
 			continue
 		}
-		// ★ 리시버의 마지막 셀렉터가 "cli" 여야 진짜 Client.Write 다. Sel.Name 만 보면
-		// ledger.Write(migrate.go·ledgerbackup.go, 전혀 다른 타입의 동명 메서드)도 걸린다 —
-		// 정규식과 같은 실수를 AST 에서 반복하지 않으려고 리시버 모양까지 확인한다.
+		// ★ 리시버의 마지막 셀렉터가 "cli" 여야 진짜 Client.Write/Client.do 다. Sel.Name
+		// 만 보면 ledger.Write(migrate.go·ledgerbackup.go, 전혀 다른 타입의 동명
+		// 메서드)도 걸리고, client.go 안에서 *Client 자신이 자기 메서드로 부르는
+		// `c.do(...)`(Read·Write·replay·Healthz 의 구현)도 걸린다 — 그건 탈출구가
+		// 아니라 Client 의 정문 그 자체다. 리시버가 `<무엇>.cli` 형태(a.cli·b.app.cli)일
+		// 때만 "App 이 Client 의 표준 경로를 벗어났다"는 뜻이 된다.
 		recv, ok := sel.X.(*ast.SelectorExpr)
 		if !ok || recv.Sel.Name != "cli" {
 			continue
 		}
-		if len(ac.call.Args) < 2 {
-			t.Fatalf("%s: Client.Write 호출인데 인자가 %d개다 — 시그니처(ctx, cmd, path, body)가 바뀌었다",
-				fset.Position(ac.call.Pos()), len(ac.call.Args))
-		}
-		pos := fset.Position(ac.call.Pos())
-		for _, v := range resolve(ac.call.Args[1], ac.enc, 0) {
-			facts.write[v] = append(facts.write[v], cmdSite{cmd: v, file: filepath.Base(pos.Filename), line: pos.Line})
+		switch sel.Sel.Name {
+		case "Write":
+			if len(ac.call.Args) < 2 {
+				t.Fatalf("%s: Client.Write 호출인데 인자가 %d개다 — 시그니처(ctx, cmd, path, body)가 바뀌었다",
+					fset.Position(ac.call.Pos()), len(ac.call.Args))
+			}
+			pos := fset.Position(ac.call.Pos())
+			for _, v := range resolve(ac.call.Args[1], ac.enc, 0) {
+				facts.write[v] = append(facts.write[v], cmdSite{cmd: v, file: filepath.Base(pos.Filename), line: pos.Line})
+			}
+		case "do":
+			// I-4: a.cli.do 로 직접 나가는 서버 변경 호출이다. JudgeOffline·
+			// IdempotencyStable 은 Client.Write 의 cmd 인자만 보므로 이 호출은 두 표에
+			// **구조적으로** 안 잡힌다 — 정책 없이 산다는 뜻이다. 키를 감싸는 함수
+			// 이름으로 삼는다(cmdFacts.cliDo 주석 참고).
+			if ac.enc == nil {
+				t.Fatalf("%s: a.cli.do 호출이 톱레벨 함수 선언 밖에 있다 — 감싸는 함수 이름을 못 얻는다",
+					fset.Position(ac.call.Pos()))
+			}
+			pos := fset.Position(ac.call.Pos())
+			fn := ac.enc.Name.Name
+			if old, dup := facts.cliDo[fn]; dup {
+				t.Fatalf("함수 %s 안에 a.cli.do 호출이 둘 이상이다(%s, %s) — 이 시험은 함수 이름을 "+
+					"키로 쓰므로 함수당 호출이 하나뿐이라고 가정한다. 알려진 셋(knownCliDoWrites)에서 "+
+					"두 호출을 구분할 새 키가 필요하다", fn, old, cmdSite{file: filepath.Base(pos.Filename), line: pos.Line})
+			}
+			facts.cliDo[fn] = cmdSite{cmd: fn, file: filepath.Base(pos.Filename), line: pos.Line}
 		}
 	}
 	if len(facts.write) == 0 {
 		t.Fatal("Client.Write 호출을 하나도 못 찾았다 — 리시버·셀렉터 판정이 깨졌거나 파일 목록이 비었다")
+	}
+	if len(facts.cliDo) == 0 {
+		t.Fatal("a.cli.do 호출을 하나도 못 찾았다(I-4) — 리시버 판정이 깨졌을 수 있다. " +
+			"app.go 의 openSession·Rekey·CloseSession 이 지금도 a.cli.do 를 쓰는지 먼저 확인하라")
 	}
 
 	// ── 두 표의 case 값 ─────────────────────────────────────────────────────
@@ -440,6 +477,75 @@ var idempotencyStableGhostExceptions = map[string]ghostException{
 		"case 다 — 그 자체가 근거이지만 실행 경로 근거는 아니라는 점을 이 문구가 명시한다."},
 	"claim": {"위 judgeOfflineGhostExceptions[\"claim\"] 과 근거가 같다 — 근거를 못 찾았지만 " +
 		"지우지 않는다."},
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I-4(최종 리뷰) — Client.Write 를 안 거치고 a.cli.do 로 직접 나가는 탈출구
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 위 두 표(JudgeOffline·IdempotencyStable)는 Client.Write 의 cmd 인자만 본다. app.go 의
+// openSession·Rekey·CloseSession 셋은 **그 표준 경로를 안 거치고** a.cli.do 를 직접 불러
+// 세션류 쓰기를 낸다 — 각 함수 머리의 주석이 이유를 적어 뒀다(Rekey·CloseSession 은
+// "Write 는 모르는 명령을 거절한다", openSession 은 "고정 키를 쓰지 않는다"). 세 자리
+// 자신은 그 주석으로 정당화돼 있어 결함이 아니다. 문제는 **탈출구가 열려 있다는 것**이다
+// — 넷째 a.cli.do 쓰기가 생기면 두 표에 안 오르고, 이 파일의 다른 시험 넷 중 어느 것도
+// 안 울리며, 그 명령은 정책 없이 산다. 이 시험이 존재하는 이유(주 표 커버리지)와 똑같은
+// 사각이 한 겹 아래(Write 자체를 안 거치는 경로)에 그대로 있었던 것이다.
+type cliDoException struct {
+	reason string
+}
+
+// knownCliDoWrites 는 지금 정당화된 a.cli.do 호출 셋이다(키 = 감싸는 함수 이름).
+// 넷째가 생기면 아래 TestCliDoWriteCallsAreKnownAndJustified 가 그 자리에서 빨개진다 —
+// judgeOfflineGhostExceptions 와 같은 어법으로 reason 을 필수 필드로 둔다.
+var knownCliDoWrites = map[string]cliDoException{
+	"openSession": {"세션 열기는 고정 키를 쓰지 않는다 — 응답에 지금 상태(신규 여부·선점 " +
+		"목록·서버가 실제로 연 프로젝트)가 실려 있어 고정하면 낡은 답이 재생된다(app.go 의 " +
+		"openSession 주석). Client.Write 를 거치면 IdempotencyStable 이 강제하는 고정 키를 " +
+		"피할 길이 없어 이 함수가 직접 a.cli.do 를 부른다. 중복 등록은 3중키 UNIQUE 가 막는다."},
+	"Rekey": {"Client.Write 는 JudgeOffline·IdempotencyStable 을 거치는데 둘 다 \"rekey\" 를 " +
+		"모르는 명령으로 보고 default(거절)로 떨어진다 — 그러면 서버가 안 닿을 때마다 이 호출이 " +
+		"실패한다(app.go 의 Rekey 주석). 그리고 rekey 는 애초에 오프라인 큐에 쌓을 일이 아니다 " +
+		"— 다음 SessionStart 훅이 어차피 다시 시도하고, 낡은 rekey 를 나중에 재생하면 오히려 " +
+		"틀린 값을 심는다."},
+	"CloseSession": {"Rekey 와 같은 이유(정책표가 모르는 명령을 거절한다)에 하나가 더 있다 — " +
+		"닫기는 **지금의 사실**이지 나중에 재생할 사실이 아니다(app.go 의 CloseSession 주석). " +
+		"오프라인 큐에 쌓아 두면 그 사이 되살아나 일하고 있는 세션을 나중에 다시 죽인다."},
+}
+
+// TestCliDoWriteCallsAreKnownAndJustified 는 I-4 를 잰다: a.cli.do 로 직접 나가는 서버
+// 변경 호출 집합이 knownCliDoWrites 와 **정확히** 일치하는지(양방향)를 본다. 새 a.cli.do
+// 쓰기가 이 목록 없이 생기면 이 시험이 그 자리에서 빨개진다 — 두 표 커버리지 시험이
+// 절대 못 보는 축이라 여기서 대신 막는다.
+func TestCliDoWriteCallsAreKnownAndJustified(t *testing.T) {
+	facts := extractCmdFacts(t)
+
+	var unknown []string
+	for fn, site := range facts.cliDo {
+		if _, ok := knownCliDoWrites[fn]; ok {
+			continue
+		}
+		unknown = append(unknown, fmt.Sprintf("%s(%s)", fn, site))
+	}
+	sort.Strings(unknown)
+	if len(unknown) > 0 {
+		t.Errorf("a.cli.do 로 직접 나가는 새 쓰기 호출이 생겼는데 알려진 셋(knownCliDoWrites)에 "+
+			"없다 — 이 호출은 Client.Write 를 안 거치므로 JudgeOffline·IdempotencyStable 어느 표에도 "+
+			"안 잡히고 정책 없이 산다. 정당하면 knownCliDoWrites 에 근거와 함께 추가하고, 아니면 "+
+			"a.cli.Write 를 쓰도록 고쳐라:\n  %s", strings.Join(unknown, "\n  "))
+	}
+
+	// 반대 방향: 알려진 셋으로 적어 둔 함수가 지금도 실제로 a.cli.do 를 쓰는가. 함수가
+	// Client.Write 로 옮겨 가거나 지워지면 이 예외가 유령을 가리키게 된다.
+	for fn, exc := range knownCliDoWrites {
+		if strings.TrimSpace(exc.reason) == "" {
+			t.Errorf("knownCliDoWrites 의 %q 는 사유가 비었다 — 근거 없는 예외는 안 둔다", fn)
+		}
+		if _, ok := facts.cliDo[fn]; !ok {
+			t.Errorf("knownCliDoWrites 의 %q(%s)가 지금 a.cli.do 를 안 쓴다 — 예외가 낡았다",
+				fn, exc.reason)
+		}
+	}
 }
 
 // TestWriteCommandsAppearInJudgeOfflineTable 은 **주 목적**이다: Client.Write 로 나가는

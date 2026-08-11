@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,6 +13,11 @@ import (
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
 )
+
+// eventSessionProjectMismatch 는 §I-2 의 이벤트 kind 다. 상수로 두는 이유는 발화부
+// (아래)와 억제 조회(alreadyLoggedProjectMismatch)가 같은 문자열을 봐야 하기 때문이다 —
+// 리터럴 둘을 두면 한쪽만 고쳐질 때 억제가 조용히 죽는다.
+const eventSessionProjectMismatch = "session.project.mismatch"
 
 // 세션 — 열기·신호·상태.
 //
@@ -179,10 +185,42 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 			if prior, perr := t.FindSession(in.MachineID, in.Worktree, in.CCSessionID); perr == nil &&
 				prior.Project != "" && prior.Project != in.Project {
 
-				t.LogEvent("session.project.mismatch", prior.Project, prior.ID, map[string]any{
-					"requested": clip(in.Project, 64), "using": clip(prior.Project, 64),
-					"worktree": clip(in.Worktree, 200), "cc_session": clip(in.CCSessionID, 64),
-				})
+				// ★ I-2(최종 리뷰): 이 이벤트를 무조건 남기면 안 된다. 이 갈래는 3중키가
+				// 살아 있는 한 OpenSession 이 불릴 때마다(훅 진입점 넷~다섯 자리, 그것도
+				// 프롬프트마다) 매번 다시 탄다 — 요청 프로젝트는 클라이언트 cwd 의 함수라
+				// 세션 생애 동안 안 바뀐다. 20줄 아래 DivergentSessions 의 `if created` 접기가
+				// 정확히 이 위험을 "건별로 남기면 원장이 프롬프트마다 4배로 증폭된다"고
+				// 이름 붙였는데, 이 이벤트에는 그 가드가 없었다. 그리고 event 는
+				// event_no_delete 트리거로 **삭제가 안 된다**(schema.sql) — 억제가 없으면
+				// 지울 수 없는 행이 무한히 는다.
+				//
+				// ★ 억제 단위는 (prior.ID, requested) 다. 어법은 judge/prescribe.go 의
+				// emittedKeys 와 같다 — 세션의 과거 이벤트를 kind 로 읽고 payload 를 파싱해
+				// "이미 낸 키가 있나"를 판정한다(아래 alreadyLoggedProjectMismatch). 그
+				// 함수와 다른 점 하나: emittedKeys 는 세션이 **열린 시각 이후**만 보는데
+				// (그 억제는 "판단을 남기면 다시 뜬다"는 재발화 규칙이 있어서 시각 창이
+				// 필요하다), 여기는 시각 창 없이 **전 기간**을 본다 — 이 축에는 재발화
+				// 규칙이 없고(요청 프로젝트는 다시 안 바뀐다) 한 번 남기면 그걸로 충분하다.
+				//
+				// ★ 완전한 원자성은 아니다. 조회는 Tx 밖(별도 커넥션의 s.st)에서 하는데,
+				// 그래도 안전한 이유는 이 이벤트 자체가 Tx.LogEvent 로 **예약만** 되고
+				// 커밋 뒤에야 별도 커넥션으로 flush 되기 때문이다(store.go 의
+				// flushDeferred) — 그래서 t.tx 로 봐도 s.db 로 봐도 "지금까지 커밋+flush
+				// 된 것"이라는 같은 답을 얻는다(store.go 의 Tx 주석: "읽기는 Tx 를 안
+				// 거치고 Store 의 조회 메서드가 s.db 로 바로 질의한다. WAL 이라 안
+				// 막힌다"). 남는 위험은 커밋~flush 사이의 아주 좁은 창에 동시 프로세스가
+				// 끼는 것뿐이고, 그때도 최대 2건이지 무한 증폭이 아니다 — 완전한 원자성을
+				// 사려면 event 표에 UNIQUE 제약을 더하는 새 마이그레이션이 들고, 그러면
+				// "추가 전용 감사 원장"이라는 지금 스키마 계약을 벗어나 이 항목의 범위를
+				// 넘는다.
+				if !s.alreadyLoggedProjectMismatch(ctx, prior.ID, in.Project) {
+					t.LogEvent(eventSessionProjectMismatch, prior.Project, prior.ID, map[string]any{
+						"requested": clip(in.Project, 64), "using": clip(prior.Project, 64),
+						"worktree": clip(in.Worktree, 200), "cc_session": clip(in.CCSessionID, 64),
+					})
+				}
+				// 로그는 **매번** 남긴다 — WarnContext 는 회전하는 인프라이지 지울 수 없는
+				// 원장이 아니다. 접는 것은 이벤트뿐이다(위 이유).
 				s.log.WarnContext(ctx, "요청한 프로젝트가 이 3중키의 기존 세션과 다르다 — 기존 것을 쓴다",
 					"requested", clip(in.Project, 64), "using", clip(prior.Project, 64),
 					"session", clip(prior.ID, 64))
@@ -284,6 +322,42 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		"project", proj.ID, "session_id", sess.ID, "created", created,
 		"branch", branch, "stale", res.Freshness.Stale)
 	return res, nil
+}
+
+// alreadyLoggedProjectMismatch 는 이 세션이 이 요청 프로젝트에 대한
+// session.project.mismatch 이벤트를 이미 냈는지 본다(I-2 억제 판정).
+//
+// judge/prescribe.go 의 emittedKeys 와 같은 어법이다 — 세션 하나의 과거 이벤트를 kind 로
+// 걸러 읽고 payload 를 파싱해 "이미 낸 키가 있나"를 본다. 그 함수와 다른 점: emittedKeys 는
+// 세션이 **열린 시각 이후**만 보는데, 그 억제는 판단을 남기면 다시 뜨는 재발화 규칙이 있어
+// 시각 창이 필요하다. 여기는 그런 규칙이 없다(요청 프로젝트가 다시 바뀔 이유가 없다) —
+// 그래서 시각 창 없이 세션 생애 **전체**를 본다.
+func (s *Service) alreadyLoggedProjectMismatch(ctx context.Context, sessionID, requested string) bool {
+	evs, err := s.st.ListSessionEvents(ctx, sessionID, eventSessionProjectMismatch, time.Time{})
+	if err != nil {
+		// 조회 실패가 세션 등록을 죽이면 안 된다 — 억제를 포기하고 그대로 남긴다.
+		// 이벤트가 한 건 더 남는 것이 세션을 못 여는 것보다 훨씬 싼 대가다.
+		s.log.WarnContext(ctx, "mismatch 이벤트 억제 조회 실패 — 억제 없이 남긴다",
+			"session_id", clip(sessionID, 64), "error", err.Error())
+		return false
+	}
+	requested = clip(requested, 64) // 발화부와 같은 자름(clip(in.Project, 64)) — 안 맞추면 억제가 못 맞는다
+	for _, e := range evs {
+		var p struct {
+			Requested string `json:"requested"`
+		}
+		if json.Unmarshal([]byte(e.Payload), &p) != nil {
+			// 해석 실패를 조용히 버리면 그 키가 안 눌린 것으로 보여 이벤트가 다시 뜬다 —
+			// prescribe.go 의 emittedKeys 와 같은 판단이다. 그쪽처럼 WARN 으로 남긴다.
+			s.log.WarnContext(ctx, "mismatch 이벤트 payload 해석 실패",
+				"session_id", clip(sessionID, 64), "payload", e.Payload)
+			continue
+		}
+		if p.Requested == requested {
+			return true
+		}
+	}
+	return false
 }
 
 // worktreeFacts 는 워크트리 하나의 브랜치와 HEAD sha 를 관측한다.

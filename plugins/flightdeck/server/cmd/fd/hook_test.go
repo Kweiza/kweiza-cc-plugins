@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -227,6 +228,103 @@ func TestPreCompactLeavesDraftJudgment(t *testing.T) {
 	mustContain(t, "초안 본문", js[0].Body,
 		"압축 직전 자동 초안", "trigger=auto", "이 세션이 쥔 항목",
 		"판단 본문은 이 초안에 없다")
+}
+
+// envAtProject 는 h.env 를 베끼고 FD_PROJECT 만 바꾼다(wire_test.go 의 envAt 과 같은
+// 관용구 — 하네스는 프로젝트 하나로 도는데, 이 축을 갈아 끼우면 같은 3중키(machine·
+// worktree·cc)로 다른 프로젝트 이름을 보내는 상황을 만들 수 있다).
+func envAtProject(h *harness, project string) map[string]string {
+	e := map[string]string{}
+	for k, v := range h.env {
+		e[k] = v
+	}
+	e["FD_PROJECT"] = project
+	return e
+}
+
+// TestSessionStartAdoptsTheServerResolvedProjectAndNoticesIt 는 I-1(최종 리뷰)을 잰다.
+//
+// e81831b(고아 방지) 뒤로, 같은 (machine, worktree, cc) 3중키가 이미 프로젝트 "real" 로
+// 열려 있는데 다른(미등록) 프로젝트 이름으로 다시 열면 서버는 세션을 "real" 로 **정상
+// 재개**시키고 그 이름은 등록하지 않는다(internal/service/session_test.go 의
+// TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple 이 서비스 층에서 같은
+// 시나리오를 잰다 — 이 시험은 그것을 클라이언트 표면에서 재현한다: "클라이언트가 git 을
+// 못 읽어 워크트리 디렉토리 이름을 프로젝트로 지어낸 상황"을 FD_PROJECT 로 강제한다).
+//
+// 옛 코드는 그 답(res.Project)을 한 번도 안 보고 a.proj.ID 를 요청한 이름 그대로 뒀다 —
+// 그러면 이 프로세스의 후속 쓰기가 전부 미등록 이름으로 나가 FK 위반으로 죽었다
+// (TestPreCompactWriteLandsInTheProjectTheServerActuallyOpened 가 그 사고를 원장에서 잰다).
+//
+// ★ 무엇을 재나: ⑴ 요청한 이름으로 프로젝트가 안 생긴다(e81831b 의 성과가 안 깨졌는지도
+// 같이 본다) ⑵ SessionStart 머리줄이 **채택된 실제 프로젝트**를 말한다(a.proj.ID 가
+// 실제로 갈렸다는 간접 증거) ⑶ 그 사실이 notice 로 화면에 남는다 — 지금까지는 서버 로그
+// (session.project.mismatch 이벤트)로만 나가 에이전트가 못 봤다.
+func TestSessionStartAdoptsTheServerResolvedProjectAndNoticesIt(t *testing.T) {
+	h := newHarness(t)
+	cwd := t.TempDir()
+	cc := "cc-mismatch"
+
+	// 정상 세션 하나 — 프로젝트 "real" 에 3중키를 만든다.
+	if code, out := h.runEnv(envAtProject(h, "real"), sessionStartPayload(cc, cwd),
+		"hook", "session-start"); code != 0 {
+		t.Fatalf("첫 session-start 실패(%d): %s", code, out)
+	}
+
+	// 같은 3중키(같은 cc·cwd)로 **다른(미등록) 프로젝트 이름**을 보낸다.
+	code, out := h.runEnv(envAtProject(h, "지어낸이름"), sessionStartPayload(cc, cwd),
+		"hook", "session-start")
+	if code != 0 {
+		t.Fatalf("둘째 session-start 실패(%d): %s", code, out)
+	}
+
+	if _, err := h.st.GetProject(context.Background(), "지어낸이름"); err == nil {
+		t.Fatal("미등록 이름으로 프로젝트가 생겼다 — 자동 등록이 3중키 조회보다 앞으로 되돌아갔다")
+	}
+
+	if !strings.Contains(out, "프로젝트 real") {
+		t.Fatalf("SessionStart 머리줄이 채택된 실제 프로젝트(real)를 안 말한다:\n%s", out)
+	}
+	mustContain(t, "SessionStart 출력", out, "지어낸이름", "등록돼 있지 않다")
+}
+
+// TestPreCompactWriteLandsInTheProjectTheServerActuallyOpened 는 I-1 이 고친 실제 사고를
+// **원장 좌표계**에서 잰다(harness_test.go 머리말의 규율: "서버가 실제로 갖게 된 것").
+// hookPreCompact 는 noteReq{Project: a.proj.ID, …} 로 프로젝트 좌표를 실어 쓰는 유일한
+// 훅이다 — a.proj.ID 가 채택되지 않으면 이 쓰기가 FK 위반으로 죽어 초안이 **한 건도**
+// 안 남는다. 그것이 최종 리뷰가 실측으로 든 사고 그대로다.
+func TestPreCompactWriteLandsInTheProjectTheServerActuallyOpened(t *testing.T) {
+	h := newHarness(t)
+	cwd := t.TempDir()
+	cc := "cc-mismatch-precompact"
+
+	if code, out := h.runEnv(envAtProject(h, "real"), sessionStartPayload(cc, cwd),
+		"hook", "session-start"); code != 0 {
+		t.Fatalf("session-start 실패(%d): %s", code, out)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"session_id": cc, "cwd": cwd, "trigger": "auto",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := h.runEnv(envAtProject(h, "지어낸이름"), string(payload),
+		"hook", "pre-compact"); code != 0 {
+		t.Fatalf("pre-compact 실패(%d): %s", code, out)
+	}
+
+	if _, err := h.st.GetProject(context.Background(), "지어낸이름"); err == nil {
+		t.Fatal("미등록 이름으로 프로젝트가 생겼다")
+	}
+
+	js, err := h.st.ListJudgmentsByKind(context.Background(), "real", model.JudgmentDraft, 10)
+	if err != nil {
+		t.Fatalf("판단 조회 실패: %v", err)
+	}
+	if len(js) != 1 {
+		t.Fatalf("압축 직전 초안이 %d건이다 — 1건이어야 한다. a.proj.ID 를 서버 응답으로 "+
+			"채택하지 않으면 이 쓰기가 FK 위반으로 죽어 0건이 된다", len(js))
+	}
 }
 
 func TestEditedPathsReadsEveryToolShape(t *testing.T) {
