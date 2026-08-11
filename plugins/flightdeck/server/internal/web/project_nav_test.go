@@ -25,6 +25,30 @@ func (f *fixture) archive(id string) {
 	}
 }
 
+// TestCountPinnedIsTheOneCount 는 핀 세기가 한 벌이라는 단정이다. 순수 함수라 표로 본다.
+//
+// ★ 이 수를 두 자리가 본다 — buildProjectNav(접을지 정한다)와 buildPage(보관 나이 조회를
+// 아예 돌릴지 정한다). 두 자리가 각자 세면 한쪽만 고쳐지는 날 「접기는 안 하는데 조회는
+// 돈다」거나 그 반대가 되고, 그 어긋남은 화면에 안 뜬다 — 느려질 뿐이다.
+func TestCountPinnedIsTheOneCount(t *testing.T) {
+	at := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	for name, c := range map[string]struct {
+		in   []model.Project
+		want int
+	}{
+		"빈 목록":      {nil, 0},
+		"핀 없음":      {[]model.Project{{ID: "a"}, {ID: "b"}}, 0},
+		"핀 하나":      {[]model.Project{{ID: "a", PinnedAt: at}, {ID: "b"}}, 1},
+		"전부 핀":      {[]model.Project{{ID: "a", PinnedAt: at}, {ID: "b", PinnedAt: at}}, 2},
+		"보관은 안 센다":  {[]model.Project{{ID: "a", ArchivedAt: at}, {ID: "b"}}, 0},
+		"핀이면서 보관이면": {[]model.Project{{ID: "a", PinnedAt: at, ArchivedAt: at}}, 1},
+	} {
+		if got := CountPinned(c.in); got != c.want {
+			t.Fatalf("%s: CountPinned = %d, 기대 %d", name, got, c.want)
+		}
+	}
+}
+
 // TestProjectNavShowsAllWhenNoPins 는 **핀이 0이면 아무것도 안 접는다**는 단정이다.
 //
 // ★ 이것이 이 화면의 정직함이다. 핀이 없다는 사실을 자동 판정(활동이 있는 것만 편다)으로

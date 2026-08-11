@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,58 @@ func TestProjectViewWriteRefusesUnknownTarget(t *testing.T) {
 	})
 	if rec.Code != 400 {
 		t.Fatalf("응답 %d, 기대 400", rec.Code)
+	}
+}
+
+// TestProjectViewButtonsWorkOnTheNotFoundPage 는 **없는 프로젝트를 요청한 화면에서도
+// 축 버튼이 실제로 도는지**를 왕복으로 잰다.
+//
+// ★ 이 갈래가 왜 지원되는 상태인가: buildPage 가 「요청한 프로젝트를 못 찾아도 헤더의
+// 프로젝트 줄은 그대로 나간다」를 명시로 약속한다(그 갈래는 p.Project 가 제로값인 채
+// 일찍 return 한다). 그래서 사람이 오타 난 URL 에서도 별을 누를 수 있어야 한다.
+//
+// ★ 무엇이 회귀하면 빨개지나: 템플릿의 hidden project 필드가 해결값(Page.Current)이 아니라
+// {{.Project.ID}} 로 되돌아가면 그 값이 빈 문자열이 되고, JudgeProjectView 가 「돌아갈
+// 프로젝트가 비었다」로 400 을 낸다 — **그 화면의 버튼 전부가 죽는다.** 조용하지는 않지만
+// (누르면 400 이 보인다) 그것을 재는 시험이 없어서 최종 리뷰가 이 자리를 지적했다.
+func TestProjectViewButtonsWorkOnTheNotFoundPage(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	f.addProject(testProject)
+	f.addProject("junk")
+
+	// 없는 프로젝트를 요청한다 — 페이지는 나오고 프로젝트 줄도 나온다.
+	code, html := f.get("?project=없는것")
+	if code != 404 {
+		t.Fatalf("없는 프로젝트 요청에 %d — 이 갈래는 404 다", code)
+	}
+
+	// ★ **템플릿이 실제로 낸 값을 뽑아서 그것으로 보낸다.** 여기서 값을 손으로 적으면
+	//   이 시험은 템플릿과 무관해져 아무것도 안 재게 된다(실측: hidden 을 {{.Project.ID}}
+	//   로 되돌려도 초록이었다). hidden 은 <form> 바로 뒤·<nav> 앞이라 navOf 로도 안 잡힌다.
+	m := regexp.MustCompile(`<form class="pview"[\s\S]*?name="project" value="([^"]*)"`).
+		FindStringSubmatch(html)
+	if m == nil {
+		t.Fatal("표시 축 폼의 hidden project 필드를 못 찾았다 — 폼 구조가 바뀌었다")
+	}
+	sent := m[1]
+	if sent == "" {
+		t.Fatal("NotFound 화면의 hidden project 가 비었다 — 이 화면의 축 버튼이 전부 400 이 된다")
+	}
+
+	// 그 화면에서 별을 누른 것과 같은 요청을 보낸다. 400 이면 회귀다.
+	rec := f.post("/actions/project-view", url.Values{
+		"project": {sent},
+		"axis":    {"pin:junk"},
+	})
+	if rec.Code != 303 {
+		t.Fatalf("NotFound 화면에서 온 축 요청에 %d, 기대 303 (보낸 project=%q)", rec.Code, sent)
+	}
+	got, err := f.st.GetProject(context.Background(), "junk")
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	if got.PinnedAt.IsZero() {
+		t.Fatal("303 을 냈는데 핀이 안 켜졌다")
 	}
 }
 

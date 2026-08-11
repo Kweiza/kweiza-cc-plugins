@@ -380,11 +380,8 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 	// ★ archived 도 이 첫 루프에서 함께 센다. pinned == 0 갈래는 아래에서 전원을
 	// nav.Shown 으로 보내므로(row.Archived 를 안 본다) 렌더된 행만 보고는 몇 건이
 	// 보관 상태인지 되짚을 수 없다 — 이 카운트가 그 유일한 자리다(최종 리뷰 Minor-1).
-	pinned, archived := 0, 0
+	pinned, archived := CountPinned(projects), 0
 	for _, p := range projects {
-		if !p.PinnedAt.IsZero() {
-			pinned++
-		}
 		if !p.ArchivedAt.IsZero() {
 			archived++
 		}
@@ -426,7 +423,9 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 		// 것처럼 보인다(최종 리뷰 Minor-1). 보관이 0건이면 괄호 자체를 안 붙인다 — 없는
 		// 사실을 있는 것처럼 괄호로 강조할 이유가 없다.
 		if archived > 0 {
-			nav.NoPins += fmt.Sprintf("(보관 %d건도 지금은 함께 펴져 있다)", archived)
+			// ★ 앞에 공백을 둔다. 같은 함수의 형제 문구(FoldedLine 의 " (보관 %d 포함)")가
+			//   그렇게 쓰고, 안 두면 "…접힌다(보관 1건도…" 로 붙어 읽힌다.
+			nav.NoPins += fmt.Sprintf(" (보관 %d건도 지금은 함께 펴져 있다)", archived)
 		}
 		return nav
 	}
@@ -439,11 +438,38 @@ func buildProjectNav(projects []model.Project, current string, ages map[string]s
 	return nav
 }
 
+// CountPinned 는 핀이 몇 건인지 센다. 순수 함수다.
+//
+// ★ **왜 함수로 빼는가.** 이 수를 두 자리가 본다 — buildProjectNav 가 접을지 말지를 정할 때,
+// 그리고 buildPage 가 **나이 조회를 아예 돌릴지**를 정할 때다(archivedSessionAges 주석 참고).
+// 두 자리가 각자 세면 한쪽만 고쳐지는 날 「접기는 안 하는데 조회는 돈다」거나 그 반대가 되고,
+// 그 어긋남은 화면에 안 뜬다 — 느려질 뿐이다.
+func CountPinned(projects []model.Project) int {
+	n := 0
+	for _, p := range projects {
+		if !p.PinnedAt.IsZero() {
+			n++
+		}
+	}
+	return n
+}
+
 // archivedSessionAges 는 **보관된 프로젝트만** 마지막 세션 나이를 읽는다.
 //
 // ★ 전건을 안 읽는다. 이 줄은 페이지 머리라 매 렌더 도는데, 프로젝트가 늘수록 질의가
 // 함께 느는 자리를 머리에 두면 화면 전체가 그 비용을 문다. 보관 목록에만 필요한 값이다 —
 // 보관해 둔 것이 다시 돌기 시작하면 사람이 그것을 보고 풀어야 하기 때문이다.
+//
+// ★ **부르는 쪽이 핀 0을 먼저 거른다.** 핀이 하나도 없으면 buildProjectNav 가 전원을
+// nav.Shown 으로 펴고 Shown 갈래는 LastSession 을 안 그린다 — 즉 이 함수의 결과를
+// **아무도 안 쓴다.** 그런데도 보관 건수만큼 질의가 돌던 것이 최종 리뷰의 지적이었다.
+// 거르는 자리를 이 함수 안이 아니라 buildPage 에 둔 이유: 여기서 걸러도 되지만 그러면
+// 「나이 맵을 만들어 순수 함수에 주입한다」는 지금 구조에서 이 함수가 자기 입력(projects)의
+// 다른 축(핀)을 조건부로 읽게 되어, 이름이 말하는 일(보관된 것의 나이)과 하는 일이 갈린다.
+//
+// ★ (project, opened_at) 인덱스는 **안 만든다.** 지금 보관은 몇 건이고 위 거르기로 흔한
+// 경우(핀 0)가 통째로 빠진다. 보관이 수십 건이 되고 그것이 실측으로 아프면 그때 만든다 —
+// 지금 만들면 아무도 안 재 본 비용에 스키마를 하나 더 얹는 것이다.
 func (h *handler) archivedSessionAges(ctx context.Context, projects []model.Project,
 	now time.Time) map[string]string {
 
@@ -514,7 +540,14 @@ func (h *handler) buildPage(ctx context.Context, req pageRequest) Page {
 	// p.Current 도 여기서 함께 채운다 — 아래의 모든 조기 return(0건·NotFound) 갈래에서도
 	// 헤더 폼의 히든 필드가 값을 가져야 한다(Current 필드 주석 참고).
 	p.Current = current
-	p.Nav = buildProjectNav(projects, current, h.archivedSessionAges(ctx, projects, now))
+	// ★ 핀이 0이면 나이 조회를 **아예 안 돈다.** 그때는 buildProjectNav 가 전원을 펴고
+	//   Shown 갈래가 LastSession 을 안 그려서 결과를 아무도 안 쓴다(archivedSessionAges 주석).
+	//   같은 수를 두 자리가 각자 세지 않도록 CountPinned 하나를 쓴다.
+	ages := map[string]string{}
+	if CountPinned(projects) > 0 {
+		ages = h.archivedSessionAges(ctx, projects, now)
+	}
+	p.Nav = buildProjectNav(projects, current, ages)
 
 	// 건강은 프로젝트와 무관하게 항상 낸다 — 프로젝트가 하나도 없을 때가
 	// 오히려 "서버는 사는데 아무도 안 붙었다"를 확인해야 하는 순간이다.

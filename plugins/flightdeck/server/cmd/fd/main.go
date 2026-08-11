@@ -51,6 +51,7 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd lane release --row <id> --reason …   물린 줄 행을 사람이 회수한다(사유는 판단으로 남는다)
   fd claim release --item <id> --reason … 죽은 세션의 선점을 사람이 회수한다(항목은 open 으로 돌아간다)
   fd project ls                           등록된 프로젝트와 그 실적을 표로 낸다(지울 수 있는지도 말한다)
+  fd project rm --project <id> --reason … 잔해 프로젝트를 원장에서 지운다(--yes 없이는 세기만 한다)
   fd alloc <counter>                      원자 발번
   fd doctor                               이 머신과 서버의 축을 실제로 잰다
 

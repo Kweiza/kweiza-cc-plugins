@@ -1,12 +1,15 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
+	"github.com/kweiza/flightdeck/internal/store"
 )
 
 func TestOpenSessionResumesSameTripleAndSplitsOnNewCCSession(t *testing.T) {
@@ -360,4 +363,108 @@ func TestOpenSessionAndSetStateLeaveNoSignal(t *testing.T) {
 	if len(sig) != 0 {
 		t.Fatalf("상태를 바꿨더니 신호가 생겼다 — 상태 전이는 도구 호출이 아니다: %v", sig)
 	}
+}
+
+// TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple 은 **고아 프로젝트가
+// 안 생긴다**는 단정이다.
+//
+// ★ 무엇이 이 시험을 낳았나(실측). 세션 정체는 (machine, worktree, cc_session) 3중키이고
+// project 가 안 들어간다. 그래서 OpenSession 은 같은 3중키 행이 있으면 재개하는데, 프로젝트
+// 자동 등록이 그보다 **앞**이라 잘못된 project 로 요청이 오면 프로젝트만 새로 만들어지고
+// 세션은 남의 프로젝트 것을 재개했다 — 트랜잭션이 성공하므로 롤백도 흔적도 없었다.
+// 원장에서 그 모양의 고아 셋을 찾았다(console-screen-landing · t6-console-notice-kind-split ·
+// upload-staging-live-verification). 셋 다 세션 행은 정상 프로젝트에 있고, 워크트리 이름의
+// 프로젝트에는 session.open 이벤트만 있으며 세션이 0건이었다.
+//
+// ★ 무엇을 재나: ⑴ 두 번째 요청이 새 프로젝트를 **안 만든다** ⑵ 세션은 열린다(거절이 아니다)
+// ⑶ 그 세션이 원래 프로젝트 것 그대로다. 자동 등록을 3중키 조회보다 앞으로 되돌리면 ⑴이
+// 빨개진다.
+func TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+
+	// 정상 세션 하나 — 프로젝트 "real" 에 3중키를 만든다.
+	first := openSession(t, s, "real", repo, repo, "cc-1", "정상")
+	if !first.Created {
+		t.Fatal("첫 호출은 신규여야 한다")
+	}
+
+	// 같은 3중키로 **다른 프로젝트 이름**을 보낸다 — 클라이언트가 git 을 못 읽어
+	// 워크트리 디렉토리 이름을 프로젝트로 지어낸 상황이 정확히 이 모양이다.
+	second := openSession(t, s, "지어낸이름", repo, repo, "cc-1", "정상")
+
+	// ⑴ 고아 프로젝트가 없다.
+	if _, err := st.GetProject(ctx(), "지어낸이름"); err == nil {
+		t.Fatal("요청한 이름으로 프로젝트가 생겼다 — 세션은 재개되는데 프로젝트만 새로 만들어지는 " +
+			"그 고아 경로다(자동 등록이 3중키 조회보다 앞이면 여기가 빨개진다)")
+	}
+
+	// ⑵⑶ 세션은 열리고, 원래 프로젝트 것 그대로다.
+	if second.Created {
+		t.Fatal("같은 3중키인데 새 세션이 만들어졌다 — 재개여야 한다")
+	}
+	if second.Session.ID != first.Session.ID {
+		t.Fatalf("세션이 갈렸다: %q vs %q", second.Session.ID, first.Session.ID)
+	}
+	if second.Session.Project != "real" {
+		t.Fatalf("세션의 프로젝트가 %q 다 — 기존 것(real)이어야 한다", second.Session.Project)
+	}
+
+	// ⑷ I-3(최종 리뷰): 이 함수 머리말이 "거절하지 않고 **대신 관측을 남긴다**"고 적은
+	// 그 관측이 실제로 남는다. 이 단정이 없으면 session.go 의 t.LogEvent 줄을 통째로
+	// 지워도 이 시험은 초록으로 남는다 — 관측이 거절을 안 하는 대가로 산 것인데
+	// 그 대가가 실제로 지불됐는지 아무도 안 쟀다는 뜻이다.
+	evs := mismatchEvents(t, st, second.Session.ID)
+	if len(evs) != 1 {
+		t.Fatalf("mismatch 이벤트가 %d건이다 — 1건이어야 한다: %+v", len(evs), evs)
+	}
+	if evs[0].Requested != "지어낸이름" || evs[0].Using != "real" {
+		t.Fatalf("이벤트 payload 가 %+v 다 — requested=지어낸이름 · using=real 이어야 한다", evs[0])
+	}
+
+	// ⑸ I-2: 같은 (세션, 요청 프로젝트) 조합을 또 보내도 이벤트는 **늘지 않는다**.
+	// 억제가 없으면 이 3중키가 사는 동안 OpenSession 이 불릴 때마다(훅 진입점 넷~
+	// 다섯 자리, 프롬프트마다) event 표에 지울 수 없는 행이 하나씩 쌓인다
+	// (event_no_delete 트리거 — schema.sql).
+	third := openSession(t, s, "지어낸이름", repo, repo, "cc-1", "정상")
+	if third.Session.ID != first.Session.ID || third.Session.Project != "real" {
+		t.Fatalf("세 번째 호출도 같은 세션·같은 프로젝트여야 한다: %+v", third.Session)
+	}
+	if evs := mismatchEvents(t, st, second.Session.ID); len(evs) != 1 {
+		t.Fatalf("같은 요청을 두 번 냈는데 mismatch 이벤트가 %d건이다 — "+
+			"억제가 없으면 이 세션이 사는 동안 무한히 증폭된다", len(evs))
+	}
+}
+
+// mismatchPayload 는 session.project.mismatch 이벤트의 payload 모양이다(session.go 의
+// LogEvent 호출부와 필드가 같아야 한다).
+type mismatchPayload struct {
+	Requested string `json:"requested"`
+	Using     string `json:"using"`
+}
+
+// mismatchEvents 는 원장에 남은 session.project.mismatch 이벤트를 세션별로 낸다(I-3).
+//
+// 좌표계를 원장으로 잡은 이유는 divergence_test.go 의 countDivEvents 와 같다 — 로그는
+// 형식이 안 정해져 단정할 수 없고, 원장은 이 기능이 남기기로 한 바로 그것이다.
+//
+// ★ divKind 처럼 이 시험 파일에 kind 문자열을 또 안 둔다. session.go 가 이제
+// eventSessionProjectMismatch 를 패키지 상수로 갖고 있고 이 시험은 같은 패키지(service)
+// 안이라 그것을 그대로 쓸 수 있다 — 문자열을 셋째 자리(발화부·억제 조회·시험)에 또
+// 베끼면 그중 하나만 바뀌는 날 시험이 조용히 무의미해진다.
+func mismatchEvents(t *testing.T, st *store.Store, sessionID string) []mismatchPayload {
+	t.Helper()
+	evs, err := st.ListSessionEvents(context.Background(), sessionID, eventSessionProjectMismatch, time.Time{})
+	if err != nil {
+		t.Fatalf("mismatch 이벤트 조회 실패: %v", err)
+	}
+	out := make([]mismatchPayload, 0, len(evs))
+	for _, e := range evs {
+		var p mismatchPayload
+		if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
+			t.Fatalf("mismatch 이벤트 payload 해석 실패: %v (payload=%s)", err, e.Payload)
+		}
+		out = append(out, p)
+	}
+	return out
 }

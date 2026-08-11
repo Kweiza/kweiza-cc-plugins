@@ -150,6 +150,7 @@ func (a *App) openSession(ctx context.Context, in openReq) (res service.SessionR
 			return res, false, fmt.Errorf("세션 응답 해석 실패: %w", uerr)
 		}
 		a.cli.Session = res.Session.ID
+		a.adoptResolvedProject(res.Project.ID)
 		key := sessionCachePath + "/" + ccSession
 		if cerr := a.cli.Cache.Put(key, raw, a.now()); cerr != nil {
 			a.log.Warn("세션 캐시 보관 실패", "error", cerr.Error())
@@ -167,7 +168,52 @@ func (a *App) openSession(ctx context.Context, in openReq) (res service.SessionR
 		return res, true, fmt.Errorf("세션 캐시 해석 실패: %w", uerr)
 	}
 	a.cli.Session = res.Session.ID
+	// ★ 캐시 갈래도 채택한다 — 캐시된 raw 는 **그때 서버가 실제로 낸** res.Project 를
+	// 그대로 담고 있다(Put 이 서버 응답 그대로를 저장한다, 위 참고). 여기서 안 채택하면
+	// 오프라인 동안 나가는 큐잉 쓰기가 여전히 미등록 이름을 싣고, 서버가 살아난 뒤
+	// 재생될 때 똑같은 FK 위반으로 죽는다.
+	a.adoptResolvedProject(res.Project.ID)
 	return res, true, nil
+}
+
+// adoptResolvedProject 는 서버가 **실제로 연 프로젝트**를 이 프로세스의 좌표로 채택한다.
+//
+// ★ I-1(최종 리뷰). e81831b 뒤로 세션 정체(machine·worktree·cc 3중키)가 이미 프로젝트
+// P 로 열려 있는 상태에서 다른(미등록) 프로젝트 이름 Q 로 다시 열면, 서버는 세션을
+// P 로 **정상 재개**시키고 Q 를 등록하지 않는다(internal/service/session.go 의
+// "자동 등록 전에 3중키 세션을 본다") — 그것이 고아 프로젝트를 막은 방법이다. 문제는
+// 응답의 res.Project 가 P 인데 이 프로세스의 a.proj.ID 는 여전히 Q 로 남는다는
+// 것이었다. 그 뒤 이 프로세스 안에서 나가는 모든 쓰기(note·add·pick·finish·alloc·
+// after cut·move·lane/claim release — 전부 a.sessionID 를 거쳐 결국 이 함수를
+// 부른 뒤 a.proj.ID 를 그대로 싣는다, cmds.go)가 미등록 이름 Q 로 나가 FK 위반으로
+// 죽었다. 실측: 서버는 res.Project.ID="real" 을 냈는데 뒤이은 note 쓰기가
+// project="지어낸이름" 으로 나가 "FOREIGN KEY constraint failed"를 받았다 —
+// 판단을 못 남기는 세션이 된 것이다.
+//
+// ★ **여기 한 곳에서 고치는 이유.** a.proj.ID 를 읽는 쓰기 호출부가 cmds.go 에
+// 여덟 곳 이상(note·add·pick·finish·alloc·next·lane·claim·after cut·move…) +
+// hook.go 의 hookPreCompact 하나다. 그 자리마다 "응답을 보고 좌표를 고쳐라"를
+// 각자 심으면 새 쓰기 명령이 늘 때마다 또 잊을 수 있다 — 이 결함 자체가 그 모양이다
+// (hookSessionStart 가 res.Project 를 한 번도 안 본 것). 반면 **모든 경로가
+// a.OpenSession → a.openSession 을 거친다**(a.sessionID 도 내부에서 a.OpenSession 을
+// 부른다, cmds.go) — 그래서 그 응답을 해석하는 이 자리 하나만 고치면 전부 닫힌다.
+//
+// ★ **MCP 경로에도 안전하다.** mcpBackend.OpenSession 은 이 함수를 자기 좌표
+// (mcpsrv.ResolveIdentity 가 관측한 것)로 부르는데, 그 뒤 MCP 의 note·add 등은
+// a.proj.ID 를 안 읽는다 — mcpbackend.go 의 각 메서드가 service.XxxInput.Project 를
+// 호출자(mcpsrv)로부터 직접 받는다. 유일하게 a.proj.ID 를 읽는 MCP 쪽 자리는
+// mcp.go 의 WithProject(app.proj.ID, …) 인데 그것은 **서버 기동 시 한 번**만 읽고,
+// OpenSession 은 그보다 항상 뒤에 불린다 — 그래서 여기서 값을 바꿔도 이미 넘긴
+// 옵션은 안 흔들린다. 무조건 채택해도 되는 이유다.
+func (a *App) adoptResolvedProject(serverProject string) {
+	serverProject = strings.TrimSpace(serverProject)
+	if serverProject == "" || serverProject == a.proj.ID {
+		return
+	}
+	a.log.Warn("요청한 프로젝트가 등록돼 있지 않아 서버가 다른 프로젝트로 세션을 열었다 — "+
+		"이 프로세스의 후속 쓰기는 그 프로젝트를 쓴다",
+		"requested", a.proj.ID, "using", serverProject)
+	a.proj.ID = serverProject
 }
 
 // moveSessionCache 는 세션 캐시를 새 cc 키로 옮긴다. rekey 가 성공한 직후에만 부른다.

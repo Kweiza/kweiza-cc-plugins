@@ -1331,7 +1331,11 @@ func (a *App) runAfterCut(ctx context.Context, args []string, out io.Writer) int
 
 	sess, _ := a.sessionID(ctx, *session)
 	a.cli.Session = sess
-	res, err := a.cli.Write(ctx, "after cut", afterCutPath(itemID), afterCutReq{
+	// ★ 리터럴 "after cut" 대신 CmdAfterCut 을 쓴다(CmdProjectRemove 와 같은 이유) —
+	// offline.go·outbox.go 가 이 이름으로 명시 갈래를 잡아 뒀다. 여기서 오타를 내면
+	// 그 갈래를 못 타고 표 밖 기본값으로 조용히 떨어지는데, 상수를 쓰면 그 오타가
+	// 컴파일 오류가 된다.
+	res, err := a.cli.Write(ctx, CmdAfterCut, afterCutPath(itemID), afterCutReq{
 		Project: a.proj.ID, SessionID: sess, Dep: dep,
 	})
 	if err != nil {
@@ -1406,7 +1410,9 @@ func (a *App) runMove(ctx context.Context, args []string, out io.Writer) int {
 	}
 	sess, _ := a.sessionID(ctx, *session)
 	a.cli.Session = sess
-	res, err := a.cli.Write(ctx, "move", "/api/v1/items/"+urlPath(itemID)+"/move", moveReq{
+	// ★ 리터럴 "move" 대신 CmdMove 를 쓴다(CmdProjectRemove 와 같은 이유) — offline.go·
+	// outbox.go 가 이 이름으로 명시 갈래를 잡아 뒀다. 오타는 여기서 컴파일 오류가 된다.
+	res, err := a.cli.Write(ctx, CmdMove, "/api/v1/items/"+urlPath(itemID)+"/move", moveReq{
 		Project: a.proj.ID, SessionID: sess, To: *to,
 	})
 	if err != nil {
