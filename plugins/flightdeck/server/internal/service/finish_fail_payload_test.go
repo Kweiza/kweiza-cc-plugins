@@ -2,7 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -34,9 +37,15 @@ func readEventPayload(t *testing.T, st *store.Store, kind string) map[string]any
 // DESIGN §10 의 실측 문단(1435행)이 그 방법으로 잰 값을 싣고 있다. 초 단위 짝짓기는 한
 // 세션이 한 초에 두 항목을 건드리는 순간 조용히 틀리고, 틀렸다는 사실조차 안 남는다.
 //
-// ★ 실패시키는 수단은 finish_test.go 의 TestFinishRollsBackEverythingWhenFollowupFails 와
-// 같다(선행 조건이 빈 후속). 그쪽은 **롤백 계약**을 재고 이쪽은 **원장의 좌표**를 잰다 —
+// ★ 실패시키는 수단은 finish_test.go 의
+// TestFinishRollsBackEverythingWhenTheClaimDriftsIntoTheTransaction 과 같은 부류다(tx 안에서
+// 선점이 남에게 있다). 그쪽은 **롤백 계약**을 재고 이쪽은 **원장의 좌표**를 잰다 —
 // 같은 수단, 다른 축이다.
+//
+// ★★ **수단이 갈렸다(2026-08-11).** 앞 판은 "선행 조건이 빈 후속"을 썼는데, 그 입력이
+// 전단 관문으로 옮겨져(finish.go 의 store.ValidateAfter) **tx 안에 도달할 수 없게 됐다** —
+// 판단이 롤백되는 자리였으므로 옮긴 것이 맞다. 새 수단은 바깥 상태에서 오므로 전단 관문이
+// 더 늘어도 다시 도달 불가가 되지 않는다.
 func TestFinishFailNamesItsItemAndMode(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")
@@ -44,15 +53,21 @@ func TestFinishFailNamesItsItemAndMode(t *testing.T) {
 	addItem(t, s, "p", "batch7", nil, nil)
 	claimed(t, s, "p", me.Session.ID, "batch7")
 
+	// 다른 세션이 쥔 항목을 끝내려 한다 — tx 안 ReleaseClaim 이 ClaimHeldError 를 올린다.
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
+	if err := st.ForceReleaseClaim(ctx(), "p", "batch7", "시험: 임자를 바꾼다"); err != nil {
+		t.Fatalf("강제 반납 실패(시험 전제 준비): %v", err)
+	}
+	if _, err := st.ClaimItem(ctx(), "p", "batch7", other.Session.ID, time.Now()); err != nil {
+		t.Fatalf("남의 선점 만들기 실패(시험 전제 준비): %v", err)
+	}
+
 	_, err := s.Finish(ctx(), FinishInput{
 		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
 		Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "①…②…③…④…",
-		Followups: []FollowupInput{
-			{ID: "bad-after", Title: "후속", Body: "본문", After: []model.After{{}}},
-		},
 	})
 	if err == nil {
-		t.Fatalf("불변식을 깨는 후속은 실패해야 한다 — 이 시험의 전제가 깨졌다")
+		t.Fatalf("남이 쥔 항목은 끝낼 수 없어야 한다 — 이 시험의 전제가 깨졌다")
 	}
 
 	p := readEventPayload(t, st, "item.finish.fail")
@@ -75,31 +90,61 @@ func TestFinishFailNamesItsItemAndMode(t *testing.T) {
 	}
 }
 
-// TestFinishFailCauseSeparatesTheStageFromTheLeaf 는 **후속 등록 단계**의 실패가
-// leaf 오류의 종류에 먹히지 않는지 본다.
+// failCause 는 **후속 등록 단계**의 실패를 leaf 오류의 종류에 먹히지 않게 갈라야 한다.
 //
 // 고칠 자리가 정반대다: 단계가 후속이면 고칠 것은 followups 인자이고, 끝내려는 항목이
 // 없는 것이면 고칠 것은 item_id 다. 그 둘이 같은 값으로 쌓이면 원장은 "몇 번 실패했나"만
 // 답하고 "무엇을 고쳐야 하나"에는 앞 판과 똑같이 침묵한다.
-func TestFinishFailCauseSeparatesTheStageFromTheLeaf(t *testing.T) {
-	s, st := newSvc(t)
-	repo, wt := newRepoWithWorktree(t, "feat")
-	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
-	addItem(t, s, "p", "batch7", nil, nil)
-	claimed(t, s, "p", me.Session.ID, "batch7")
-
-	if _, err := s.Finish(ctx(), FinishInput{
-		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
-		Outcome: model.ItemDone, Title: "batch7 랜딩", Body: "①…②…③…④…",
-		Followups: []FollowupInput{
-			{ID: "bad-after", Title: "후속", Body: "본문", After: []model.After{{}}},
-		},
-	}); err == nil {
-		t.Fatalf("불변식을 깨는 후속은 실패해야 한다 — 전제가 깨졌다")
+//
+// ★★ **이 시험은 2026-08-11 에 통합 경로에서 순수 함수로 내려왔다.** 앞 판은 "선행 조건이
+// 빈 후속"으로 실물 tx 실패를 만들어 payload 의 cause 를 읽었는데, 이 회차가 그 입력을
+// 전단 관문으로 옮겨(finish.go 의 store.ValidateAfter) **후속 쓰기 실패에 도달하는 자연
+// 입력이 사라졌다.** 남은 tx 안 실패는 선점 표류·항목 없음이고 둘 다 cause 가 다르다.
+//
+// 그래서 잃은 것과 지킨 것을 정직하게 적는다:
+//
+//	· 지켰다 — **단계가 leaf 에 먹히지 않는다**는 판정 자체. failCause 는 순수 함수라
+//	  leaf 를 여러 종류로 갈아 넣어 정확히 그 축만 잴 수 있다(아래 표가 그것이다).
+//	· 잃었다 — **Finish 가 실제로 그 갈래를 원장에 싣는 배선.** 그 배선은 이제
+//	  TestFinishFailCauseSeparatesClaimDriftFromItemMissing(claim-drift·item-missing)과
+//	  TestFinishFailNamesItsItemAndMode 가 다른 갈래로 덮는다 — followup-write 갈래만
+//	  통합 시험 없이 남는다. 그 갈래가 다시 도달 가능해지는 날(tx 안 후속 쓰기 실패를
+//	  만드는 새 입력이 생기는 날) 여기에 통합 시험을 다시 세워라.
+func TestFailCauseSeparatesTheStageFromTheLeaf(t *testing.T) {
+	// 같은 단계(후속 쓰기)를 감싼 leaf 를 넷으로 갈아 넣는다. 전부 followup-write 여야 한다 —
+	// 그렇지 않으면 단계가 leaf 에 먹힌다.
+	leaves := []struct {
+		name string
+		err  error
+	}{
+		{"평범한 오류", errors.New("무슨 이유든")},
+		{"항목 없음", &store.NotFoundError{Kind: store.NFItem}},
+		{"선점 표류", &store.ClaimHeldError{Project: "p", ItemID: "x", Holder: "s2"}},
+		{"감싼 ErrNotFound", fmt.Errorf("바깥: %w", store.ErrNotFound)},
 	}
-	p := readEventPayload(t, st, "item.finish.fail")
-	if p["cause"] != "followup-write" {
-		t.Fatalf("사유 갈래가 %v 다(기대 followup-write): %v", p["cause"], p)
+	for _, c := range leaves {
+		wrapped := &followupWriteError{ID: "some-followup", Err: c.err}
+		if got := failCause(wrapped); got != CauseFollowupWrite {
+			t.Errorf("leaf 가 %s 일 때 갈래가 %q 다(기대 %q) — 단계가 leaf 에 먹혔다",
+				c.name, got, CauseFollowupWrite)
+		}
+	}
+	// 그리고 감싸지 않은 같은 leaf 들은 **각자의 갈래**로 가야 한다. 이 대조가 없으면
+	// failCause 가 늘 followup-write 를 돌려줘도 위 루프는 초록이다.
+	for _, c := range []struct {
+		name string
+		err  error
+		want FailCause
+	}{
+		{"항목 없음", &store.NotFoundError{Kind: store.NFItem}, CauseItemMissing},
+		{"선점 표류", &store.ClaimHeldError{Project: "p", ItemID: "x", Holder: "s2"}, CauseClaimDrift},
+		{"그 밖의 없음", fmt.Errorf("바깥: %w", store.ErrNotFound), CauseNotFound},
+		{"평범한 오류", errors.New("무슨 이유든"), CauseOther},
+		{"오류 없음", nil, ""},
+	} {
+		if got := failCause(c.err); got != c.want {
+			t.Errorf("%s 의 갈래가 %q 다(기대 %q)", c.name, got, c.want)
+		}
 	}
 }
 

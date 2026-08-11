@@ -166,6 +166,11 @@ const (
 	GateFollowupBody       FinishGate = "followup-body"       // 새로 만들 후속에 제목·본문이 없다
 	GateFollowupPaths      FinishGate = "followup-paths"      // 후속 경로가 좌표계 밖이다
 	GateDroppedDeps        FinishGate = "dropped-deps"        // 이 항목을 기다리는 살아 있는 항목이 있다
+	// GateFollowupAfter·GateJudgmentLinkKind 는 **tx 안에서 죽던 마지막 둘**을 전단으로
+	// 옮긴 자리다(2026-08-11). 저 안에서 오류가 되면 판단이 함께 롤백돼 파생 불가한
+	// 자산이 사라진다 — finish_preflight_after_and_links_test.go 가 그 둘을 잠근다.
+	GateFollowupAfter    FinishGate = "followup-after"     // 후속의 선행 형식이 틀렸다(축이 0개 또는 둘 이상)
+	GateJudgmentLinkKind FinishGate = "judgment-link-kind" // 판단 링크의 target_kind 가 열거 밖이다
 )
 
 // logFinishRefused 는 **트랜잭션에 들어가기도 전에** 끊긴 시도를 원장에 남긴다.

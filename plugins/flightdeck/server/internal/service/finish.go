@@ -260,6 +260,38 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
 					"좌표계가 다르면 이 후속 항목의 겹침 축이 조용히 죽는다."}
 		}
+		// ★ 선행 형식도 **여기서** 본다. 이 판정은 store.ValidateAfter 가 이미 갖고 있는데,
+		// 그것을 부르는 자리가 tx 안 addAfter 뿐이었다 — 거기서 오류가 되면 ① 의 판단이
+		// 함께 롤백돼 **파생 불가한 자산이 사라진다.** MCP 로 도달 가능한 갈래다(afterSchema 에
+		// required 가 없어 클라이언트가 빈 객체를 막지 못한다).
+		//
+		// **잇기에는 안 건다** — 위 ③ 과 같은 논거다. 잇기는 기존 항목의 선행을 안 덮으므로
+		// (store 에 그 항목의 after 를 바꿀 메서드가 없다) 통과시킬 우회 문 자체가 없고,
+		// 적게 하고 버리는 것이 조용한 거짓이다.
+		for k, a := range f.After {
+			if err := store.ValidateAfter(a); err != nil {
+				s.logFinishRefused(ctx, in, GateFollowupAfter)
+				return FinishResult{}, &RefusedError{What: "finish",
+					Reason: fmt.Sprintf("%d번째 후속(%s)의 %d번째 선행: %v",
+						c.Index, clip(f.ID, 64), k+1, err),
+					Guidance: "선행 하나에는 item·job·sha 중 **정확히 하나**를 채운다 — " +
+						"미랜딩 항목은 item, 이미 랜딩된 커밋은 sha, Tier B 잡은 job 이다."}
+			}
+		}
+	}
+	// ★ 판단 링크의 종류도 tx 진입 전에 본다. 열거 위반은 judgment_link 의 CHECK 가 잡지만
+	// 그 자리는 tx 안이고, 거기서 죽으면 방금 쓴 판단이 함께 롤백된다. HTTP 경로
+	// (internal/api/handlers_items.go 가 target_kind 를 문자열로 그대로 받는다)로 도달한다.
+	//
+	// item_id 로 자동 생성되는 링크는 검사하지 않는다 — 그것은 이 함수가 만들고 종류가
+	// 상수("item")다. 여기서 보는 것은 **호출자가 실은 것**뿐이다.
+	for i, l := range in.Links {
+		if err := store.ValidateLink(l); err != nil {
+			s.logFinishRefused(ctx, in, GateJudgmentLinkKind)
+			return FinishResult{}, &RefusedError{What: "finish",
+				Reason:   fmt.Sprintf("%d번째 링크: %v", i+1, err),
+				Guidance: "링크의 target_kind 는 " + strings.Join(store.LinkTargetKinds, "·") + " 중 하나다."}
+		}
 	}
 
 	now := s.now()

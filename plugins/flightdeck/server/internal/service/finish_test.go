@@ -78,20 +78,42 @@ func TestFinishWithoutBodyRefusesAndSaysWhatToWrite(t *testing.T) {
 //	롤백하면 **원리적으로 파생 불가한 판단 본문**이 함께 사라지기 때문이다
 //	(finish.go 의 ② 주석). 중복은 실패를 만들기 편한 수단이었을 뿐 이 시험의 대상이
 //	아니었으므로, 수단만 갈고 롤백 계약은 여기서 계속 지킨다.
-func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
-	s, st := newSvc(t)
+//
+// ★★ **수단을 또 갈았다(2026-08-11) — 이번에는 갈 수밖에 없었다.**
+//
+// 앞 판은 "선행 조건이 빈 후속"으로 이 축을 쟀다. 그 입력이 tx 안 addAfter 에서 죽었기
+// 때문이다. **이 회차가 그것을 전단 관문으로 옮겼다**(finish.go 의 store.ValidateAfter 호출,
+// finish_preflight_after_and_links_test.go 가 잠근다) — 판단이 롤백되는 자리였으므로 옮긴
+// 것이 맞고, 그래서 이 시험의 수단이 **도달 불가**가 됐다.
+//
+// 새 수단은 **선점 표류**다: 분류가 끝난 뒤 tx 진입 전에 선점이 남에게 넘어가면 tx 안
+// ReleaseClaim 이 ClaimHeldError 를 올린다. 창은 `now := s.now()`(관문 뒤·tx 앞) 한 자리라
+// 주입한 시계로 **결정론적으로** 벌어진다 — 같은 형식의 선례가 이 패키지에 있다
+// (TestFinishSkipsALinkTargetThatClosedBetweenClassifyAndTx).
+//
+// ★ 이 수단이 앞 둘보다 **나은 점**: 실패가 후속 인자가 아니라 **바깥 상태**에서 오므로,
+// 전단 관문을 아무리 늘려도 이 시험의 수단이 다시 도달 불가가 되지 않는다. 앞 두 수단
+// (중복 id · 빈 선행)은 둘 다 입력 검증이 흡수해 버렸다.
+func TestFinishRollsBackEverythingWhenTheClaimDriftsIntoTheTransaction(t *testing.T) {
+	// arm 은 분류와 tx 사이에 **딱 한 번** 돈다. 픽스처도 시계를 읽으므로 무장은 그 뒤에 한다.
+	var arm func()
+	s, st := newSvcWithClock(t, func() time.Time {
+		if arm != nil {
+			f := arm
+			arm = nil
+			f()
+		}
+		return time.Now()
+	})
 	repo, wt := newRepoWithWorktree(t, "feat")
 	me := openSession(t, s, "p", repo, wt, "cc-1", "트랙2")
+	other := openSession(t, s, "p", repo, repo, "cc-2", "트랙7")
 	addItem(t, s, "p", "batch7", nil, nil)
 	claimed(t, s, "p", me.Session.ID, "batch7")
 
 	// ★ 대조가 성립하는지 **결과를 읽기 전에** 단정한다.
-	//   ① 후속 id 가 비어 있어야 "중복이 아닌 사유로 실패했다"가 성립한다
-	//   ② 끝내려는 항목이 선점 상태여야 "종료가 롤백됐다"가 의미를 가진다
-	//   ③ 판단이 0건이어야 "판단도 안 남았다"를 말할 수 있다
-	if n := countRows(t, st, `SELECT count(*) FROM item WHERE project='p' AND id='bad-after'`); n != 0 {
-		t.Fatalf("사전 조건이 깨졌다 — 후속 id 가 이미 %d건 있어 중복 갈래로 샌다", n)
-	}
+	//   ① 끝내려는 항목이 선점 상태여야 "종료가 롤백됐다"가 의미를 가진다
+	//   ② 판단이 0건이어야 "판단도 안 남았다"를 말할 수 있다
 	before, err := st.GetItem(ctx(), "p", "batch7")
 	if err != nil {
 		t.Fatalf("항목 조회 실패: %v", err)
@@ -103,21 +125,28 @@ func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 		t.Fatalf("사전 조건이 깨졌다 — 판단이 이미 %d건 있다", n)
 	}
 
+	arm = func() {
+		// 분류가 끝난 뒤 tx 진입 전에 선점이 남에게 넘어간다.
+		if err := st.ForceReleaseClaim(ctx(), "p", "batch7", "시험: 표류를 만든다"); err != nil {
+			t.Errorf("강제 반납 실패(시험 전제 준비): %v", err)
+			return
+		}
+		if _, err := st.ClaimItem(ctx(), "p", "batch7", other.Session.ID, time.Now()); err != nil {
+			t.Errorf("남의 선점 만들기 실패(시험 전제 준비): %v", err)
+		}
+	}
+
 	_, err = s.Finish(ctx(), FinishInput{
 		Project: "p", SessionID: me.Session.ID, ItemID: "batch7",
 		Outcome: model.ItemDone,
 		Title:   "batch7 랜딩",
 		Body:    "①…②…③…④…",
-		Followups: []FollowupInput{
-			// 선행 조건이 비었다 — item·job·sha 중 0개다. duplicate 가 아닌 거절이다.
-			{ID: "bad-after", Title: "후속", Body: "본문", After: []model.After{{}}},
-		},
 	})
 	if err == nil {
-		t.Fatalf("불변식을 깨는 후속은 실패해야 한다 — 흡수는 중복 id 한 갈래뿐이다")
+		t.Fatalf("tx 안에서 선점이 남에게 있는데 마무리가 성공했다 — 이 시험의 전제가 깨졌다")
 	}
-	if !strings.Contains(err.Error(), "후속 항목 bad-after 등록 실패") {
-		t.Fatalf("실패 사유가 후속 등록임을 말하지 않는다: %v", err)
+	if arm != nil {
+		t.Fatalf("시계 후크가 안 불렸다 — 창이 안 벌어졌으니 이 시험은 아무것도 안 잠근다")
 	}
 
 	// ★ 한 트랜잭션이었는가 — 넷 전부가 되돌아가야 한다.
@@ -126,20 +155,25 @@ func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 		t.Fatalf("항목 조회 실패: %v", err)
 	}
 	if after.State != model.ItemClaimed {
-		t.Fatalf("후속이 실패했는데 항목이 %s 로 종료됐다 — 한 트랜잭션이 아니다", after.State)
+		t.Fatalf("tx 가 실패했는데 항목이 %s 로 종료됐다 — 한 트랜잭션이 아니다", after.State)
 	}
 	if after.ClosedAt != nil {
 		t.Fatalf("closed_at 이 남았다: %v", after.ClosedAt)
 	}
 	if n := countRows(t, st, `SELECT count(*) FROM judgment`); n != 0 {
-		t.Fatalf("판단이 %d건 남았다 — 후속 실패에 함께 롤백되지 않았다", n)
+		t.Fatalf("판단이 %d건 남았다 — tx 실패에 함께 롤백되지 않았다", n)
 	}
 	cl, err := st.GetClaim(ctx(), "p", "batch7")
 	if err != nil {
 		t.Fatalf("선점 조회 실패: %v", err)
 	}
+	// ★ 선점은 **살아 있어야 한다** — 지금 임자는 other 다(창에서 넘어갔다). 여기서 보는 것은
+	// "종료가 롤백됐으면 반납도 롤백된다"이고, 반납이 통과했다면 이 행의 released_at 이 찍힌다.
 	if cl.ReleasedAt != nil {
 		t.Fatalf("선점이 반납됐다 — 종료가 롤백됐으면 반납도 롤백돼야 한다")
+	}
+	if cl.SessionID != other.Session.ID {
+		t.Fatalf("임자가 %s 다 — 창에서 선점이 안 넘어갔으면 이 시험은 표류를 안 재고 있다", cl.SessionID)
 	}
 	// 계측은 트랜잭션과 별개로 남는다 — "무엇을 시도했다 실패했나"가 감사 원장의 존재 이유다.
 	if n := countRows(t, st, `SELECT count(*) FROM event WHERE kind='item.finish'`); n != 1 {
@@ -153,8 +187,8 @@ func TestFinishRollsBackEverythingWhenFollowupFails(t *testing.T) {
 		Scan(&payload); err != nil {
 		t.Fatalf("실패 사유 이벤트가 없다: %v", err)
 	}
-	if !strings.Contains(payload, "bad-after") {
-		t.Fatalf("실패 사유에 무엇이 실패했는지가 없다: %s", payload)
+	if !strings.Contains(payload, "claim-drift") {
+		t.Fatalf("실패 사유가 갈래를 안 말한다(기대 claim-drift): %s", payload)
 	}
 }
 

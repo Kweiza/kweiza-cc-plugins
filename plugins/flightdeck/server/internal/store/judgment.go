@@ -22,6 +22,35 @@ import (
 // judgment
 // ─────────────────────────────────────────────────────────────────────────────
 
+// LinkTargetKinds 는 판단 링크가 가리킬 수 있는 것의 전부다.
+//
+// ★ **schema.sql 의 `judgment_link.target_kind` CHECK 열거와 같아야 한다.** 두 벌이 갈리면
+// 한쪽은 통과시키고 다른 쪽은 CHECK 로 죽이는데, 그 죽음은 트랜잭션 안이라 **함께 있던 판단이
+// 롤백된다.** 그 일치를 사람이 지키게 두지 않는다 — internal/store 의 시험이 schema.sql 을
+// 읽어 이 슬라이스와 대조한다(TestLinkTargetKindsMatchSchemaCheck).
+var LinkTargetKinds = []string{"item", "job", "commit", "session"}
+
+// ValidateLink 는 판단 링크 하나가 저장 가능한지다. 순수 함수다.
+//
+// ★ **이 함수가 존재하는 이유는 자리다.** 열거 위반은 지금까지 `judgment_link` 의 CHECK 가
+// 잡았고, 그것은 트랜잭션 **안**이다. `Finish` 는 판단·후속·종료·반납을 한 tx 로 묶으므로
+// 거기서 오류가 되면 **원리적으로 파생 불가한 판단이 함께 사라진다.** 그래서 같은 판정을
+// 순수 함수로 꺼내 호출부가 **tx 진입 전에** 부를 수 있게 한다(service.Finish 의 전단 관문).
+// CHECK 는 그대로 최후 방어로 남는다 — 이 함수를 안 부르는 경로가 생겨도 DB 는 지킨다.
+func ValidateLink(l model.JudgmentLink) error {
+	if strings.TrimSpace(l.TargetKind) == "" || strings.TrimSpace(l.TargetID) == "" {
+		return fmt.Errorf("판단 링크가 비었다(kind=%q id=%q)",
+			clip(l.TargetKind, 32), clip(l.TargetID, 64))
+	}
+	for _, k := range LinkTargetKinds {
+		if l.TargetKind == k {
+			return nil
+		}
+	}
+	return fmt.Errorf("판단 링크의 target_kind %q 는 열거 밖이다 — %s 중 하나여야 한다",
+		clip(l.TargetKind, 32), strings.Join(LinkTargetKinds, "·"))
+}
+
 // AddJudgment 는 판단 하나와 그 링크를 저장한다. ID 가 비어 있으면 발급한다.
 //
 // 반환은 저장된 판단이다(발급된 ID 를 호출부가 알아야 링크를 걸 수 있다).
@@ -52,9 +81,8 @@ func (t *Tx) AddJudgment(j model.Judgment) (model.Judgment, error) {
 			clip(j.ID, 64), clip(string(j.Kind), 32), clip(j.SessionID, 64))
 	}
 	for _, l := range j.Links {
-		if l.TargetKind == "" || l.TargetID == "" {
-			return j, fmt.Errorf("판단 링크가 비었다(kind=%q id=%q)",
-				clip(l.TargetKind, 32), clip(l.TargetID, 64))
+		if err := ValidateLink(l); err != nil {
+			return j, err
 		}
 		if _, err := t.tx.ExecContext(t.ctx,
 			`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
