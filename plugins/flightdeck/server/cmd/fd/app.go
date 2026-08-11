@@ -303,6 +303,40 @@ func (a *App) FindSession(ctx context.Context, ccSession string) (model.Session,
 	return body.Session, nil
 }
 
+// SessionByID 는 카드 한 장을 **id 로** 읽는다. 3중키 좌표를 안 보낸다.
+//
+// ★ 그것이 이 메서드의 존재 이유다. FindSession 은 (machine, worktree, cc) 셋을 보내므로
+// 그 셋 중 하나라도 이 프로세스에서 다르게 풀리면 다른 카드를 가리킨다 — 그리고 cc 는
+// rekey 로 실제로 갈린다. id 를 보내면 해석할 좌표가 없어 세 입구가 갈려도 같은 카드다.
+//
+// FindSession 과 같은 자리를 쓴다(`GET /sessions?id=`) — 범용 Read 가 캐시·열화를
+// 이미 갖고 있고, 같은 갈래를 둘로 만들면 한쪽만 고칠 때 조용히 어긋난다.
+// 선점 목록을 **함께** 받는다 — 카드를 닫을지는 그것으로 판정하고, 따로 물으면
+// 두 호출 사이가 창이 된다(OpenSession 갈래가 res.Claims 를 쓰는 것과 같은 어법).
+//
+// ★ claims 를 **포인터로** 받는다. 값으로 받으면 「선점 0건」과 「이 서버는 선점을
+// 안 센다」가 둘 다 빈 슬라이스라 구분되지 않고, 그 구분이 없으면 이 입구를 모르는
+// 낡은 서버에 붙은 날 **선점을 든 카드가 조용히 닫힌다.** 안 센 응답은 거절이다.
+func (a *App) SessionByID(ctx context.Context, id string) (model.Session, []string, error) {
+	res, err := a.cli.Read(ctx, "/api/v1/sessions?"+url.Values{"id": {id}}.Encode())
+	if err != nil {
+		return model.Session{}, nil, err
+	}
+	var body struct {
+		Session model.Session `json:"session"`
+		Claims  *[]string     `json:"claims"`
+	}
+	if uerr := json.Unmarshal(res.Body, &body); uerr != nil {
+		return model.Session{}, nil, fmt.Errorf("세션 조회 응답 해석 실패: %w", uerr)
+	}
+	if body.Claims == nil {
+		return model.Session{}, nil, fmt.Errorf(
+			"서버가 이 카드의 선점을 안 셌다(claims 가 응답에 없다) — 이 응답으로는 닫아도 되는지 판정할 수 없다. " +
+				"서버가 이 입구를 모르는 낡은 버전이다: fd update")
+	}
+	return body.Session, *body.Claims, nil
+}
+
 // clientAPIVersion 은 이 바이너리가 아는 계약 버전이다.
 // 서버와 같은 상수를 쓴다 — 두 벌로 두면 스큐 배너가 자기 자신을 못 본다.
 const clientAPIVersion = service.APIVersion

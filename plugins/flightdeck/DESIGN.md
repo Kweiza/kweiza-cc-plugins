@@ -572,20 +572,47 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 
 ### REST `/api/v1/` — 정본
 
-```
+이 블록의 펜스 태그(` ```routes `)는 **기계가 읽는 표식**이다 — `internal/api` 의 mux 등록과
+이 표를 양방향으로 대조하는 시험이 그것으로 표를 찾는다(`api/design_route_table_test.go`).
+지우면 그 시험이 "정본이 없다"로 빨강이 된다. 표를 옮기거나 쪼갤 때는 태그를 함께 옮겨라.
+
+```routes
 POST   /sessions                    PATCH  /sessions/{id}
+GET    /sessions?machine&worktree&cc   (조회 전용 — 3중키. 없으면 404 다, 만들지 않는다)
+GET    /sessions?id=<카드>             (카드 id 로 지목 — 좌표 해석이 없는 유일한 축. 선점을 함께 낸다)
 POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라이언트 0건(아래)
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
 POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropped-dep`·`after-bad-ref` 의 유일한 탈출구)
+POST   /items/{id}/move             (고칠 수 있는 축은 프로젝트 하나뿐 — 본문·제목은 못 바꾼다)
+POST   /landing                     (줄 서기·보고·이탈 셋이 한 표면 — 셋 다 자기 줄 행 하나를 다룬다)
+POST   /landing/rows/{id}/release   (물린 줄 행을 사람이 회수 — 남의 점유를 끊는 일이라 위와 갈랐다)
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
+GET    /projects                    POST   /projects/{id}/remove  (잔해 지우기 — `--yes` 없이는 세기만 한다)
 GET    /dashboard.json              GET    /notices      (꼬리 전용)  POST /sessions/{id}/prescriptions (세션 카드 파생 안 돎)
 GET    /events        (SSE)         GET    /healthz
 GET    /metrics
+GET|POST /login                     POST   /logout       (화면 토큰 로그인 — 아래 ★)
 ```
+
+**이 표는 `/api/v1` 밖의 표면도 적는다.** 헤더의 접두는 *대부분이 그것*이라는 뜻이지
+경계가 아니다 — `/healthz`·`/metrics`·`/events`(짧은 별칭, 화면이 이걸 문다)·`/login`·
+`/logout` 은 접두 밖이고, 그래도 이 서버가 내는 HTTP 표면이라 여기 있다. **접두를 경계로
+읽으면 그 다섯이 표에서 빠지고, 실제로 로그인 표면 셋이 그렇게 빠져 있었다**(2026-08-11
+기계 대조에서 드러났다 — `internal/web` 의 화면 라우트는 별개 mux 라 여전히 이 표 밖이다).
+
+**`GET /sessions` 는 카드를 두 축으로 지목한다 — 3중키와 카드 id.**
+3중키는 훅의 복구 갈래가 쓴다(rekey 하기 전에 옛 cc 의 카드를 찾는다). 카드 id 는 사람이
+쓴다 — cc 는 rekey 를 못 견디므로 `/clear` 를 겪은 카드에 손이 닿는 축은 그것뿐이고,
+`fd close --session` 이 그 유일한 소비처다. 새 라우트로 안 가른 기준은 아래 `/footprints`
+판정과 같은 **대체재**다: 여기가 이미 「세션 하나를 찾는다」는 표면이고 갈리는 것은
+무엇으로 지목하느냐뿐이다. **id 갈래만 `claims` 를 함께 낸다** — 카드를 닫아도 되는지를
+그 응답 하나로 판정하기 때문이고(따로 물으면 두 호출 사이가 창이다), 그래서 그 필드에는
+`omitempty` 가 없다. 없으면 「선점 0건」과 「이 서버는 선점을 안 센다」가 같은 응답이 되고,
+그 둘을 구분 못 하는 클라이언트는 낡은 서버를 만난 날 선점을 든 카드를 조용히 닫는다.
 
 **`POST /footprints` 는 이 표에서 지웠다(2026-08-05, 실제로 코드에서 제거).**
 신호 없이 발자국만 남기는 표면이었고 `origin=declared|claimed` 를 받을 수 있어

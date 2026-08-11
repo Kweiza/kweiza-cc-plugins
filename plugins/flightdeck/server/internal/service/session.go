@@ -619,6 +619,35 @@ func (s *Service) FindSession(ctx context.Context, machineID, worktree, ccSessio
 	return s.st.FindSession(ctx, machineID, worktree, ccSessionID)
 }
 
+// SessionByID 는 카드 한 장을 **id 로** 읽는다. 좌표 해석이 없다.
+//
+// ★ 왜 3중키 조회 옆에 이것이 따로 필요한가. cc 축은 rekey 를 못 견딘다 —
+// `/clear` 가 오면 훅이 카드의 cc 를 새 값으로 옮기는데(Rekey 는 cc 컬럼만 UPDATE 한다)
+// 이미 뜬 MCP 프로세스의 environ 은 안 바뀐다. 그러면 그 프로세스가 인쇄한 cc 는
+// **어떤 카드도 갖지 않은 값**이 되고 3중키 조회는 아무것도 못 찾는다.
+// id 는 그 전환을 건너 보존되므로(설계 제약 ⑥) 사람이 카드를 지목할 수 있는 축은 그것뿐이다.
+//
+// FindSession 과 같은 이유로 파생(branch·head·ahead)을 안 붙인다 — 이 조회를 부르는 자리가
+// 원하는 것은 "그 카드가 있느냐"와 **그것이 무엇을 쥐고 있느냐**뿐이다.
+//
+// ★ **선점을 함께 낸다.** 이 조회의 유일한 호출자(`fd close --session`)가 카드를 닫기 전에
+// 반드시 물어야 하는 것이 그것이라서다. 따로 부르게 하면 두 호출 사이가 창이 되고,
+// 무엇보다 **묻는 것을 잊은 갈래**가 가드를 우회한다 — OpenSession 이 Claims 를 같은
+// 응답에 실어 보내는 것과 정확히 같은 이유다(그 응답 하나로 닫을지 판정한다).
+func (s *Service) SessionByID(ctx context.Context, id string) (model.Session, []string, error) {
+	sess, err := s.st.GetSession(ctx, id)
+	if err != nil {
+		return model.Session{}, nil, err
+	}
+	claims, err := s.st.ClaimedItems(ctx, sess.ID)
+	if err != nil {
+		// 선점 목록은 조정 정보라 파생이 아니다. 못 세면 그대로 올린다 —
+		// 여기서 빈 목록으로 접으면 호출자가 "선점 0건"으로 읽고 카드를 닫는다.
+		return model.Session{}, nil, err
+	}
+	return sess, claims, nil
+}
+
 // 시간 비교의 기준점. Board 가 자르는 지점을 만든다.
 func (s *Service) cut(now time.Time, window time.Duration) time.Time {
 	if window <= 0 {

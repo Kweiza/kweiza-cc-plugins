@@ -39,8 +39,10 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd pick <item-id> [<item-id>…]          선점(여럿이면 첫째가 선두 · 오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
   fd finish <item-id> --body … [--close]  판단+후속+종료+반납을 한 번에. --close 면 세션도 닫는다
-  fd close [--why …]                      이 세션을 닫는다. 선점이 남아 있으면 거절한다.
-                                          **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다
+  fd close [--session <카드 id>] [--why …] 세션을 닫는다. 선점이 남아 있으면 거절한다.
+                                          **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다.
+                                          --session 은 보드 배너가 내는 카드 id 다 — /clear 로
+                                          cc 가 갈려 손이 안 닿는 카드를 그 축으로 지목한다
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
   fd after cut <item-id> --item <dep>     걸린 선행 하나를 끊는다(--job·--sha 도 된다).

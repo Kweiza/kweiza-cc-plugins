@@ -378,3 +378,24 @@ func TestRenderDriftNamesTheStableAxis(t *testing.T) {
 			"유일한 소비처에 넣으면 카드가 하나 더 생긴다", got)
 	}
 }
+
+// TestRenderDriftCarriesARunnableCommand 는 배너가 **그 id 로 할 수 있는 일**을 함께 내는지 본다.
+//
+// ★ 안정 축을 인쇄하면서 그 축으로 일할 수단을 안 주는 것이 이 저장소가 명문화한 결함이다
+// (judge/prescribe.go 2026-08-06 개정 주석: "실행할 수 없는 지시를 싣는 것은 이 개정이
+// 없애려는 결함의 재발이다"). 위 시험이 통과한 뒤에도 사람은 그 값을 어디에 넣을지 몰랐다 —
+// `fd close` 가 가진 입구가 `--cc-session` 뿐이었고 그것은 정확히 rekey 를 못 견디는 축이다.
+//
+// ★★ **자기 카드에는 그 명령을 안 붙인다.** 지금 이 대화가 쓰고 있는 카드이고, 닫으면
+// 자기 발밑을 지운다. 배너가 정리 대상으로 지목할 수 있는 것은 갈린 쪽뿐이다.
+func TestRenderDriftCarriesARunnableCommand(t *testing.T) {
+	twins := []CoordinateTwin{{SessionID: "01KZOLDCARD", CCSessionID: "cc-old"}}
+	got := RenderDrift(twins, "01KZMINECARD", "cc-new", "")
+
+	if !strings.Contains(got, "fd close --session 01KZOLDCARD") {
+		t.Fatalf("배너가 id 만 내고 **그것으로 할 일**을 안 냈다 — 복사해 쓸 명령이 없다:\n%s", got)
+	}
+	if strings.Contains(got, "fd close --session 01KZMINECARD") {
+		t.Fatalf("자기 카드를 닫으라고 낸다 — 이 대화가 쓰는 카드다:\n%s", got)
+	}
+}
