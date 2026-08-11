@@ -528,6 +528,21 @@ func uncoveredByClosed(in PrescribeInput) (uncovered []string, grounded bool) {
 //	   service.OpenSession 이 빈 worktree 와 비절대 worktree 를 거절하기 때문이다.
 //	   **그 검증이 느슨해지는 순간 절대경로가 다시 들어오고, 이 가드가 그 뒤에 선다.**
 //
+//	   ★ **그 두 사실을 각각 잠그는 시험의 이름을 적는다**(2026-08-11). 존치 근거는 곱이고
+//	   각 항을 서로 다른 시험이 지킨다:
+//
+//	     · fail-open 이 **살아 있다** → service 의 TestRelPathWithinSeparatesContainmentFromCoordinate
+//	       (그 격자의 "root 를 모르면 판정하지 않는다(fail-open)" 케이스). 실측 2026-08-11:
+//	       그 갈래를 within=false 로 바꾸는 변이를 넣으면 이 케이스만 빨개진다.
+//	     · 그 문이 **닫혀 있다** → service 의 TestJudgeOpenSessionKeepsExistingAxes
+//	       ("worktree 가 비었다" · "절대경로" 두 축을 사유 문자열로 잠근다).
+//
+//	   어느 한쪽이 빨개지는 날 이 가드를 **재판정해야 한다** — fail-open 이 없어지면 존치
+//	   근거가 사라지고(그때는 지우는 것이 맞다), 문이 열리면 근거가 오히려 강해진다.
+//	   그 두 시험은 자기가 이 가드를 지탱하는 줄 몰랐고(사유가 각각 다른 이유를 댄다),
+//	   그것이 이 항목이 지목한 상태다. 인용이 썩지 않는지는 이 패키지의
+//	   TestComparablePathCitesTheTestsThatKeepItsGroundTrue 가 양방향으로 본다.
+//
 //	   ★ 앞 판은 여기서 legacy.PlanImport 의 fail-open("포함 축은 기준 트리가 없어 안 본다")을
 //	   근거로 들었다. **거짓이다** — internal/legacy 는 footprint·Touch 를 아예 안 만진다.
 //	   legacy 의 절대경로는 item.paths 로 가고, 거기서 발자국이 되는 유일한 길인 Pick 도

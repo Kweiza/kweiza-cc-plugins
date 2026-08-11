@@ -224,6 +224,19 @@ func TestJudgeOpenSessionNamesWindowsPathAsTheCause(t *testing.T) {
 }
 
 // 좌표계 판정이 기존 축을 가리면 안 된다 — 상대경로는 여전히 상대경로 사유를 받는다.
+//
+// ★ **이 두 축은 다른 패키지의 가드 하나를 지탱한다**(2026-08-11에 이름이 붙었다).
+// judge.comparablePath 는 절대경로 발자국을 "비교 불가"로 걸러내는데, 그 가드가 존치하는
+// 유일한 근거가 "service.RelPathWithin 의 fail-open 때문에 절대경로가 들어올 문이 원리적으로
+// 열려 있고, 지금 안 들어오는 이유는 **오직 이 검증이 문을 닫기 때문**"이다.
+//
+// 즉 아래 두 단정("절대경로" · "worktree 가 비었다")을 완화하거나 지우면 절대경로가 발자국으로
+// 다시 들어오기 시작하고, 그 가드가 그 뒤에 선다 — 가드를 지우려는 사람은 **이 시험이 여전히
+// 초록인지**를 먼저 봐야 한다. 반대로 이 시험을 느슨하게 하려는 사람은 자기가 그 가드의
+// 필요성을 키우고 있다는 것을 알아야 한다. fail-open 쪽 항은
+// TestRelPathWithinSeparatesContainmentFromCoordinate 의 "root 를 모르면 판정하지 않는다"
+// 케이스가 잠근다. 이 인용이 썩지 않는지는 judge 패키지의
+// TestComparablePathCitesTheTestsThatKeepItsGroundTrue 가 양방향으로 본다.
 func TestJudgeOpenSessionKeepsExistingAxes(t *testing.T) {
 	base := OpenSessionInput{Project: "p", MachineID: "m", CCSessionID: "cc"}
 

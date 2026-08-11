@@ -58,10 +58,18 @@ func TestRelPathWithinSeparatesContainmentFromCoordinate(t *testing.T) {
 			why: "이미 저장소 좌표계다 — 이것을 밖으로 접으면 git 이 주는 경로가 전부 죽는다",
 		},
 		{
+			// ★ 이 케이스는 judge.comparablePath 의 **존치 근거**이기도 하다(2026-08-11에
+			// 이름이 붙었다). 그 가드가 서 있는 이유가 "이 fail-open 이 살아 있어서 절대경로가
+			// 들어올 문이 원리적으로 열려 있다"이고, 지금 안 들어오는 이유는 오직
+			// JudgeOpenSession 이 그 문을 닫기 때문이다(TestJudgeOpenSessionKeepsExistingAxes).
+			// **이 케이스를 없애거나 완화하려면 그 가드를 함께 재판정해라** — fail-open 이
+			// 사라지면 가드의 유일한 근거가 사라진다. 반대로 이 케이스만 조용히 지우면 가드는
+			// 그대로 서 있고 근거만 없어진다(그 상태가 이 저장소가 반복해서 데이는 모양이다).
 			name: "root 를 모르면 판정하지 않는다(fail-open)",
 			root: "", in: "/anywhere/x.go",
 			wantRel: "/anywhere/x.go", wantWithin: true,
-			why: "못 읽음을 '밖'으로 세면 워크트리를 못 읽은 세션의 발자국이 통째로 사라진다",
+			why: "못 읽음을 '밖'으로 세면 워크트리를 못 읽은 세션의 발자국이 통째로 사라진다. " +
+				"그리고 이 fail-open 이 judge.comparablePath 의 존치 근거다",
 		},
 		{
 			name: "빈 경로는 안도 밖도 아니다 — 빈 rel 로 호출부가 거른다",
