@@ -545,7 +545,15 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 		sess, claims, err := a.SessionByID(ctx, id)
 		if err != nil {
 			fmt.Fprintf(out, "안 닫았다 — 카드 %s 를 못 찾았다: %v\n", clip(id, 64), err)
-			fmt.Fprintln(out, "여기서 카드를 만들지는 않는다 — 보드가 낸 id 를 그대로 넣었는지 확인해라.")
+			fmt.Fprintln(out, "여기서 카드를 만들지는 않는다 — 보드 배너가 낸 id 를 그대로 넣었는지 확인해라.")
+			// ★ 위 사유는 **서버가 준 것**이라 이 갈래를 모를 수 있다. 실물로 그랬다
+			// (2026-08-11, 도는 서버 0.17.0): `id=` 를 모르는 서버는 그것을 무시하고 3중키로
+			// 조회하므로, 카드 id 로 지목한 사람이 「좌표에 해당하는 세션이 없다」를 듣고
+			// 「fd open 으로 열어라」를 처방으로 받는다 — 둘 다 그 사람이 한 일과 무관하고,
+			// 카드를 정리하려던 사람에게 새로 열라는 말은 이 항목이 없애려는 그 결함이다.
+			// 서버 사유는 지우지 않는다(진짜 원인이 거기 있다). 대신 갈래를 이름으로 말한다.
+			fmt.Fprintln(out, "위 사유가 3중키(머신·워크트리·cc)를 말하거나 fd open 을 권하면 그것은 이 입구의 처방이 아니다 —")
+			fmt.Fprintln(out, "서버가 카드 id 입구를 모르는 낡은 버전이라 좌표로 찾은 것이다: fd update")
 			return 1
 		}
 		return a.closeCard(ctx, sess.ID, claims, *why, out)

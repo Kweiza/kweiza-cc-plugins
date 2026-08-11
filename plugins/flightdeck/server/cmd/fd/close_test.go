@@ -214,6 +214,34 @@ func TestCloseRefusesBothEntrancesAtOnce(t *testing.T) {
 	}
 }
 
+// 못 찾았을 때의 처방이 **이 입구를 쓴 사람에게 맞아야** 한다.
+//
+// ★ 실물이 낸 관측이다(2026-08-11, 도는 서버 0.17.0). 이 입구를 모르는 서버는 `id=` 를
+// 무시하고 3중키로 조회하므로, `--session` 만 준 사람이 **"3중키(머신·워크트리·cc)에
+// 해당하는 세션이 없다"** 를 듣고 **"fd open 으로 열어라"** 를 처방으로 받는다.
+// 둘 다 그 사람이 한 일과 무관하다 — 카드 id 로 지목했는데 좌표 얘기를 듣고, 카드를
+// 정리하려던 사람이 새로 열라는 말을 듣는다.
+//
+// 이 항목이 없애려는 결함이 정확히 이 모양이라(실행할 수 없는 지시), 클라이언트가 그
+// 갈래를 이름으로 말한다. **서버 사유는 그대로 옮긴다** — 지우면 진짜 원인이 사라진다.
+func TestCloseBySessionIDNamesTheStaleServerBranchWhenNotFound(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.run("", "open"); code != 0 {
+		t.Fatalf("open 실패(%d): %s", code, out)
+	}
+	before := len(h.liveSessions())
+
+	code, out := h.run("", "close", "--session", "01ZZZZZZZZZZZZZZZZZZZZZZZZ")
+	if code == 0 {
+		t.Fatalf("없는 카드를 닫았다고 보고했다:\n%s", out)
+	}
+	if got := len(h.liveSessions()); got != before {
+		t.Fatalf("못 찾은 조회가 카드 수를 바꿨다: %d → %d", before, got)
+	}
+	// 사람이 다음에 할 수 있는 일이 문구 안에 있어야 한다.
+	mustContain(t, "못 찾음 처방", out, "fd update")
+}
+
 // 닫은 뒤에도 신호 하나면 살아난다 — store 의 안전핀이 cmd 계층에서도 도는지 본다.
 func TestClosedSessionRevivesOnNextBeat(t *testing.T) {
 	h := newHarness(t)
