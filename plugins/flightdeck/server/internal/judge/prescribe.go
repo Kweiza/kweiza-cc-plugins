@@ -161,6 +161,34 @@ type PrescribeInput struct {
 	// 4배가 한 판에 쏟아진다. 타입이 []string 인 것 자체가 그 결정을 못박는다(Closed 를
 	// Claims 와 안 합친 것과 같은 논거이고, 이쪽은 근거가 실측이다).
 	SiblingClaims []string
+	// WorkspaceClaims 는 **이 카드가 서 있는 워크트리의 항목**이 지금 선점돼 있으면 그 id 다.
+	//
+	// ★ 왜 SiblingClaims 로 안 되는가. 형제 축은 `cc_session_id` 로 조인한다. 그런데 실사용
+	// 경로는 사람이 **주 저장소 카드에서 pick 하고 워크트리 안에서 새 대화를 연다** — 그 순간
+	// cc 가 갈리고 형제 조인이 원리적으로 못 본다. 0ec08c7 이 닫은 것은 "같은 cc · 다른
+	// 워크트리"였고, 남은 것은 "다른 cc · 그 항목의 워크트리"다.
+	//
+	// 실측(2026-08-11, 원장 unclaimed 발화 118건 전수. 발화 시점의 선점 상태를 추가전용 원장
+	// item.claim·item.finish·claim.reclaim 에서 복원했다 — claim 표는 PK 가 (project,item_id)
+	// 한 행이라 재선점에 덮여 이력이 없다):
+	//
+	//	형제 축 거짓 양성 — 08-06 을 끝으로 0건이다(0ec08c7 이 닫았다)
+	//	08-07 이후 "선점 0건" 발화 20건 중 **16건**이 이 축이고, 16건 전수가
+	//	`같은 머신 · 다른 cc` 다. 예외가 없다.
+	//
+	// ★ **왜 조용해지는 것이 맞는가.** 그 처방문은 `pick(item_id=…)` 를 시키는데 그 항목은
+	// 남의 카드가 쥐고 있어 그 pick 은 거절된다 — unclaimedPrescription 이 아래에서 스스로
+	// 못박은 규칙("실행할 수 없는 지시를 싣는 것은 이 개정이 없애려는 결함의 재발이다")이
+	// 이 축에도 그대로 걸린다.
+	//
+	// ★ **경로를 안 싣는다. Claims 와 합치지도 않는다.** SiblingClaims 와 같은 논거이고
+	// 근거도 같은 실측이다(합치면 outside 가 그 선언 경로를 기준으로 돌기 시작한다).
+	// 타입이 []string 인 것 자체가 그 결정을 못박는다.
+	//
+	// ★ **프로젝트 축이 아니다.** 조용해지는 것은 이 카드가 **서 있는 그 워크트리**의 항목이
+	// 쥐어졌을 때뿐이다. 남이 다른 항목을 쥔 것은 여전히 이 카드를 안 껀다 — 0ec08c7 이
+	// 세운 배타 방벽을 그대로 둔다.
+	WorkspaceClaims []string
 	// TurnPaths 는 마지막 처방 이후 새로 만진 경로다(처방이 없었으면 세션 시작 이후).
 	TurnPaths []string
 	// Others 는 살아 있는 세션 목록이다. 자기 자신이 섞여 있어도 이 함수가 뺀다 —
@@ -408,6 +436,11 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // `git worktree add` 가 카드를 가르고 선점은 갈리기 전 카드에 남는데, 그 상태가
 // "한 번도 안 집었다"와 글자 그대로 똑같이 보였다. SiblingClaims 가 그 넷째를 갈라낸다.
 //
+// **다섯째는 2026-08-11 이다: 이 워크트리의 항목을 다른 대화가 쥐고 있다**(처방이 틀리다).
+// 넷째가 닫은 것은 "같은 cc · 다른 워크트리"뿐이었다. 사람이 주 저장소에서 pick 하고
+// 워크트리 안에서 **새 대화**를 열면 cc 가 갈려 형제 조인이 원리적으로 못 본다 —
+// 08-07 이후 남은 거짓 양성 16건 전수가 그 모양이었다. WorkspaceClaims 가 다섯째를 갈라낸다.
+//
 // ★ **문구는 판정이 실제로 든 근거만 댄다(2026-08-06 개정).** 앞선 판은 `in.TurnPaths` 의
 // 앞 3개를 그대로 실었다 — 덮였는지 안 덮였는지를 안 보고. 그래서 판정이 옳은 발화에서도
 // 문구가 **덮인 경로**를 지목했고, 읽는 쪽은 "선점이 저 파일을 덮는데 왜 뜨지"로 읽어
@@ -419,7 +452,7 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // 처방의 값어치는 "틀리지 않는다"가 아니라 **"고칠 자리를 가리킨다"** 이고, 맞는 처방이
 // 틀린 증거를 들고 오면 그 다음부터 처방 전체가 안 읽힌다(설계 §4 의 상시 점등과 같은 종착).
 func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
-	if len(in.Claims) > 0 || len(in.SiblingClaims) > 0 ||
+	if len(in.Claims) > 0 || len(in.SiblingClaims) > 0 || len(in.WorkspaceClaims) > 0 ||
 		len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
 		return Prescription{}, false
 	}

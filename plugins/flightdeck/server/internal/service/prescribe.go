@@ -156,6 +156,27 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		return PrescribeResult{}, err
 	}
 
+	// 이 카드가 **서 있는 워크트리의 항목**이 지금 선점돼 있는가.
+	//
+	// ★ 형제 축이 못 잡는 나머지다. 형제 조인은 cc 로 걸리는데, 사람이 주 저장소에서
+	// pick 하고 워크트리 안에서 **새 대화**를 열면 cc 가 갈린다. 08-07 이후 남은 거짓 양성
+	// 16건 전수가 그 모양이다(judge 쪽 WorkspaceClaims 주석에 실측이 있다).
+	//
+	// ★ 여기서도 GetItem 을 **안 부른다** — 이 축은 항목 id 만 나르고 선언 경로를 안 싣는다
+	// (형제 축과 같은 논거: 실으면 outside 가 그 경로를 기준으로 돌기 시작한다).
+	// 질의는 워크트리가 관례 자리일 때만, 그때도 한 건이다.
+	//
+	// ★ 선점 **없음**은 처방을 못 낼 이유가 아니다 — 그때는 축이 비고 판정이 옛날대로 돈다.
+	// 다른 오류만 올린다.
+	if id := judge.WorkspaceItemID(sess.Worktree); id != "" {
+		switch c, err := s.st.GetClaim(ctx, sess.Project, id); {
+		case err == nil && c.ReleasedAt == nil:
+			in.WorkspaceClaims = []string{id}
+		case err != nil && !errors.Is(err, store.ErrNotFound):
+			return PrescribeResult{}, err
+		}
+	}
+
 	// 이 구간에 반납한 항목 — "한 번도 안 집었다"와 "방금 제대로 끝냈다"를 가르는 축이다.
 	// **TurnPaths 와 같은 since 를 쓴다.** 두 창이 갈리면 "이번 턴에 만진 경로"와
 	// "이번 턴에 끝낸 항목"이 서로 다른 구간을 가리키게 되고, 그 어긋남은 화면에 안 뜬다.
