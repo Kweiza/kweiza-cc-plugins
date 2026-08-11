@@ -143,10 +143,18 @@ func RenderDrift(twins []CoordinateTwin, mineID, mineCC, why string) string {
 				"건 더 — 수는 위 첫 줄이 전부 센 값이다\n"
 			break
 		}
-		s += "  갈린 카드: " + clip(t.SessionID, 64) + " · cc=" + clip(t.CCSessionID, 64) + "\n"
+		// ★ **id 옆에 그 id 로 할 일을 붙인다.** 안정 축을 인쇄하면서 그 축으로 일할 수단을
+		// 안 주는 것이 이 저장소가 명문화한 결함이다(judge/prescribe.go 2026-08-06 개정 주석).
+		// 자기 카드(위 첫 줄)에는 안 붙인다 — 이 대화가 쓰는 카드라 닫으면 발밑을 지운다.
+		s += "  갈린 카드: " + clip(t.SessionID, 64) + " · cc=" + clip(t.CCSessionID, 64) +
+			" — 닫으려면: fd close --session " + clip(t.SessionID, 64) + "\n"
 	}
 	s += "  같은 창의 카드라면 훅이 다음 SessionStart 에 합친다. " +
-		"같은 워크트리에 열린 **다른 창**이라면 안 합쳐진다 — 그쪽이 맞다."
+		"같은 워크트리에 열린 **다른 창**이라면 안 합쳐진다 — 그쪽이 맞다.\n" +
+		// ★ 명령을 실은 이상 이 경고가 함께 가야 한다. 위 두 갈래는 사람만 가를 수 있는데,
+		// 명령만 보이면 둘 다 닫는 쪽으로 흐른다 — 그러면 살아 있는 다른 창이 보드에서 사라지고,
+		// 그 창이 든 선점은 아무에게도 안 보인다(runClose 의 선점 가드가 막는 바로 그 상태다).
+		"  닫기 전에 어느 쪽인지 가려라 — 살아 있는 다른 창을 닫으면 그 창이 보드에서 사라진다."
 	if strings.TrimSpace(why) != "" {
 		s += " 이 프로세스가 아는 사유: " + clip(why, 200)
 	}
