@@ -68,6 +68,25 @@ const (
 	// 아래 JudgeOffline·outbox.go 의 IdempotencyStable 이 이 상수로 잡아 둔 갈래를 안 타고
 	// default(최종 리뷰 Important-3)로 조용히 떨어진다.
 	CmdProjectRemove = "project-remove"
+	// CmdMove 는 항목을 다른 프로젝트로 옮기는 것이다(`fd move`).
+	//
+	// ★ 값이 cmd/fd/cmds.go 의 runMove 안 a.cli.Write 호출부와 글자 그대로 같아야 한다 —
+	// CmdProjectRemove 와 같은 이유다. write_cmd_table_coverage_test.go 가 cmd/fd 전체를
+	// go/ast 로 훑어 이 어긋남을 기계로 잡는다(2026-08-11, project-remove 하나만 표에
+	// 명시였던 자리에서 move·after cut·prescriptions 셋이 더 빠져 있던 것을 그 시험이
+	// 처음으로 드러냈다).
+	CmdMove = "move"
+	// CmdAfterCut 는 걸린 선행 하나를 끊는 것이다(`fd after cut`).
+	//
+	// ★ 값이 cmd/fd/cmds.go 의 runAfterCut 안 a.cli.Write 호출부와 글자 그대로 같아야
+	// 한다 — 위 CmdMove 와 같은 이유·같은 시험이 지킨다.
+	CmdAfterCut = "after cut"
+	// CmdPrescriptions 는 Stop 훅이 이번 턴의 처방을 받아 오는 내부 호출이다 — 사람이
+	// 셸에 치는 서브명령이 아니라 cmd/fd/hook.go 의 hookStop 만 부른다.
+	//
+	// ★ 값이 hookStop 안 a.cli.Write 호출부와 글자 그대로 같아야 한다 — 위 CmdMove 와
+	// 같은 이유·같은 시험이 지킨다.
+	CmdPrescriptions = "prescriptions"
 )
 
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
@@ -119,6 +138,34 @@ func JudgeOffline(cmd string) OfflineVerdict {
 			"삭제 판정은 원장의 지금 상태(항목·판단·다른 프로젝트의 판단 수)를 실시간으로 세어 " +
 				"내린다 — 되돌릴 수 없는 삭제를 오프라인의 낡은 셈으로 실행하면 그 사이 새로 " +
 				"생긴 항목·판단을 못 보고 지울 위험이 있다. 서버가 돌아오면 다시 실행하라"}
+	case CmdMove:
+		// ★ CmdProjectRemove 와 같은 결의 판단이다 — 표 밖으로 떨어지면 사유가 "정의돼
+		//   있지 않다"가 되어 설계 결함처럼 읽힌다. 동작(거절)은 default 와 같지만
+		//   사유가 다르다.
+		return OfflineVerdict{OfflineRefuse,
+			"옮길 대상 프로젝트가 실제로 등록돼 있는지는 서버만 안다(자동 생성을 안 하므로 " +
+				"없는 프로젝트로는 거절한다 — move_seam_test.go 의 " +
+				"TestMoveToUnknownProjectIsRefused). 아웃박스에 쌓아 재연결 시 재생하면 그 " +
+				"사이 대상 프로젝트가 지워졌거나(project rm) 이 항목이 이미 다른 곳으로 " +
+				"옮겨졌을 수 있는데도 낡은 요청을 그대로 실행해 엉뚱한 곳으로 보낸다"}
+	case CmdAfterCut:
+		return OfflineVerdict{OfflineRefuse,
+			"선행을 끊는 판정은 지금 그 항목에 실제로 걸려 있는 선행이 무엇인지(item·job·sha " +
+				"축)를 원장에서 실시간으로 확인해야 한다 — 아웃박스에 쌓아 재생하면 그 사이 " +
+				"같은 선행이 다른 경로로 이미 사라졌거나 바뀌었을 수 있는데도 낡은 요청을 " +
+				"그대로 실행해 엉뚱한 관계를 끊거나 이미 없는 관계를 끊으려 든다. 되돌릴 수 " +
+				"없는 관계 편집이라 서버가 돌아오면 지금 상태를 보고 다시 실행하라"}
+	case CmdPrescriptions:
+		// ★ 사람이 치는 명령이 아니라 Stop 훅(hook.go 의 hookStop)의 내부 호출이다. 이
+		//   거절은 훅을 안 막는다 — 훅은 fail-open 이라(hookStop 머리 주석) 경고 로그만
+		//   남기고 다음 턴으로 넘어간다. 그래도 표 밖 default 로 떨어지면 그 로그 사유가
+		//   "정책이 정의돼 있지 않다"로 오독된다는 점은 사람이 치는 명령과 같다.
+		return OfflineVerdict{OfflineRefuse,
+			"처방은 원장의 지금 상태(claim·랜딩·이벤트 억제 이력)를 읽어 판정하고 동시에 " +
+				"\"보였다\"는 사실을 이벤트로 남겨 같은 처방이 반복 발화되지 않게 억제한다 " +
+				"(internal/service/prescribe.go) — 오프라인에서 캐시로 답하면 이미 해소된 " +
+				"처방이 억제 이력을 못 읽어 다시 뜨거나, 새로 켜진 조건을 놓쳐 정작 필요한 " +
+				"처방을 못 낸다"}
 
 	// ── 랜딩 레인 넷. 전부 거절이지만 **사유가 셋으로 갈린다.**
 	//

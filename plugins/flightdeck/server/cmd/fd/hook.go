@@ -535,7 +535,9 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Wr
 	}
 	a.cli.Session = res.Session.ID
 
-	wr, err := a.cli.Write(ctx, "prescriptions",
+	// ★ 리터럴 "prescriptions" 대신 CmdPrescriptions 를 쓴다(CmdProjectRemove 와 같은
+	// 이유) — offline.go·outbox.go 가 이 이름으로 명시 갈래를 잡아 뒀다.
+	wr, err := a.cli.Write(ctx, CmdPrescriptions,
 		"/api/v1/sessions/"+urlPath(res.Session.ID)+"/prescriptions", struct{}{})
 	if err != nil {
 		a.log.Warn("stop: 처방 조회 실패", "error", err.Error())
