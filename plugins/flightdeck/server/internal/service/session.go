@@ -158,6 +158,43 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 		case err == nil:
 			proj = p
 		case errors.Is(err, store.ErrNotFound):
+			// ★ **자동 등록 전에 3중키 세션을 본다.** 이 순서가 이 소절의 전부다.
+			//
+			// 세션 정체는 (machine, worktree, cc_session) 3중키이고 **project 가 안 들어간다.**
+			// 그래서 아래 t.OpenSession 은 같은 3중키 행이 이미 있으면 **재개**한다(created=false)
+			// — 그 행의 project 는 처음 열릴 때 정해진 것 그대로다. 그런데 자동 등록이 그보다
+			// 앞이라, 잘못된 project 로 요청이 오면 **프로젝트만 새로 만들어지고 세션은
+			// 남의 프로젝트 것을 재개한다.** 트랜잭션은 성공하므로 롤백도 없고 아무 흔적도
+			// 안 남는다 — 고아 프로젝트가 조용히 하나 는다.
+			//
+			// 실측(원장): console-screen-landing · t6-console-notice-kind-split ·
+			// upload-staging-live-verification 셋이 정확히 이 모양으로 생겼다. 셋 다 세션 행은
+			// 전부 context-platform 으로 정상인데 워크트리 이름의 프로젝트에는 session.open
+			// 이벤트만 있고 세션이 0건이다. 두 달 뒤 원장을 뒤져서야 경위를 알 수 있었다.
+			//
+			// 거절하지 않고 **기존 세션의 프로젝트로 진행**한다: 이 경로는 훅이 프롬프트마다
+			// 무는 자리라 거절하면 세션이 안 열리고, 그 대가로 얻는 것이 없다(잘못된 것은
+			// 클라이언트가 보낸 이름이지 이 세션의 정체가 아니다). 대신 **관측을 남긴다** —
+			// 지금까지 이 자리에 아무 흔적이 없던 것이 이 항목이 늦게 발견된 이유다.
+			if prior, perr := t.FindSession(in.MachineID, in.Worktree, in.CCSessionID); perr == nil &&
+				prior.Project != "" && prior.Project != in.Project {
+
+				t.LogEvent("session.project.mismatch", prior.Project, prior.ID, map[string]any{
+					"requested": clip(in.Project, 64), "using": clip(prior.Project, 64),
+					"worktree": clip(in.Worktree, 200), "cc_session": clip(in.CCSessionID, 64),
+				})
+				s.log.WarnContext(ctx, "요청한 프로젝트가 이 3중키의 기존 세션과 다르다 — 기존 것을 쓴다",
+					"requested", clip(in.Project, 64), "using", clip(prior.Project, 64),
+					"session", clip(prior.ID, 64))
+
+				existing, gerr := t.GetProject(prior.Project)
+				if gerr != nil {
+					return gerr
+				}
+				proj = existing
+				in.Project = prior.Project // 아래 OpenSession·Divergent 가 같은 좌표를 쓰게
+				break
+			}
 			if repo == "" {
 				return &RefusedError{What: "session open",
 					Reason:   fmt.Sprintf("프로젝트 %q 가 등록돼 있지 않고 project_path 도 안 왔다", clip(in.Project, 64)),

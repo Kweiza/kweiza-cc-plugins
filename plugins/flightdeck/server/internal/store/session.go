@@ -173,6 +173,15 @@ func (s *Store) FindSession(ctx context.Context, machineID, worktree, ccSessionI
 	return sessionByTriple(ctx, s.db, machineID, worktree, ccSessionID)
 }
 
+// FindSession 은 트랜잭션 안에서 3중키로 찾는다. getProject/GetProject 와 같은 dbtx 짝이다.
+//
+// ★ 왜 Tx 판이 필요한가: service.OpenSession 이 **프로젝트 자동 등록을 하기 전에** 이 조회를
+// 해야 하는데, 그 둘은 같은 트랜잭션이어야 한다. 밖에서 읽으면 읽은 뒤 등록 사이에 남이
+// 세션을 만들 수 있고, 그러면 이 조회가 막으려던 고아 프로젝트가 그 창으로 다시 생긴다.
+func (t *Tx) FindSession(machineID, worktree, ccSessionID string) (model.Session, error) {
+	return sessionByTriple(t.ctx, t.tx, machineID, worktree, ccSessionID)
+}
+
 // DivergentSessions 는 **같은 대화(cc_session_id)인데 project 나 machine 이 다른** 세션을 낸다.
 //
 // ★ 키를 바꾸지 않는다. 세션 정체는 (machine, worktree, cc) 3중키 그대로이고, 이 조회는

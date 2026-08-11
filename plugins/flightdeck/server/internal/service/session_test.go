@@ -348,3 +348,49 @@ func TestOpenSessionAndSetStateLeaveNoSignal(t *testing.T) {
 		t.Fatalf("상태를 바꿨더니 신호가 생겼다 — 상태 전이는 도구 호출이 아니다: %v", sig)
 	}
 }
+
+// TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple 은 **고아 프로젝트가
+// 안 생긴다**는 단정이다.
+//
+// ★ 무엇이 이 시험을 낳았나(실측). 세션 정체는 (machine, worktree, cc_session) 3중키이고
+// project 가 안 들어간다. 그래서 OpenSession 은 같은 3중키 행이 있으면 재개하는데, 프로젝트
+// 자동 등록이 그보다 **앞**이라 잘못된 project 로 요청이 오면 프로젝트만 새로 만들어지고
+// 세션은 남의 프로젝트 것을 재개했다 — 트랜잭션이 성공하므로 롤백도 흔적도 없었다.
+// 원장에서 그 모양의 고아 셋을 찾았다(console-screen-landing · t6-console-notice-kind-split ·
+// upload-staging-live-verification). 셋 다 세션 행은 정상 프로젝트에 있고, 워크트리 이름의
+// 프로젝트에는 session.open 이벤트만 있으며 세션이 0건이었다.
+//
+// ★ 무엇을 재나: ⑴ 두 번째 요청이 새 프로젝트를 **안 만든다** ⑵ 세션은 열린다(거절이 아니다)
+// ⑶ 그 세션이 원래 프로젝트 것 그대로다. 자동 등록을 3중키 조회보다 앞으로 되돌리면 ⑴이
+// 빨개진다.
+func TestOpenSessionDoesNotOrphanAProjectWhenResumingAnotherOnesTriple(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+
+	// 정상 세션 하나 — 프로젝트 "real" 에 3중키를 만든다.
+	first := openSession(t, s, "real", repo, repo, "cc-1", "정상")
+	if !first.Created {
+		t.Fatal("첫 호출은 신규여야 한다")
+	}
+
+	// 같은 3중키로 **다른 프로젝트 이름**을 보낸다 — 클라이언트가 git 을 못 읽어
+	// 워크트리 디렉토리 이름을 프로젝트로 지어낸 상황이 정확히 이 모양이다.
+	second := openSession(t, s, "지어낸이름", repo, repo, "cc-1", "정상")
+
+	// ⑴ 고아 프로젝트가 없다.
+	if _, err := st.GetProject(ctx(), "지어낸이름"); err == nil {
+		t.Fatal("요청한 이름으로 프로젝트가 생겼다 — 세션은 재개되는데 프로젝트만 새로 만들어지는 " +
+			"그 고아 경로다(자동 등록이 3중키 조회보다 앞이면 여기가 빨개진다)")
+	}
+
+	// ⑵⑶ 세션은 열리고, 원래 프로젝트 것 그대로다.
+	if second.Created {
+		t.Fatal("같은 3중키인데 새 세션이 만들어졌다 — 재개여야 한다")
+	}
+	if second.Session.ID != first.Session.ID {
+		t.Fatalf("세션이 갈렸다: %q vs %q", second.Session.ID, first.Session.ID)
+	}
+	if second.Session.Project != "real" {
+		t.Fatalf("세션의 프로젝트가 %q 다 — 기존 것(real)이어야 한다", second.Session.Project)
+	}
+}
