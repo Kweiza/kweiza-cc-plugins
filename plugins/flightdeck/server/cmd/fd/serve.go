@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -230,16 +231,26 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// ★ 리스너를 조립 **뒤에** 연다. 열린 순간부터 backlog 가 쌓이므로 받을 준비가
+	// 끝난 뒤 여는 것이 맞다.
+	ln, lerr := api.Listen(ctx, *addr, log)
+	if lerr != nil {
+		// 처방은 여기 붙는다 — 바인드 실패를 아는 유일한 자리다.
+		log.Error("서버를 띄우지 못했다", "route", clip(*addr, 120),
+			"error", lerr.Error(), "reason", PortAdvice(*addr, lerr))
+		return 1
+	}
+
 	// ★ 판단 원장 주기 백업(설계 §7). serve 가 소유하는 티커다 — selfwatch 와 같은 모양이고,
 	//   이 프로세스가 이미 그 DB 를 쥐고 있어 여는 쪽을 한 벌 더 만들 이유가 없다.
 	//   ctx 로 묶여 있어 종료·자동 갱신 드레인에서 함께 선다.
 	go ledgerJob.Run(ctx)
 
-	log.Info("기동", "route", clip(*addr, 120), "db_path", clip(path, 200),
+	log.Info("기동", "route", clip(ln.Addr().String(), 120), "db_path", clip(path, 200),
 		"api_version", service.APIVersion, "auth_required", token != "",
 		"ledger_out", clip(ledgerJob.route, 200))
 
-	return serveWithWatcher(ctx, *addr, handler, log, watcher)
+	return serveWithWatcher(ctx, ln, handler, log, watcher)
 }
 
 // newServeWatcher 는 runServe 의 감시기 조립이다. 두 줄짜리인데도 **밖으로 뺀 이유는
@@ -319,7 +330,9 @@ func selfUpdateStatusOf(st selfUpdateStatus) api.SelfUpdateStatus {
 // 안 끊기고(stopWatch() 는 api.Serve 가 돌아온 **뒤에** 불린다), serveCtx 는 감시기 자신의
 // 드레인으로도 끊긴다. 그래서 신호 컨텍스트인 ctx 를 그대로 읽는 술어를 따로 건네준다 —
 // exec 직전 두 자리가 그것으로 묻는다.
-func serveWithWatcher(ctx context.Context, addr string, h api.Handler, log *slog.Logger, w *selfWatcher) int {
+func serveWithWatcher(ctx context.Context, ln net.Listener, h api.Handler, log *slog.Logger, w *selfWatcher) int {
+	// ★ 리스너가 닫힌 뒤에도 로그에 쓸 수 있도록 먼저 잡아 둔다.
+	route := ln.Addr().String()
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	defer stopWatch()
 	serveCtx, drainServe := context.WithCancel(ctx)
@@ -345,15 +358,17 @@ func serveWithWatcher(ctx context.Context, addr string, h api.Handler, log *slog
 		})
 	}()
 
-	serveErr := api.Serve(serveCtx, addr, h, log)
+	serveErr := api.Serve(serveCtx, ln, h, log)
 	close(served) // 드레인 중인 감시기를 먼저 풀어 준다
 	stopWatch()   // 감시 중이면 세운다. 드레인 중이면 served 가 이미 닫혀 있어 안 막힌다
 	<-watchDone   // ★ exec 시도가 끝나기 전에는 이 프로세스가 돌아오지 않는다
 
 	if serveErr != nil {
-		// api.Serve 가 이미 원인 전문을 남겼다. 여기서 더하는 것은 **처방**이다.
-		log.Error("서버를 띄우지 못했다", "route", clip(addr, 120),
-			"error", serveErr.Error(), "reason", PortAdvice(addr, serveErr))
+		// api.Serve 가 이미 원인 전문을 남겼다.
+		// ★ 여기에 PortAdvice 를 안 붙인다 — 바인드는 이 함수에 들어오기 전에 이미
+		// 성공했다. 이 갈래는 포트 선점이 아니라 리스너가 스스로 죽은 것이고(포트 회수·
+		// fd 고갈), 거기에 "ss -ltnp 로 점유자를 확인해라"를 붙이면 사람을 엉뚱한 데로 보낸다.
+		log.Error("서버가 멈춰 내려간다", "route", clip(route, 120), "error", serveErr.Error())
 		return 1
 	}
 	// 드레인이 자동 갱신 때문이었으면 exec 가 이미 이 프로세스를 갈아치웠다.
@@ -363,7 +378,7 @@ func serveWithWatcher(ctx context.Context, addr string, h api.Handler, log *slog
 			"detail", clip(su.Detail, 400))
 		return 1
 	}
-	log.Info("종료", "route", clip(addr, 120))
+	log.Info("종료", "route", clip(route, 120))
 	return 0
 }
 

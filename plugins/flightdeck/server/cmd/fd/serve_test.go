@@ -65,9 +65,13 @@ func TestServeWithWatcherJoinsWatcherBeforeReturning(t *testing.T) {
 		return nil
 	}
 
+	ln, lerr := api.Listen(context.Background(), "127.0.0.1:0", log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
 	done := make(chan int, 1)
 	go func() {
-		done <- serveWithWatcher(context.Background(), "127.0.0.1:0", newDrainProbe(nil), log, w)
+		done <- serveWithWatcher(context.Background(), ln, newDrainProbe(nil), log, w)
 	}()
 
 	select {
@@ -116,7 +120,11 @@ func TestServeWithWatcherReturnsFailWhenExecFails(t *testing.T) {
 		return errors.New("가짜 exec 실패")
 	}
 
-	got := serveWithWatcher(context.Background(), "127.0.0.1:0", newDrainProbe(nil), log, w)
+	ln, lerr := api.Listen(context.Background(), "127.0.0.1:0", log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
+	got := serveWithWatcher(context.Background(), ln, newDrainProbe(nil), log, w)
 	if got != 1 {
 		t.Fatalf("exec 가 실패했는데 종료코드가 %d 다", got)
 	}
@@ -155,7 +163,11 @@ func TestServeDrainsHandlerBeforeExec(t *testing.T) {
 		return nil
 	}
 
-	if got := serveWithWatcher(context.Background(), "127.0.0.1:0", probe, log, w); got != 0 {
+	ln, lerr := api.Listen(context.Background(), "127.0.0.1:0", log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
+	if got := serveWithWatcher(context.Background(), ln, probe, log, w); got != 0 {
 		t.Fatalf("종료코드 %d 다", got)
 	}
 	if !drainedAtExec.Load() {
