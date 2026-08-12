@@ -118,10 +118,14 @@ func emitContext(out io.Writer, event, text string) {
 // ★ 무한루프 방벽은 이 함수가 아니라 **호출자의 stop_hook_active 가드**다. block 이 만든
 // 턴이 끝나면 Stop 이 stop_hook_active=true 로 다시 오고, hookStop 은 그 자리에서 반환한다 —
 // 그래서 block 은 사람이 몰던 턴의 끝마다 최대 한 번이다. 2026-08-04 의 additionalContext
-// 무한루프(hook.go 위 ★★ 실측)와 같은 사슬이고 같은 가드가 끊는다.
+// 무한루프(hook.go 아래 ★★ 실측)와 같은 사슬이고 같은 가드가 끊는다.
 // (세션×키) 억제표를 방벽으로 쓰지 않는 이유는 ★★★ 문단이 이미 적었다 — 그것은
 // 우연한 edge-triggering 이라 방벽이 못 되고, 여기서는 지속(매 프롬프트 한 번)이 목적이라
 // 애초에 억제가 반대 방향이다.
+//
+// ★ 이 계약(decision/reason 최상위 필드)은 2026-08-12 시점 Claude Code 공개 훅 문서
+// 기준이고, 이 저장소의 실물 실측(additionalContext 는 2026-08-04 에 실측됨)은 아직
+// 없다 — 랜딩 뒤 첫 배포에서 block 발화를 실물로 확인하고 이 문단을 실측 기록으로 바꿔라.
 func emitBlock(out io.Writer, reason string) {
 	buf, err := json.Marshal(struct {
 		Decision string `json:"decision"`
