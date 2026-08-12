@@ -8,7 +8,7 @@
 //     CLAUDE_PROJECT_DIR)과 cwd 에서 온다(설계 §13 실측). 파생 가능한 값에 파라미터를
 //     두면 틀린 값이 들어오고, 그 틀린 값은 검사로 막히지 않는다 — 우회할 필드가 있으면 우회된다.
 //  2. **못 읽으면 조용히 익명으로 진행하지 않는다.** 결손 축을 이름으로 배너에 싣고
-//     세션 귀속이 필요한 도구(pick·note·add·finish·land)를 거절한다.
+//     세션 귀속이 필요한 도구(pick·note·add·finish·land·label)를 거절한다.
 //  3. **규율은 도구 설명이 아니라 응답에 싣는다.** 세션 시작에 실리는 것은 도구 이름과
 //     300자 instructions 뿐이고, 무엇을 적어야 하는지는 finish 를 body 없이 부른
 //     **그 자리에서** 온다(설계 §6).
@@ -467,6 +467,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		res = s.toolAlloc(ctx, sessionID, args)
 	case "land":
 		res = s.toolLand(ctx, sessionID, args)
+	case "label":
+		res = s.toolLabel(ctx, sessionID, args)
 	default:
 		// KnownTool 을 통과했는데 여기 오면 도구 표와 디스패치가 어긋난 것이다.
 		res = textResult(fmt.Sprintf("도구 %q 가 표에는 있는데 디스패치에 없다 — 서버 결함이다", clip(name, 64)), true)
@@ -986,6 +988,27 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
 	}
 	return textResult(s.withTail(ctx, RenderLand(res, s.now()), tailOpts{}), false)
+}
+
+// toolLabel 은 이미 있는 항목의 꼬리표를 고친다.
+//
+// ★ 고칠 수 있는 축은 **꼬리표 하나뿐**이다 — 일반 amend 가 아니다(설계 §11).
+func (s *Server) toolLabel(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
+	var a labelArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return textResult(s.withTail(ctx, s.errText("label", err), tailOpts{}), true)
+	}
+	res, err := s.be.SetLabels(ctx, service.LabelInput{
+		Project: s.id.ProjectID, SessionID: sessionID,
+		ItemID: strings.TrimSpace(a.ItemID), Add: a.Add, Rm: a.Rm,
+	})
+	if err != nil {
+		if r, ok := s.degradedResult(ctx, "label", err); ok {
+			return r
+		}
+		return textResult(s.withTail(ctx, s.errText("label", err), tailOpts{}), true)
+	}
+	return textResult(s.withTail(ctx, RenderLabel(res), tailOpts{}), false)
 }
 
 // toAfter 는 인자의 선행 조건을 도메인 타입으로 옮긴다.

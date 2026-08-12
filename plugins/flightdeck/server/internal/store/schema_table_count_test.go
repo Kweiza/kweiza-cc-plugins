@@ -51,7 +51,7 @@ func declaredTables(t *testing.T) []string {
 
 // TestDeclaredTablesMatchDesign 은 DESIGN §3 이 못박은 표 수를 스키마 쪽에서 지킨다.
 //
-// ★ 왜 문서가 아니라 여기서 지키나 — `TestToolTableIsSeven`(mcpsrv/protocol_test.go) 와 같은
+// ★ 왜 문서가 아니라 여기서 지키나 — `TestToolTableIsEight`(mcpsrv/protocol_test.go) 와 같은
 // 규율이다. 표를 **더하는 사람**의 빨간불이 여기서 나야 그 사람이 DESIGN 을 같이 고친다.
 // 문서를 읽는 시험은 표를 안 더한 사람까지 세우고, 문서 편집이 도는 동안 계속 빨갛다.
 //

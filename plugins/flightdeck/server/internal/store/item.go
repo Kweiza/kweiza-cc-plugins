@@ -717,6 +717,62 @@ func (s *Store) SetLandedRef(ctx context.Context, project, itemID, sha string) e
 	return s.Tx(ctx, func(t *Tx) error { return t.SetLandedRef(project, itemID, sha) })
 }
 
+// SetLabels 는 항목의 꼬리표를 통째로 바꾼다.
+//
+// ★ **더하기·빼기 계산은 여기 없다.** 이 함수는 최종 집합을 받아 쓰기만 한다 —
+// 계산은 judge.ApplyLabels 가 하고, 지금 값을 읽어 그 함수에 먹이는 것은 service 가
+// 같은 트랜잭션 안에서 한다. 읽고-고쳐-쓰기를 호출자에게 맡기면 두 세션이 서로의
+// 꼬리표를 지운다.
+//
+// ★ 원장을 **여기서** 남긴다. move 는 API 계층에서 남기지만(handlers_items.go 의
+// s.publish) 이 쓰기는 그럴 수 없다 — before 를 아는 것은 같은 트랜잭션 안에서 읽은
+// 쪽뿐이고, API 로 올려 보내면 원장의 정확성이 응답 왕복에 의존하게 된다.
+// RemoveAfter 가 item.after.cut 을 store 에 둔 이유와 같다: 이 쓰기는 되돌리는 코드가
+// 없고 **무엇이 붙어 있었는지가 바꾸는 순간 사라진다.**
+//
+// labels 는 표시 전용이고 배제 판정에 안 쓴다(설계 §5). 유일한 예외가 tickler 이고
+// 그것도 배제가 아니라 굶김 축에서의 승격 부재다(judge/tickler.go).
+// ★ **종료 상태는 여기서 안 본다.** 그 가드는 service 에 있다(`service.SetLabels`).
+//
+// 처음 판은 여기서 `ItemClosedError` 로 거절하려 했는데, 그 타입은 **상태 전이용**이다 —
+// `State`(지금)와 `Want`(되돌리려던 것) 둘을 담고, api/errors.go 가 그것을
+// "이미 %s 다 — %s 로 되돌릴 수 없다"로 찍는다. 꼬리표 수정은 상태 전이가 아니라
+// `Want` 에 넣을 값이 없고, 현재 상태를 넣으면 **"이미 done 다 — done 로 되돌릴 수 없다"**
+// 라는 틀린 문장이 사용자에게 나간다. 그래서 그 거절은 `service.RefusedError`(What·Reason·
+// **Guidance**)로 service 에 두고, 이 함수는 쓰기만 한다.
+func (t *Tx) SetLabels(project, itemID string, labels []string, sessionID string) error {
+	before, err := t.GetItem(project, itemID)
+	if err != nil {
+		return err
+	}
+
+	labelsJSON, err := marshalStrings(labels)
+	if err != nil {
+		return fmt.Errorf("항목 labels 직렬화 실패(id=%q): %w", clip(itemID, 64), err)
+	}
+	res, err := t.tx.ExecContext(t.ctx,
+		`UPDATE item SET labels = ? WHERE project = ? AND id = ?`, labelsJSON, project, itemID)
+	if err != nil {
+		return fmt.Errorf("항목 labels 갱신 실패(project=%q id=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	if err := affectedOne(res, NFItem, project, itemID); err != nil {
+		return err
+	}
+
+	t.LogEvent("item.label", project, sessionID, map[string]any{
+		"item":   clip(itemID, 100),
+		"before": before.Labels,
+		"after":  labels,
+	})
+	return nil
+}
+
+// SetLabels 는 단발 트랜잭션으로 감싼 것이다.
+func (s *Store) SetLabels(ctx context.Context, project, itemID string, labels []string, sessionID string) error {
+	return s.Tx(ctx, func(t *Tx) error { return t.SetLabels(project, itemID, labels, sessionID) })
+}
+
 // affectedOne 은 UPDATE 가 정확히 한 행을 건드렸는지 본다.
 //
 // 이 헬퍼를 둔 이유는 비대칭이 결함의 신호이기 때문이다 —

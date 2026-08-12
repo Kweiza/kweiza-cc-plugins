@@ -35,8 +35,8 @@ func TestNegotiateProtocol(t *testing.T) {
 
 // TestInstructionsBudget 은 설계 §6 의 "instructions 300자" 예산을 지킨다.
 //
-// 이 예산이 도구를 일곱으로 눌러 잡은 이유이고, 문구가 자라면 세션 시작 컨텍스트가 자란다.
-// 그 일곱을 잠그는 것은 바로 아래 TestToolTableIsSeven 이다(이름·순서까지 못박는다).
+// 이 예산이 도구를 여덟으로 눌러 잡은 이유이고, 문구가 자라면 세션 시작 컨텍스트가 자란다.
+// 그 여덟을 잠그는 것은 바로 아래 TestToolTableIsEight 이다(이름·순서까지 못박는다).
 func TestInstructionsBudget(t *testing.T) {
 	n := len([]rune(Instructions))
 	if n > InstructionsLimit {
@@ -65,11 +65,11 @@ func TestInstructionsBudget(t *testing.T) {
 	}
 }
 
-func TestToolTableIsSeven(t *testing.T) {
+func TestToolTableIsEight(t *testing.T) {
 	got := ToolNames()
-	want := []string{"board", "pick", "note", "add", "finish", "alloc", "land"}
+	want := []string{"board", "pick", "note", "add", "finish", "alloc", "land", "label"}
 	if len(got) != len(want) {
-		t.Fatalf("도구가 %d개다(%v) — 랜딩 순서 큐가 land 를 더해 7개다", len(got), got)
+		t.Fatalf("도구가 %d개다(%v) — 항목 꼬리표 표면이 label 을 더해 8개다", len(got), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {

@@ -17,8 +17,8 @@ import (
 // ★ 이 전제는 mcpsrv 안에서 끝나지 않는다. `fd mcp` 의 운영 배선인 cmd/fd 의 Client 가
 // 통째로 그 위에 서 있다:
 //
-//   - mcpBackend 가 호출마다 app.cli.Session 을 갈아 쓴다(mcpbackend.go 의 여섯 자리 —
-//     Pick 둘·Note·AddItem·Finish·land). 그 값의 소비자는 멱등 키다(client.go 의 KeyFor).
+//   - mcpBackend 가 호출마다 app.cli.Session 을 갈아 쓴다(mcpbackend.go 의 일곱 자리 —
+//     Pick 둘·Note·AddItem·Finish·land·label). 그 값의 소비자는 멱등 키다(client.go 의 KeyFor).
 //
 // ★ **이 시험이 지키는 범위가 좁아졌다.** 옛 주석은 여기에 Outbox.Append 와 Cache.Put 도
 // 함께 적어 뒀는데, 그 둘은 프로세스 **간** 축이라 애초에 이 시험이 못 보는 자리였다 —
@@ -88,8 +88,8 @@ func (p *serialProbe) report() (maxInflight, calls int, overlapped []string) {
 }
 
 // ── Backend 전면 ─────────────────────────────────────────────────────────────
-// 열두 개를 **전부** 감싼다. 하나만 감싸면 "그 하나가 안 겹쳤다"만 참이 되는데,
-// 갈아쓰기가 있는 자리는 Pick·Note·AddItem·Finish 넷이고 파일을 다시 쓰는 자리는
+// 열세 개를 **전부** 감싼다. 하나만 감싸면 "그 하나가 안 겹쳤다"만 참이 되는데,
+// 갈아쓰기가 있는 자리는 Pick·Note·AddItem·Finish·SetLabels 다섯이고 파일을 다시 쓰는 자리는
 // 그 밖에도 있다. 전제는 백엔드 표면 전체에 걸린 것이므로 시험도 전체를 봐야 한다.
 
 func (p *serialProbe) OpenSession(ctx context.Context, in service.OpenSessionInput) (service.SessionResult, error) {
@@ -152,6 +152,11 @@ func (p *serialProbe) RecentNotes(ctx context.Context, project string, limit int
 	return p.Backend.RecentNotes(ctx, project, limit)
 }
 
+func (p *serialProbe) SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error) {
+	defer p.enter("SetLabels")()
+	return p.Backend.SetLabels(ctx, in)
+}
+
 // 컴파일 시점에 계약을 못 박는다 — Backend 에 메서드가 늘면 여기도 늘어야 한다.
 var _ Backend = (*serialProbe)(nil)
 
@@ -205,7 +210,7 @@ func TestServeNeverOverlapsBackend(t *testing.T) {
 	if maxInflight != 1 {
 		t.Fatalf("백엔드에 동시 진입이 %d건 있었다(겹친 메서드: %s).\n"+
 			"프레임 루프를 병렬로 바꿨다면, 같은 커밋에서 아래를 함께 고쳐야 한다:\n"+
-			"  · cmd/fd/mcpbackend.go — app.cli.Session 갈아쓰기 여섯 자리(Pick 둘·Note·AddItem·Finish·land)\n"+
+			"  · cmd/fd/mcpbackend.go — app.cli.Session 갈아쓰기 일곱 자리(Pick 둘·Note·AddItem·Finish·land·label)\n"+
 			"    고칠 방법은 잠금이 아니라 **인자화**다. Session 은 KeyFor 에만 필요하고 호출자가\n"+
 			"    이미 세션을 손에 들고 있으므로, 넘겨 주면 공유 가변 상태 자체가 없어진다.\n"+
 			"아웃박스·캐시의 프로세스 간 축은 이미 닫혀 있다(cmd/fd/outbox_lock.go · cache.go 의 tmpPath).\n"+

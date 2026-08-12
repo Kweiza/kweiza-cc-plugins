@@ -32,12 +32,12 @@ func TestJudgmentNowConstantSurvives(t *testing.T) {
 }
 
 // pick 에 item_ids 를 더해도 도구 수는 늘지 않는다 — 세션 시작 컨텍스트 예산이
-// 그 이유다(설계 §6). ★ 7개인 이유: 랜딩 순서 큐 설계가 이 브랜치가 main 에서
-// 갈라진 뒤 land 도구 하나를 더해 6→7 로 눌러 잡았다(tools.go 상단 주석 참고) —
-// 이 시험이 6을 단정하면 그 사실과 어긋나 원래 목적(도구 수 상한)과 무관하게 FAIL 한다.
+// 그 이유다(설계 §6). ★ 8개인 이유: 랜딩 순서 큐 설계가 6→7 로(land), 항목 꼬리표
+// 표면이 7→8 로(label) 눌러 잡았다(tools.go 상단 주석 참고) — 이 시험이 다른 수를
+// 단정하면 그 사실과 어긋나 원래 목적(도구 수 상한)과 무관하게 FAIL 한다.
 func TestPickGainsItemIDsWithoutGrowingToolCount(t *testing.T) {
-	if got := len(Tools()); got != 7 {
-		t.Fatalf("도구가 %d개다 — 7개여야 한다(land 포함)", got)
+	if got := len(Tools()); got != 8 {
+		t.Fatalf("도구가 %d개다 — 8개여야 한다(land·label 포함)", got)
 	}
 	var pick *Tool
 	for i := range tools {

@@ -189,11 +189,21 @@ type Bundle struct {
 	Dependents int
 	// Oldest 는 가장 오래된 구성원의 생성 시각이다.
 	Oldest time.Time
-	// StarveOldest 는 **굶김 판정에 쓰는** 최고령이다 — 티클러(TicklerLabel)를 뺀 값.
+	// StarveOldest 는 **굶김 판정에 쓰는** 나이다 — **선두의 생성 시각**이고,
+	// 선두가 티클러(TicklerLabel)면 zero 다. **구성원은 안 본다.**
+	//
 	// 티클러는 기한까지 늙는 것이 정상이라, 그 나이로 묶음을 기아 승격시키면
-	// 상시 점등이 된다(§4). 전원이 티클러면 zero 고, 그 묶음은 굶지 않는다.
-	// Oldest 와 갈라 둔 이유: Oldest 는 순서 동률 해소와 표시에도 쓰여서
-	// 티클러를 빼면 "가장 오래된 구성원"이라는 이름이 거짓이 된다.
+	// 상시 점등이 된다(§4).
+	//
+	// ★ 앞선 판은 이 값을 "구성원 전체에서 티클러를 걸러낸 최고령"으로 계산했고,
+	// 그래서 선두에 단 티클러가 구성원 하나 때문에 **무효가 됐다**(실측 2026-08-12).
+	// 그 판정은 bundleAround 로 옮겨 갔다 — 아래 CloseDeclared 와 같은 논법이다
+	// ("주어는 브랜치를 받는 선두다"). 이 주석이 그때 안 따라와서 Task 1 리뷰가
+	// 잡았다: 옛 문장은 **"전원이 티클러가 아니면 non-zero"** 라는 역방향 오독을
+	// 부르는데, 그 오독이 정확히 고쳐진 그 결함이다.
+	//
+	// Oldest 와 갈라 둔 이유: Oldest 는 순서 동률 해소와 표시에 쓰이고 **전체를 본다** —
+	// 여기서 티클러나 구성원을 빼면 "가장 오래된 구성원"이라는 이름이 거짓이 된다.
 	StarveOldest time.Time
 	// Starved 는 이 묶음의 최고령이 StarvationAge 를 넘겼다는 사실이다.
 	//
@@ -434,6 +444,18 @@ func closeDeclaredDetail(d model.CloseDeclaration) string {
 // 사유가 전부 after-unmet-item 인 탈락 항목만 여기 들어온다.
 func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candidate, sib SiblingIndex) Bundle {
 	b := Bundle{Lead: lead, Dependents: lead.Dependents, Oldest: lead.Item.CreatedAt}
+	// ★ 굶김 축은 **선두만** 본다. 구성원은 안 본다.
+	//
+	// 아래 CloseDeclared 판정과 같은 논법이다("보는 것은 선두 하나다 — 이 축은
+	// '지금 새로 집어도 되나'에 답하고 그 질문의 주어는 브랜치를 받는 선두다").
+	// 앞선 판은 이 축만 구성원까지 봤고, 그 비대칭이 결함이었다: 선두에 티클러를
+	// 달아도 구성원이 티클러가 아니면 기아 값이 거기서 다시 채워져 **사용자 판정이
+	// 조용히 무효가 됐다**(실측 2026-08-12 — created_at 이 글자까지 같은 두 항목).
+	//
+	// 오래된 구성원이 감춰지지 않는 이유: EligibleBundle 은 fit 전원을 **각각 선두로
+	// 세워** 묶음을 만드므로, 굶은 항목은 자기가 선두인 묶음에서 제 나이로 판정된다.
+	// 자기 묶음이 없는 것은 흡수분뿐인데 그들은 선행이 선두 하나뿐이라(blockedOnlyBy)
+	// 선두 없이 못 간다 — 굶김이 선두에 종속되는 것은 감춤이 아니라 사실이다.
 	if !IsTickler(lead.Item.Labels) {
 		b.StarveOldest = lead.Item.CreatedAt
 	}
@@ -443,10 +465,6 @@ func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candida
 		b.Dependents += c.Dependents
 		if c.Item.CreatedAt.Before(b.Oldest) {
 			b.Oldest = c.Item.CreatedAt
-		}
-		if !IsTickler(c.Item.Labels) &&
-			(b.StarveOldest.IsZero() || c.Item.CreatedAt.Before(b.StarveOldest)) {
-			b.StarveOldest = c.Item.CreatedAt
 		}
 	}
 	for _, c := range fit {
@@ -553,8 +571,13 @@ func sortedCands(m map[string]Candidate) []Candidate {
 // ★ **"만든" 만이 아니다 — `followups` 로 이은 항목도 같다**(2026-08-11). 잇기는 같은
 // 판단에 그 항목을 매달므로 형제 축에서 창설과 구별되지 않고, 그것은 의도다(SiblingIndex
 // 주석의 판정 셋). 여기서 중요한 것은 **굶김과의 맞물림**이다: 이은 항목은 창설과 달리
-// 이미 나이를 먹은 것이라 묶음의 Oldest·StarveOldest 를 뒤로 밀고, 이 함수의 ③(최고령)에서
-// 유리해진다. 즉 잇기는 위 LIFO 편향을 **완화하는** 쪽으로 작용한다.
+// 이미 나이를 먹은 것이라 묶음의 Oldest 를 뒤로 밀고, 이 함수의 ③(최고령)에서 유리해진다.
+// 즉 잇기는 위 LIFO 편향을 **완화하는** 쪽으로 작용한다.
+//
+//	★ 이 완화는 **①′(기아) 갈래에는 안 닿는다.** 굶김 축(StarveOldest)은 묶음의 선두 하나만
+//	본다(위 StarveOldest 필드 주석) — 구성원으로 흡수되든 잇기로 들어오든, 선두가 아니면
+//	그 항목의 나이는 StarveOldest 를 한 자리도 못 민다. 그래서 잇기의 완화는 ③(최고령)
+//	동점 해소에만 걸리고, 묶음이 기아로 승격되는지 여부는 여전히 선두 하나로만 정해진다.
 //
 //	★ 그 완화 폭에는 **상한이 있다.** 이을 수 있는 것은 그 항목의 **선점 시각 이후**에
 //	만들어진 것뿐이므로(sessionSpawnedOpen), 이은 항목의 나이는 길어도 그 세션이 한

@@ -137,11 +137,19 @@ type Client struct {
 
 	// Session 은 멱등 키의 앞 절반이다. 없을 수 있다(세션 열기 전).
 	//
-	// ★ **공유 가변 상태다.** 실측(이 커밋 시점): 쓰는 자리 17(app.go 2 · cmds.go 6 ·
-	// hook.go 3 · mcpbackend.go 6), 읽는 자리 5(client.go 의 KeyFor 둘 · app.go 셋).
-	// 그중 mcpbackend.go 의 여섯(Pick 둘 · Note · AddItem · Finish · land)은 **호출마다**
-	// 갈아 쓴다. 옛 주석은 "읽는 자리는 KeyFor 하나뿐 · mcpbackend 의 넷"이라 적었는데
-	// 둘 다 낡았었다 — 세는 문장은 늘 낡으므로 고칠 때 함께 다시 세라.
+	// ★ **공유 가변 상태다.** 실측(이 커밋 시점): 쓰는 자리 21(app.go 2 · cmds.go 9 ·
+	// hook.go 3 · mcpbackend.go 7), 읽는 자리 5(client.go 의 KeyFor 둘 · app.go 셋).
+	// 그중 mcpbackend.go 의 일곱(Pick 둘 · Note · AddItem · Finish · land · label)은
+	// **호출마다** 갈아 쓴다. 옛 주석은 "읽는 자리는 KeyFor 하나뿐 · mcpbackend 의 넷"이라
+	// 적었는데 둘 다 낡았었다 — 세는 문장은 늘 낡으므로 고칠 때 함께 다시 세라.
+	//
+	// ★ 이번에 늘어난 둘(cmds.go 의 `fd label`, mcpbackend.go 의 `SetLabels`)은
+	// 항목 꼬리표 표면(2026-08-12)이 더한 것이다(실측: e11f6ce 전후 cmds.go 8→9,
+	// 9d59276 전후 mcpbackend.go 6→7). 그 직전 값 17(cmds.go 6 · mcpbackend.go 6)은
+	// 이 표면이 생기기 전부터 이미 낡아 있었다 — 그때도 cmds.go 실측은 6이 아니라
+	// 8이었다(move·after/cut 등 이 표면과 무관한 명령들 때문에). 그 몫은 이 표면의
+	// 책임이 아니라서 안 건드린다.
+	//
 	// 쓰기와 읽기 사이에 잠금이 없으므로 겹치면 그 자리에서 깨진다 —
 	// 문자열은 (ptr,len) 둘이라 찢긴 값이 나올 수 있고, 그 값이 곧 멱등 키다.
 	//

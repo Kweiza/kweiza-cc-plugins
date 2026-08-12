@@ -243,3 +243,18 @@ type patchStateReq struct {
 	State string `json:"state"`
 	Why   string `json:"why"`
 }
+
+// labelPath 는 항목의 꼬리표를 고치는 표면이다.
+func labelPath(itemID string) string {
+	return "/api/v1/items/" + urlPath(itemID) + "/label"
+}
+
+// labelReq 는 POST /api/v1/items/{id}/label 의 본문이다.
+// 필드 이름이 internal/api 의 labelRequest 와 어긋나면 서버가 조용히 0값을 받는다
+// (label_seam_test.go 가 잠근다).
+type labelReq struct {
+	Project   string   `json:"project"`
+	SessionID string   `json:"session_id"`
+	Add       []string `json:"add"`
+	Rm        []string `json:"rm"`
+}

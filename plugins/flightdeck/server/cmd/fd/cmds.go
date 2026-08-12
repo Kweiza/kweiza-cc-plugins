@@ -1836,3 +1836,57 @@ func (a *App) runMove(ctx context.Context, args []string, out io.Writer) int {
 	}
 	return 0
 }
+
+const labelHelp = "fd label <item-id> --add <꼬리표> --rm <꼬리표>  — 이미 있는 항목의 꼬리표를 고친다(둘 다 반복 지정 가능)"
+
+// runLabel 은 이미 있는 항목의 꼬리표를 고친다.
+//
+// ★ 고칠 수 있는 축은 **꼬리표 하나뿐**이다 — move 가 프로젝트 한 축으로 못박은 것과
+// 같은 좁기다. 본문·제목·선행의 사후 수정은 DESIGN §11 이 "안 만든다"로 판정했다.
+func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("label")
+	var add, rm stringList
+	fs.Var(&add, "add", "더할 꼬리표(반복 지정 가능). 'tickler' 만 굶김 축에서 빠진다")
+	fs.Var(&rm, "rm", "뺄 꼬리표(반복 지정 가능)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "꼬리표를 고칠 항목 id 를 줘라:")
+		fmt.Fprintln(out, "  "+labelHelp)
+		return 2
+	}
+	// ★ 빈 요청을 **여기서** 막는다. 서버도 거절하지만 그 왕복은 오프라인에서
+	// 아웃박스에 쌓이는 쓰기가 된다 — runAfterCut 이 축 수를 여기서 세는 것과 같은 규율이다.
+	if len(nonBlankPositionals(add))+len(nonBlankPositionals(rm)) == 0 {
+		fmt.Fprintln(out, "더하거나 뺄 꼬리표를 하나는 줘라:")
+		fmt.Fprintln(out, "  "+labelHelp)
+		return 2
+	}
+
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+	res, err := a.cli.Write(ctx, CmdLabel, labelPath(itemID), labelReq{
+		Project: a.proj.ID, SessionID: sess, Add: add, Rm: rm,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "꼬리표를 못 고쳤다: %v\n", err)
+		return 1
+	}
+	// ★ mcpsrv.RenderLabel 로 낸다 — mcpbackend.go 의 SetLabels 가 같은 응답을 같은
+	// 타입으로 언마셜한다. 손으로 다시 짜면(옛 코드) tickler 의 선두 규칙 문구를
+	// CLI 사용자만 못 보는 결함이 난다 — RenderBoard·RenderNote·RenderPick·RenderFinish·
+	// RenderLand 가 이미 지키는 규율이고 label 만 예외였다.
+	var got service.LabelResult
+	if uerr := json.Unmarshal(res.Body, &got); uerr != nil {
+		fmt.Fprintf(out, "고쳤으나 응답을 못 읽었다: %v\n", uerr)
+		return 1
+	}
+	fmt.Fprint(out, mcpsrv.RenderLabel(got))
+	return 0
+}

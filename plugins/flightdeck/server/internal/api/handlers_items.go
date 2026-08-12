@@ -324,3 +324,42 @@ func (s *server) handleCutAfter(w http.ResponseWriter, r *http.Request) {
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
 }
+
+// labelRequest 는 항목의 꼬리표를 고치는 요청이다.
+//
+// move·after/cut 과 같은 규율으로 **전용 동사**다 — 일반 PATCH 를 열면 "무엇까지
+// 고칠 수 있나"가 다시 열린 질문이 되고, 그 질문은 항목 본문까지 번진다.
+// 본문이 만들어진 시점의 사진이라는 규율은 DESIGN §11 이 적고 store 의 관문이 지킨다.
+//
+// 필드 이름이 cmd/fd 의 labelReq 와 어긋나면 서버가 조용히 0값을 받는다 —
+// add·rm 이 둘 다 빈 채 닿으면 "하나는 줘라"로 거절되는데, 사람은 자기가 방금 친
+// `--add` 를 다시 들여다본다. 이음매 시험이 잠근다.
+type labelRequest struct {
+	Project   string   `json:"project"`
+	SessionID string   `json:"session_id"`
+	Add       []string `json:"add"`
+	Rm        []string `json:"rm"`
+}
+
+func (s *server) handleLabelItem(w http.ResponseWriter, r *http.Request) {
+	var req labelRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	infoFrom(r.Context()).setSession(req.SessionID)
+	res, err := s.svc.SetLabels(r.Context(), service.LabelInput{
+		Project: req.Project, SessionID: req.SessionID,
+		ItemID: r.PathValue("id"), Add: req.Add, Rm: req.Rm,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// ★ SSE 알림용이다. 원장 행 자체는 store 가 트랜잭션 안에서 남긴다(item.label) —
+	// before 를 아는 것이 거기뿐이기 때문이다. 여기서 다시 publish 하면 같은 사실이
+	// 원장에 두 줄이 되므로, 이 호출은 **알림 축만** 태운다.
+	s.publish(r, "item.label", req.Project, req.SessionID, map[string]any{
+		"item": clip(res.Item.ID, 100), "added": res.Added, "removed": res.Removed,
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}

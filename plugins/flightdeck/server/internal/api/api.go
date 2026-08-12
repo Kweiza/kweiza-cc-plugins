@@ -325,6 +325,8 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/items/{id}/claim/release", s.handleReclaimClaim)
 	mux.HandleFunc("POST /api/v1/items/{id}/finish", s.handleFinishItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/move", s.handleMoveItem)
+	// 꼬리표. 고칠 수 있는 축은 이 하나뿐이다 — move·after/cut 과 같은 전용 동사다.
+	mux.HandleFunc("POST /api/v1/items/{id}/label", s.handleLabelItem)
 	// 선행 절단. DELETE 가 아니라 POST 인 이유는 handlers_items.go 의 cutAfterRequest 에 있다.
 	mux.HandleFunc("POST /api/v1/items/{id}/after/cut", s.handleCutAfter)
 
