@@ -394,15 +394,23 @@ func TestMCPReportWithoutTheLaneNeverClaimsItReleasedIt(t *testing.T) {
 	}
 
 	// 원장 축 — 잘못된 보고가 앞사람의 점유도, 자기 줄 행도 안 건드렸다.
+	//
+	// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 여기서 쓰는 land 는 자원 집합을 안 주므로
+	// 기본 자원("landing" 하나)으로 정규화된다. LaneView.Holder·Entries 는 이제
+	// LaneView.Resources[i](ResourceLane) 아래에 있다.
 	lane, err := svc.LandingLane(context.Background(), project)
 	if err != nil {
 		t.Fatalf("레인 조회 실패: %v", err)
 	}
-	if lane.Holder == nil || lane.Holder.SessionID != other.Session.ID {
-		t.Fatalf("보고가 앞사람의 점유를 건드렸다: %+v", lane.Holder)
+	if len(lane.Resources) != 1 {
+		t.Fatalf("레인 자원이 %d개다(기대 1 — 기본 자원): %+v", len(lane.Resources), lane.Resources)
 	}
-	if len(lane.Entries) != 2 {
+	rl := lane.Resources[0]
+	if rl.Holder == nil || rl.Holder.SessionID != other.Session.ID {
+		t.Fatalf("보고가 앞사람의 점유를 건드렸다: %+v", rl.Holder)
+	}
+	if len(rl.Entries) != 2 {
 		t.Fatalf("보고 뒤 줄이 %d행이다(기대 2) — 오타 한 번이 순번을 날렸다: %+v",
-			len(lane.Entries), lane.Entries)
+			len(rl.Entries), rl.Entries)
 	}
 }

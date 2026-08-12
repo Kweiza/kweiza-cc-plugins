@@ -42,25 +42,42 @@ func TestLandingQueueHasAProductionReader(t *testing.T) {
 			"위 함수 주석의 ①② 중 하나를 해라: Board 가 LandingLane 을 다시 부르게 되살리거나, " +
 			"정말 안 쓰는 표라면 landing_queue·LandingLane·이 시험을 함께 지워라.")
 	}
-	if len(view.Lane.Entries) != 1 {
+	// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 이 시험은 원래 view.Lane.Entries·
+	// view.Lane.Holder 를 직접 봤다. LandingLane 이 자원별로 갈리면서 그 둘은 이제
+	// LaneView 가 아니라 ResourceLane(view.Lane.Resources 의 원소) 아래에 있다 — land 로
+	// 서면 기본 자원("landing" 하나)만 쓰므로 Resources 는 정확히 1개다.
+	if len(view.Lane.Resources) != 1 {
+		t.Fatalf("레인 자원이 %d개다(기대 1 — 기본 자원 landing) — 방금 land 로 하나 세웠으니 "+
+			"그 자원이 나와야 한다: %+v", len(view.Lane.Resources), view.Lane.Resources)
+	}
+	rl := view.Lane.Resources[0]
+	if rl.Resource != LaneResource {
+		t.Fatalf("레인 자원 이름이 %q 다(기대 %q)", rl.Resource, LaneResource)
+	}
+	if len(rl.Entries) != 1 {
 		t.Fatalf("레인 항목이 %d건이다 — 방금 land 로 하나 세웠으니 1건이어야 한다: %+v",
-			len(view.Lane.Entries), view.Lane)
+			len(rl.Entries), rl)
 	}
-	if view.Lane.Entries[0].SessionID != sess.Session.ID {
-		t.Fatalf("레인 항목의 세션이 %q 다 — 기대 %q", view.Lane.Entries[0].SessionID, sess.Session.ID)
+	if rl.Entries[0].SessionID != sess.Session.ID {
+		t.Fatalf("레인 항목의 세션이 %q 다 — 기대 %q", rl.Entries[0].SessionID, sess.Session.ID)
 	}
-	if view.Lane.Holder == nil || view.Lane.Holder.SessionID != sess.Session.ID {
+	if rl.Holder == nil || rl.Holder.SessionID != sess.Session.ID {
 		t.Fatalf("레인 점유자가 %+v 다 — 빈 레인의 첫 세션은 곧바로 차례를 받으므로 이 세션이어야 한다",
-			view.Lane.Holder)
+			rl.Holder)
 	}
 }
 
-// TestLandingLaneNilVsEmptyStayApart — Lane 이 nil 인 경우(안 읽었다)와 Entries 가 빈
+// TestLandingLaneNilVsEmptyStayApart — Lane 이 nil 인 경우(안 읽었다)와 Resources 가 빈
 // 슬라이스인 경우(질의는 돌았는데 아무도 없다)를 접지 않는다는 것을 값 수준에서 못박는다.
 //
 // Board 는 이제 항상 채우므로 Board 를 통해서는 nil 이 안 나온다 — 그 사실 자체가
 // "안 읽었다"를 만들 수 있는 유일한 자리가 (표시 계층이 아예 안 부르는) 호출부뿐이라는
 // 것을 보여준다. 이 시험은 그 대조를 명시한다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — "0건"의 자리가 Entries 에서 Resources 로
+// 옮겨왔다. 아무도 안 섰으면 자원 우주 자체가 비므로(줄 행도 점유도 없다) Resources 가
+// 빈 슬라이스다 — 개별 ResourceLane 이 "0건"을 표현하는 것이 아니라 그 슬라이스 자체가
+// 빈 것으로 표현된다(LaneView 타입 주석 참고).
 func TestLandingLaneNilVsEmptyStayApart(t *testing.T) {
 	s, _ := newSvc(t)
 	dir := tmpBase(t)
@@ -71,15 +88,12 @@ func TestLandingLaneNilVsEmptyStayApart(t *testing.T) {
 		t.Fatalf("보드 조회 실패: %v", err)
 	}
 	if view.Lane == nil {
-		t.Fatal("아무도 안 서도 Board 는 레인을 읽었어야 한다(nil 이 아니라 빈 Entries 여야 한다)")
+		t.Fatal("아무도 안 서도 Board 는 레인을 읽었어야 한다(nil 이 아니라 빈 Resources 여야 한다)")
 	}
-	if view.Lane.Entries == nil {
-		t.Fatal("Entries 가 nil 이다 — LandingLane 계약(항상 빈 슬라이스, 절대 nil 아님)을 위반했다")
+	if view.Lane.Resources == nil {
+		t.Fatal("Resources 가 nil 이다 — LandingLane 계약(항상 빈 슬라이스, 절대 nil 아님)을 위반했다")
 	}
-	if len(view.Lane.Entries) != 0 {
-		t.Fatalf("아무도 안 섰는데 항목이 %d건이다", len(view.Lane.Entries))
-	}
-	if view.Lane.Holder != nil {
-		t.Fatalf("아무도 안 섰는데 점유자가 %+v 다", view.Lane.Holder)
+	if len(view.Lane.Resources) != 0 {
+		t.Fatalf("아무도 안 섰는데 자원이 %d개다: %+v", len(view.Lane.Resources), view.Lane.Resources)
 	}
 }

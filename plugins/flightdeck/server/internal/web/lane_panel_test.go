@@ -241,13 +241,19 @@ func TestLaneReleaseFromScreenLeavesTheHumanJudgment(t *testing.T) {
 	}
 
 	// ① 줄에서 실제로 빠졌나.
+	//
+	// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — LaneView.Entries 는 이제
+	// LaneView.Resources[i].Entries(자원별) 아래에 있다. 이 픽스처는 기본 자원 하나만
+	// 쓰므로 전 자원을 순회해도 뜻은 그대로다.
 	lane, err := lf.svc.LandingLane(ctx, testProject)
 	if err != nil {
 		t.Fatalf("줄 조회 실패: %v", err)
 	}
-	for _, e := range lane.Entries {
-		if e.RowID == 2 {
-			t.Fatalf("줄 행 2 가 아직 줄에 있다 — 303 만 내고 아무것도 안 했다")
+	for _, rl := range lane.Resources {
+		for _, e := range rl.Entries {
+			if e.RowID == 2 {
+				t.Fatalf("줄 행 2 가 아직 줄에 있다 — 303 만 내고 아무것도 안 했다")
+			}
 		}
 	}
 

@@ -230,12 +230,26 @@ type LandingPanel struct {
 	Empty     string
 	Tier      string
 	Current   string // 현재 입력(기본 브랜치 HEAD) — 스냅숏 대조의 상대
-	// 레인 절. **0건·못 읽음·어긋남을 각각 자기 문자열로 가진다** — 한 자리에 접으면
-	// "질의가 안 돌았다"와 "아무도 안 섰다"가 화면에서 같아진다.
+	// 레인 절 — Task 6 부터 자원별로 갈린다. **0건·못 읽음·어긋남을 각각 자기 문자열로
+	// 가진다** — 한 자리에 접으면 "질의가 안 돌았다"와 "아무도 안 섰다"가 화면에서
+	// 같아진다.
+	//
+	// Lane 은 회수 폼(그리고 절 머리글의 "N줄")이 쓰는 평평한 목록이다 — **줄 행 단위로
+	// 유일하다.** 한 행이 자원을 여럿 담아도(다자원 land) 회수는 행 하나를 대상으로 하므로
+	// 여기서는 한 번만 낸다(fillLane 이 RowID 로 중복을 걷는다). Resources 는 화면
+	// 표시용(자원 → 그 자원의 줄) 이고, 다자원 행은 자기가 걸린 자원마다 한 번씩 나온다 —
+	// 회수 대상이 아니라 "지금 이 자원이 뭘 기다리나"를 보여주는 관찰 대상이다.
 	Lane      []LaneRow
+	Resources []LaneResourcePanel
 	LaneErr   string
 	LaneEmpty string
-	LaneWarn  string
+}
+
+// LaneResourcePanel 은 자원 하나의 레인 표시다.
+type LaneResourcePanel struct {
+	Resource string
+	Rows     []LaneRow
+	Warn     string // 이 자원만의 정합 어긋남 문구 — 비었으면 이 자원은 정상이다
 }
 
 // LaneRow 는 랜딩 줄의 한 자리다.
@@ -1010,7 +1024,8 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 	return pan
 }
 
-// fillLane 은 랜딩 줄을 패널에 채운다.
+// fillLane 은 랜딩 줄을 패널에 채운다 — Task 6 부터는 자원별로(service.ResourceLane 마다)
+// 채운다.
 //
 // ★ **조회는 service.LandingLane 하나로 한다.** query.go 에 생 SQL 을 두 번째로
 // 만들면 판정이 두 자리에 생기고, 한쪽만 고치는 순간 화면과 보드가 조용히 어긋난다
@@ -1018,6 +1033,12 @@ func (h *handler) landingPanel(ctx context.Context, proj model.Project, label st
 //
 // ★ **생존 창으로 거르지 않는다.** 창 밖 세션이 맨 앞에서 막고 있는 상황이야말로
 // 사람이 봐야 하는 상황이고, 거르면 화면이 "줄이 비었는데 아무도 못 잡는다"가 된다.
+//
+// ★ pan.Lane(회수 폼용 평평한 목록)은 RowID 로 **한 번만** 낸다 — 다자원 land 한 행은
+// service.ResourceLane 여럿에 걸쳐 나오는데(예: {r1,r2} 로 선 행은 r1 절과 r2 절 둘 다에
+// 자기 항목이 생긴다), 회수는 행 하나를 대상으로 하는 동작이라 그 행이 select 에 두 번
+// 뜨면 안 된다("회수 폼은 줄 행 단위 그대로" — 브리프). pan.Resources(표시용)는 반대로
+// 자원이 갈리는 그대로 낸다 — 그 행이 지금 어느 자원에 걸려 있는지가 화면의 정보다.
 func (h *handler) fillLane(ctx context.Context, pan *LandingPanel, project string, now time.Time) {
 	lane, err := h.svc.LandingLane(ctx, project)
 	if err != nil {
@@ -1027,40 +1048,49 @@ func (h *handler) fillLane(ctx context.Context, pan *LandingPanel, project strin
 		return
 	}
 
-	holderSeen := false
-	for _, e := range lane.Entries {
-		row := LaneRow{
-			RowID:   e.RowID,
-			Session: e.SessionID,
-			Waiting: Age(now.Sub(e.EnqueuedAt)),
-			Signal:  signalAge(now, e.LastSignalAt),
+	seen := map[int64]bool{} // pan.Lane 중복 방지 — 위 함수 주석 참고
+	for _, rl := range lane.Resources {
+		res := LaneResourcePanel{Resource: rl.Resource}
+		holderSeen := false
+		for _, e := range rl.Entries {
+			row := LaneRow{
+				RowID:   e.RowID,
+				Session: e.SessionID,
+				Waiting: Age(now.Sub(e.EnqueuedAt)),
+				Signal:  signalAge(now, e.LastSignalAt),
+			}
+			if rl.Holder != nil && rl.Holder.SessionID == e.SessionID {
+				row.Holder = true
+				row.Held = Age(now.Sub(rl.Holder.AcquiredAt))
+				holderSeen = true
+			}
+			res.Rows = append(res.Rows, row)
+			if !seen[e.RowID] {
+				seen[e.RowID] = true
+				pan.Lane = append(pan.Lane, row)
+			}
 		}
-		if lane.Holder != nil && lane.Holder.SessionID == e.SessionID {
-			row.Holder = true
-			row.Held = Age(now.Sub(lane.Holder.AcquiredAt))
-			holderSeen = true
+
+		// 점유자가 이 자원의 줄에 없다 — 정합 어긋남이다. **행을 지우지 않고 낸다.**
+		// 이 행이 화면에서 사라지면 "레인은 물렸는데 화면은 비었다"가 되고,
+		// 그때가 정확히 사람이 회수해야 하는 순간이다.
+		if rl.Holder != nil && !holderSeen {
+			res.Rows = append(res.Rows, LaneRow{
+				Session: rl.Holder.SessionID,
+				Waiting: "", // 줄 행이 없으므로 대기 경과라는 것이 없다
+				Signal:  signalAge(now, rl.Holder.LastSignalAt),
+				Holder:  true,
+				Held:    Age(now.Sub(rl.Holder.AcquiredAt)),
+				Missing: true,
+			})
+			res.Warn = fmt.Sprintf("정합 어긋남 — %s 를 쥔 세션의 줄 행이 없다. "+
+				"회수는 줄 행 번호로 하는데 그 번호가 없으므로, 이 자리는 CLI 로도 화면으로도 못 푼다 — "+
+				"점유자가 land 로 빠지거나 서버가 다시 읽어 스스로 아무는 것이 정상 경로다.", rl.Resource)
 		}
-		pan.Lane = append(pan.Lane, row)
+		pan.Resources = append(pan.Resources, res)
 	}
 
-	// 점유자가 줄에 없다 — 정합 어긋남이다. **행을 지우지 않고 낸다.**
-	// 이 행이 화면에서 사라지면 "레인은 물렸는데 화면은 비었다"가 되고,
-	// 그때가 정확히 사람이 회수해야 하는 순간이다.
-	if lane.Holder != nil && !holderSeen {
-		pan.Lane = append(pan.Lane, LaneRow{
-			Session: lane.Holder.SessionID,
-			Waiting: "", // 줄 행이 없으므로 대기 경과라는 것이 없다
-			Signal:  signalAge(now, lane.Holder.LastSignalAt),
-			Holder:  true,
-			Held:    Age(now.Sub(lane.Holder.AcquiredAt)),
-			Missing: true,
-		})
-		pan.LaneWarn = "정합 어긋남 — 레인을 쥔 세션의 줄 행이 없다. " +
-			"회수는 줄 행 번호로 하는데 그 번호가 없으므로, 이 자리는 CLI 로도 화면으로도 못 푼다 — " +
-			"점유자가 land 로 빠지거나 서버가 다시 읽어 스스로 아무는 것이 정상 경로다."
-	}
-
-	if len(pan.Lane) == 0 {
+	if len(lane.Resources) == 0 {
 		pan.LaneEmpty = "줄이 비었다 — 질의는 돌았고 아무도 안 섰다."
 	}
 }

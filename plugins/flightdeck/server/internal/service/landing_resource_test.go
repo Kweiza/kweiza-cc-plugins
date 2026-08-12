@@ -12,7 +12,8 @@ import (
 
 // landing_resource_test.go — Task 3: service.Land 가 자원 집합의 all-or-nothing 취득이 되는지를 잠근다.
 // Task 4 는 반납(LandReport)·이탈(LandLeave)·회수(ReleaseLaneRow)가 같은 자원 집합을
-// 따라가는지를 이어서 잠근다(파일 하단 "Task 4" 절).
+// 따라가는지를 이어서 잠근다(파일 하단 "Task 4" 절). Task 6 은 읽기 쪽(LandingLane)이
+// 그 자원 집합대로 화면을 갈라 내는지를 잠근다(파일 하단 "Task 6" 절).
 //
 // ★ 이 파일의 시험은 전부 landing_test.go 와 같은 이유로 실물 DB 로 돈다: 두 표
 // (resource_hold · landing_queue)가 어긋나는 것이 유일한 치명적 실패 모양이라 가짜
@@ -555,5 +556,94 @@ func TestLiveHoldAlwaysHasALiveRowForAnyResource(t *testing.T) {
 	check("fin 이 마무리로 반납한")
 	if held, err := st.HeldBy(ctx(), "p", "r2"); err == nil {
 		t.Fatalf("finish 뒤에도 r2 가 쥐어 있다: %+v", held)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 6 — LandingLane 이 LaneView.Resources(자원별)로 갈라 낸다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestLandingLaneSplitsByResource — A 가 {r1} 을 쥐고 B 가 {r1,r2} 로 서면(all-or-nothing이라
+// r2 는 안 잡힌다) Resources 는 이름순으로 [r1, r2] 다: r1 은 holder=A · entries 2(A·B),
+// r2 는 holder 없음 · entries 1(B).
+func TestLandingLaneSplitsByResource(t *testing.T) {
+	s, _ := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1", "r2"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	lane, err := s.LandingLane(ctx(), "p")
+	if err != nil {
+		t.Fatalf("레인 조회 실패: %v", err)
+	}
+	if len(lane.Resources) != 2 {
+		t.Fatalf("Resources 가 %d개다(기대 2 — r1·r2): %+v", len(lane.Resources), lane.Resources)
+	}
+	r1, r2 := lane.Resources[0], lane.Resources[1]
+	if r1.Resource != "r1" || r2.Resource != "r2" {
+		t.Fatalf("이름순이 아니다: [%s, %s](기대 [r1, r2])", r1.Resource, r2.Resource)
+	}
+	// ★ r1 — A 가 쥐었고, 줄에는 A(자기 자신)·B 둘 다 있다(B 도 r1 을 요구했으므로).
+	if r1.Holder == nil || r1.Holder.SessionID != a {
+		t.Fatalf("r1 의 점유자가 %+v 다(기대 %s)", r1.Holder, a)
+	}
+	if len(r1.Entries) != 2 {
+		t.Fatalf("r1 의 줄이 %d행이다(기대 2 — A·B): %+v", len(r1.Entries), r1.Entries)
+	}
+	// ★ 이 시험의 심장 — r2 는 all-or-nothing 이 지켜져 아무도 안 쥐었다(B 가 부분 취득 안 함).
+	if r2.Holder != nil {
+		t.Fatalf("r2 는 아직 아무도 안 쥐었어야 하는데 점유자가 %+v 다 — all-or-nothing 위반", r2.Holder)
+	}
+	if len(r2.Entries) != 1 || r2.Entries[0].SessionID != b {
+		t.Fatalf("r2 의 줄이 %+v 다(기대 B 하나)", r2.Entries)
+	}
+}
+
+// TestLandingLaneShowsHoldWithoutRowPerResource — hold 만 있고 줄 행이 없는 자원도
+// ResourceLane 으로 나온다(어긋남을 화면이 봐야 한다). 다른 자원이 정상이어도 어긋난
+// 자원 하나가 화면에서 안 사라진다는 것이 이 시험의 심장이다.
+func TestLandingLaneShowsHoldWithoutRowPerResource(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	// r2 는 정상 경로: b 가 서서 곧바로 차례를 받는다.
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r2"}}); err != nil {
+		t.Fatal(err)
+	}
+	// r1 은 어긋난 상태: 줄 행 없이 점유만 만든다(store 직접 호출 — landing_resource_test.go
+	// 위쪽 TestLandReportHealsHoldWithoutRow 와 같은 수법).
+	if _, err := st.AcquireResource(ctx(), "p", "r1", store.Holder{SessionID: a}, time.Time{}); err != nil {
+		t.Fatalf("어긋난 점유 흉내가 실패했다: %v", err)
+	}
+
+	lane, err := s.LandingLane(ctx(), "p")
+	if err != nil {
+		t.Fatalf("레인 조회 실패: %v", err)
+	}
+	if len(lane.Resources) != 2 {
+		t.Fatalf("Resources 가 %d개다(기대 2 — r1·r2): %+v", len(lane.Resources), lane.Resources)
+	}
+	r1, r2 := lane.Resources[0], lane.Resources[1]
+	if r1.Resource != "r1" {
+		t.Fatalf("첫 자원이 %q 다(기대 r1 — 이름순)", r1.Resource)
+	}
+	// ★ 이 시험의 심장 — r1 은 점유자는 있는데 줄 행이 하나도 없다.
+	if r1.Holder == nil || r1.Holder.SessionID != a {
+		t.Fatalf("어긋난 자원 r1 의 점유자가 %+v 다(기대 %s)", r1.Holder, a)
+	}
+	if len(r1.Entries) != 0 {
+		t.Fatalf("r1 은 줄 행이 없어야 어긋남인데 Entries 가 %+v 다", r1.Entries)
+	}
+	// 대조 — r2 는 정상이라 어긋남에 안 묻힌다.
+	if r2.Resource != "r2" || r2.Holder == nil || r2.Holder.SessionID != b {
+		t.Fatalf("정상 자원 r2 가 깨졌다: %+v", r2)
+	}
+	if len(r2.Entries) != 1 || r2.Entries[0].SessionID != b {
+		t.Fatalf("r2 의 줄이 %+v 다(기대 B 하나)", r2.Entries)
 	}
 }

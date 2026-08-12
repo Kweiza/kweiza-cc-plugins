@@ -345,17 +345,21 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
   {{end}}
 
   {{/* 레인 절. **새 <section> 이 아니라 ④ 안쪽 <h3>** 이다 — 절 개수는 여섯으로 고정이고
-       그 수가 화면의 골격을 잠근다(render_test.go). */}}
+       그 수가 화면의 골격을 잠근다(render_test.go). Task 6 부터 표는 자원별로 갈린다 —
+       <h4> 하나가 자원 하나다(<h3> 을 새로 열지 않는다. 그러면 절 개수 락과 laneSectionOf
+       헬퍼가 "다음 <h3>" 을 경계로 자르는 것 둘 다 깨진다). */}}
   <h3>랜딩 레인 — 줄과 회수 <span class="count">{{len .Landing.Lane}}줄</span></h3>
   <p class="k">자동 만료는 없다. 회수는 사람이 하고, 대상은 레인이 아니라 <b>줄 행</b>이다 —
      대기 중 좀비도 같은 문법으로 빠진다. 판정 근거는 아래 두 숫자다: 획득 경과와 마지막 신호 나이.</p>
   {{with .Landing.LaneErr}}<p class="err">{{.}}</p>{{end}}
-  {{with .Landing.LaneWarn}}<p class="err">{{.}}</p>{{end}}
   {{with .Landing.LaneEmpty}}<p class="empty">{{.}}</p>{{end}}
-  {{if .Landing.Lane}}
+  {{range .Landing.Resources}}
+  <h4>{{.Resource}}</h4>
+  {{/* 이 자원만의 정합 어긋남 — LandingPanel.LaneWarn(레인 전체 한 줄)이 옮겨온 자리다. */}}
+  {{with .Warn}}<p class="err">{{.}}</p>{{end}}
   <table>
     <tr><th>순번</th><th>세션</th><th>대기 경과</th><th>마지막 신호</th><th>획득 경과</th></tr>
-    {{range .Landing.Lane}}
+    {{range .Rows}}
     <tr{{if .Holder}} class="lane-holder"{{end}}>
       <td class="mono">{{if .Missing}}<span class="dim">없음</span>{{else}}{{.RowID}}{{end}}</td>
       <td class="mono">{{.Session}}</td>

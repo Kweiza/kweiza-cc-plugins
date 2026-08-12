@@ -425,9 +425,11 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	// 레인 절 — v.Lane 이 nil 이면 이 조회가 레인을 안 읽은 것이라 아예 안 찍는다.
 	// 읽었으면(0건이어도) 반드시 한 줄을 낸다 — renderLane 이 그 0건 문장에
 	// "질의는 돌았다"를 적어 nil(안 읽음)과 빈 슬라이스(질의는 돌았는데 아무도 없음)를 가른다
-	// (service.BoardView.Lane 주석과 같은 판정).
+	// (service.BoardView.Lane 주석과 같은 판정). Task 6 부터는 자원별로 갈려 **한 줄이 아니라
+	// 자원 수만큼**(0건이면 한 줄) 나온다 — foot 은 줄마다 하나씩 이어 붙이는 슬라이스라
+	// append(...,) 로 펼친다.
 	if v.Lane != nil {
-		foot = append(foot, renderLane(v.Lane, now))
+		foot = append(foot, renderLane(v.Lane, now)...)
 	}
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
@@ -870,32 +872,47 @@ func boardDetailFoot(v service.BoardView) []string {
 	return out
 }
 
-// renderLane 은 보드의 레인 절 한 줄이다. 순수 함수다.
+// renderLane 은 보드의 레인 절이다 — Task 6 부터는 **자원별로** 한 줄씩 낸다. 순수 함수다.
 //
 // 설계 §9 ① 이 요구하는 축을 전부 낸다: **점유자의 획득 경과**(머리) · 대기 줄 전체
 // (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
 // 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
 //
 // ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
-// 이상 질의는 이미 돈 것이고, Entries 가 비었어도 그 사실("질의는 돌았다")을 문장에
-// 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Entries)가
-// 화면에서 같아진다(service.LaneView 주석과 같은 판정).
-func renderLane(l *service.LaneView, now time.Time) string {
-	if len(l.Entries) == 0 {
-		if l.Holder == nil {
-			// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
-			//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
-			//   실제로 길게 썼을 때 TestBoardDefaultOutputWithinBudget 이 5토큰 초과로 빨개졌다.
-			//   "지금 아무도 안 섰다"는 "0건"과 같은 말이라 뺀다 —
-			//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
-			return "랜딩 레인 0건(질의는 돌았다)"
-		}
-		// ★ 점유는 있는데 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는 랜딩 점유에는
-		// 반드시 대응하는 살아 있는 줄 행이 있다")이 깨진 가장 위험한 모양이다
-		// (TestLiveLandingHoldAlwaysHasALiveQueueRow 가 잡으려는 상태 그 자체다. Land 도 이
-		// 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go 참고). 위 0건 분기로 접으면
-		// 정확히 이 상태에서 경고가 필요한데 그 경고에 영원히 안 닿는다 — 그래서 여기서 먼저
-		// 가른다: 조용한 "비어 있음"이 아니라 화면에서 가장 시끄러운 문장을 낸다.
+// 이상 질의는 이미 돈 것이고, Resources 가 비었어도 그 사실("질의는 돌았다")을 문장에
+// 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Resources)가
+// 화면에서 같아진다(service.LaneView 주석과 같은 판정). **이 0건 문구는 프로젝트 전체
+// 기준이다** — len(l.Resources)==0(자원 우주 자체가 빈 것)일 때만 나가고, 한 줄 고정이다.
+// 자원이 하나라도 있으면 그 수만큼 줄이 나온다(renderResourceLane 이 자원 하나씩을 맡는다).
+func renderLane(l *service.LaneView, now time.Time) []string {
+	if len(l.Resources) == 0 {
+		// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
+		//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
+		//   실제로 길게 썼을 때 TestBoardDefaultOutputWithinBudget 이 5토큰 초과로 빨개졌다.
+		//   "지금 아무도 안 섰다"는 "0건"과 같은 말이라 뺀다 —
+		//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
+		return []string{"랜딩 레인 0건(질의는 돌았다)"}
+	}
+	lines := make([]string, 0, len(l.Resources))
+	for _, rl := range l.Resources {
+		lines = append(lines, renderResourceLane(rl, now))
+	}
+	return lines
+}
+
+// renderResourceLane 은 자원 하나의 레인 한 줄이다. 순수 함수다 — renderLane 이 자원마다
+// 이 함수를 부른다. 옛 단일 레인 시절 renderLane 의 본문이 그대로 여기로 옮겨왔고, 머리의
+// "랜딩" 자리가 자원 이름으로 바뀐 것 말고는 판정이 안 바뀌었다(TestBoardDefaultOutputWithinBudget
+// 이 기본 자원 하나일 때 출력이 안 늘도록 접두를 `<resource>: ` 로 짧게 유지한다).
+func renderResourceLane(rl service.ResourceLane, now time.Time) string {
+	if len(rl.Entries) == 0 {
+		// ★ 점유는 있는데 이 자원의 줄 행이 하나도 없다 — landing.go 의 불변식("살아 있는
+		// 점유에는 반드시 대응하는 살아 있는 줄 행이 있다")이 이 자원 기준으로 깨진 가장
+		// 위험한 모양이다(TestLiveLandingHoldAlwaysHasALiveQueueRow 류가 잡으려는 상태
+		// 그 자체다. Land 도 이 상태를 만나면 점유자를 그대로 실어 보낸다 — landing.go
+		// 참고). rl.Holder 는 여기서 반드시 non-nil 이다 — LandingLane 의 자원 우주가
+		// 줄 행·점유의 합집합이라, Entries 도 Holder 도 없는 자원은 애초에 Resources 에
+		// 안 실린다.
 		//
 		// ★ 회수 판정용 **두 나이**(설계 §9 ①)를 이 문장에 싣는다. 아래 정상 경로는 획득 경과를
 		// 머리에, 신호 나이를 항목마다 나눠 싣는데 여기는 항목이 0건이라 실을 자리가 이 한 줄뿐이다.
@@ -903,7 +920,7 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 거둬야 하고 그 판단의 근거가 이 두 숫자인데, 둘 다 없으면 화면이 "누가"만 답하고
 		// "얼마나 오래됐나"를 되묻게 만든다.
 		//
-		// ★ 그중 Holder.LastSignalAt 은 LandingLane 이 홀더용으로 질의를 한 번 더 돌려 채워 두고도
+		// ★ 그중 Holder.LastSignalAt 은 LandingLane 이 홀더용으로 채워 두고도
 		// renderLane 이 전 함수 통틀어 한 번도 안 읽던 필드였다 —
 		// TestLandingQueueHasAProductionReader 가 잡으려는 "계산만 되고 읽는 쪽이 0건"의 필드 판.
 		//
@@ -913,25 +930,25 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// ★ nil 은 빈칸으로 두지 않고 "신호 없음"이라고 **적는다** — 여기서 하는 일은 그것뿐이다.
 		// **못 읽음과 없음을 가르는 자리가 아니다.** 이 nil 은 두 경우가 이미 뭉개진 값이다:
 		// 그 둘을 실제로 가르는 것은 service/landing.go 의 lastSignal 의 **둘째 반환값**인데,
-		// 이 필드를 채우는 세 자리(Land 의 점유자 채움 · LandingLane 의 루프 · LandingLane 의
-		// 점유자-줄에-없음 갈래)가 전부 그 값을 `_` 로 버린다. 읽기 실패는 그쪽 WARN 에만 남는다.
-		// 그 규율이 지켜지는 곳은 불변으로 남는 판단 본문(ReleaseLaneRow)이고, 거기만
-		// "읽지 못했다"와 "없음"을 다른 문장으로 적는다 — 화면은 애초에 그 축을 못 받는다.
+		// 이 필드를 채우는 자리(Land 의 점유자 채움 · LandingLane 의 sig 클로저)가 전부 그 값을
+		// `_` 로 버린다. 읽기 실패는 그쪽 WARN 에만 남는다. 그 규율이 지켜지는 곳은 불변으로
+		// 남는 판단 본문(ReleaseLaneRow)이고, 거기만 "읽지 못했다"와 "없음"을 다른 문장으로
+		// 적는다 — 화면은 애초에 그 축을 못 받는다.
 		//
 		// ★ ShortID 바로 뒤에 여는 괄호를 두지 않고 문장 꼬리에 ` · ` 로 잇는다. 머리에
 		// `<세션>(…)` 모양이 생기면 항목 조각을 잘라 보는 시험(laneEntrySegment)이 그 `)` 를
 		// 먼저 집는다 — 이 분기는 항목이 0건이라 지금은 안 밟히지만, 같은 함정을 새로 파지 않는다.
 		sig := "신호 없음"
-		if l.Holder.LastSignalAt != nil {
-			sig = "신호 " + FormatAge(now.Sub(*l.Holder.LastSignalAt)) + "전"
+		if rl.Holder.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*rl.Holder.LastSignalAt)) + "전"
 		}
-		return fmt.Sprintf("⚠ 랜딩 레인 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다 · 점유 획득 %s전 · %s",
-			ShortID(l.Holder.SessionID), FormatAge(now.Sub(l.Holder.AcquiredAt)), sig)
+		return fmt.Sprintf("%s: ⚠ 정합 어긋남: 점유자 %s 는 있는데 줄 행이 하나도 없다 · 점유 획득 %s전 · %s",
+			rl.Resource, ShortID(rl.Holder.SessionID), FormatAge(now.Sub(rl.Holder.AcquiredAt)), sig)
 	}
-	parts := make([]string, 0, len(l.Entries))
-	for i, e := range l.Entries {
+	parts := make([]string, 0, len(rl.Entries))
+	for i, e := range rl.Entries {
 		mark := ""
-		if l.Holder != nil && l.Holder.SessionID == e.SessionID {
+		if rl.Holder != nil && rl.Holder.SessionID == e.SessionID {
 			mark = "◀점유"
 		}
 		// ★ **신호 나이를 낸다**(설계 §9 ①). 자동 만료를 안 만든 근거가 "사람이 나이를 보고
@@ -939,8 +956,8 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 여기서 빼면 LaneEntry.LastSignalAt 은 계산만 되고 읽는 쪽이 0건이 된다 —
 		// 이 브랜치가 TestLandingQueueHasAProductionReader 로 잡으려는 함정의 필드 판이다.
 		// nil 은 빈칸이 아니라 "신호 없음"으로 적는다 — 다만 그 nil 은 못 읽음과 없음이 이미
-		// 뭉개진 값이다(위 어긋남 갈래 주석의 세 자리와 같은 이유. LaneEntry 쪽을 채우는 것이
-		// 그중 LandingLane 의 루프다).
+		// 뭉개진 값이다(위 어긋남 갈래 주석과 같은 이유. LaneEntry 쪽을 채우는 것이 그중
+		// LandingLane 의 sig 클로저다).
 		sig := "신호 없음"
 		if e.LastSignalAt != nil {
 			sig = "신호 " + FormatAge(now.Sub(*e.LastSignalAt)) + "전"
@@ -948,19 +965,22 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		parts = append(parts, fmt.Sprintf("%d.%s(행%d·대기 %s전·%s%s)",
 			i+1, ShortID(e.SessionID), e.RowID, FormatAge(now.Sub(e.EnqueuedAt)), sig, mark))
 	}
-	// ★ 머리에 **점유자의 획득 경과**를 낸다(설계 §9 ①). 회수를 판정하는 사람이 봐야 할
-	// 두 숫자가 획득 경과와 신호 나이인데, 앞엣것은 LaneHolder.AcquiredAt 에 채워져 있으면서
-	// 이 함수가 안 읽어 화면에 없었다.
+	// ★ 머리에 **자원 이름**과 **점유자의 획득 경과**를 낸다(설계 §9 ①). 자원 이름이
+	// 접두인 이유는 이 함수가 자원 하나만 맡아서다 — "랜딩 레인" 이라는 고정 낱말은
+	// 옛 단일 레인 시절의 것이고, 지금은 그 자리에 어느 자원인지가 와야 여러 줄을 볼 때
+	// 사람이 갈라 읽는다. 회수를 판정하는 사람이 봐야 할 두 숫자가 획득 경과와 신호
+	// 나이인데, 앞엣것은 LaneHolder.AcquiredAt 에 채워져 있으면서 이 함수가 안 읽어
+	// 화면에 없던 시절이 있었다(옛 renderLane 결함).
 	//
 	// ★ 점유자의 ShortID 를 머리에 **다시 적지 않는다.** 누가 쥐었나는 항목의 ◀점유 표시가
 	// 이미 답하고, 머리에 `<세션>(…)` 모양을 하나 더 두면 항목 조각을 잘라 보는 시험
 	// (laneEntrySegment)이 머리 쪽을 먼저 집어 표시 뒤바뀜을 못 잡게 된다.
-	head := fmt.Sprintf("랜딩 레인 %d건", len(l.Entries))
-	if l.Holder != nil {
-		head += fmt.Sprintf("(점유 획득 %s전)", FormatAge(now.Sub(l.Holder.AcquiredAt)))
+	head := fmt.Sprintf("%s: 레인 %d건", rl.Resource, len(rl.Entries))
+	if rl.Holder != nil {
+		head += fmt.Sprintf("(점유 획득 %s전)", FormatAge(now.Sub(rl.Holder.AcquiredAt)))
 	}
 	line := head + ": " + strings.Join(parts, " ")
-	if l.Holder != nil && !laneHolderIsQueued(l) {
+	if rl.Holder != nil && !resourceLaneHolderIsQueued(rl) {
 		// 살아 있는 점유에는 반드시 대응하는 살아 있는 줄 행이 있어야 한다(landing.go 의 불변식).
 		// 그게 깨진 상태를 침묵하면 "레인이 비었다"로 오독된다.
 		//
@@ -977,24 +997,22 @@ func renderLane(l *service.LaneView, now time.Time) string {
 		// 같은 축이 한 화면에서 두 어휘로 읽히면 회수 판정이 대조부터 해야 한다.
 		// nil 을 "신호 없음"으로 적는 것의 한계도 그 갈래 주석과 같다 — 이 nil 은
 		// 못 읽음과 없음이 이미 뭉개진 값이고, 가르는 축은 화면에 애초에 안 온다.
-		//
-		// ★ 이 모양이 세 자리째지만 헬퍼로 **안 뽑는다.** 지금 render.go 를 쥔 세션이
-		// 더 있어(겹침 통보 완료) 기존 두 자리를 건드리면 충돌 면적이 그만큼 넓어진다.
-		// 뽑는 것은 그 자리가 조용해진 뒤에 할 별개의 일이다.
 		sig := "신호 없음"
-		if l.Holder.LastSignalAt != nil {
-			sig = "신호 " + FormatAge(now.Sub(*l.Holder.LastSignalAt)) + "전"
+		if rl.Holder.LastSignalAt != nil {
+			sig = "신호 " + FormatAge(now.Sub(*rl.Holder.LastSignalAt)) + "전"
 		}
 		line += fmt.Sprintf(" · ⚠ 점유자 %s 의 줄 행이 안 보인다(정합 어긋남) · %s",
-			ShortID(l.Holder.SessionID), sig)
+			ShortID(rl.Holder.SessionID), sig)
 	}
 	return line
 }
 
-// laneHolderIsQueued 는 지금 점유자가 줄 목록에도 있는지다.
-func laneHolderIsQueued(l *service.LaneView) bool {
-	for _, e := range l.Entries {
-		if e.SessionID == l.Holder.SessionID {
+// resourceLaneHolderIsQueued 는 자원 하나의 점유자가 그 자원의 줄 목록에도 있는지다.
+// 옛 laneHolderIsQueued 가 *service.LaneView 를 받던 것을 자원판으로 좁혔다 — 개편 뒤에는
+// "레인"이 아니라 "자원의 레인"이 이 축의 단위다.
+func resourceLaneHolderIsQueued(rl service.ResourceLane) bool {
+	for _, e := range rl.Entries {
+		if e.SessionID == rl.Holder.SessionID {
 			return true
 		}
 	}

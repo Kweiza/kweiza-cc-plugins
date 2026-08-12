@@ -1039,13 +1039,16 @@ func TestRenderBoardLaneNilStaysSilent(t *testing.T) {
 }
 
 // TestRenderBoardLaneEmptySaysTheQueryRan 은 브리프의 핵심 요구다: Lane 이 있지만
-// Entries 가 빈 것과 Lane 자체가 nil 인 것을 렌더가 **다른 문장**으로 낸다.
+// Resources 가 빈 것과 Lane 자체가 nil 인 것을 렌더가 **다른 문장**으로 낸다.
 // 0건 문장은 "질의는 돌았다"를 반드시 말해야 한다 — 안 그러면 위 시험과 이 시험의
 // 두 출력이 우연히 같아질 수 있고, 그러면 화면에서 둘이 구분 안 된다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 0건의 자리가 LaneView.Entries 에서
+// LaneView.Resources 로 옮겨왔다(아무도 안 쓴 자원은 이름조차 안 실린다).
 func TestRenderBoardLaneEmptySaysTheQueryRan(t *testing.T) {
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane:     &service.LaneView{Entries: []service.LaneEntry{}},
+		Lane:     &service.LaneView{Resources: []service.ResourceLane{}},
 	}, BoardRenderOptions{Now: t0})
 
 	if !strings.Contains(got, "레인") {
@@ -1093,13 +1096,14 @@ func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
 	enq := t0.Add(-90 * time.Second)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
-			Holder: &service.LaneHolder{SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-1 * time.Minute)},
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
+			Holder:   &service.LaneHolder{SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-1 * time.Minute)},
 			Entries: []service.LaneEntry{
 				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: enq},
 				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
 			},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 
 	if !strings.Contains(got, "레인 2건") {
@@ -1127,8 +1131,13 @@ func TestRenderBoardLaneListsEntriesAndMarksTheHolder(t *testing.T) {
 // TestLiveLandingHoldAlwaysHasALiveQueueRow(internal/service/landing_test.go)가 동작으로 잠근다.
 //
 // 0건 분기가 Holder 유무를 안 가르면 이 상태가 "비어 있음(질의는 돌았다)"으로 조용히 접힌다 —
-// 정확히 이 상태에서 경고가 필요한데 그 경고 분기(l.Holder != nil && !laneHolderIsQueued(l))에
-// 영원히 안 닿는다(len(l.Entries)==0 조기 반환이 앞을 막는다). 이 시험은 그 도달성을 잠근다.
+// 정확히 이 상태에서 경고가 필요한데 그 경고 분기(rl.Holder != nil &&
+// !resourceLaneHolderIsQueued(rl))에 영원히 안 닿는다(len(rl.Entries)==0 조기 반환이 앞을
+// 막는다). 이 시험은 그 도달성을 잠근다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 위 분기 이름은 옛 laneHolderIsQueued·
+// len(l.Entries) 좌표였다. 지금은 자원 하나(ResourceLane)마다 도는 renderResourceLane 안의
+// resourceLaneHolderIsQueued·len(rl.Entries) 다 — 판정 자체는 그대로다.
 //
 // ★ 그리고 **회수 판정용 두 나이**(설계 §9 ①)를 여기서도 단정한다. 이 분기는 회수 판정이
 // 가장 절실한 화면인데(정상 경로와 달리 항목 조각이 하나도 없어 나이를 실을 자리가 머리밖에
@@ -1141,13 +1150,14 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 	ghostSignal := t0.Add(-45 * time.Second)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
 			Holder: &service.LaneHolder{
 				SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute),
 				LastSignalAt: &ghostSignal,
 			},
 			Entries: []service.LaneEntry{},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 
 	if strings.Contains(got, "비어 있음") {
@@ -1174,10 +1184,11 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 	// 이 대조가 없으면 nil 갈래를 통째로 지워도 위 단정이 초록이다.
 	noSignal := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
-			Holder:  &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
-			Entries: []service.LaneEntry{},
-		},
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
+			Holder:   &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-2 * time.Minute)},
+			Entries:  []service.LaneEntry{},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 	if !strings.Contains(noSignal, "신호 없음") {
 		t.Fatalf("신호가 없는 점유자의 그 사실이 안 보인다 — 침묵은 '못 읽었다'와 구분이 안 된다:\n%s", noSignal)
@@ -1188,9 +1199,13 @@ func TestRenderBoardLaneHolderWithoutQueueRowIsNeverSilent(t *testing.T) {
 // 어긋남 갈래**다: 줄에 사람은 있는데 그중 아무도 점유자가 아니다.
 //
 // 0건 갈래(위 시험)만 잠그고 이쪽을 비워 두면 그 비대칭이 다음 리팩터에서 잠기지 않은 쪽을
-// 조용히 지운다 — 실제로 이 분기(render.go 의 `l.Holder != nil && !laneHolderIsQueued(l)`)는
-// 통째로 지워도 전 시험이 초록이었다. 이 경고는 **화면이 침묵하면 사고가 안 보이는** 부류라
-// 회귀가 자기 신고를 안 한다: 줄만 보면 정상으로 읽히고, 레인은 아무도 못 잡는다.
+// 조용히 지운다 — 실제로 이 분기(render.go 의 `rl.Holder != nil &&
+// !resourceLaneHolderIsQueued(rl)`)는 통째로 지워도 전 시험이 초록이었다. 이 경고는
+// **화면이 침묵하면 사고가 안 보이는** 부류라 회귀가 자기 신고를 안 한다: 줄만 보면
+// 정상으로 읽히고, 레인은 아무도 못 잡는다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 분기 이름·좌표가 옛 laneHolderIsQueued 에서
+// 자원판 resourceLaneHolderIsQueued 로 옮겨왔다(renderResourceLane 안).
 func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.T) {
 	// ★ 네 나이를 **전부 다른 값**으로 심는다(획득 3분 · 점유자 신호 47분 · 대기 30초 ·
 	//   대기자 신호 9초). 같은 값이 둘이면 한 숫자를 두 번 찍는 구현도 초록이 된다.
@@ -1198,7 +1213,8 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 	waiterSignal := t0.Add(-9 * time.Second)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
 			Holder: &service.LaneHolder{
 				SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute),
 				LastSignalAt: &ghostSignal,
@@ -1206,7 +1222,7 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 			Entries: []service.LaneEntry{
 				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second), LastSignalAt: &waiterSignal},
 			},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 
 	if !strings.Contains(got, "⚠") {
@@ -1232,12 +1248,13 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 	// 대기자에게는 신호를 심어 둔다 — 안 그러면 대기자 조각의 "신호 없음"이 이 단정을 대신 통과시킨다.
 	noSignal := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
-			Holder: &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
+			Holder:   &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{
 				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second), LastSignalAt: &waiterSignal},
 			},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 	if want := "의 줄 행이 안 보인다(정합 어긋남) · 신호 없음"; !strings.Contains(noSignal, want) {
 		t.Fatalf("신호가 없는 점유자의 그 사실이 부분 어긋남 경고에 안 보인다 — 빈칸은 '못 읽었다'와 구분이 안 된다.\n찾는 것: %q\n전체:\n%s", want, noSignal)
@@ -1245,12 +1262,13 @@ func TestRenderBoardLaneHolderMissingFromANonEmptyQueueIsNeverSilent(t *testing.
 	// 대조: 점유자가 줄에 **있으면** 이 경고가 나오면 안 된다(상시 발동하면 판별력이 0이 된다).
 	ok := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
-			Holder: &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
+			Holder:   &service.LaneHolder{SessionID: "01WAITERSESSION", AcquiredAt: t0.Add(-3 * time.Minute)},
 			Entries: []service.LaneEntry{
 				{RowID: 21, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-30 * time.Second)},
 			},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 	if strings.Contains(ok, "⚠") {
 		t.Fatalf("정합이 맞는데 어긋남 경고가 찍혔다 — 경고가 흔해지면 판별력이 0이 된다:\n%s", ok)
@@ -1269,7 +1287,8 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 	holderSignal := t0.Add(-4 * time.Minute)
 	got := RenderBoard(service.BoardView{
 		Sessions: []service.SessionCard{{View: model.SessionView{Session: model.Session{ID: "01AAA"}}}},
-		Lane: &service.LaneView{
+		Lane: &service.LaneView{Resources: []service.ResourceLane{{
+			Resource: "landing",
 			Holder: &service.LaneHolder{
 				SessionID: "01HOLDERSESSION", AcquiredAt: t0.Add(-2 * time.Hour),
 				LastSignalAt: &holderSignal,
@@ -1278,7 +1297,7 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 				{RowID: 11, SessionID: "01HOLDERSESSION", EnqueuedAt: t0.Add(-3 * time.Hour), LastSignalAt: &holderSignal},
 				{RowID: 12, SessionID: "01WAITERSESSION", EnqueuedAt: t0.Add(-10 * time.Second)},
 			},
-		},
+		}}},
 	}, BoardRenderOptions{Now: t0})
 
 	// ① 점유자의 획득 경과 — 레인 줄 머리에 있다.

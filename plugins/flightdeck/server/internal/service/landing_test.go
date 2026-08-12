@@ -600,8 +600,14 @@ func TestReleaseLaneRowLeavesAJudgment(t *testing.T) {
 
 // TestLandingLaneSeparatesZeroFromUnobserved — 0건과 "안 읽었다"가 다르다.
 //
-// ★ Entries 가 nil 이면 json 이 null 이 되고, 화면에서 "질의가 안 돌았다"와
+// ★ Resources 가 nil 이면 json 이 null 이 되고, 화면에서 "질의가 안 돌았다"와
 // "아무도 안 섰다"가 같아진다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 이 시험은 원래 LaneView.Entries·
+// LaneView.Holder 를 직접 봤다. 지금은 그 둘이 ResourceLane(LaneView.Resources 의 원소)
+// 아래에 있다 — "0건"은 이제 LaneView.Resources 슬라이스 자체가 비는 것으로 표현되고
+// (자원 우주가 줄 행·점유의 합집합이라 아무도 안 쓴 자원은 이름조차 안 실린다), 한 명이
+// 서면 기본 자원("landing" 하나)의 ResourceLane 이 하나 생긴다.
 func TestLandingLaneSeparatesZeroFromUnobserved(t *testing.T) {
 	s, _ := newSvc(t)
 	a, _ := twoSessions(t, s)
@@ -610,18 +616,18 @@ func TestLandingLaneSeparatesZeroFromUnobserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("빈 레인 조회가 실패했다: %v", err)
 	}
-	if empty.Entries == nil {
+	if empty.Resources == nil {
 		t.Fatalf("0건이 nil 로 나왔다 — 화면에서 \"안 읽었다\"와 구분되지 않는다")
 	}
-	if len(empty.Entries) != 0 || empty.Holder != nil {
+	if len(empty.Resources) != 0 {
 		t.Fatalf("아무도 안 섰는데 레인이 비어 있지 않다: %+v", empty)
 	}
 	buf, err := json.Marshal(empty)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(buf), `"entries":[]`) {
-		t.Fatalf("빈 레인의 json 이 %s 다 — entries 는 [] 여야 한다", buf)
+	if !strings.Contains(string(buf), `"resources":[]`) {
+		t.Fatalf("빈 레인의 json 이 %s 다 — resources 는 [] 여야 한다", buf)
 	}
 
 	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a}); err != nil {
@@ -631,16 +637,20 @@ func TestLandingLaneSeparatesZeroFromUnobserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(one.Entries) != 1 || one.Entries[0].SessionID != a {
-		t.Fatalf("한 명이 섰는데 목록이 %+v 다", one.Entries)
+	if len(one.Resources) != 1 || one.Resources[0].Resource != LaneResource {
+		t.Fatalf("한 명이 섰는데 자원 목록이 %+v 다(기대 %q 하나)", one.Resources, LaneResource)
 	}
-	if one.Holder == nil || one.Holder.SessionID != a {
-		t.Fatalf("점유자가 안 보인다: %+v", one.Holder)
+	rl := one.Resources[0]
+	if len(rl.Entries) != 1 || rl.Entries[0].SessionID != a {
+		t.Fatalf("한 명이 섰는데 줄 목록이 %+v 다", rl.Entries)
 	}
-	if one.Entries[0].LastSignalAt == nil {
+	if rl.Holder == nil || rl.Holder.SessionID != a {
+		t.Fatalf("점유자가 안 보인다: %+v", rl.Holder)
+	}
+	if rl.Entries[0].LastSignalAt == nil {
 		t.Errorf("줄에 선 세션의 마지막 신호 시각이 없다 — 나이를 못 재면 사람이 회수를 판정할 수 없다")
 	}
-	if one.Entries[0].EnqueuedAt.IsZero() {
+	if rl.Entries[0].EnqueuedAt.IsZero() {
 		t.Errorf("대기 시작 시각이 비었다")
 	}
 }
@@ -781,18 +791,25 @@ func TestLandingLaneStillReportsRealDivergenceAfterTheRecheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("어긋난 상태에서 레인 조회가 실패했다 — 그러면 그 상태를 볼 유일한 창이 닫힌다: %v", err)
 	}
-	if lane.Holder == nil {
+	// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 어긋난 자원도 자원 우주(줄 행·점유의
+	// 합집합)에는 여전히 실린다(점유가 그 자원 이름을 댄다) — 그래서 Resources 가 여전히
+	// 1개(기본 자원 "landing")고, 그 안에서 Holder·Entries 를 본다.
+	if len(lane.Resources) != 1 {
+		t.Fatalf("재확인이 진짜 어긋남을 삼켰다 — 자원이 %d개다(기대 1): %+v", len(lane.Resources), lane.Resources)
+	}
+	rl := lane.Resources[0]
+	if rl.Holder == nil {
 		t.Fatalf("재확인이 진짜 어긋남을 삼켰다 — 점유자를 nil 로 접으면 화면이 \"비어 있음\"을 " +
 			"내고 랜딩 전원 정지가 안 보인다")
 	}
-	if lane.Holder.SessionID != a {
-		t.Errorf("점유자가 %q 다(기대 %q)", lane.Holder.SessionID, a)
+	if rl.Holder.SessionID != a {
+		t.Errorf("점유자가 %q 다(기대 %q)", rl.Holder.SessionID, a)
 	}
-	if lane.Entries == nil {
+	if rl.Entries == nil {
 		t.Fatalf("0건이 nil 로 나왔다 — \"안 읽었다\"와 구분되지 않는다")
 	}
-	if len(lane.Entries) != 0 {
-		t.Errorf("줄 행을 다 닫았는데 항목이 %d건 보인다: %+v", len(lane.Entries), lane.Entries)
+	if len(rl.Entries) != 0 {
+		t.Errorf("줄 행을 다 닫았는데 항목이 %d건 보인다: %+v", len(rl.Entries), rl.Entries)
 	}
 
 	// ★ 여기서부터는 나중에 더한 단정이다(위 단정은 그대로 둔다). 이 상태가 곧
@@ -815,12 +832,12 @@ func TestLandingLaneStillReportsRealDivergenceAfterTheRecheck(t *testing.T) {
 	if !ok {
 		t.Fatalf("사전 조건이 깨졌다 — 이 세션에 신호가 하나도 없다(세션 열기가 비트를 남긴다)")
 	}
-	if lane.Holder.LastSignalAt == nil {
+	if rl.Holder.LastSignalAt == nil {
 		t.Fatalf("어긋난 갈래에서 점유자의 마지막 신호가 비었다 — 원장에는 %v 가 있다. "+
 			"줄이 0건이라 이 필드가 나이를 말하는 유일한 자리인데, 화면이 \"신호 없음\"을 낸다", want)
 	}
-	if !lane.Holder.LastSignalAt.Equal(want) {
-		t.Errorf("점유자의 마지막 신호가 %v 다(원장은 %v)", lane.Holder.LastSignalAt, want)
+	if !rl.Holder.LastSignalAt.Equal(want) {
+		t.Errorf("점유자의 마지막 신호가 %v 다(원장은 %v)", rl.Holder.LastSignalAt, want)
 	}
 }
 
@@ -836,6 +853,10 @@ func TestLandingLaneStillReportsRealDivergenceAfterTheRecheck(t *testing.T) {
 // 읽은 값을 **재사용한다**(점유자 몫 질의를 아낀다). 재사용이 엉뚱한 줄 행의 값을 집어도
 // nil 검사는 통과한다 — 그 실수가 정확히 이 최적화가 새로 만든 실패 모양이다. 그래서 두 세션의
 // 신호 시각을 다르게 심어 값 자체를 가른다.
+//
+// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 위 "LaneView.Holder.LastSignalAt" 은 이 시험이
+// 처음 섰을 때의 좌표다. 지금은 그 필드가 LaneView.Resources[i].Holder.LastSignalAt(자원 하나의
+// ResourceLane) 아래에 있다 — 재사용 로직 자체(signals 맵, sig 클로저)는 그대로다.
 func TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates(t *testing.T) {
 	s, st := newSvc(t)
 	a, b := twoSessions(t, s)
@@ -878,17 +899,23 @@ func TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("레인 조회가 실패했다: %v", err)
 	}
-	if lane.Holder == nil || lane.Holder.SessionID != a {
-		t.Fatalf("사전 조건이 깨졌다 — 점유자가 %+v 다(기대 %s)", lane.Holder, a)
+	// ★ 2026-08-12 자원 개편(Task 6) 정정 각주 — 둘 다 기본 자원("landing")으로 섰으므로
+	// Resources 는 여전히 1개고, Holder·Entries 는 그 ResourceLane 아래에 있다.
+	if len(lane.Resources) != 1 {
+		t.Fatalf("사전 조건이 깨졌다 — 자원이 %d개다(기대 1): %+v", len(lane.Resources), lane.Resources)
+	}
+	rl := lane.Resources[0]
+	if rl.Holder == nil || rl.Holder.SessionID != a {
+		t.Fatalf("사전 조건이 깨졌다 — 점유자가 %+v 다(기대 %s)", rl.Holder, a)
 	}
 	entry := func(session string) LaneEntry {
 		t.Helper()
-		for _, e := range lane.Entries {
+		for _, e := range rl.Entries {
 			if e.SessionID == session {
 				return e
 			}
 		}
-		t.Fatalf("줄에 %s 의 행이 없다: %+v", session, lane.Entries)
+		t.Fatalf("줄에 %s 의 행이 없다: %+v", session, rl.Entries)
 		return LaneEntry{}
 	}
 	entA, entB := entry(a), entry(b)
@@ -902,17 +929,17 @@ func TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates(t *testing.T) {
 	}
 
 	// ★ 이 시험의 심장 — 점유자 값이 **자기 줄 행과 같은 값**이다.
-	if lane.Holder.LastSignalAt == nil {
+	if rl.Holder.LastSignalAt == nil {
 		t.Fatalf("점유자의 마지막 신호가 비었다 — 같은 세션의 줄 행은 %v 를 내는데, "+
 			"사람이 회수를 판정할 두 숫자 중 하나가 화면에서 사라진다", sigA)
 	}
-	if !lane.Holder.LastSignalAt.Equal(sigA) {
+	if !rl.Holder.LastSignalAt.Equal(sigA) {
 		extra := ""
-		if lane.Holder.LastSignalAt.Equal(sigB) {
+		if rl.Holder.LastSignalAt.Equal(sigB) {
 			extra = " — 이것은 대기자의 신호다. 재사용이 엉뚱한 줄 행을 집었다"
 		}
 		t.Errorf("점유자의 마지막 신호가 %v 다(기대 %v — 자기 줄 행의 값)%s",
-			lane.Holder.LastSignalAt, sigA, extra)
+			rl.Holder.LastSignalAt, sigA, extra)
 	}
 }
 
