@@ -732,13 +732,14 @@ func TestLaneTurnRequiresEveryResourceOfTheRow(t *testing.T)
 ```go
 // laneTurnRow 는 이 세션 차례가 된 줄 행의 번호다. 0 이면 차례가 아니다.
 //
-// ★ **이 축은 과도기다 — 걷어낼 자리가 이미 정해져 있다**(항목
-// fd-lane-turn-machinery-is-dead-remove-it, 조율 2026-08-12 판단 01KZT2GKX2TR6W2AH6RZFKVEVD).
-// fd lane wait 가 서면 대기 세션은 턴을 안 끝내 처방을 끌어갈 Stop 이 없고, wait 를 안
-// 부르고 턴을 끝낸 세션은 라이프사이클 block(stage=lane-wait)이 잡는다 — lane-turn 처방이
-// 유용할 남은 갈래가 없다. 여기서 자원별로 고치는 것은 살려 쓰기가 아니라 그 항목이 걷을
-// 때까지 **거짓 통지를 안 내는 최소**다: project 전체 front 를 그대로 두면 자원 B 줄
-// 맨 앞에게 "네 차례다"를 낸다.
+// ★ **발화 0건은 기구 결함이 아니라 표본이다**(실측 2026-08-12, 항목
+// fd-lane-turn-machinery-is-dead-remove-it 의 판정 "안 지운다" — finish 세션 38건 중
+// 15건(39%)이 랜딩 줄에 안 섰고 done 196건에 landed_ref 0건. ρ=1.14% 가 실측 대기율
+// 1.06% 와 맞아, 대기 부재는 구조가 아니라 낮은 랜딩률의 결과다). 랜딩의 문(instructions·
+// pick 꼬리)과 라이프사이클 block 이 서면 이 축이 처음으로 표본을 갖는다.
+// wait 중인 세션에게는 이 처방이 안 뜬다(턴이 안 끝나 Stop 이 없다) — 이 축이 잡는 것은
+// wait 를 아직 안 부른(또는 타임아웃으로 나온) 세션의 턴 끝이고, block(stage=lane-wait)의
+// "줄에 서 있는데 안 쥠"보다 구체적인 신호("네 차례다")를 낸다.
 //
 // 차례의 정의가 자원 집합의 곱으로 넓어졌다(2026-08-12): 내 살아 있는 줄 행이 있고,
 // 그 행의 **모든** 자원에서 (맨 앞이 그 행) 그리고 (레인이 비었다).
@@ -1540,18 +1541,17 @@ const Instructions = "작업은 `pick`, 판단은 `note`, 끝나면 `finish`, �
 	b.WriteString("끝나면: finish → land 로 줄 서기 → 차례에 랜딩. 기다림은 `fd lane wait` 가 턴 안에서 잇는다.\n")
 ```
 
-`RenderLand` waiting 꼬리의 **lane-turn 두 문장을 통째로 교체한다** — 유지가 아니라 교체다
-(조율 2026-08-12, 판단 `01KZT2GKX2TR6W2AH6RZFKVEVD`: lane-turn 처방 기구는 항목
-`fd-lane-turn-machinery-is-dead-remove-it` 이 걷어낼 예정이라, 키 이름을 안내에 남기면
-걷은 뒤 거짓 문구가 된다):
+`RenderLand` waiting 꼬리 — **첫 문장(lane-turn 처방이 온다는 사실)은 유지하고 둘째 문장만
+교체한다**(lane-turn 기구는 실측 판정 "안 지운다"로 살았다 — 항목
+`fd-lane-turn-machinery-is-dead-remove-it` 참조. 둘째 문장의 "land 를 다시 불러 묻는 길"은
+이제 폴링을 손으로 하라는 낡은 안내라 wait 로 바꾼다):
 ```go
-		// ★ 교체다(2026-08-12). 여기 있던 두 문장은 lane-turn 처방 통로를 안내했는데,
-		// 그 기구는 걷어낼 자리가 정해졌다(fd-lane-turn-machinery-is-dead-remove-it).
-		// 대기의 통로는 이제 fd lane wait 하나다 — 취득의 정본이 land 인 것은 그대로다.
-		b.WriteString("`fd lane wait` 가 턴 안에서 차례까지 기다린다(취득은 land 가 트랜잭션 안에서 다시 판정한다).\n")
-		b.WriteString("턴을 끝내면 차례가 와도 못 받는다 — 기다림을 끊으려면 leave 로 줄에서 빠져라.\n")
+		b.WriteString("차례가 오면 처방이 턴 끝에 온다(Stop 훅이 끌어간다) — 키는 lane-turn 이고 그 줄 행 앞으로 한 번뿐이다.\n")
+		// ★ 둘째 문장 교체(2026-08-12): "land 를 다시 불러 묻는 길" 은 손 폴링 안내였다.
+		// 대기의 통로는 이제 fd lane wait 다 — 취득의 정본이 land 인 것은 그대로다.
+		b.WriteString("`fd lane wait` 가 턴 안에서 차례까지 기다린다(취득은 land 가 트랜잭션 안에서 다시 판정한다) — 기다림을 끊으려면 leave 다.\n")
 ```
-기존 그 두 문장을 단정하는 시험(grep `"lane-turn"` · `"land 를 다시 불러"` in `internal/mcpsrv/*_test.go`)을 찾아 함께 고친다.
+기존 둘째 문장을 단정하는 시험(grep `"land 를 다시 불러"` in `internal/mcpsrv/*_test.go`)을 찾아 함께 고친다.
 
 - [ ] **Step 3: 실행** — `go test ./internal/mcpsrv/ -count=1` PASS.
 
