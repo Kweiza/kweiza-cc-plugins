@@ -244,14 +244,20 @@ func containsStr(xs []string, s string) bool {
 //   land_seam_test.go 의 TestLandDegradeReasonsAreDistinct 가 순수 함수 쪽에서 가른다.
 //   여기서 재는 것은 그 판정이 **MCP 응답까지 건너오는가**이지 판정 자체가 아니다.
 //
-// ★ **그 "다 덮는다"를 잠그는 시험은 지금도 없다.** 아래 표를 mcpsrv.ToolNames() 와
-//   대조하는 자리가 이 패키지에 한 군데도 없다(cmd/fd 전체에 ToolNames·KnownTool·Tools
-//   호출이 0건이다) — 실측: alloc 행 하나를 지워도 이 시험이 초록으로 통과한다. label
-//   행은 항목 꼬리표 표면(Task 7)이 바로 이 주석을 읽고 손으로 찾아와 채웠다 — 도구가
-//   아홉이 되면 그 사람도 똑같이 손으로 찾아와야 한다. mcpsrv 의 TestToolTableIsEight
-//   는 그때 빨개지지만 그 빨간불은 **다른 패키지의 다른 사실**을 말하고, 그것을 고치는
-//   사람을 이 표로 데려오는 문장은 없다(api/errors.go 의 "그 수를 잠그는 시험은 없다",
-//   DESIGN.md 의 "이 수를 잠그는 시험은 없다"와 같은 부류의 결손이다).
+// ★ **그 "다 덮는다"는 이제 잠겨 있다** (2026-08-12). 같은 패키지의
+//   renderer_pairing_test.go 의 TestDegradeTableCoversEveryTool 이 아래 표를
+//   mcpsrv.ToolNames() 와 대조한다 — 이 함수 안의 []struct{…} 리터럴을 AST 로 읽어
+//   각 행의 첫 필드를 도구 이름으로 모으고, 빠진 도구가 있으면 빨개진다.
+//
+//   그 전까지 이 자리에 있던 문장은 이랬다: "그 대조를 하는 자리가 이 패키지에 한
+//   군데도 없다(cmd/fd 전체에 ToolNames·KnownTool·Tools 호출이 0건이다) — 실측:
+//   alloc 행 하나를 지워도 이 시험이 초록으로 통과한다." **그 실측은 이제 뒤집혔다** —
+//   alloc 행을 지우면 위 시험이 그 이름을 대며 빨개진다(같은 변이로 확인했다).
+//
+//   label 행은 항목 꼬리표 표면(2026-08-12)이 바로 이 주석을 읽고 손으로 찾아와 채웠다.
+//   도구가 아홉이 되는 사람은 이제 손으로 안 찾아와도 된다 — 시험이 데려온다.
+//   같은 부류의 남은 결손은 여전히 있다(api/errors.go 의 "그 수를 잠그는 시험은 없다",
+//   DESIGN.md 의 "이 수를 잠그는 시험은 없다").
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {

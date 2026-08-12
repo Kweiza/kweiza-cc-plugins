@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -47,11 +46,26 @@ func (s *Service) MoveItem(ctx context.Context, in MoveInput) (MoveResult, error
 	in.ItemID = strings.TrimSpace(in.ItemID)
 	in.To = strings.TrimSpace(in.To)
 
+	// ★ 입력 거절은 **RefusedError 여야 한다.** `api.ClassifyError` 는 화이트리스트라
+	// 평범한 error 는 어느 갈래에도 안 걸리고 500 `internal` + "서버 내부 오류다"가 된다 —
+	// 사람이 읽으라고 쓴 이 문구는 아무에게도 안 닿고 서버에는 ERROR 로그만 쌓인다.
+	// 인자를 안 준 것은 사용자 오류(400)이지 서버 결함이 아니다.
+	//
+	// 같은 부류의 선례: `api/land_resource_name_test.go` 가 자원 이름 오타에서 정확히
+	// 이 결함(500 으로 나가던 것)을 잡고 HTTP 레벨로 잠갔다.
 	if in.Project == "" {
-		return res, fmt.Errorf("프로젝트가 비었다")
+		return res, &RefusedError{
+			What:     "move",
+			Reason:   "프로젝트가 비었다",
+			Guidance: "요청 본문의 project 를 채워라. CLI 는 `.flightdeck.yaml` 의 프로젝트를 자동으로 싣는다.",
+		}
 	}
 	if in.ItemID == "" {
-		return res, fmt.Errorf("옮길 항목 id 가 비었다")
+		return res, &RefusedError{
+			What:     "move",
+			Reason:   "옮길 항목 id 가 비었다",
+			Guidance: "옮길 항목 id 를 줘라: `fd move <item-id> --project <대상>`",
+		}
 	}
 
 	cross, err := s.st.MoveItem(ctx, in.Project, in.ItemID, in.To, in.SessionID)

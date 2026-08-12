@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -56,11 +55,22 @@ func (s *Service) SetLabels(ctx context.Context, in LabelInput) (LabelResult, er
 	in.Project = strings.TrimSpace(in.Project)
 	in.ItemID = strings.TrimSpace(in.ItemID)
 
+	// ★ 이 둘도 RefusedError 다. 아래 빈-요청 거절이 먼저 그렇게 고쳐졌고(2026-08-12 최종 리뷰),
+	// 그때 이 둘은 "move·cut_after 와 같은 선례라"는 이유로 남겼다 — **그 선례가 결함이었다.**
+	// 셋 다 같은 화이트리스트(api.ClassifyError)를 못 타고 500 으로 나가던 것이다.
 	if in.Project == "" {
-		return res, errors.New("프로젝트가 비었다")
+		return res, &RefusedError{
+			What:     "label",
+			Reason:   "프로젝트가 비었다",
+			Guidance: "요청 본문의 project 를 채워라. CLI 는 `.flightdeck.yaml` 의 프로젝트를 자동으로 싣는다.",
+		}
 	}
 	if in.ItemID == "" {
-		return res, errors.New("꼬리표를 고칠 항목 id 가 비었다")
+		return res, &RefusedError{
+			What:     "label",
+			Reason:   "꼬리표를 고칠 항목 id 가 비었다",
+			Guidance: "꼬리표를 고칠 항목 id 를 줘라: `fd label <item-id> --add/--rm <꼬리표>`",
+		}
 	}
 	// ★ 빈 요청을 **쓰기 전에** 거절한다. 서버까지 갔다 와도 같은 결론이지만, 그
 	// 왕복은 오프라인에서 아웃박스에 쌓이는 쓰기가 된다(runAfterCut 이 축 수를

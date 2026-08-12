@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/kweiza/flightdeck/internal/model"
@@ -54,11 +53,25 @@ func (s *Service) CutAfter(ctx context.Context, in CutAfterInput) (CutAfterResul
 
 	// ★ 좌표가 비면 **내려가기 전에** 거절한다. 빈 항목 id 로 내려가면 "그런 선행이 없다"(404)가
 	// 나가는데 진짜 사유는 인자를 안 준 것이고, 그러면 사람은 dep 이름을 의심하러 간다.
+	//
+	// ★ 그리고 그 거절은 **RefusedError 여야 한다.** `api.ClassifyError` 는 화이트리스트라
+	// 평범한 error 는 어느 갈래에도 안 걸리고 500 `internal` 이 된다 — 위 문단이 애써 만든
+	// "진짜 사유"가 정작 화면에서는 "서버 내부 오류다"로 바뀐다. 404 로 오도되는 것을 막으려다
+	// 500 으로 오도하면 고친 것이 없다.
 	if in.Project == "" {
-		return res, fmt.Errorf("프로젝트가 비었다")
+		return res, &RefusedError{
+			What:     "after cut",
+			Reason:   "프로젝트가 비었다",
+			Guidance: "요청 본문의 project 를 채워라. CLI 는 `.flightdeck.yaml` 의 프로젝트를 자동으로 싣는다.",
+		}
 	}
 	if in.ItemID == "" {
-		return res, fmt.Errorf("선행을 끊을 항목 id 가 비었다")
+		return res, &RefusedError{
+			What:   "after cut",
+			Reason: "선행을 끊을 항목 id 가 비었다",
+			Guidance: "선행을 끊을 항목 id 를 줘라: `fd after cut <item-id> --item <dep>`. " +
+				"지금 무엇이 걸려 있는지는 `fd pick <item-id>` 의 항목 절이 낸다.",
+		}
 	}
 
 	if err := s.st.RemoveAfter(ctx, in.Project, in.ItemID, in.Dep, in.SessionID); err != nil {
