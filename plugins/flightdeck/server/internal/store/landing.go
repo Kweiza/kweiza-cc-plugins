@@ -442,9 +442,12 @@ func (s *Store) ListLandingQueue(ctx context.Context, project string) ([]model.L
 // ListLandingQueue 는 트랜잭션 안에서 줄을 읽는다.
 // 정렬은 Store 짝과 같다(순번 = 오래된 순) — 질의를 자유 함수 하나로 공유한다.
 //
-// ★ 이 순서에 **분기하는** 호출자가 실제로 있다: service 의 lanePosition 이 이 슬라이스를
-// 훑으며 `pos = i + 1` 로 자기 자리를 센다. 순서가 곧 대답이라 뒤집으면 순번이 거짓이 된다.
-// 다만 **이 짝을 직접 통과하는 순서 시험은 없다**(형제
+// ★ 이 순서에 **분기하는** 호출자가 실제로 있다: service 의 resourcePosition(옛 lanePosition,
+// Task 3 이 자원별 순번으로 대체했다)이 이 슬라이스를 훑으며 자원이 일치하는 행만 세는
+// 러닝 카운터로 자기 자리를 센다(`pos++` 뒤 `r.ID == rowID` 면 그 값을 낸다 — 옛
+// `pos = i + 1`처럼 인덱스를 그대로 쓰지 않는 이유는 같은 줄에 다른 자원의 행이 섞여
+// 있어 인덱스와 "그 자원 안에서의 순번"이 갈리기 때문이다). 순서가 곧 대답이라 뒤집으면
+// 순번이 거짓이 된다. 다만 **이 짝을 직접 통과하는 순서 시험은 없다**(형제
 // TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction 은 가시성만 본다).
 // 질의가 한 벌이라 Store 짝의 순서 시험이 같은 ORDER BY 를 덮을 뿐이다.
 //
