@@ -856,6 +856,18 @@ func TestLoginRoundTripBehindPathPrefix(t *testing.T) {
 	svc := service.New(st, quiet)
 
 	opt := serveAPIOptions(token, 0, quiet, false, nil, nil)
+	// ★ **루프백 면제를 끈다.** httptest 서버는 언제나 127.0.0.1 이고 프록시도 같은
+	// 머신이라, 끄지 않으면 업스트림이 보는 RemoteAddr 이 루프백이라 인증 게이트가
+	// 통째로 건너뛰어진다 — 첫 방문이 401 이 아니라 **200** 이 되고, 그러면 이 시험은
+	// 로그인을 한 번도 안 거치고 초록이 된다(실측). 재려는 것이 로그인 왕복인데
+	// 로그인이 아예 안 일어나는 것이 가장 나쁜 초록이다.
+	//
+	// ★ 이 한 줄이 가리키는 더 큰 축이 있다. `serveAPIOptions` 는 이 필드를 한 번도
+	// 세팅하지 않아서 **운영 배포의 면제는 항상 켜져 있고 끌 길이 없다.** 판정은
+	// RemoteAddr 이므로 같은 호스트의 리버스 프록시 뒤에서는 실제 배포도 루프백으로
+	// 보인다. 그 축은 이 항목의 범위가 아니라 별도로 다룬다 — 여기서는 이 시험이
+	// **인증이 실제로 켜진 서버**를 재게 만드는 것이 전부다.
+	opt.RequireTokenOnLoopback = true
 	upstream := httptest.NewServer(buildHandler(svc, web.New(svc, web.WithLogger(quiet)), opt))
 	t.Cleanup(upstream.Close)
 
@@ -869,8 +881,18 @@ func TestLoginRoundTripBehindPathPrefix(t *testing.T) {
 	client := &http.Client{Jar: jar}
 
 	// ① 접두 뒤 첫 방문 — 폼이 떠야 한다.
+	//
+	// ★ Accept 를 손으로 싣는다. 브라우저는 언제나 보내고, 이 서버는 그 헤더로
+	// HTML 폼과 JSON 401 을 가른다(JudgeLoginScreen). 안 실으면 401 은 오는데
+	// 폼이 아니라 JSON 이 와서 이 시험이 폼을 못 찾는다 — Go 의 http.Client 는
+	// Accept 를 자동으로 안 붙이므로 브라우저를 흉내내려면 이 줄이 필요하다.
 	docURL := proxy.URL + prefix + "/"
-	resp, err := client.Get(docURL)
+	req0, err := http.NewRequest(http.MethodGet, docURL, nil)
+	if err != nil {
+		t.Fatalf("첫 방문 요청을 못 만들었다: %v", err)
+	}
+	req0.Header.Set("Accept", "text/html")
+	resp, err := client.Do(req0)
 	if err != nil {
 		t.Fatalf("첫 방문 실패: %v", err)
 	}
@@ -1129,6 +1151,212 @@ playwright MCP 가 이 세션에 붙어 있어야 한다. 안 붙어 있으면 �
 - [ ] **Step 4: 스펙 §11 의 열린 위험을 닫는다**
 
 Task 5 에서 출처 대조(`JudgeScreenOrigin`)가 프록시 뒤에서 어떻게 됐는지가 그때 드러났을 것이다. 안 깨졌으면 **그 사실 자체를 판단에 적는다** — 다음 사람이 같은 의심을 다시 하지 않도록. 깨졌으면 이미 사람의 판단을 받았을 것이고, 그 결과를 적는다.
+
+---
+
+### Task 9: 루프백 면제를 끌 스위치
+
+★ **실행 순서: 이 태스크를 Task 6 보다 먼저 돈다.** 코드 변경이라 관문(Task 7)과 브라우저(Task 8) 앞에 와야 한다. 번호가 뒤인 것은 계획이 실행 중에 자란 흔적일 뿐이다.
+
+★ **이것은 리다이렉트 축이 아니다.** Task 5 를 만들다 드러난 인접 결함이고, 사람이 "이 브랜치에서 함께 고친다"고 판단했다. 스펙 §12 를 읽어라.
+
+**Files:**
+- Modify: `plugins/flightdeck/server/cmd/fd/serve.go` (플래그 추가 · `serveAPIOptions` 시그니처 · 전달)
+- Modify: `plugins/flightdeck/server/internal/api/handlers_meta.go` (`AuthNotice` 의 `Observed` 갈래)
+- Modify: `plugins/flightdeck/server/internal/api/pure_test.go` (문구 시험 추가)
+- Modify: `plugins/flightdeck/server/cmd/fd/auth_reach_test.go` (배선 시험 추가 + 호출부)
+- Modify: 호출부만 고칠 파일 넷 — `cmd/fd/ledgerbackup_test.go:242,246` · `cmd/fd/selfwatch_wiring_test.go:115,132` · `cmd/fd/serve_test.go:359` · `cmd/fd/proxy_prefix_login_test.go:88`
+
+**Interfaces:**
+- Consumes: `api.Options.RequireTokenOnLoopback bool` (이미 존재 — `internal/api/api.go:38`)
+- Produces: `serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool, watcher *selfWatcher, ledgerJob *ledgerBackupJob, requireTokenOnLoopback bool) api.Options` — **인자가 하나 늘어난다. 끝에 붙인다.**
+
+- [ ] **Step 1: 배선 시험을 쓴다 (실패한다 — 인자가 아직 없다)**
+
+`plugins/flightdeck/server/cmd/fd/auth_reach_test.go` 끝에 더한다:
+
+```go
+// TestServeAPIOptionsCarriesLoopbackSwitch 는 스위치가 실제로 옵션에 실리는지 본다.
+//
+// ★ 이 축이 안 잠기면 스위치가 **조용히 죽는다.** 운영자가 -require-token-on-loopback 을
+// 켰는데 아무 일도 안 일어나고, 그 사실이 증상으로 안 드러난다 — 면제는 원래 눈에 안
+// 보이고, 안 걸리는 것과 안 열린 것이 화면에서 같기 때문이다.
+func TestServeAPIOptionsCarriesLoopbackSwitch(t *testing.T) {
+	if serveAPIOptions("tok", 60, quietLogger(), false, nil, nil, false).RequireTokenOnLoopback {
+		t.Error("기본값이 참이다 — 로컬 루프백으로 토큰 없이 붙던 세션이 전부 깨진다")
+	}
+	if !serveAPIOptions("tok", 60, quietLogger(), false, nil, nil, true).RequireTokenOnLoopback {
+		t.Error("스위치를 켰는데 옵션에 안 실렸다 — 플래그가 조용히 죽는다")
+	}
+}
+```
+
+- [ ] **Step 2: 시험이 컴파일 실패하는지 확인한다**
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
+go vet ./cmd/fd/
+```
+
+기대: `too many arguments in call to serveAPIOptions`
+
+- [ ] **Step 3: 시그니처와 플래그를 넣는다**
+
+`plugins/flightdeck/server/cmd/fd/serve.go` 의 `serveAPIOptions` 선언에 인자를 **끝에** 더한다:
+
+```go
+func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool,
+	watcher *selfWatcher, ledgerJob *ledgerBackupJob, requireTokenOnLoopback bool) api.Options {
+	opt := api.Options{
+		Token:         token,
+		RatePerMinute: ratePerMinute,
+		Log:           log,
+		InContainer:   inContainer,
+		// ★ 기본값(false)이 설계의 기본 동작이다 — 그것을 여기서 바꾸지 않는다.
+		// 이 필드가 배선을 타야 하는 이유는 아래 플래그 주석에 있다.
+		RequireTokenOnLoopback: requireTokenOnLoopback,
+```
+
+(나머지 필드는 그대로 둔다. `RequireTokenOnLoopback` 을 `InContainer` 다음 줄에 넣는다.)
+
+같은 파일 `runServe` 의 플래그 블록, `rate` 줄 **다음에** 더한다:
+
+```go
+	// ★ 루프백 면제를 끄는 스위치다. **기본값은 면제 열림이고 그것을 안 바꾼다** —
+	// 로컬 루프백으로 토큰 없이 붙는 세션이 이 제품의 정상 사용이라, 기본값을 뒤집으면
+	// 그것들이 한꺼번에 전부 깨진다.
+	//
+	// ★ 이 플래그가 필요한 자리는 **리버스 프록시가 같은 호스트에 있는 배포**다.
+	// 면제 판정은 RemoteAddr 이므로(auth.go 의 IsLoopback) 그 프록시를 거친 요청이
+	// 전부 127.0.0.1 로 도착한다 — 토큰을 켜 뒀는데 바깥에서 오는 요청 전부가
+	// 무인증으로 통과한다. 컨테이너 배포는 해당 없다: 브리지 게이트웨이가 172.x 라
+	// 루프백으로 안 보인다(login.go 가 그 사실을 이미 적어 뒀다).
+	//
+	// ★ 환경변수를 안 만든다. 이 저장소의 불리언 설정은 전부 플래그이고
+	// (migrate.go·project.go), 불리언 환경변수는 선례가 없다. 한 축을 위해 새 관례를
+	// 만들면 다음 사람이 어느 쪽이 규칙인지 모른다.
+	requireTokenOnLoopback := fs.Bool("require-token-on-loopback", false,
+		"루프백 요청에도 토큰을 요구한다(리버스 프록시가 같은 호스트에 있으면 켜라)")
+```
+
+그리고 같은 파일의 `handler := buildHandler(...)` 줄에서 새 인자를 넘긴다:
+
+```go
+	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher, ledgerJob, *requireTokenOnLoopback))
+```
+
+- [ ] **Step 4: 호출부 여섯을 고친다**
+
+컴파일러가 전부 잡아 준다. 각 자리에 `, false` 를 **마지막 인자로** 더한다:
+
+- `cmd/fd/ledgerbackup_test.go:242` · `:246`
+- `cmd/fd/selfwatch_wiring_test.go:115` · `:132`
+- `cmd/fd/auth_reach_test.go:71` · `:75`
+- `cmd/fd/serve_test.go:359`
+- `cmd/fd/proxy_prefix_login_test.go:88`
+
+★ `proxy_prefix_login_test.go:88` 은 **바로 다음 줄에서 `opt.RequireTokenOnLoopback = true` 로 덮어쓴다.** 그 줄과 위 주석을 지우지 마라 — 인자로 `true` 를 넘기도록 바꾸지도 마라. 그 시험이 면제를 끄는 이유는 배선 축이 아니라 "이 시험은 인증이 켜진 서버를 잰다"이고, 그 근거가 거기 주석에 있다.
+
+- [ ] **Step 5: 시험이 통과하는지 확인한다**
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
+gofmt -l .
+go vet ./...
+go test ./cmd/fd/ -count=1
+```
+
+기대: 무출력 둘, 시험 `ok`
+
+- [ ] **Step 6: `/healthz` 문구를 보강한다 (실패하는 시험 먼저)**
+
+`plugins/flightdeck/server/internal/api/pure_test.go` 끝에 더한다:
+
+```go
+// TestAuthNoticeWarnsAboutSameHostProxy 는 면제가 **실제로 열린** 갈래가 리버스 프록시를
+// 함께 경고하는지 본다.
+//
+// ★ 관측은 이미 있었다 — loopback_open 이 그 상태를 정확히 낸다. 없던 것은 **연결**이다.
+// 같은 호스트 프록시 뒤에서 그 값이 참이 되는데, 운영자가 그 사실을 프록시와 잇지
+// 못하면 "내 서버는 루프백으로 아무도 안 치는데 왜 열렸다고 하지"로 읽고 넘긴다.
+func TestAuthNoticeWarnsAboutSameHostProxy(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: true})
+	for _, want := range []string{"리버스 프록시", "require-token-on-loopback"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("문구에 %q 가 없다 — 운영자가 loopback_open 을 프록시와 못 잇는다: %s", want, n)
+		}
+	}
+}
+```
+
+돌려서 빨간 것을 본다:
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
+go test ./internal/api/ -run TestAuthNoticeWarnsAboutSameHostProxy -count=1
+```
+
+기대: FAIL — 문구에 그 낱말들이 없다
+
+- [ ] **Step 7: 문구를 고친다**
+
+`plugins/flightdeck/server/internal/api/handlers_meta.go` 의 `AuthNotice` 에서 `case reach.Observed:` 갈래를 바꾼다:
+
+```go
+	case reach.Observed:
+		// ★ **리버스 프록시를 함께 경고한다.** 면제 판정은 RemoteAddr 이라, 프록시가 같은
+		// 호스트에 있으면 그것을 거친 요청 전부가 127.0.0.1 로 도착해 이 면제를 받는다 —
+		// 토큰을 켜 뒀는데 바깥에서 오는 요청이 전부 무인증으로 통과하는 상태다.
+		// 관측은 원래 있었고(loopback_open) 없던 것은 이 연결이다: 그 값을 프록시와 못 이으면
+		// "루프백으로 아무도 안 치는데 왜 열렸다지"로 읽고 넘긴다.
+		return "토큰이 설정돼 있다. 루프백 요청만 토큰 없이 통과한다 — " +
+			"리버스 프록시가 같은 호스트에 있으면 그것을 거친 요청 전부가 여기에 해당한다. " +
+			"그 배포라면 -require-token-on-loopback 으로 면제를 꺼라"
+```
+
+- [ ] **Step 8: 관문을 돌린다**
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
+gofmt -l .
+go vet ./...
+go test ./internal/... ./cmd/fd/ -count=1
+```
+
+기대: 무출력 둘, 시험 전부 `ok`
+
+★ 기존 `AuthNotice` 시험 넷(`pure_test.go:338,377,392,404,419`)이 함께 초록이어야 한다. 그중 하나라도 빨개지면 문구를 고치면서 다른 갈래를 건드린 것이다 — 그 갈래들은 각각 실물 사고에서 나온 문장이라 지우면 안 된다.
+
+- [ ] **Step 9: 커밋한다**
+
+```bash
+cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix
+git add plugins/flightdeck/server/cmd/fd/ plugins/flightdeck/server/internal/api/
+git status --short
+git commit -F - <<'EOF'
+feat(flightdeck): 루프백 면제를 끌 스위치를 단다 — 같은 호스트 프록시가 그것을 받는다
+
+접두 프록시 뒤 왕복 시험을 만들다 드러났다. 면제 판정은 RemoteAddr 이라
+리버스 프록시가 같은 호스트에 있으면 그것을 거친 요청이 전부 127.0.0.1 로
+도착한다 — 토큰을 켜 뒀는데 바깥에서 오는 요청 전부가 무인증으로 통과한다.
+
+serveAPIOptions 는 RequireTokenOnLoopback 을 한 번도 세팅하지 않았다. 그 필드를
+쓰는 자리가 저장소 전체에서 harness_test.go 하나, 즉 시험뿐이었다. 운영자가
+끌 길이 없었다는 뜻이다.
+
+**기본값은 안 바꾼다.** 로컬 루프백으로 토큰 없이 붙는 세션이 이 제품의 정상
+사용이라, 기본값을 뒤집으면 그것들이 한꺼번에 전부 깨진다. 명시적 스위치만 단다.
+
+관측은 원래 있었다 — /healthz 의 loopback_open 이 그 상태를 정확히 냈다.
+없던 것은 연결이라, AuthNotice 의 그 갈래가 이제 프록시를 함께 경고한다.
+그 값을 프록시와 못 이으면 "루프백으로 아무도 안 치는데 왜 열렸다지"로 읽는다.
+
+환경변수는 안 만들었다. 이 저장소의 불리언 설정은 전부 플래그이고 불리언
+환경변수는 선례가 없다 — 한 축을 위해 새 관례를 만들지 않는다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+```
 
 ---
 
