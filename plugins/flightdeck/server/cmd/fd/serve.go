@@ -214,8 +214,6 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 		}
 	}()
 
-	noteBuild(context.Background(), st, log)
-
 	svc := service.New(st, log)
 	token := envOr(env, "FD_TOKEN", "")
 	webH := web.New(svc, web.WithLogger(log))
@@ -240,6 +238,14 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 			"error", lerr.Error(), "reason", PortAdvice(*addr, lerr))
 		return 1
 	}
+
+	// ★ **바인드 성공 뒤다.** 리스너가 열리기 전에 적으면 포트를 이미 물린 기동도
+	// 배포로 남고, 그러면 LastDeployAt 이 한 번도 응답한 적 없는 바이너리의 시각을 낸다.
+	// 이 순서가 계약이라 시험이 실물로 잠근다(TestServeSkipsDeployNoteWhenBindFails).
+	//
+	// ★ ctx 가 아니라 Background 를 준다 — 관측은 신호 컨텍스트의 수명과 무관하고,
+	// SIGTERM 이 방금 왔다고 배포 관측이 잘려서는 안 된다.
+	noteBuild(context.Background(), st, log)
 
 	// ★ 판단 원장 주기 백업(설계 §7). serve 가 소유하는 티커다 — selfwatch 와 같은 모양이고,
 	//   이 프로세스가 이미 그 DB 를 쥐고 있어 여는 쪽을 한 벌 더 만들 이유가 없다.
