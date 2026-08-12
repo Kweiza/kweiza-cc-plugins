@@ -4,6 +4,8 @@
 --   표현할 수 없고, 기존 행 백필을 UPDATE 로 하면 파괴적 조작(opUpdateSet)으로
 --   마이그레이션 가드에 걸린다 — INSERT … SELECT 는 가산이라 통과한다
 --   (migrate_guard_test.go 의 판정. 실측 2026-08-12).
+--   ★ 정정(실측 2026-08-12): 위 "가산이라 통과한다"는 틀렸다 — opInsertSelect 정규식이 이 문을 잡고,
+--     destructiveExempt[8](migrate_guard_test.go)의 사유 있는 예외 등록이 있어야 통과한다.
 --
 -- ★ 세션당 살아 있는 줄 행 1개(landing_queue_one_live_per_session)는 그대로다.
 --   "자원 A 를 쥔 채 자원 B 를 기다린다"가 성립하지 않아 순환대기의 전제가 사라진다.
