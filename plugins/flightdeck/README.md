@@ -72,7 +72,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PostToolUse`(Edit\|Write) 훅 | `tool` 신호 + **미커밋 발자국** — 경로 겹침 축의 유일한 원천 |
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
-| MCP 도구 7개 | `board` `pick` `note` `add` `finish` `alloc` `land` |
+| MCP 도구 8개 | `board` `pick` `note` `add` `finish` `alloc` `land` `label` |
 | 스킬 4개 | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 `bin/fd` 는 셸 런처다. 첫 훅이 `server/` 를 빌드해 `~/.cache/flightdeck/bin` 에 **소스 트리별로** 캐시한다 —
