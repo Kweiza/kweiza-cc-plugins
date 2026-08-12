@@ -72,15 +72,19 @@ type Option func(*builder)
 type builder struct {
 	projectID   string
 	projectPath string
-	worktree    string
-	machineID   string
-	getenv      func(string) (string, bool)
-	cwd         string
-	cwdErr      error
-	hostname    string
-	hostErr     error
-	now         func() time.Time
-	beaconDir   string
+	// projectSet 은 WithProject 가 **불렸는가**다. 값이 비었는가와 다른 질문이다 —
+	// 진입점이 "좌표를 못 풀었다"고 말하는 유일한 방법이 빈 값을 주는 것이라,
+	// 이 축이 없으면 그 말이 "아무 말도 안 했다"와 같게 접힌다(WithProject 주석).
+	projectSet bool
+	worktree   string
+	machineID  string
+	getenv     func(string) (string, bool)
+	cwd        string
+	cwdErr     error
+	hostname   string
+	hostErr    error
+	now        func() time.Time
+	beaconDir  string
 }
 
 // WithEnv 는 환경 조회를 바꾼다. nil 은 무시한다.
@@ -162,11 +166,28 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	// 이 레포는 알림 축에서 그것을 한 번 겪었고 한쪽만 고쳐 조용히 어긋났다.
 	//
 	// 주입이 없으면(이 패키지를 단독으로 쓰는 경우) 옛 규칙으로 떨어지되 **그 사실을 남긴다.**
-	if b.projectID != "" {
+	//
+	// ★ **가르는 것은 값이 아니라 「불렸는가」다.** 앞선 판은 `if b.projectID != ""` 였고,
+	// 그것이 진입점의 고침을 한 줄에서 통째로 무효화했다 — 진입점은 git 을 못 읽으면 프로젝트
+	// id 를 **일부러 비워** 보내는데(cmd/fd 의 resolveProject: "지어내지 않는다"), 그 빈 값이
+	// 여기서 "주입이 아예 없다"와 같게 접혀 옛 폴백이 **같은 이름을 다시 지어냈다.**
+	// 실측: WithProject("", "…/wt") → ProjectID="wt". 그리고 조용했다 — 붙는 경고가
+	// "워크트리에서는 주 저장소와 다를 수 있다"라 **git 을 못 읽었다는 말을 안 한다.**
+	//
+	// 두 상태는 요구가 정반대다. 「안 불렸다」는 이 패키지가 스스로 풀어야 하는 자리이고,
+	// 「불렸는데 비었다」는 **호출자가 모른다고 답한 것**이라 우리가 대신 답하면 안 된다.
+	if b.projectSet {
 		id.ProjectID, id.ProjectPath = b.projectID, b.projectPath
 	} else if id.ProjectID != "" {
 		id.Warnings = append(id.Warnings,
 			"프로젝트 좌표를 경로의 마지막 성분으로 정했다 — 워크트리에서는 주 저장소와 다를 수 있다")
+	}
+	// ★ 결손 판정은 **주입을 반영한 뒤** 다시 내린다. ResolveIdentity 가 매긴 것은 폴백 기준의
+	// 답이라, 주입이 그 값을 비우거나(위) 반대로 채운 경우 둘 다 낡는다. 이 축이 낡으면
+	// Banner 가 "관측되지 않은 축"을 틀리게 말하고, 그 배너는 모든 도구 응답 꼬리에 붙는다.
+	id.Missing = withoutAxis(id.Missing, axisProject)
+	if id.ProjectID == "" {
+		id.Missing = append(id.Missing, axisProject)
 	}
 
 	// 워크트리도 **주입이 이긴다.** 프로젝트 축과 같은 규율이고, 안 넣었다가 같은 사고를 겪었다.
@@ -1108,8 +1129,12 @@ func (s *Server) currentSession() string {
 //
 // 진입점이 git 으로 이미 푼 값을 그대로 쓴다 — 이 패키지가 다시 풀면 규칙이 두 벌이 되고,
 // 두 벌은 반드시 표류한다. 워크트리에서 실제로 그렇게 갈렸다.
+// ★ **빈 id 를 주는 것은 "안 주는 것"과 다르다.** 진입점이 git 을 못 읽었을 때 그 사실을
+// 이 계층에 전하는 방법이 그것뿐이라, 이 옵션은 값과 별개로 **불렸다는 사실**을 기록한다.
+// 시그니처를 안 바꾸는 이유도 그것이다 — 호출부(cmd/fd 의 mcp.go)는 이미 옳은 값을 넘기고
+// 있었고, 갈리던 것은 이 계층의 해석 하나였다.
 func WithProject(id, path string) Option {
-	return func(b *builder) { b.projectID, b.projectPath = id, path }
+	return func(b *builder) { b.projectID, b.projectPath, b.projectSet = id, path, true }
 }
 
 // WithMachine 은 머신 id 를 **주입**한다. WithProject 와 같은 자리, 같은 이유다.
