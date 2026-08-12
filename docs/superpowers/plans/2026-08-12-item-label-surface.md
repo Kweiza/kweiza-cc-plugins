@@ -490,6 +490,27 @@ func TestSetLabelsWritesLedgerWithBeforeAndAfter(t *testing.T) {
 		if e.SessionID != "sess" {
 			t.Errorf("이벤트의 세션이 %q 다 — sess 여야 한다", e.SessionID)
 		}
+		// ★ **페이로드를 푼다.** Kind 와 SessionID 만 보면 LogEvent 에서 before 키가
+		// 사라져도 이 시험이 조용히 통과한다 — 그런데 before 야말로 이 표면이 메우려던
+		// 공백이다(사고 당시 원장의 흔적은 판단 하나뿐이었다). 이름이 …WithBeforeAndAfter
+		// 인 시험이 before·after 를 안 재면 그 이름이 거짓이다.
+		var payload struct {
+			Item   string   `json:"item"`
+			Before []string `json:"before"`
+			After  []string `json:"after"`
+		}
+		if uerr := json.Unmarshal([]byte(e.Payload), &payload); uerr != nil {
+			t.Fatalf("이벤트 페이로드를 못 읽었다: %v (원문 %q)", uerr, e.Payload)
+		}
+		if got := strings.Join(payload.Before, ","); got != "a" {
+			t.Errorf("원장의 before 가 %q 다 — a 여야 한다", got)
+		}
+		if got := strings.Join(payload.After, ","); got != "tickler" {
+			t.Errorf("원장의 after 가 %q 다 — tickler 여야 한다", got)
+		}
+		if payload.Item != "it" {
+			t.Errorf("원장의 item 이 %q 다 — it 여야 한다", payload.Item)
+		}
 	}
 	if !found {
 		t.Errorf("원장에 item.label 이 없다 — 이 표면이 메우려던 공백이 그대로 남는다(사고 당시 흔적은 판단 하나뿐이었다)")
@@ -604,8 +625,10 @@ feat(store): 항목 꼬리표를 고치는 쓰기 하나 — 원장에 before·a
 쪽뿐이다. API 로 올려 보내면 원장의 정확성이 응답 왕복에 의존한다. RemoveAfter 가
 item.after.cut 을 store 에 둔 이유와 같다.
 
-종료된 항목은 ItemClosedError 로 거절한다. tickler 의 유일한 판정 소비자는 굶김
-축이고 그 축은 열린 항목만 본다.
+종료 상태는 여기서 안 본다 — 그 거절은 service 가 RefusedError 로 한다.
+ItemClosedError 는 State·Want 를 담는 상태 전이용이라 꼬리표 수정에는 Want 에
+넣을 값이 없고, 현재 상태를 넣으면 "이미 done 다 — done 로 되돌릴 수 없다"가
+사용자에게 나간다. 검사는 여전히 같은 트랜잭션 안이다.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
