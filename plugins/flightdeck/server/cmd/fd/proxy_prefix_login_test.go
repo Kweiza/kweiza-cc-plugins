@@ -85,7 +85,7 @@ func TestLoginRoundTripBehindPathPrefix(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	svc := service.New(st, quiet)
 
-	opt := serveAPIOptions(token, 0, quiet, false, nil, nil)
+	opt := serveAPIOptions(token, 0, quiet, false, nil, nil, false)
 	// ★ **루프백 면제를 끈다.** httptest 서버는 언제나 127.0.0.1 이고 프록시도 같은
 	// 머신이라, 끄지 않으면 업스트림이 보는 RemoteAddr 이 루프백이라 인증 게이트가
 	// 통째로 건너뛰어진다 — 첫 방문이 401 이 아니라 **200** 이 되고, 그러면 이 시험은

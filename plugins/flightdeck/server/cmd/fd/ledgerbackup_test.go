@@ -239,11 +239,11 @@ func TestLedgerBackupJobRemembersItsLastTick(t *testing.T) {
 
 // 배선이 실제로 걸린다 — 잡이 nil 이면 콜백을 안 달고, 있으면 그 값이 온다.
 func TestServeAPIOptionsWiresLedgerBackup(t *testing.T) {
-	if serveAPIOptions("tok", 60, quietLog(), false, nil, nil).LedgerBackup != nil {
+	if serveAPIOptions("tok", 60, quietLog(), false, nil, nil, false).LedgerBackup != nil {
 		t.Error("잡이 없는데 콜백이 달렸다 — api 가 '배선 안 됨'을 못 말하게 된다")
 	}
 	j := newLedgerBackupJob(quietLog(), nil, "/ledger", time.Hour)
-	opt := serveAPIOptions("tok", 60, quietLog(), false, nil, j)
+	opt := serveAPIOptions("tok", 60, quietLog(), false, nil, j, false)
 	if opt.LedgerBackup == nil {
 		t.Fatal("잡이 있는데 콜백이 안 달렸다 — /healthz 가 이 축을 영영 못 낸다")
 	}

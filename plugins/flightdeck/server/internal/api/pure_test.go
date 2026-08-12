@@ -793,6 +793,21 @@ func TestJudgeNextFrom(t *testing.T) {
 	}
 }
 
+// TestAuthNoticeWarnsAboutSameHostProxy 는 면제가 **실제로 열린** 갈래가 리버스 프록시를
+// 함께 경고하는지 본다.
+//
+// ★ 관측은 이미 있었다 — loopback_open 이 그 상태를 정확히 낸다. 없던 것은 **연결**이다.
+// 같은 호스트 프록시 뒤에서 그 값이 참이 되는데, 운영자가 그 사실을 프록시와 잇지
+// 못하면 "내 서버는 루프백으로 아무도 안 치는데 왜 열렸다고 하지"로 읽고 넘긴다.
+func TestAuthNoticeWarnsAboutSameHostProxy(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: true})
+	for _, want := range []string{"리버스 프록시", "require-token-on-loopback"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("문구에 %q 가 없다 — 운영자가 loopback_open 을 프록시와 못 잇는다: %s", want, n)
+		}
+	}
+}
+
 func TestJudgePreSessionPath(t *testing.T) {
 	cases := map[string]bool{
 		"/login":  true,

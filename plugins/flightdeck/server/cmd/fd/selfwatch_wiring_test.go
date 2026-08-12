@@ -112,7 +112,7 @@ func TestServeAPIOptionsCarriesTheWatcherStatus(t *testing.T) {
 		t.Skipf("이 배치는 감시를 아예 안 켠다(%s) — 나르기는 그 뒤의 축이다", st.Reason)
 	}
 
-	opt := serveAPIOptions("tok", 60, quietLogger(), false, w, nil)
+	opt := serveAPIOptions("tok", 60, quietLogger(), false, w, nil, false)
 	if opt.SelfUpdate == nil {
 		t.Fatal("감시기를 줬는데 조립이 self_update 콜백을 안 달았다 — /healthz 에서 그 절이 통째로 빠진다")
 	}
@@ -129,7 +129,7 @@ func TestServeAPIOptionsCarriesTheWatcherStatus(t *testing.T) {
 	// ★ 이것이 없으면 위 단정은 "늘 콜백을 단다"로도 통과한다. 그리고 nil 감시기에 콜백을
 	// 달면 부르는 순간 패닉이고, api 는 "감시기가 없다"와 "감시기가 빈 값을 답한다"를
 	// 가를 근거를 잃는다(handlers_meta.go 는 SelfUpdate 가 nil 이면 그 절을 통째로 뺀다).
-	if serveAPIOptions("tok", 60, quietLogger(), false, nil, nil).SelfUpdate != nil {
+	if serveAPIOptions("tok", 60, quietLogger(), false, nil, nil, false).SelfUpdate != nil {
 		t.Fatal("감시기가 nil 인데 콜백을 달았다 — 부르면 패닉이고, api 가 그 절을 뺄 근거를 잃는다")
 	}
 }
