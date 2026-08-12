@@ -53,8 +53,9 @@ func TestRenderNoteClipsFailuresAloud(t *testing.T) {
 	if !strings.Contains(got, "못 읽은 파생 4축") {
 		t.Fatalf("실패 총수가 화면에 없다:\n%s", got)
 	}
-	if !strings.Contains(got, "1축 더") {
-		t.Fatalf("한도 절단이 침묵했다 — 4축 중 3축만 내면 그 사실을 말해야 한다:\n%s", got)
+	// 절단 단위는 **줄**이다 — 축 수와 줄 수는 접기가 들어온 뒤로 갈렸다(foldTwinFailures).
+	if !strings.Contains(got, "1줄 더") {
+		t.Fatalf("한도 절단이 침묵했다 — 4축 중 3줄만 내면 그 사실을 말해야 한다:\n%s", got)
 	}
 }
 
@@ -128,8 +129,9 @@ func TestRenderFinishClipsFailuresAloud(t *testing.T) {
 	if !strings.Contains(got, "못 읽은 파생 4축") {
 		t.Fatalf("실패 총수가 화면에 없다:\n%s", got)
 	}
-	if !strings.Contains(got, "1축 더") {
-		t.Fatalf("한도 절단이 침묵했다 — 4축 중 3축만 내면 그 사실을 말해야 한다:\n%s", got)
+	// 절단 단위는 **줄**이다 — 축 수와 줄 수는 접기가 들어온 뒤로 갈렸다(foldTwinFailures).
+	if !strings.Contains(got, "1줄 더") {
+		t.Fatalf("한도 절단이 침묵했다 — 4축 중 3줄만 내면 그 사실을 말해야 한다:\n%s", got)
 	}
 }
 

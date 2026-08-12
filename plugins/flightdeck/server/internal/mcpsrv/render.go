@@ -93,19 +93,120 @@ func FormatFreshness(d service.Derived) string {
 
 // renderFailures 는 파생 실패를 축 이름과 원인 전문으로 낸다.
 // 침묵하면 빈 필드가 "값이 0이다"로 읽힌다.
+//
+// ★ **머리줄의 N 은 축 수이고 아래 줄 수와 다를 수 있다.** 원인이 하나인 쌍을 한 줄로
+// 접기 때문이다(foldTwinFailures). 축 수를 줄이지 않는 이유는 그 수가 "몇 개를 못 봤나"에
+// 답하는 유일한 자리여서다 — 접기가 그것까지 먹으면 부재가 조용해진다.
 func renderFailures(d service.Derived, limit int) []string {
 	if len(d.Failures) == 0 {
 		return nil
 	}
+	rows := foldTwinFailures(d.Failures)
 	out := []string{fmt.Sprintf("못 읽은 파생 %d축:", len(d.Failures))}
-	for i, f := range d.Failures {
+	for i, r := range rows {
 		if limit > 0 && i >= limit {
-			out = append(out, fmt.Sprintf("  … %d축 더", len(d.Failures)-limit))
+			out = append(out, fmt.Sprintf("  … %d줄 더", len(rows)-limit))
 			break
 		}
-		out = append(out, fmt.Sprintf("  · %s — %s", f.Axis, clip(f.Detail, 200)))
+		out = append(out, "  · "+r)
 	}
 	return out
+}
+
+// foldTwinFailures 는 **한 원인이 낸 실패 둘**을 한 줄로 접는다. 순수 함수다.
+//
+// 죽은 워크트리 경로 하나가 `uncommitted:<세션>` 과 `uncommitted-delta:<세션>` 을 **함께**
+// 실패시킨다(service/board.go 의 두 호출이 같은 `Session.Worktree` 를 본다). 원인은 하나인데
+// 화면이 같은 말을 두 번 하고, dangling 워크트리가 이미 수십 개라 창 안에 여럿 들어오면
+// 그 값이 배로 든다. 그래서 화면에서만 접는다 — **원장과 `/metrics` 는 축을 그대로 본다.**
+//
+// ★ **접기 조건이 좁은 것이 이 함수의 요점이다.** 셋을 다 만족할 때만 접는다:
+// 같은 세션 · 같은 경로 · 둘 다 실패. 한쪽만 실패한 경우를 접으면 "규모만 죽었다"와
+// "둘 다 죽었다"가 같은 화면이 되고, 그러면 두 축을 별개 git 호출로 갈라 세운 이유가
+// (규모를 못 읽어도 경로 축이 산다 — gitreader.UncommittedDelta 독스트링 ②) 화면에서 사라진다.
+//
+// ★ **원인 꼬리가 같을 때만 접는다.** `gitreader.CommandError` 가 원인을
+// `git <args>: status <n>: <stderr>` 로 적으므로 `: status ` 부터가 명령줄을 뺀 꼬리다.
+// 2026-08-12 실측: 죽은 경로에 대해 `status --porcelain` 과 `diff --numstat` 의 stderr 는
+// **글자 그대로 같다**(`fatal: cannot change to '…': No such file or directory`) — 다른 것은
+// 하위 명령뿐이고 그것은 축 이름이 이미 말한다. 형식이 바뀌면 꼬리를 못 뽑아 **안 접힌다** —
+// 뭉개는 쪽이 아니라 갈라 내는 쪽으로 넘어진다.
+//
+// ★ 접은 줄은 앞의 `(경로)` 를 **빼고** 꼬리에 든 경로를 쓴다. 넣으면 한 줄에 경로가 두 번
+// 들어가 `clip(…, 200)` 이 원인을 통째로 먹는다 — 접기 전 화면이 정확히 그 상태였다
+// (실측: 두 줄 다 stderr 가 안 보이고 `status --porce…` 에서 잘렸다).
+func foldTwinFailures(fs []service.DerivedFailure) []string {
+	const (
+		pathAxis  = "uncommitted:"
+		deltaAxis = "uncommitted-delta:"
+	)
+	// ★ 판정을 먼저 다 끝내고 나서 낸다. 한 번에 훑으면 두 축이 오는 **순서**에 결과가
+	//   달라진다 — 규모 축이 먼저 오면 그 줄을 이미 내보낸 뒤에 접기가 결정돼 세 줄이 된다.
+	paths, deltas := map[string]string{}, map[string]string{}
+	for _, f := range fs {
+		if sess, ok := strings.CutPrefix(f.Axis, deltaAxis); ok {
+			deltas[sess] = f.Detail
+		} else if sess, ok := strings.CutPrefix(f.Axis, pathAxis); ok {
+			paths[sess] = f.Detail
+		}
+	}
+	tails := map[string]string{} // 접을 세션 → 공통 원인 꼬리
+	for sess, pd := range paths {
+		if tail, ok := twinTail(pd, deltas[sess]); ok {
+			tails[sess] = tail
+		}
+	}
+
+	out := make([]string, 0, len(fs))
+	done := map[string]bool{}
+	for _, f := range fs {
+		sess, ok := strings.CutPrefix(f.Axis, deltaAxis)
+		if !ok {
+			sess, ok = strings.CutPrefix(f.Axis, pathAxis)
+		}
+		if tail, folds := tails[sess]; ok && folds {
+			if done[sess] {
+				continue // 이미 접힌 쌍의 짝이다
+			}
+			done[sess] = true
+			out = append(out, fmt.Sprintf("uncommitted+delta:%s — 미커밋 경로·규모 둘 다 관측 실패: %s",
+				sess, clip(tail, 200)))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s — %s", f.Axis, clip(f.Detail, 200)))
+	}
+	return out
+}
+
+// twinTail 은 두 원인이 **한 원인**인지 판정하고, 맞으면 공통 꼬리를 낸다.
+// 경로가 다르거나 꼬리가 다르거나 한쪽이 없으면 접지 않는다.
+func twinTail(pathDetail, deltaDetail string) (string, bool) {
+	if pathDetail == "" || deltaDetail == "" {
+		return "", false // 한쪽만 실패했다 — 갈라서 내야 하는 바로 그 경우다
+	}
+	p1, t1 := failurePathAndTail(pathDetail)
+	p2, t2 := failurePathAndTail(deltaDetail)
+	if p1 == "" || t1 == "" || p1 != p2 || t1 != t2 {
+		return "", false
+	}
+	return t1, true
+}
+
+// failurePathAndTail 은 파생 실패 원인에서 **관측 대상 경로**와 **명령줄을 뺀 원인 꼬리**를
+// 가른다. 둘 중 하나라도 못 뽑으면 빈 문자열을 내고, 부르는 쪽은 그때 접지 않는다.
+//
+// 형식: `미커밋 … 관측 실패(<경로>): git -C <경로> <하위명령>: status <n>: <stderr>`
+// (gitreader 의 `fmt.Errorf("…(%s): %w", worktree, err)` + CommandError.Error()).
+func failurePathAndTail(detail string) (path, tail string) {
+	if open := strings.Index(detail, "("); open >= 0 {
+		if close := strings.Index(detail[open:], "): "); close > 0 {
+			path = detail[open+1 : open+close]
+		}
+	}
+	if i := strings.Index(detail, ": status "); i >= 0 {
+		tail = detail[i+2:]
+	}
+	return path, tail
 }
 
 // signalOrder 는 신호를 찍는 순서다. 고정 — 같은 입력에 같은 줄이어야 눈으로 비교된다.

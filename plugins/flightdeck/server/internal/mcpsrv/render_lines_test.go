@@ -444,12 +444,17 @@ func TestFormatFreshnessCarriesStateSourceAndFailureCount(t *testing.T) {
 	}
 }
 
-// TestRenderFailuresSaysHowManyItCutOff 는 잘린 축 수를 못박는다. 실측: `… N축 더`
+// TestRenderFailuresSaysHowManyItCutOff 는 잘린 수를 못박는다. 실측: `… N줄 더`
 // 줄을 지워도 전 스위트가 초록이었다.
 //
 // ★ 무엇이 깨지나. 목록에 상한이 있다는 것을 화면이 말하지 않으면, 여섯 줄이 전부인
 // 응답과 스물을 못 읽은 응답이 같은 모양이 된다 — 안 보인 것을 침묵하지 않는다는
 // 규율이 정확히 이 줄이다.
+//
+// ★ **단위가 축에서 줄로 바뀌었다**(2026-08-12 · fd-dead-worktree-path-now-costs-two-derive-lines).
+// 상한은 언제나 **출력 줄**에 걸리는데, 접기가 들어오면서 축 수와 줄 수가 갈렸다
+// (foldTwinFailures). 접힌 응답에서 "N축 더"는 틀린 말이 된다 — 두 축이 한 줄이므로
+// 실제로 더 있는 줄은 그보다 적다. 머리줄의 `N축` 은 그대로 **축 수**다(못 본 것의 수).
 func TestRenderFailuresSaysHowManyItCutOff(t *testing.T) {
 	var fs []service.DerivedFailure
 	for i := 0; i < 9; i++ {
@@ -463,8 +468,8 @@ func TestRenderFailuresSaysHowManyItCutOff(t *testing.T) {
 	if !strings.Contains(got, "못 읽은 파생 9축:") {
 		t.Fatalf("실패 축 수가 9가 아니다:\n%s", got)
 	}
-	if !strings.Contains(got, "3축 더") {
-		t.Fatalf("잘라 낸 3축을 침묵한다 — 여섯이 전부인 응답과 같은 화면이 된다:\n%s", got)
+	if !strings.Contains(got, "3줄 더") {
+		t.Fatalf("잘라 낸 3줄을 침묵한다 — 여섯이 전부인 응답과 같은 화면이 된다:\n%s", got)
 	}
 }
 
