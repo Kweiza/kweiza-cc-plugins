@@ -275,7 +275,7 @@ func TestProjectRmSurfacesBlockedRemovalReasonNotRawFK(t *testing.T) {
 		t.Fatalf("세션 열기 실패: %v", err)
 	}
 	if err := h.st.Tx(ctx, func(tx *store.Tx) error {
-		_, err := tx.EnqueueLanding("other", sess.ID, time.Now().UTC())
+		_, err := tx.EnqueueLanding("other", sess.ID, []string{"landing"}, time.Now().UTC())
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 등록 실패: %v", err)

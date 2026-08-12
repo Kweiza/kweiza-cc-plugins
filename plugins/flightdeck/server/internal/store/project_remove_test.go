@@ -95,7 +95,7 @@ func TestRemoveProjectDeletesChildrenAndKeepsEvents(t *testing.T) {
 		t.Fatalf("세션 열기 실패: %v", err)
 	}
 	if err := s.Tx(ctx, func(tx *Tx) error {
-		_, err := tx.EnqueueLanding("junk", sess.ID, time.Now().UTC())
+		_, err := tx.EnqueueLanding("junk", sess.ID, []string{"landing"}, time.Now().UTC())
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 등록 실패: %v", err)
@@ -298,7 +298,7 @@ func TestRemoveProjectTranslatesForeignLandingQueueFKViolation(t *testing.T) {
 	}
 	// "other" 프로젝트의 랜딩 줄 행이 "junk" 의 세션을 가리킨다 — 교차 참조.
 	if err := s.Tx(ctx, func(tx *Tx) error {
-		_, err := tx.EnqueueLanding("other", sess.ID, time.Now().UTC())
+		_, err := tx.EnqueueLanding("other", sess.ID, []string{"landing"}, time.Now().UTC())
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 등록 실패: %v", err)

@@ -37,7 +37,7 @@ func TestProjectRefCountsCountsRealRows(t *testing.T) {
 		t.Fatalf("선점 실패: %v", err)
 	}
 	if err := st.Tx(ctx, func(tx *Tx) error {
-		_, err := tx.EnqueueLanding("p", sess.ID, time.Now().UTC())
+		_, err := tx.EnqueueLanding("p", sess.ID, []string{"landing"}, time.Now().UTC())
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 등록 실패: %v", err)

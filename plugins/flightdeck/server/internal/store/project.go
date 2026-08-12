@@ -489,6 +489,21 @@ func (s *Store) RemoveProject(ctx context.Context, id string) error {
 				// 0건이 아니면 트리거가 정확한 말로 죽인다. 건너뛰지 않는 이유가 그것이다.
 				continue
 			}
+			if tbl == "landing_queue" {
+				// landing_queue_resource(row_id → landing_queue(id), 증분 008)는
+				// project 컬럼이 없다. projectRefTables 의 project 컬럼 전제 밖이라
+				// 이 목록에 못 넣는다(TestProjectRefTablesCoverEveryProjectColumn 도
+				// project 컬럼만 훑으므로 이 표를 안 잡는다). EnqueueLanding 이 이제
+				// 실제로 그 표에 자원 행을 쓰므로(자원 축 이전에는 이 표가 늘 비어
+				// 있어 안 걸렸다), landing_queue 를 지우기 직전에 먼저 지워야 한다.
+				// 안 그러면 FK 가 아래 DELETE 를 막는다
+				// (TestRemoveProjectDeletesChildrenAndKeepsEvents 가 실측했다).
+				if _, err := t.tx.ExecContext(t.ctx, `
+					DELETE FROM landing_queue_resource
+					WHERE row_id IN (SELECT id FROM landing_queue WHERE project = ?)`, id); err != nil {
+					return fmt.Errorf("줄 행 자원 삭제 실패(project=%q): %w", clip(id, 64), err)
+				}
+			}
 			if _, err := t.tx.ExecContext(t.ctx,
 				`DELETE FROM `+tbl+` WHERE project = ?`, id); err != nil {
 				if ferr := removalFKMessage(id, tbl, err); ferr != nil {

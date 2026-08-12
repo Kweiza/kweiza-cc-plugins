@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,68 @@ func scanLandingRow(sc interface{ Scan(...any) error }) (model.LandingRow, error
 	return r, nil
 }
 
+// attachResources 는 줄 행들에 자원 집합을 붙인다. 행 수와 무관하게 질의 하나다 —
+// 줄 길이는 실무상 한 자릿수지만, N+1 을 여기 두면 ListLandingQueue 를 부르는
+// 보드가 줄 길이에 비례해 느려지고 그 원인이 이 파일 밖에서는 안 보인다.
+func attachResources(ctx context.Context, q dbtx, rows []model.LandingRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]any, len(rows))
+	marks := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i], marks[i] = r.ID, "?"
+	}
+	rs, err := q.QueryContext(ctx, `
+		SELECT row_id, resource FROM landing_queue_resource
+		WHERE row_id IN (`+strings.Join(marks, ",")+`) ORDER BY resource`, ids...)
+	if err != nil {
+		return fmt.Errorf("줄 행 자원 조회 실패: %w", err)
+	}
+	defer rs.Close()
+	byID := map[int64][]string{}
+	for rs.Next() {
+		var id int64
+		var name string
+		if err := rs.Scan(&id, &name); err != nil {
+			return fmt.Errorf("줄 행 자원 해석 실패: %w", err)
+		}
+		byID[id] = append(byID[id], name)
+	}
+	if err := rs.Err(); err != nil {
+		return fmt.Errorf("줄 행 자원 순회 실패: %w", err)
+	}
+	for i := range rows {
+		rows[i].Resources = byID[rows[i].ID]
+	}
+	return nil
+}
+
+// laneResourceMax 는 자원 이름 길이 상한이다. 오류 문구의 clip(…, 64) 관례보다 넉넉하되
+// 무한하지 않게 둔다 — path:<경로> 가 들어오는 자리라 64는 좁다.
+const laneResourceMax = 200
+
+// ValidateResourceName 은 자원 이름 하나가 성립하는지 본다. 순수 함수다.
+// `:` 는 path:<경로> 규약, `/`·`.` 는 경로 자체 때문에 허용한다.
+func ValidateResourceName(name string) error {
+	if name == "" {
+		return errors.New("자원 이름이 비었다")
+	}
+	if len(name) > laneResourceMax {
+		return fmt.Errorf("자원 이름이 %d자다 — 상한은 %d자다: %s", len(name), laneResourceMax, clip(name, 64))
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '/', c == ':', c == '-':
+		default:
+			return fmt.Errorf("자원 이름에 허용되지 않는 문자 %q 가 있다([A-Za-z0-9._/:-] 만): %s",
+				c, clip(name, 64))
+		}
+	}
+	return nil
+}
+
 // EnqueueLanding 은 랜딩 줄에 선다. **재진입 안전하다** — 이미 살아 있는 줄 행이 있으면
 // 새로 넣지 않고 그것을 그대로 돌려준다.
 //
@@ -91,10 +154,22 @@ func scanLandingRow(sc interface{ Scan(...any) error }) (model.LandingRow, error
 // 만든다: 페이지는 주입된 시계로 now 를 잡는데 이 행만 실시계라 그 차가 경과로 찍힌다.
 // 운영에서는 양쪽 다 실시계라 안 드러나고 시험에서만 갈려서, 이 축은 실제로 한 번도
 // 검증된 적이 없었다(fd-lane-timestamps-ignore-injected-clock).
-func (t *Tx) EnqueueLanding(project, sessionID string, at time.Time) (model.LandingRow, error) {
+func (t *Tx) EnqueueLanding(project, sessionID string, resources []string, at time.Time) (model.LandingRow, error) {
 	if project == "" || sessionID == "" {
 		return model.LandingRow{}, fmt.Errorf("랜딩 줄 좌표가 비었다(project=%q session=%q)",
 			clip(project, 64), clip(sessionID, 64))
+	}
+	if len(resources) == 0 {
+		return model.LandingRow{}, errors.New("자원 집합이 비었다 — 무엇에 줄을 서는지 없이 줄 행을 만들 수 없다")
+	}
+	// 정렬해서 저장한다 — 집합 대조(service)가 순서에 흔들리면 안 되고, 재진입 때도
+	// 같은 순서로 되읽혀야 대조가 안정된다.
+	sorted := append([]string(nil), resources...)
+	sort.Strings(sorted)
+	for _, r := range sorted {
+		if err := ValidateResourceName(r); err != nil {
+			return model.LandingRow{}, err
+		}
 	}
 	at = atStamp(at)
 	res, err := t.tx.ExecContext(t.ctx, `
@@ -104,8 +179,9 @@ func (t *Tx) EnqueueLanding(project, sessionID string, at time.Time) (model.Land
 	if err != nil {
 		row, qErr := liveLandingRow(t.ctx, t.tx, project, sessionID)
 		if qErr == nil {
-			// 이미 서 있다. 순번(id)과 대기 시작 시각을 그대로 낸다 —
-			// 여기서 새 행을 만들면 다시 부를 때마다 맨 뒤로 밀린다.
+			// 이미 서 있다. **자원 집합까지 채워** 그대로 낸다(liveLandingRow 가
+			// attachResources 를 이미 거친다) — 요청 집합과 다른지의 판정(거절)은
+			// service 몫이다. 여기서 거절하면 재진입 안전이 깨진다.
 			return row, nil
 		}
 		if !errors.Is(qErr, ErrNotFound) {
@@ -124,7 +200,13 @@ func (t *Tx) EnqueueLanding(project, sessionID string, at time.Time) (model.Land
 		return model.LandingRow{}, fmt.Errorf("랜딩 줄 순번 확인 실패(project=%q session=%q): %w",
 			clip(project, 64), clip(sessionID, 64), err)
 	}
-	return model.LandingRow{ID: id, Project: project, SessionID: sessionID, EnqueuedAt: at}, nil
+	for _, r := range sorted {
+		if _, err := t.tx.ExecContext(t.ctx,
+			`INSERT INTO landing_queue_resource(row_id, resource) VALUES (?, ?)`, id, r); err != nil {
+			return model.LandingRow{}, fmt.Errorf("줄 행 %d 의 자원 %s 기록 실패: %w", id, clip(r, 64), err)
+		}
+	}
+	return model.LandingRow{ID: id, Project: project, SessionID: sessionID, EnqueuedAt: at, Resources: sorted}, nil
 }
 
 // liveLandingRow 는 세션의 살아 있는(left_at IS NULL) 줄 행을 읽는다. 없으면 ErrNotFound.
@@ -140,7 +222,11 @@ func liveLandingRow(ctx context.Context, q dbtx, project, sessionID string) (mod
 		return r, fmt.Errorf("살아 있는 랜딩 줄 행 조회 실패(project=%q session=%q): %w",
 			clip(project, 64), clip(sessionID, 64), err)
 	}
-	return r, nil
+	wrapped := []model.LandingRow{r}
+	if err := attachResources(ctx, q, wrapped); err != nil {
+		return model.LandingRow{}, err
+	}
+	return wrapped[0], nil
 }
 
 // LiveLandingRow 는 세션이 지금 줄에 서 있는지를 낸다. 없으면 ErrNotFound.
@@ -176,7 +262,11 @@ func lastLandingRow(ctx context.Context, q dbtx, project, sessionID string) (mod
 		return r, fmt.Errorf("마지막 랜딩 줄 행 조회 실패(project=%q session=%q): %w",
 			clip(project, 64), clip(sessionID, 64), err)
 	}
-	return r, nil
+	wrapped := []model.LandingRow{r}
+	if err := attachResources(ctx, q, wrapped); err != nil {
+		return model.LandingRow{}, err
+	}
+	return wrapped[0], nil
 }
 
 // LastLandingRow 는 트랜잭션 안에서 세션의 마지막 줄 행을 낸다.
@@ -211,6 +301,38 @@ func (t *Tx) FrontLandingRow(project string) (model.LandingRow, error) {
 // FrontLandingRow 는 트랜잭션 밖에서 읽는다.
 func (s *Store) FrontLandingRow(ctx context.Context, project string) (model.LandingRow, error) {
 	return frontLandingRow(ctx, s.db, project)
+}
+
+// frontLandingRowFor 는 자원 하나의 줄 맨 앞이다. 순서 집행(land 의 all-or-nothing 판정과
+// 처방의 차례 판정)이 자원마다 이 함수를 본다. **Resources 를 안 채운다** — 쓰는 곳이
+// ID·SessionID 비교뿐이고, 채우면 자원 수만큼 질의가 는다.
+func frontLandingRowFor(ctx context.Context, q dbtx, project, resource string) (model.LandingRow, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT q.id, q.project, q.session_id, q.enqueued_at, q.left_at, q.left_kind, q.left_detail
+		FROM landing_queue q
+		JOIN landing_queue_resource r ON r.row_id = q.id
+		WHERE q.project = ? AND r.resource = ? AND q.left_at IS NULL
+		ORDER BY q.id LIMIT 1`, project, resource)
+	r, err := scanLandingRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, notFoundNote(NFLiveLandingRow,
+			fmt.Sprintf("프로젝트 %s · 자원 %s 줄의 맨 앞에 해당하는", clip(project, 64), clip(resource, 64)))
+	}
+	if err != nil {
+		return r, fmt.Errorf("자원 줄 맨 앞 조회 실패(project=%q resource=%q): %w",
+			clip(project, 64), clip(resource, 64), err)
+	}
+	return r, nil
+}
+
+// FrontLandingRowFor 는 트랜잭션 안에서 자원 하나의 줄 맨 앞을 낸다.
+func (t *Tx) FrontLandingRowFor(project, resource string) (model.LandingRow, error) {
+	return frontLandingRowFor(t.ctx, t.tx, project, resource)
+}
+
+// FrontLandingRowFor 는 트랜잭션 밖에서 읽는다.
+func (s *Store) FrontLandingRowFor(ctx context.Context, project, resource string) (model.LandingRow, error) {
+	return frontLandingRowFor(ctx, s.db, project, resource)
 }
 
 // CloseLandingRow 는 줄 행 하나를 id 로 닫는다. **자원을 안 건드린다** —
@@ -287,6 +409,9 @@ func listLandingQueue(ctx context.Context, q dbtx, project string) ([]model.Land
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("랜딩 줄 목록 순회 실패: %w", err)
+	}
+	if err := attachResources(ctx, q, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

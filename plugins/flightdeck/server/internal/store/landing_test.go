@@ -30,7 +30,10 @@ func mustEnqueue(t *testing.T, s *Store, project, sessionID string) model.Landin
 		// 시각은 영값으로 넘긴다 — 이 헬퍼의 축은 순번·재진입이지 시각이 아니고,
 		// 영값이면 저장층이 nowStamp 를 찍어 이 파일의 기존 시험들이 보던 그 값 그대로다.
 		// 시각 자체를 잠그는 것은 TestLaneTimestampsTakeTheGivenClock 하나다.
-		row, err = tx.EnqueueLanding(project, sessionID, time.Time{})
+		// 자원 집합은 옛 동작과 같은 단일 랜딩 레인({"landing"})을 쓴다 — 이 파일의
+		// 시험들이 잠그는 축은 순번·재진입·시각이지 자원 집합이 아니다
+		// (자원 집합 축은 landing_resource_test.go 가 잠근다).
+		row, err = tx.EnqueueLanding(project, sessionID, []string{"landing"}, time.Time{})
 		return err
 	}); err != nil {
 		t.Fatalf("랜딩 줄 서기 실패(project=%s session=%s): %v", project, sessionID, err)
@@ -86,18 +89,18 @@ func TestEnqueueLandingReentryDoesNotPoisonTheTransaction(t *testing.T) {
 	b := mustSession(t, s, "p", "cc-B")
 
 	err := s.Tx(ctx, func(tx *Tx) error {
-		if _, err := tx.EnqueueLanding("p", a.ID, time.Time{}); err != nil {
+		if _, err := tx.EnqueueLanding("p", a.ID, []string{"landing"}, time.Time{}); err != nil {
 			return fmt.Errorf("첫 서기: %w", err)
 		}
 		// 재진입 — 부분 유니크 인덱스 위반을 내부에서 직접 거친다. SQLite 의 기본
 		// 충돌 해법(ABORT)은 이 INSERT 문 하나만 되돌리고 트랜잭션 자체는 안 죽는다.
 		// 그 성질을 다음 줄의 성공으로 직접 확인한다.
-		if _, err := tx.EnqueueLanding("p", a.ID, time.Time{}); err != nil {
+		if _, err := tx.EnqueueLanding("p", a.ID, []string{"landing"}, time.Time{}); err != nil {
 			return fmt.Errorf("재진입: %w", err)
 		}
 		// 같은 트랜잭션에서 다른 세션의 쓰기가 계속 성립해야 한다 — 문장 단위 롤백이
 		// 아니라 트랜잭션 단위 롤백이었다면 이 호출도 이미 죽은 트랜잭션 위에서 실패한다.
-		if _, err := tx.EnqueueLanding("p", b.ID, time.Time{}); err != nil {
+		if _, err := tx.EnqueueLanding("p", b.ID, []string{"landing"}, time.Time{}); err != nil {
 			return fmt.Errorf("재진입 뒤 다른 세션의 쓰기: %w", err)
 		}
 		return nil
@@ -142,7 +145,7 @@ func TestEnqueueLandingRefusesEmptyCoordsWithItsOwnWords(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := s.Tx(ctx, func(tx *Tx) error {
-				_, e := tx.EnqueueLanding(c.project, c.sessionID, time.Time{})
+				_, e := tx.EnqueueLanding(c.project, c.sessionID, []string{"landing"}, time.Time{})
 				return e
 			})
 			if err == nil {
@@ -460,7 +463,7 @@ func TestTxListLandingQueueSeesTheRowInsertedInTheSameTransaction(t *testing.T) 
 	a := mustSession(t, s, "p", "cc-A")
 
 	if err := s.Tx(ctx, func(tx *Tx) error {
-		row, err := tx.EnqueueLanding("p", a.ID, time.Time{})
+		row, err := tx.EnqueueLanding("p", a.ID, []string{"landing"}, time.Time{})
 		if err != nil {
 			return err
 		}
@@ -549,7 +552,7 @@ func TestLaneTimestampsTakeTheGivenClock(t *testing.T) {
 	var hold model.ResourceHold
 	if err := s.Tx(ctx, func(tx *Tx) error {
 		var err error
-		if row, err = tx.EnqueueLanding("p", a.ID, want); err != nil {
+		if row, err = tx.EnqueueLanding("p", a.ID, []string{"landing"}, want); err != nil {
 			return err
 		}
 		hold, err = tx.AcquireResource("p", "landing", Holder{SessionID: a.ID}, want)
@@ -590,7 +593,7 @@ func TestLaneTimestampsTakeTheGivenClock(t *testing.T) {
 	var nanoRow model.LandingRow
 	if err := s.Tx(ctx, func(tx *Tx) error {
 		var e error
-		nanoRow, e = tx.EnqueueLanding("p", c.ID, nano)
+		nanoRow, e = tx.EnqueueLanding("p", c.ID, []string{"landing"}, nano)
 		return e
 	}); err != nil {
 		t.Fatalf("나노초 줄 서기 실패: %v", err)

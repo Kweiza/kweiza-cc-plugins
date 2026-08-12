@@ -310,6 +310,7 @@ type LandingRow struct {
 	LeftAt     *time.Time // nil 이면 아직 줄에 있다
 	LeftKind   LandingLeftKind
 	LeftDetail string
+	Resources  []string // 이 행이 줄 선 자원들(정렬). 008 이전 행은 마이그레이션이 'landing' 을 백필했다
 }
 
 type Event struct {

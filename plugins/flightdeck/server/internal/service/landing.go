@@ -123,7 +123,9 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 		// 그러면 §10 의 "세션당 쓰기 호출 수"가 대기 폴링의 비용을 못 본다.
 		t.LogEvent("lane.land", in.Project, in.SessionID, map[string]any{"mode": "acquire"})
 
-		mine, err := t.EnqueueLanding(in.Project, in.SessionID, now)
+		// []string{LaneResource} — 자원 집합 판정(Task 3 이 다룰 겹침·차례 로직)은 아직
+		// 옛 동작(단일 랜딩 레인)을 그대로 보존한다. 여기서 개편하지 않는다.
+		mine, err := t.EnqueueLanding(in.Project, in.SessionID, []string{LaneResource}, now)
 		if err != nil {
 			return err
 		}
