@@ -89,7 +89,7 @@ func (p *serialProbe) report() (maxInflight, calls int, overlapped []string) {
 
 // ── Backend 전면 ─────────────────────────────────────────────────────────────
 // 열세 개를 **전부** 감싼다. 하나만 감싸면 "그 하나가 안 겹쳤다"만 참이 되는데,
-// 갈아쓰기가 있는 자리는 Pick·Note·AddItem·Finish·SetLabels 다섯이고 파일을 다시 쓰는 자리는
+// 갈아쓰기가 있는 자리는 Pick·Note·AddItem·Finish·SetLabels·LeaveClaim 여섯이고 파일을 다시 쓰는 자리는
 // 그 밖에도 있다. 전제는 백엔드 표면 전체에 걸린 것이므로 시험도 전체를 봐야 한다.
 
 func (p *serialProbe) OpenSession(ctx context.Context, in service.OpenSessionInput) (service.SessionResult, error) {
@@ -155,6 +155,14 @@ func (p *serialProbe) RecentNotes(ctx context.Context, project string, limit int
 func (p *serialProbe) SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error) {
 	defer p.enter("SetLabels")()
 	return p.Backend.SetLabels(ctx, in)
+}
+
+// ★ 이 래퍼가 없어도 **컴파일은 된다** — serialProbe 가 Backend 를 인터페이스로 embed 하기
+// 때문이다(label 이 같은 자리에서 확인한 사실). 그러면 이 시험은 pick(leave) 의 겹침을
+// 못 보고, "열두 개를 전부 감싼다"는 이 파일의 존재 이유와 어긋난다.
+func (p *serialProbe) LeaveClaim(ctx context.Context, in service.LeaveInput) (service.ClaimLeaveResult, error) {
+	defer p.enter("LeaveClaim")()
+	return p.Backend.LeaveClaim(ctx, in)
 }
 
 // 컴파일 시점에 계약을 못 박는다 — Backend 에 메서드가 늘면 여기도 늘어야 한다.

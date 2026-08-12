@@ -589,6 +589,7 @@ POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 �
 GET    /items/next                  POST   /items
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
+POST   /claims/leave                (세션이 **자기** 선점을 놓는다 — `pick(leave:…)`. 항목 id 가 선택이라 경로에 없다)
 POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropped-dep`·`after-bad-ref` 의 유일한 탈출구)
 POST   /items/{id}/move             (고칠 수 있는 축은 프로젝트 하나뿐 — 본문·제목은 못 바꾼다)
 POST   /items/{id}/label            (고칠 수 있는 축은 꼬리표 하나뿐 — 본문·제목·선행은 못 바꾼다)

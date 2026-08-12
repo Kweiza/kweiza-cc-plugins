@@ -468,6 +468,24 @@ func (b *mcpBackend) RecentNotes(ctx context.Context, project string, limit int)
 // AddItem·Finish 와 같은 모양으로 **err 를 다시 감싸지 않는다.** 감싸면 b.apiError 를
 // 두 번 태우는 것인데, 그 함수는 *APIError 가 아닌 값을 그대로 돌려주므로 겉보기엔
 // 무해하지만 읽는 사람에게 "여기서 뭔가 더 한다"는 거짓 신호를 남긴다.
+// LeaveClaim 은 이 세션이 자기 선점을 놓는다. 회수 경로(CmdClaimRelease)와 **다른 명령**이다 —
+// 오프라인 정책도 각자 적어야 한다(둘 다 거절이지만 사유가 다르고, 그 사유가 화면에 나간다).
+func (b *mcpBackend) LeaveClaim(ctx context.Context, in service.LeaveInput) (service.ClaimLeaveResult, error) {
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
+	b.app.cli.Session = in.SessionID
+	var res service.ClaimLeaveResult
+	raw, err := b.write(ctx, CmdClaimLeave, claimLeavePath(), claimLeaveReq{
+		Project: in.Project, SessionID: in.SessionID, ItemID: in.ItemID, Reason: in.Reason,
+	})
+	if err != nil {
+		return res, err
+	}
+	if uerr := json.Unmarshal(raw, &res); uerr != nil {
+		return res, fmt.Errorf("선점 반납 응답 해석 실패: %w", uerr)
+	}
+	return res, nil
+}
+
 func (b *mcpBackend) SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error) {
 	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
 	b.app.cli.Session = in.SessionID

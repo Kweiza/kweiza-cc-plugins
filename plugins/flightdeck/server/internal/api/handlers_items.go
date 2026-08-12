@@ -204,6 +204,43 @@ func (s *server) handleReclaimClaim(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, res)
 }
 
+// claimLeaveRequest 는 POST /api/v1/claims/leave 의 본문이다.
+//
+// ★ 회수와 정반대로 **session_id 가 필수다.** 회수는 세션을 요구하면 탈출구가 막히지만
+// (죽은 세션 명의로는 아무 호출도 못 한다), 반납은 "누구 것을 놓는가"가 세션으로만
+// 정해진다 — 세션 없는 반납은 반납이 아니라 회수다. item_id 는 선택이고, 비면 이
+// 세션이 쥔 전부가 대상이다(묶음은 함께 집히므로 함께 놓인다).
+type claimLeaveRequest struct {
+	Project   string `json:"project"`
+	SessionID string `json:"session_id"`
+	ItemID    string `json:"item_id"`
+	Reason    string `json:"reason"` // 왜 안 했나. **비면 service 가 거절한다**
+}
+
+// handleLeaveClaim 은 살아 있는 세션이 자기 선점을 놓는다.
+//
+// 로직의 정본은 service.LeaveClaim — MCP 의 `pick(leave:…)` 가 이 경로로 온다.
+// 회수(handleReclaimClaim)와 **다른 함수**인 이유는 판정이 반대이기 때문이다:
+// 회수는 "관측한 점유자 == 지금 점유자"를 방벽으로 세우고, 반납은 "점유자 == 나"를 세운다.
+func (s *server) handleLeaveClaim(w http.ResponseWriter, r *http.Request) {
+	var req claimLeaveRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	res, err := s.svc.LeaveClaim(r.Context(), service.LeaveInput{
+		Project: req.Project, SessionID: strings.TrimSpace(req.SessionID),
+		ItemID: strings.TrimSpace(req.ItemID), Reason: req.Reason,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.publish(r, "claim.leave", req.Project, res.Session, map[string]any{
+		"items": res.Items, "count": len(res.Items),
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}
+
 type followupRequest struct {
 	ID     string       `json:"id"`
 	Title  string       `json:"title"`

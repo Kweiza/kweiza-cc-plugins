@@ -773,6 +773,31 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 				"하나의 신호로 판정해 두 번 틀렸다. 지금 할 수 있는 것: note(kind=ask) 로 점유자에게 묻거나, "+
 				"웹 대시보드의 '선점 회수' 버튼(사유 필수)을 쓴다."), tailOpts{}), true)
 	}
+	// ★ 반납은 **집기 앞**에서 갈린다. 뒤에 두면 leave 와 item_id 가 함께 온 호출이
+	//   먼저 집고 나서 놓는 꼴이 되고, 그러면 "놓으려던 것"과 "방금 집은 것"이 같은
+	//   id 로 겹쳐 원장에 선점 한 쌍이 헛으로 남는다.
+	//
+	//   land 의 leave 와 같은 이름인 것은 같은 판정이기 때문이다 — 자기가 빠지는 축.
+	//   회수 축(steal_reason)은 위에서 이미 거절됐으므로 여기 오는 것은 전부 자기 것이다.
+	if strings.TrimSpace(a.Leave) != "" {
+		if len(a.ItemIDs) > 0 {
+			return textResult(s.withTail(ctx, RenderRefusal("pick",
+				"leave 와 item_ids 를 함께 줬다",
+				"반납은 전부 아니면 하나다 — 내가 쥔 전부를 놓으려면 leave 만, "+
+					"하나만 놓으려면 item_id 와 함께 줘라."), tailOpts{}), true)
+		}
+		res, err := s.be.LeaveClaim(ctx, service.LeaveInput{
+			Project: s.id.ProjectID, SessionID: sessionID,
+			ItemID: strings.TrimSpace(a.ItemID), Reason: strings.TrimSpace(a.Leave),
+		})
+		if err != nil {
+			if r, ok := s.degradedResult(ctx, "pick", err); ok {
+				return r
+			}
+			return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
+		}
+		return textResult(s.withTail(ctx, RenderLeave(res), tailOpts{}), false)
+	}
 	// ★ 둘을 동시에 주면 합치거나 한쪽을 우선하지 않고 거절한다. 어느 쪽을
 	//   골라도 "무엇을 집었는가"가 호출자의 의도가 아니라 서버의 임의 선택이
 	//   되고, 그것이 이 도구가 지키려는 사실 그 자체를 흐린다.

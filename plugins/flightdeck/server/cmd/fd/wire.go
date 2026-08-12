@@ -187,6 +187,20 @@ type laneReleaseReq struct {
 	Reason  string `json:"reason"`
 }
 
+// claimLeavePath 는 **자기** 선점 반납 표면이다. 항목 id 가 경로에 없다 —
+// 비면 세션이 쥔 전부가 대상이라 손잡이가 항목이 아니라 세션이기 때문이다.
+func claimLeavePath() string { return "/api/v1/claims/leave" }
+
+// claimLeaveReq 는 자기 반납 본문이다. 필드 이름이 internal/api 의 claimLeaveRequest 와
+// 어긋나면 서버가 조용히 0값을 받는다 — session_id 가 빈 채 닿으면 service 가 거절하므로
+// 그 어긋남은 시끄럽게 드러난다(회수의 actor 와 달리 조용히 묻히지 않는다).
+type claimLeaveReq struct {
+	Project   string `json:"project"`
+	SessionID string `json:"session_id"`
+	ItemID    string `json:"item_id,omitempty"`
+	Reason    string `json:"reason"`
+}
+
 // claimReleasePath 는 선점 하나의 회수 표면이다. 레인 회수와 같은 판정으로
 // **세션이 아니라 항목 id 가 손잡이다** — 죽은 세션 명의로는 아무 호출도 못 한다.
 func claimReleasePath(itemID string) string {

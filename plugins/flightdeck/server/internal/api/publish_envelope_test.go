@@ -239,6 +239,24 @@ func envelopeCases() []envelopeCase {
 			return sess
 		},
 	}, {
+		name: "claim.leave",
+		kind: "claim.leave",
+		prepare: func(t *testing.T, e *env, project, sess string) {
+			e.addItemIn(t, project, sess, itemID("env-lv", project), nil)
+			claimItem(t, e, project, sess, itemID("env-lv", project))
+		},
+		// ★ 회수와 정반대로 세션 좌표가 요청 본문에 **있다** — 반납은 "누구 것을 놓는가"가
+		// 세션으로만 정해진다. item_id 를 함께 주는 것도 의도다: 이 세션이 다른 항목도
+		// 쥐고 있으면 안 준 판이 그것까지 놓아 다른 시험의 상태를 흔든다.
+		fire: func(t *testing.T, e *env, project, sess string) string {
+			e.okBody(t, e.write(http.MethodPost,
+				"/api/v1/claims/leave", map[string]any{
+					"project": project, "session_id": sess,
+					"item_id": itemID("env-lv", project), "reason": "기한이 안 찼다",
+				}), "선점 반납")
+			return sess
+		},
+	}, {
 		name: "item.finish",
 		kind: "item.finish",
 		prepare: func(t *testing.T, e *env, project, sess string) {

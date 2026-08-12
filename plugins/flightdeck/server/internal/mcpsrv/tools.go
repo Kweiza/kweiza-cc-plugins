@@ -82,12 +82,17 @@ var tools = []Tool{
 	{
 		Name: "pick",
 		Description: "인자 없으면 함께 갈 항목까지 묶어 추천하고 탈락 사유 전부. " +
-			"item_id 를 주면 선점하고 맥락을 낸다. item_ids 를 주면 묶음으로 선점한다.",
+			"item_id 를 주면 선점하고 맥락을 낸다. item_ids 는 묶음, leave 는 반납이다.",
 		InputSchema: obj(map[string]any{
 			"item_id":  str("집을 항목 id. 없으면 추천만 하고 선점하지 않는다"),
 			"item_ids": strArr("함께 집을 항목 id 들. **첫째가 선두**이고 그 id 가 브랜치가 된다. item_id 와 동시에 못 준다"),
 			"steal_reason": str("남의 선점을 회수하는 사유. **이 서버는 회수하지 않는다** — " +
 				"주면 사유와 함께 거절한다"),
+			// ★ 이름이 land 의 leave 와 같다. 같은 뜻이기 때문이다 — **자기가 빠진다**.
+			//   회수(land 의 release · pick 의 steal_reason)는 둘 다 거절되는 3자 축이고,
+			//   반납은 둘 다 leave 다. 이름을 갈라 두면 같은 판정이 두 이름으로 읽힌다.
+			"leave": str("내 선점을 놓는 사유(필수). 항목은 open 으로 돌아가고 id·이력이 산다. " +
+				"item_id 를 함께 주면 그 하나만, 안 주면 내가 쥔 전부를 놓는다"),
 		}),
 	},
 	{
@@ -199,6 +204,7 @@ type pickArgs struct {
 	ItemID      string   `json:"item_id"`
 	ItemIDs     []string `json:"item_ids"`
 	StealReason string   `json:"steal_reason"`
+	Leave       string   `json:"leave"`
 }
 
 type noteArgs struct {

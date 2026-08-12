@@ -42,6 +42,11 @@ type Backend interface {
 	// SetLabels 는 이미 있는 항목의 꼬리표를 고친다. 고칠 수 있는 축은 그 하나뿐이다.
 	SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error)
 
+	// LeaveClaim 은 이 세션이 **자기** 선점을 놓는다(pick 의 leave 인자).
+	// 회수(ReclaimClaim)는 여기 없다 — 그것은 세션의 도구가 아니라 사람의 표면이고,
+	// pick 이 steal_reason 을 거절해 잠근 축이다.
+	LeaveClaim(ctx context.Context, in service.LeaveInput) (service.ClaimLeaveResult, error)
+
 	// 랜딩 레인 셋 — land 도구 하나가 인자에 따라 이 셋 중 하나를 부른다.
 	// LandingLane 은 여기 없다: 보드가 레인 절을 낼 때 쓸 통로이지 land 도구가 직접 쓰지 않는다
 	// (레인 전체를 낸다는 것과 "내 자리"를 묻는 것은 다른 조회다 — Task 8 이 그 자리를 잇는다).

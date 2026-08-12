@@ -323,6 +323,9 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/items", s.handleAddItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/claim", s.handleClaimItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/claim/release", s.handleReclaimClaim)
+	// 반납은 항목 id 가 **선택**이라 경로에 안 싣는다 — 세션이 쥔 전부가 대상일 수 있다.
+	// 회수와 경로를 가른 것도 의도다: 두 축은 방벽이 서로 반대라 한 손잡이에 얹으면 뜻이 흐려진다.
+	mux.HandleFunc("POST /api/v1/claims/leave", s.handleLeaveClaim)
 	mux.HandleFunc("POST /api/v1/items/{id}/finish", s.handleFinishItem)
 	mux.HandleFunc("POST /api/v1/items/{id}/move", s.handleMoveItem)
 	// 꼬리표. 고칠 수 있는 축은 이 하나뿐이다 — move·after/cut 과 같은 전용 동사다.
