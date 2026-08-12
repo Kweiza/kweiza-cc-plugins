@@ -536,6 +536,52 @@ func TestMCPLandUsesTheSameLaneAsTheCLI(t *testing.T) {
 	}
 }
 
+// TestMCPLandForwardsResourcesToTheLedger 는 MCP land(resources:[...])가 실배포 경로
+// (fd mcp → mcpBackend → REST → service.LandInput)를 그대로 건너 원장의 줄 행에 그 자원
+// 집합으로 도착하는지 본다.
+//
+// ★ 이 시험이 없으면 mcpsrv 쪽 시험(land_test.go 의 TestToolLandForwardsResources)만으로는
+// "MCP 도구 인자가 서비스까지 온다"만 잠기고, 그 값이 **REST 를 건너 실제 서버에 닿는지**는
+// 아무 시험도 안 본다. 리뷰가 실측한 대로 mcpBackend.Land()가 in.Resources 를 landReq 에
+// 안 실으면(또는 landReq 에 그 필드 자체가 없으면) mcpsrv 쪽 시험은 전부 초록인 채
+// 실배포에서만 자원 인자가 조용히 ["landing"]으로 접혔다 — 서버 쪽 시험은 REST 를 안
+// 건너므로 이 축을 원리적으로 못 본다(mcp_seam_test.go 머리 주석의 "두 반쪽을 각자
+// 고정하는 시험은 그 사이의 틈을 원리적으로 못 본다"와 같은 이유).
+func TestMCPLandForwardsResourcesToTheLedger(t *testing.T) {
+	h := newHarness(t)
+	rig := newMCPRig(t, h, "cc-mcp-land-res")
+
+	frames := mcpServe(t, rig, mcpCall("land", map[string]any{
+		"resources": []string{"path:a.go", "path:b.go"},
+	}))
+	text, isErr := mcpText(t, frames[0])
+	if isErr {
+		t.Fatalf("MCP land(resources) 가 실패했다:\n%s", text)
+	}
+	mustContain(t, "MCP land(resources) 응답", text, "네 차례다", "path:a.go", "path:b.go")
+
+	rows := laneLive(t, h)
+	if len(rows) != 1 {
+		t.Fatalf("MCP land(resources) 뒤 줄이 %d행이다 — REST 를 안 탔거나 다른 프로젝트를 봤다", len(rows))
+	}
+	// ★ 진짜 단정 — 원장의 줄 행이 실제로 그 자원 집합을 담았는가. normalizeResources 가
+	// 정렬해 저장하므로(service/landing.go) 정렬된 값으로 비교한다.
+	got := rows[0].Resources
+	want := []string{"path:a.go", "path:b.go"}
+	if len(got) != len(want) {
+		t.Fatalf("줄 행의 자원이 %v 다 — 기대 %v(리뷰 Critical: mcpBackend.Land 가 조용히 버렸을 수 있다)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("줄 행의 자원이 %v 다 — 기대 %v", got, want)
+		}
+	}
+	if containsStr(got, "landing") {
+		t.Fatalf("요청한 자원 대신 기본 레인 %q 로 정규화됐다 — resources 인자가 REST 를 못 건넜다: %v",
+			service.LaneResource, got)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ⑤ 열화 — 넷이 각각 다른 사유로 거절된다. 캐시도 아웃박스도 아니다
 // ─────────────────────────────────────────────────────────────────────────────

@@ -166,6 +166,13 @@ type landReq struct {
 	Mode      string `json:"mode"`
 	Kind      string `json:"kind,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	// Resources 는 mode=acquire 일 때만 쓴다 — internal/api 의 landRequest.Resources 와
+	// 이름을 맞춰야 한다(그 구조체는 비공개라 공유 상수로 못 묶는다 — land_seam_test.go 가
+	// 실물 왕복으로 이 축을 잠근다). ★ 실측 정정(리뷰 Critical, 2026-08-12) — 이 필드가
+	// 없어 mcpBackend.Land()가 in.Resources 를 실을 자리 자체가 없었다: 실배포 경로
+	// (fd mcp → mcpBackend)에서 MCP 의 land(resources:[...]) 가 조용히 ["landing"]으로
+	// 정규화됐다 — 인자를 받되 버리는 표면이었다.
+	Resources []string `json:"resources,omitempty"`
 }
 
 // laneReleaseReq 는 회수 본문이다. session_id 가 없는 이유는 위 laneReleasePath 주석에 있다.

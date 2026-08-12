@@ -394,8 +394,11 @@ func (b *mcpBackend) land(ctx context.Context, cmd string, req landReq) (service
 }
 
 func (b *mcpBackend) Land(ctx context.Context, in service.LandInput) (service.LandResult, error) {
+	// ★ in.Resources 를 싣는다(실측 정정, 리뷰 Critical) — 이 줄이 빠지면 MCP 의
+	// land(resources:[...])가 여기서 조용히 버려지고, REST 는 항상 자원 없는 취득만 본다.
 	return b.land(ctx, CmdLandAcquire, landReq{
 		Project: in.Project, SessionID: in.SessionID, Mode: api.LandModeAcquire,
+		Resources: in.Resources,
 	})
 }
 
