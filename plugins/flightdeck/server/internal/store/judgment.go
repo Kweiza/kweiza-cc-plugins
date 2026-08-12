@@ -198,6 +198,36 @@ func (s *Store) ListJudgmentsByKind(ctx context.Context, project string, kind mo
 	return s.fillLinks(ctx, out)
 }
 
+// SupersededJudgmentIDs 는 이 프로젝트에서 **정정당한** 판단 id 들이다.
+//
+// 원장은 추가 전용이라(위 트리거) 옛 행을 지우거나 표시를 켜는 경로가 없다.
+// "이것은 정정됐다"는 사실은 **새 행이 거는 역참조로만** 읽힌다 — 그래서 이 질의가
+// 필요하다. 옛 행 자체는 아무것도 모른다.
+//
+// ★ 거르는 것은 호출부(service)의 판정이다. ListJudgmentsByKind 를 여기서 좁히지 않는
+// 이유가 그것이다 — 백업(legacy/export.go)은 정정된 행까지 전수로 가져가야 한다.
+func (s *Store) SupersededJudgmentIDs(ctx context.Context, project string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT supersedes FROM judgment WHERE project = ? AND supersedes IS NOT NULL`,
+		project)
+	if err != nil {
+		return nil, fmt.Errorf("정정 대상 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("정정 대상 행 해석 실패: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("정정 대상 조회 실패(project=%q): %w", clip(project, 64), err)
+	}
+	return out, nil
+}
+
 func collectJudgments(rows *sql.Rows) ([]model.Judgment, error) {
 	defer rows.Close()
 	var out []model.Judgment

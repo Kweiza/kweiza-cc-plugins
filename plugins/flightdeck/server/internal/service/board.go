@@ -336,6 +336,12 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 // 실제로 그렇게 났다(ask 36 + blocked 36, 제목이 옛 절 이름이라 **전부 같은 문구**였다).
 // 그러면 이 채널은 첫날부터 노이즈가 되고, 노이즈가 된 채널은 아무도 안 읽는다.
 // 지난 일은 사라지지 않는다 — 판단 검색(설계 §6 ⑥)이 그 자리다.
+//
+// ★ 같은 이유로 **정정당한 행도 뺀다.** 원장이 추가 전용이라 정정은 새 행 + supersedes 로
+// 남는데, 읽는 쪽이 그 역참조를 안 보면 이미 철회된 요청이 영원히 미확인으로 선다.
+// 실측으로 그렇게 났다(2026-08-12 원장: ask 30 + blocked 3). 그중 하나는 해소된 막힘이라,
+// 정정을 낸 세션이 "걷었다"고 보고했다가 보드가 그대로여서 반증당했다.
+// 빼는 것은 **옛 행 하나뿐**이다 — 정정한 새 행은 제 종류대로 그 자리를 잇는다.
 func (s *Service) liveNotesOfKind(ctx context.Context, project string,
 	kind model.JudgmentKind, limit int) ([]model.Judgment, error) {
 	if limit <= 0 {
@@ -349,6 +355,10 @@ func (s *Service) liveNotesOfKind(ctx context.Context, project string,
 	for _, sess := range live {
 		alive[sess.Session.ID] = true
 	}
+	superseded, err := s.st.SupersededJudgmentIDs(ctx, project)
+	if err != nil {
+		return nil, err
+	}
 	// 살아 있는 것만 남기므로 넉넉히 읽고 거른다.
 	js, err := s.st.ListJudgmentsByKind(ctx, project, kind, limit*4)
 	if err != nil {
@@ -356,7 +366,7 @@ func (s *Service) liveNotesOfKind(ctx context.Context, project string,
 	}
 	out := make([]model.Judgment, 0, limit)
 	for _, j := range js {
-		if !alive[j.SessionID] {
+		if !alive[j.SessionID] || superseded[j.ID] {
 			continue
 		}
 		if out = append(out, j); len(out) >= limit {
