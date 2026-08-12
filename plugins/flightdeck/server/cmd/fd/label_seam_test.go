@@ -56,3 +56,28 @@ func TestLabelCLISeamActuallyChangesStoredLabels(t *testing.T) {
 	// 화면도 실제 변화분(요청한 것이 아니라)을 낸다는 규율을 함께 잠근다.
 	mustContain(t, "label 출력", out, "실제로 더한 것: tickler", "실제로 뺀 것: old")
 }
+
+// `fd label` 도 mcpsrv.RenderLabel 을 쓰는지를 잠근다.
+//
+// ★ 이 시험이 없던 때는 CLI 가 응답을 손으로 다시 짰다(cmds.go 의 옛 runLabel) —
+// 값은 맞았지만 RenderLabel 이 tickler 에 붙이는 두 줄(굶김 축 배제·★ 묶음 선두 규칙)이
+// CLI 에는 안 나갔다. MCP 를 쓰는 세션만 그 문구를 봤다. 이 시험은 그 문구가
+// CLI 화면에도 나오는지를 글자 그대로 단정해 그 격차를 다시 못 열게 한다.
+func TestLabelCLIShowsLeadOnlyRuleWhenTicklerAdded(t *testing.T) {
+	h := newHarness(t)
+	const item = "t-label-tickler-rule"
+
+	if code, out := h.run("", "add", "--id", item, "--title", "제목", "--body", "본문"); code != 0 {
+		t.Fatalf("전제 구성 실패 — add 가 %d 로 끝났다:\n%s", code, out)
+	}
+
+	code, out := h.run("", "label", item, "--add", "tickler")
+	if code != 0 {
+		t.Fatalf("label 이 %d 로 끝났다:\n%s", code, out)
+	}
+
+	// RenderLabel 이 tickler 에 붙이는 두 줄 — 굶김 축 배제 고지와 묶음 선두 규칙.
+	mustContain(t, "label 출력", out,
+		"이 항목은 굶김 축(집계·★·기아 가중)에서 빠진다",
+		"★ 묶음에서는 **선두에 달아야** 걸린다")
+}

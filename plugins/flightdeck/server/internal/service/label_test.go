@@ -64,13 +64,26 @@ func TestSetLabelsReportsWhatActuallyChanged(t *testing.T) {
 
 // 조용한 무작업을 안 만든다. 둘 다 비면 쓰기를 시작하기 전에 거절한다 —
 // 오프라인이면 그 왕복이 아웃박스에 쌓이는 쓰기가 되기 때문이다(runAfterCut 과 같은 규율).
+//
+// ★ 오류가 **꼭 *RefusedError 여야 한다**(리뷰 Important) — errors.New 였을 때는
+// api.ClassifyError 의 화이트리스트 어느 갈래에도 안 걸려 500 internal 로 나갔다.
+// 이 갈래는 label 도구가 item_id 하나만 필수로 받으므로(tools.go) MCP 에서 정상
+// 도달 가능하다. 타입까지 단정해야 그 회귀를 다시 못 들어오게 막는다.
 func TestSetLabelsRefusesEmptyRequestBeforeTouchingTheStore(t *testing.T) {
 	ctx := context.Background()
 	s, st := newSvc(t)
 	mustAddItem(t, st, model.Item{Project: "p", ID: "it", Title: "제목", Body: "본문"})
 
-	if _, err := s.SetLabels(ctx, LabelInput{Project: "p", SessionID: "sess", ItemID: "it"}); err == nil {
+	_, err := s.SetLabels(ctx, LabelInput{Project: "p", SessionID: "sess", ItemID: "it"})
+	if err == nil {
 		t.Fatal("add·rm 이 둘 다 비었는데 통과했다 — 조용한 무작업이다")
+	}
+	var refused *RefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("오류가 %T(%v) 다 — *RefusedError 여야 한다(500 으로 새지 않아야 한다)", err, err)
+	}
+	if refused.Guidance == "" {
+		t.Error("거절에 Guidance 가 없다 — 이 저장소의 거절은 처방을 함께 낸다")
 	}
 }
 

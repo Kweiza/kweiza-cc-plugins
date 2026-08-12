@@ -1878,35 +1878,15 @@ func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "꼬리표를 못 고쳤다: %v\n", err)
 		return 1
 	}
-	var got struct {
-		Before  []string `json:"before"`
-		After   []string `json:"after"`
-		Added   []string `json:"added"`
-		Removed []string `json:"removed"`
-		Item    struct {
-			ID    string `json:"ID"`
-			Title string `json:"Title"`
-		} `json:"item"`
-	}
+	// ★ mcpsrv.RenderLabel 로 낸다 — mcpbackend.go 의 SetLabels 가 같은 응답을 같은
+	// 타입으로 언마셜한다. 손으로 다시 짜면(옛 코드) tickler 의 선두 규칙 문구를
+	// CLI 사용자만 못 보는 결함이 난다 — RenderBoard·RenderNote·RenderPick·RenderFinish·
+	// RenderLand 가 이미 지키는 규율이고 label 만 예외였다.
+	var got service.LabelResult
 	if uerr := json.Unmarshal(res.Body, &got); uerr != nil {
 		fmt.Fprintf(out, "고쳤으나 응답을 못 읽었다: %v\n", uerr)
 		return 1
 	}
-
-	fmt.Fprintf(out, "label · %s 의 꼬리표를 고쳤다\n", got.Item.ID)
-	// ★ **실제 변화분을 낸다.** 요청한 것이 아니라. 이미 있는 것을 더하거나 없는 것을
-	// 빼는 것은 거절하지 않지만, 그때 "더했다"고만 말하면 사람은 안 바뀐 것을 바뀐 줄 안다.
-	fmt.Fprintf(out, "실제로 더한 것: %s\n", labelListOrNone(got.Added))
-	fmt.Fprintf(out, "실제로 뺀 것: %s\n", labelListOrNone(got.Removed))
-	fmt.Fprintf(out, "지금 꼬리표: %s\n", labelListOrNone(got.After))
+	fmt.Fprint(out, mcpsrv.RenderLabel(got))
 	return 0
-}
-
-// labelListOrNone 은 꼬리표 목록 한 줄이다. 빈 것을 빈 줄로 내면 "없다"와
-// "이 축을 안 읽었다"가 화면에서 같아진다.
-func labelListOrNone(ls []string) string {
-	if len(ls) == 0 {
-		return "없음"
-	}
-	return strings.Join(ls, ", ")
 }

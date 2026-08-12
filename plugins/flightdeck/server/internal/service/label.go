@@ -38,6 +38,12 @@ type LabelResult struct {
 	After   []string   `json:"after"`
 	Added   []string   `json:"added"`
 	Removed []string   `json:"removed"`
+
+	// Derived 는 쓰기 **뒤** 되읽기의 신선도다. 꼬리표 고침은 되돌리는 코드가 없으므로
+	// 되읽기가 실패해도 결과를 버리지 않는다(DESIGN §5「쓰기 뒤 조회가 실패하면」,
+	// MoveResult·CutAfterResult 와 같은 자리). item 축 실패가 있으면 Item 은 아는
+	// 사실(프로젝트·id·저장된 Labels)만 채워진 것이다.
+	Derived
 }
 
 // SetLabels 는 항목의 꼬리표를 고친다.
@@ -59,8 +65,18 @@ func (s *Service) SetLabels(ctx context.Context, in LabelInput) (LabelResult, er
 	// ★ 빈 요청을 **쓰기 전에** 거절한다. 서버까지 갔다 와도 같은 결론이지만, 그
 	// 왕복은 오프라인에서 아웃박스에 쌓이는 쓰기가 된다(runAfterCut 이 축 수를
 	// 클라이언트에서 세는 것과 같은 규율).
+	//
+	// ★ errors.New 가 아니라 RefusedError 다(리뷰 Important) — api.ClassifyError 는
+	// 화이트리스트라 errors.New 는 아무 갈래에도 안 걸리고 500 internal 로 나간다.
+	// 그런데 이 갈래는 MCP 에서 정상 도달 가능하다: label 도구의 필수 인자는
+	// item_id 하나뿐이라(tools.go) add·rm 을 둘 다 안 준 호출이 그대로 여기까지 온다.
+	// 500 이면 이 문구 대신 "서버 내부 오류다"만 나가고 서버엔 ERROR 로그가 쌓인다.
 	if len(nonBlank(in.Add))+len(nonBlank(in.Rm)) == 0 {
-		return res, errors.New("더하거나 뺄 꼬리표를 하나는 줘라 — 빈 요청은 원장만 늘린다")
+		return res, &RefusedError{
+			What:     "label",
+			Reason:   "더하거나 뺄 꼬리표를 하나는 줘라 — 빈 요청은 원장만 늘린다",
+			Guidance: "--add 나 --rm 중 하나는 꼬리표를 하나 이상 담아서 줘라.",
+		}
 	}
 
 	var before, after []string
@@ -101,15 +117,22 @@ func (s *Service) SetLabels(ctx context.Context, in LabelInput) (LabelResult, er
 	}
 	// 저장된 값을 다시 읽는다 — 요청 값을 그대로 돌려주면 무엇이 저장됐는지가
 	// 아니라 무엇을 보냈는지를 화면에 내게 된다(MoveItem 과 같은 규율).
+	//
+	// ★ **못 읽어도 결과를 버리지 않는다**(DESIGN §5, MoveResult·CutAfterResult 와 같은 자리).
+	// 쓰기는 이미 커밋됐고 되돌리는 코드가 없다 — 여기서 오류를 올리면 꼬리표는 바뀐 채로
+	// 호출자는 실패만 받고, 무엇보다 Added·Removed 까지 함께 죽는데 그 둘이 이 응답의
+	// 값이다. 아는 사실은 프로젝트·id·방금 계산한 After 뿐이라 그것만 채우고 나머지는
+	// item 축으로 고백한다.
+	d := &derive{}
 	it, gerr := s.st.GetItem(ctx, in.Project, in.ItemID)
 	if gerr != nil {
-		// 쓰기는 이미 커밋됐다. 되읽기 실패로 결과를 버리면 Added·Removed 까지
-		// 함께 죽는데, 그 둘이 이 응답의 값이다(DESIGN §5).
 		s.log.WarnContext(ctx, "꼬리표 고친 뒤 되읽기 실패 — 쓰기는 커밋됐다",
 			"project", clip(in.Project, 64), "item", clip(in.ItemID, 64), "error", gerr.Error())
+		d.fail("item", gerr)
 		it = model.Item{Project: in.Project, ID: in.ItemID, Labels: after}
 	}
 	res.Item = it
+	res.Derived = d.result(s.now())
 	return res, nil
 }
 
