@@ -82,6 +82,9 @@ const (
 	// ★ 값이 cmd/fd/cmds.go 의 runAfterCut 안 a.cli.Write 호출부와 글자 그대로 같아야
 	// 한다 — 위 CmdMove 와 같은 이유·같은 시험이 지킨다.
 	CmdAfterCut = "after cut"
+	// CmdClaimLeave 는 산 세션이 자기 선점을 놓는 것이다(pick 의 leave).
+	CmdClaimLeave = "claim leave"
+
 	// CmdLabel 은 이미 있는 항목의 꼬리표를 고치는 것이다(`fd label`).
 	//
 	// ★ 리터럴 대신 상수를 쓰는 이유는 CmdMove 와 같다 — offline.go·outbox.go 가
@@ -198,6 +201,10 @@ func JudgeOffline(cmd string) OfflineVerdict {
 		return OfflineVerdict{OfflineRefuse,
 			"회수는 사람의 판단이라 재생 대상이 아니다 — 지금 무엇이 물려 있는지를 보고 내린 판정인데, " +
 				"재생 시점의 레인은 그 판정이 본 레인이 아니다"}
+	case CmdClaimLeave:
+		return OfflineVerdict{OfflineRefuse,
+			"자기 반납도 재생 대상이 아니다 — 재생 시점에는 이 세션이 그 항목을 이미 놓았거나 " +
+				"남이 집었을 수 있고, 그러면 남의 선점을 놓는다(회수와 같은 사고를 반대편에서 낸다)"}
 	case CmdClaimRelease:
 		return OfflineVerdict{OfflineRefuse,
 			"선점 회수도 사람의 판단이라 재생 대상이 아니다 — 신호 나이를 보고 내린 판정인데, " +

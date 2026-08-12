@@ -132,7 +132,7 @@ func IdempotencyStable(cmd string) (bool, string) {
 		return false, "신호는 시각이 값이다 — 고정하면 두 번째 신호부터 서버에 안 닿는다"
 	case "pick", "claim":
 		return false, "선점 결과는 지금 상태다 — 고정하면 남이 반납한 뒤에도 옛 거절이 재생된다"
-	case CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease, CmdClaimRelease:
+	case CmdLandAcquire, CmdLandReport, CmdLandLeave, CmdLaneRelease, CmdClaimRelease, CmdClaimLeave:
 		// ★ 기본 가지도 false 라 동작은 같지만, 사유가 다르다. 기본 문구는 "모르는 명령이라"라고
 		//   말하는데 이 다섯은 아는 명령이다 — 그대로 두면 다음 사람이 "표에 없으니 넣어야겠다"
 		//   하고 위쪽(고정) 목록에 넣는다. 고정하면 대기 중인 세션이 land 를 다시 부를 때

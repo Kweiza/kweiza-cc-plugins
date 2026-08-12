@@ -310,6 +310,11 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 		// (offline.go 의 CmdLabel 판정, CmdAfterCut·CmdMove 와 같은 결).
 		{"label", map[string]any{"item_id": "t9-offline", "add": []string{"x"}}, true,
 			"실시간으로", "하지 않았다"},
+		// 반납도 재생 대상이 아니다 — 재생 시점엔 이미 놓았거나 남이 집었을 수 있고,
+		// 그러면 남의 선점을 놓는다(offline.go 의 CmdClaimLeave 판정).
+		// ★ 이 행은 pick 을 **반납 갈래로** 부른다 — 인자 없는 pick 은 읽기라 열화가 다르다.
+		{"pick", map[string]any{"leave": "오프라인에서 놓아 본다"}, true,
+			"재생 대상이 아니다", "하지 않았다"},
 	}
 	for _, c := range cases {
 		frames := mcpServe(t, rig, mcpCall(c.tool, c.args))
