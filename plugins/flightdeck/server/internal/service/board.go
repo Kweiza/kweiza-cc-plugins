@@ -494,7 +494,7 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 			// `uncommitted:<세션>` 과 `uncommitted-delta:<세션>` 을 그 이름 꼴로 짝지어 한 줄로
 			// 접는다 — **접기는 화면에서만 하고 여기서 내는 축은 그대로다**(둘을 그대로 받는
 			// 소비자는 웹 패널과 MCP 렌더러다. 원장과 `/metrics` 는 이 축을 애초에 안 본다 —
-			// 2026-08-12 실측: event.kind 10종에 파생 축이 없고 /metrics 는 runs·cards·seconds
+			// 2026-08-12 실측: event.kind 전수(33종)에 파생 축이 없고 /metrics 는 runs·cards·seconds
 			// 뿐이다. 원장 밖에 남는 것은 아래 "보드 조회" 로그 줄의 skipped 수가 전부다).
 			// 이름 꼴을 바꾸면 접기가 조용히 안 걸린다(줄이 둘로 돌아갈 뿐이라
 			// 시험 없이는 안 보인다) — `TestDeadWorktreeFoldsIntoOneLineButKeepsTheAxisCount` 가 문다.
