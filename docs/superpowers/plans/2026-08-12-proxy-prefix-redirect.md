@@ -719,10 +719,12 @@ go test ./internal/web/ -count=1
 
 ```bash
 cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
-grep -rn "http.Redirect" --include=*.go internal/ cmd/
+grep -rn 'http\.Redirect(' --include=*.go internal/ cmd/
 ```
 
 기대: **무출력.** 한 줄이라도 나오면 그 자리가 접두 밖으로 떨어지는 일곱 번째 자리다 — 고치고 이 단계를 다시 돈다.
+
+★ **여는 괄호까지 넣어야 한다.** `grep "http.Redirect"` 로는 "`http.Redirect` 를 안 쓴다"고 적은 **주석 다섯 줄**이 함께 잡힌다(`api/login.go`·`api/login_test.go`·`web/actions.go`). 그 주석들은 이 작업이 일부러 남긴 것이라 앞으로도 계속 잡힌다 — 호출부를 세는 관문이 주석을 세면 영영 빨간불이고, 그러면 사람이 그 관문을 무시하게 된다.
 
 - [ ] **Step 6: 커밋한다**
 
@@ -1080,10 +1082,12 @@ go test ./internal/... ./cmd/fd/ -count=1
 
 ```bash
 cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix/plugins/flightdeck/server && pwd
-grep -rn "http.Redirect" --include=*.go . || echo "없다 — 여섯 자리를 다 옮겼다"
+grep -rn 'http\.Redirect(' --include=*.go . || echo "없다 — 여섯 자리를 다 옮겼다"
 ```
 
 기대: `없다 — 여섯 자리를 다 옮겼다`
+
+★ 여는 괄호가 필수다. 이유는 Task 4 Step 5 에 있다 — 괄호가 없으면 이 작업이 일부러 남긴 주석 다섯 줄이 잡혀 관문이 영영 빨갛다.
 
 ---
 
