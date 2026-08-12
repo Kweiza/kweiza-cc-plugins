@@ -487,6 +487,14 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 			// 미커밋 규모 — **위 경로 축과 갈라 둔다.** 이것이 실패해도 위가 살아야 하고
 			// (커밋 전 의도를 나르는 유일한 축이다), 그것이 두 git 호출을 안 합친 이유다.
 			// 이 호출 하나가 이 축에서 새로 드는 비용의 전부다(세션당 4→5).
+			//
+			// ★ **두 축 이름의 접미가 같은 세션 id 인 것에 화면이 기댄다.** 워크트리가 지워지면
+			// 둘이 **함께** 실패하고(같은 `Session.Worktree` 를 본다) 원인도 하나인데, 화면이
+			// 같은 말을 두 번 하면 꼬리 예산이 배로 든다. `mcpsrv.foldTwinFailures` 가
+			// `uncommitted:<세션>` 과 `uncommitted-delta:<세션>` 을 그 이름 꼴로 짝지어 한 줄로
+			// 접는다 — **접기는 화면에서만 하고 여기서 내는 축은 그대로다**(원장·`/metrics` 는
+			// 둘을 따로 본다). 이름 꼴을 바꾸면 접기가 조용히 안 걸린다(줄이 둘로 돌아갈 뿐이라
+			// 시험 없이는 안 보인다) — `TestDeadWorktreeFoldsIntoOneLineButKeepsTheAxisCount` 가 문다.
 			if ud, err := g.UncommittedDelta(ctx, v.Session.Worktree); err != nil {
 				d.fail("uncommitted-delta:"+clip(v.Session.ID, 64), err)
 				fails = append(fails, "미커밋 규모를 못 읽었다")
