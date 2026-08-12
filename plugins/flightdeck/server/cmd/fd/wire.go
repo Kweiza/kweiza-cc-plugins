@@ -148,6 +148,11 @@ type errBody struct {
 // CLI 는 멀쩡한데, 그 비대칭은 "MCP 가 고장났다"로만 보여 원인에 못 닿는다.
 const landingPath = "/api/v1/landing"
 
+// landingQueuePath 는 줄 전체의 읽기 전용 조회다(Task 7) — `fd lane wait` 의 폴링이 이것을
+// 캐시 없이 친다(Client.ReadFresh). 취득의 정본은 여전히 landingPath(POST) 하나이고,
+// 이 GET 은 "차례로 보이는가"의 힌트일 뿐이다(internal/api/handlers_landing.go 머리 주석).
+const landingQueuePath = "/api/v1/landing/queue"
+
 // laneReleasePath 는 줄 행 하나의 회수 표면이다. **대상이 세션이 아니라 줄 행 번호다** —
 // 죽은 세션 명의로는 아무 호출도 못 하므로(세션 정체가 3중키다) 번호가 유일한 손잡이다.
 func laneReleasePath(rowID int64) string {

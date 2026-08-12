@@ -50,6 +50,7 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd land [--ok|--fail <사유>|--leave <사유>]
                                           랜딩 줄에 선다. 인자가 없으면 서거나 내 자리를 다시 묻는다.
                                           **내 차례가 아니면 종료코드 1** — "fd land && <랜딩>" 이 성립하게
+  fd lane wait [--resource <이름>]…            줄을 서고 차례까지 턴 안에서 기다린다(폴링은 조회, 취득은 land)
   fd lane release --row <id> --reason …   물린 줄 행을 사람이 회수한다(사유는 판단으로 남는다)
   fd claim release --item <id> --reason … 죽은 세션의 선점을 사람이 회수한다(항목은 open 으로 돌아간다)
   fd project ls                           등록된 프로젝트와 그 실적을 표로 낸다(지울 수 있는지도 말한다)

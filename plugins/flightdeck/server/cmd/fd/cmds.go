@@ -743,21 +743,26 @@ func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 	return LandExitCode(lr.State)
 }
 
-// runLane 은 `fd lane <하위명령>` 이다. 지금 있는 하위 명령은 release 하나다.
+// runLane 은 `fd lane <하위명령>` 이다. 있는 하위 명령은 release·wait 둘이다.
 //
 // 하위 명령을 하나 두려고 이름 공간을 여는 이유: 이 자리에 앞으로 오는 것들
 // (레인 목록·강제 재정렬)이 전부 **레인 전체를 다루는 사람의 일**이고,
-// 세션이 자기 자리를 다루는 land 와 섞이면 안 된다.
+// 세션이 자기 자리를 다루는 land 와 섞이면 안 된다. wait 는 예외로 보이지만 아니다 —
+// 그것도 land 를 그대로 호출하고(취득은 여전히 land POST 하나다), 다른 것은 그 사이의
+// 폴링뿐이라 여기 두어도 위 규율을 깨지 않는다.
 func (a *App) runLane(ctx context.Context, args []string, out io.Writer) int {
-	const help = "fd lane release --row <id> --reason \"...\"  — 물린 줄 행 하나를 사람이 회수한다"
+	const help = "fd lane release --row <id> --reason \"...\"  — 물린 줄 행 하나를 사람이 회수한다\n" +
+		"  fd lane wait [--resource <이름>]…            — 줄을 서고 차례까지 턴 안에서 기다린다"
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(out, "lane 하위 명령을 줘라. 지금 있는 것은 release 하나다:")
+		fmt.Fprintln(out, "lane 하위 명령을 줘라. 있는 것은 release·wait 다:")
 		fmt.Fprintln(out, "  "+help)
 		return 2
 	}
 	switch args[0] {
 	case "release":
 		return a.runLaneRelease(ctx, args[1:], out)
+	case "wait":
+		return a.runLaneWait(ctx, args[1:], out)
 	default:
 		fmt.Fprintf(out, "모르는 lane 하위 명령: %s\n  %s\n", clip(args[0], 40), help)
 		return 2
@@ -851,6 +856,226 @@ func (a *App) runLaneRelease(ctx context.Context, args []string, out io.Writer) 
 		fmt.Fprintf(out, "판단 %s 에 남겼다 — 무엇을 관측하고 끊었는지가 거기 있다.\n", rr.JudgmentID)
 	}
 	return 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// fd lane wait — 줄을 서고 차례까지 턴 안에서 기다린다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// laneWaitDeps 는 폴링의 시계 이음매다 — 시험이 sleep 을 없애고 시각을 민다.
+type laneWaitDeps struct {
+	now   func() time.Time
+	sleep func(time.Duration)
+}
+
+// runLaneWait 는 `fd lane wait` 다 — 줄에 서고, 차례가 될 때까지 **턴 안에서** 기다린다.
+//
+// ★ 대기의 통로는 읽기 전용 조회(ReadFresh)다. 취득의 정본은 여전히 land(POST) 하나다 —
+// 조회는 "차례로 보인다"까지만 말하고, 그 순간 POST 가 트랜잭션 안에서 다시 판정한다.
+// 조회가 낡아 틀렸어도 잃는 것은 POST 한 번이다(멱등 키를 고정하지 않는 기존 판정 —
+// outbox.go 의 CmdLandAcquire 갈래).
+//
+// ★ 서버 미도달이면 그 자리에서 1 로 끝낸다. 캐시로 줄을 재생하면 배타가 우회된다
+// (ReadFresh 가 그 통로 자체를 안 갖는다). 아웃박스에도 안 싣는다 — GET 이다.
+//
+// ★ --background 는 없다. 백그라운드는 부르는 쪽(하네스)이 이미 갖고 있고,
+// fd 가 데몬화하면 수명·정리·중복 실행이 전부 새 문제가 된다(스펙 결정 표).
+func (a *App) runLaneWait(ctx context.Context, args []string, out io.Writer) int {
+	return a.runLaneWaitWith(ctx, args, out, laneWaitDeps{now: a.now, sleep: time.Sleep})
+}
+
+// runLaneWaitWith 는 runLaneWait 의 본체다. deps 를 받는 이유는 시험이 sleep 을 없애고
+// 시각을 미는 것 하나다 — 실행 로직 자체는 사본이 아니다(runLaneWait 는 이 함수를 그대로 부른다).
+func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer, d laneWaitDeps) int {
+	fs := newFlagSet("lane wait")
+	var resources stringList
+	fs.Var(&resources, "resource", "줄을 설 자원(반복 가능). 비면 landing")
+	timeout := fs.Duration("timeout", 9*time.Minute, "이 시간까지 차례가 안 오면 1로 끝낸다(다시 부르면 이어진다)")
+	stale := fs.Duration("stale", 30*time.Minute, "막는 세션의 무신호가 이 나이를 넘으면 1로 끝내고 사람을 부른다")
+	interval := fs.Duration("interval", 2*time.Second, "첫 폴링 간격(변화가 없으면 1.5배씩, 상한 10초)")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	// ① 줄에 선다 — fd land 와 같은 쓰기 경로(열화 표·정체 규율을 그대로 탄다).
+	sess, err := a.sessionID(ctx, *session)
+	if err != nil {
+		fmt.Fprintf(out, "lane wait 하지 못했다: %v\n", err)
+		return 1
+	}
+	a.cli.Session = sess
+	acquire := func() (service.LandResult, bool) {
+		res, err := a.cli.Write(ctx, CmdLandAcquire, landingPath, landReq{
+			Project: a.proj.ID, SessionID: sess, Mode: api.LandModeAcquire, Resources: resources,
+		})
+		if err != nil || !res.Sent {
+			if err != nil {
+				fmt.Fprintf(out, "land 하지 못했다: %v\n", err)
+			} else {
+				fmt.Fprintf(out, "%s: %s\n", res.Mode, res.Reason)
+			}
+			return service.LandResult{}, false
+		}
+		var lr service.LandResult
+		if err := json.Unmarshal(res.Body, &lr); err != nil {
+			fmt.Fprintf(out, "랜딩 응답 해석 실패: %v\n", err)
+			return service.LandResult{}, false
+		}
+		return lr, true
+	}
+	lr, ok := acquire()
+	if !ok {
+		return 1
+	}
+	if lr.State != "waiting" {
+		fmt.Fprintln(out, strings.TrimRight(mcpsrv.RenderLand(lr, d.now()), "\n"))
+		return LandExitCode(lr.State)
+	}
+	myRow := lr.RowID
+	fmt.Fprintln(out, strings.TrimRight(mcpsrv.RenderLand(lr, d.now()), "\n"))
+
+	// ② 차례까지 조회 폴링. 변화가 있으면 한 줄 내고 간격을 처음으로 되돌린다.
+	deadline := d.now().Add(*timeout)
+	wait := *interval
+	lastLine := ""
+	for {
+		if d.now().After(deadline) {
+			fmt.Fprintf(out, "아직 차례가 아니다(%s 경과) — fd lane wait 를 다시 불러라.\n", timeout)
+			return 1
+		}
+		d.sleep(wait)
+		body, rerr := a.cli.ReadFresh(ctx, landingQueuePath+"?project="+urlValue(a.proj.ID))
+		if rerr != nil {
+			fmt.Fprintf(out, "줄을 읽지 못했다(%v) — 서버가 살아 있어야 대기가 성립한다. 캐시로는 판정하지 않는다.\n", rerr)
+			return 1
+		}
+		var view service.LaneView
+		if err := json.Unmarshal(body, &view); err != nil {
+			fmt.Fprintf(out, "줄 응답 해석 실패: %v\n", err)
+			return 1
+		}
+		st := judgeLaneWait(view, myRow, sess, d.now())
+		if st.line != lastLine && st.line != "" {
+			fmt.Fprintln(out, st.line)
+			lastLine = st.line
+			wait = *interval // 변화가 있었다 — 간격을 되돌린다
+		} else if wait = wait * 3 / 2; wait > 10*time.Second {
+			wait = 10 * time.Second
+		}
+		if st.myTurn {
+			lr, ok := acquire() // 정본 판정 — 조회가 낡았으면 여기서 waiting 으로 돌아온다
+			if !ok {
+				return 1
+			}
+			fmt.Fprintln(out, strings.TrimRight(mcpsrv.RenderLand(lr, d.now()), "\n"))
+			if lr.State != "waiting" {
+				return LandExitCode(lr.State)
+			}
+			myRow = lr.RowID
+		}
+		if st.staleFor > *stale {
+			fmt.Fprintf(out, "%s 가 %s 무신호다. 자동 회수는 없다 — 사람이 판정한다:\n  fd lane release --row %d --reason \"…\"\n그대로 더 기다리려면 fd lane wait 를 다시 불러라.\n",
+				st.staleWho, st.staleFor.Round(time.Minute), st.staleRow)
+			return 1
+		}
+	}
+}
+
+// laneWaitState 는 조회 한 번의 판정이다. judgeLaneWait 는 순수 함수다 — 시험은 이것만 찌른다.
+type laneWaitState struct {
+	myTurn   bool          // 모든 내 자원에서 entries[0].RowID==myRow && holder==nil(또는 재진입)
+	line     string        // 사람이 읽는 현황 한 줄(변화 감지용 — 같으면 안 낸다)
+	staleWho string        // 가장 오래 막는 상대(세션 짧은 id 와 자원)
+	staleFor time.Duration // 그 상대의 무신호 나이(신호가 없으면 대기 시작 나이)
+	staleRow int64         // 회수 대상 줄 행
+}
+
+// judgeLaneWait 는 조회(GET landingQueuePath) 응답 하나로 "지금 내 차례로 보이는가"를
+// 판정한다. 순수 함수다 — 시험이 서버 없이 표로 찌른다.
+//
+// 자원별 규칙(내 자원 = 그 자원의 entries 안에 myRow 가 있는 자원):
+//
+//	entries[0].RowID == myRow && holder == nil        → 그 자원은 통과
+//	holder != nil && holder.SessionID == mySession    → 통과(재진입 — front 위치와 무관하다,
+//	                                                      service.Land 의 heldByMe 판정과 같은 축)
+//	그 밖                                              → 막힘: 막는 이는 holder ?? entries[0].
+//	                                                      신호(LastSignalAt)가 있으면 그 나이,
+//	                                                      nil 이면 entries[0].EnqueuedAt 나이로 접는다.
+//
+// line 은 "r1: 2번째·점유 01KZ…·신호 3분 전 | r2: 1번째" 모양으로 자원별 조각을 잇는다
+// (내 자원이 아닌 자원은 판정에도 화면에도 안 낸다). 전부 통과면 myTurn=true 다.
+//
+// ★ 브리프 문면의 "전부 통과면 myTurn=true"를 공집합에 문자 그대로 적용하면(빈 집합의
+// 전칭명제는 항상 참) 내 줄 행이 어디에도 안 보일 때(예: 대기 중 회수당함)도 차례로
+// 접힌다 — POST 재판정이 안전망이라 취득 자체는 안 다치지만, 그 전에 사람이 읽는 줄이
+// "차례다"라고 먼저 말해 버린다. 그래서 haveMine 가드를 더한다(정정 각주 — 시험 표
+// TestLaneWaitTurnJudgement 의 "내 행이 어디에도 없다" 사례가 이 축을 잠근다).
+func judgeLaneWait(view service.LaneView, myRow int64, mySession string, now time.Time) laneWaitState {
+	var fragments []string
+	haveMine := false
+	allPass := true
+	worstAge := time.Duration(-1)
+	var worstWho string
+	var worstRow int64
+
+	for _, rl := range view.Resources {
+		idx := -1
+		for i, e := range rl.Entries {
+			if e.RowID == myRow {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			continue // 내 자원이 아니다
+		}
+		haveMine = true
+		pos := idx + 1
+
+		if (idx == 0 && rl.Holder == nil) || (rl.Holder != nil && rl.Holder.SessionID == mySession) {
+			fragments = append(fragments, fmt.Sprintf("%s: %d번째", rl.Resource, pos))
+			continue
+		}
+
+		allPass = false
+		// entries[0]은 "지금 이 자원에서 나를 막는 자리"다 — 살아 있는 점유에는 반드시
+		// 대응하는 살아 있는 줄 행이 있고(landing.go 머리 불변식), 그 행은 항상 그 자원
+		// 큐의 맨 앞이다(front 가 아니면 애초에 취득이 안 났다). 그래서 holder 가 있어도
+		// entries[0].RowID 가 곧 그 holder 의 행이다.
+		front := rl.Entries[0]
+		var blockerSession string
+		var lastSignal *time.Time
+		parts := []string{fmt.Sprintf("%d번째", pos)}
+		if rl.Holder != nil {
+			blockerSession, lastSignal = rl.Holder.SessionID, rl.Holder.LastSignalAt
+			parts = append(parts, "점유 "+mcpsrv.ShortID(blockerSession))
+		} else {
+			blockerSession, lastSignal = front.SessionID, front.LastSignalAt
+			parts = append(parts, fmt.Sprintf("앞 줄 행 %d(%s)", front.RowID, mcpsrv.ShortID(blockerSession)))
+		}
+		var age time.Duration
+		if lastSignal != nil {
+			age = now.Sub(*lastSignal)
+			parts = append(parts, "신호 "+mcpsrv.FormatAge(age)+" 전")
+		} else {
+			age = now.Sub(front.EnqueuedAt) // ★ 신호 nil 폴백 — 대기 시작 나이로 접는다
+			parts = append(parts, "신호 없음")
+		}
+		fragments = append(fragments, rl.Resource+": "+strings.Join(parts, "·"))
+
+		if age > worstAge {
+			worstAge = age
+			worstWho = fmt.Sprintf("%s(%s)", mcpsrv.ShortID(blockerSession), rl.Resource)
+			worstRow = front.RowID
+		}
+	}
+
+	st := laneWaitState{myTurn: haveMine && allPass, line: strings.Join(fragments, " | ")}
+	if worstAge >= 0 {
+		st.staleFor, st.staleWho, st.staleRow = worstAge, worstWho, worstRow
+	}
+	return st
 }
 
 // runClaim 은 `fd claim <하위명령>` 이다. 지금 있는 하위 명령은 release 하나다.

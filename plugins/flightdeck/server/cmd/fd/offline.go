@@ -52,7 +52,8 @@ type OfflineVerdict struct {
 // 그 접두는 service 가 이 이름으로 조립한 것이다. 여기서 이름을 바꾸면 접두가 안 떼여
 // 도구 응답이 "land report 거절: land report 거절: …" 가 된다.
 const (
-	// CmdLandAcquire 는 줄 서기 · 내 자리 재확인이다(mode=acquire).
+	// CmdLandAcquire 는 줄 서기 · 내 자리 재확인이다(mode=acquire). fd lane wait 의
+	// 취득도 이 이름으로 온다 — wait 전용 쓰기 명령은 없다(조회는 ReadFresh 라 이 표 밖이다).
 	CmdLandAcquire = "land"
 	// CmdLandReport 는 보고+반납이다(mode=report).
 	CmdLandReport = "land report"
