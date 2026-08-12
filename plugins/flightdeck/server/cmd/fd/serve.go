@@ -136,6 +136,11 @@ func buildHandler(svc *service.Service, webH http.Handler, opt api.Options) api.
 
 // noteBuild 는 이 기동이 새 실행 파일인지를 원장에 남긴다. **기동을 안 막는다.**
 //
+// ★ **호출 자리가 계약이다 — api.Listen 이 성공한 뒤여야 한다.** 리스너가 열리기 전에
+// 부르면 포트를 이미 물린 기동도 배포를 남기고, LastDeployAt 이 한 번도 응답한 적 없는
+// 바이너리의 시각을 낸다. 이 함수 안에는 그것을 막을 수단이 없다(바인드를 모른다) —
+// 그래서 runServe 의 순서를 시험이 직접 잠근다(deploy_note_bind_test.go).
+//
 // ★ 관측을 `/proc/self/exe` 에서 한다 — 감시기의 기준값과 같은 자리다(newSelfWatcher 의 ★).
 // 경로를 stat 하면 파일이 이미 교체된 뒤에는 "지금 도는 이미지"가 아니라 다음 이미지를 잰다.
 //

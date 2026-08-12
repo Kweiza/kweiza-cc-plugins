@@ -32,13 +32,15 @@ const eventServerDeploy = "server.deploy"
 //
 // exe 는 안정 식별자면 무엇이든 된다. 지금 호출부는 ExeID.String()(ino·size·mtime)을 준다.
 //
-// ★ **아직 못 가르는 것: 뜨지 못한 기동.** 호출부(cmd/fd 의 noteBuild)가 리스너를 열기
-// **전에** 부르므로, 포트를 이미 다른 서버가 물고 있어 곧바로 죽는 기동도 여기까지는 온다.
-// 실측으로 재현된다 — 컨테이너가 :7420 을 물고 도는데 사람이 README 의
-// `go run ./cmd/fd serve` 를 치면, 그 임시 바이너리가 배포로 적히고 "address already in
-// use" 로 죽는다. 그러면 `LastDeployAt` 이 **한 번도 응답한 적 없는 바이너리**의 시각을 낸다.
-// 고치려면 `api.Serve` 가 바인드 성공을 알려야 하는데 지금 그 훅이 없다 — 후속으로 낸다.
-// 그때까지 이 값은 "이 실행 파일이 이 원장에서 처음 관측된 시각"으로 읽어라.
+// ★ **뜨지 못한 기동은 여기까지 안 온다.** 호출부(cmd/fd 의 runServe)가 api.Listen 이
+// 성공한 **뒤에만** noteBuild 를 부른다 — 포트를 이미 물려 곧바로 죽는 기동은 원장에
+// 닿기 전에 조기 반환한다(TestServeSkipsDeployNoteWhenBindFails 가 그 순서를 붙든다).
+//
+// ★ **남는 경계 하나: 바인드에 성공한 임시 기동.** 다른 포트로 띄운 `go run` 은 실제로
+// 리스너를 열므로 이 정의 안에서 배포로 적힌다. 그것이 실제 오염인 이유는 compose 가
+// `~/.flightdeck:/data` 를 마운트해 **호스트의 임시 기동과 컨테이너가 같은 DB** 를 열기
+// 때문이다. 그러면 그 임시 정체가 마지막 배포로 남고, 다음 컨테이너 재기동(배포가 아닌)이
+// exe 불일치로 배포를 또 만든다. 가르는 축을 정하는 것은 후속이다.
 func (s *Store) NoteServerBuild(ctx context.Context, exe string) (deployed bool, err error) {
 	exe = strings.TrimSpace(exe)
 	if exe == "" {
@@ -72,6 +74,10 @@ func (s *Store) NoteServerBuild(ctx context.Context, exe string) (deployed bool,
 //
 // ★ **못 잼과 0 을 가른다.** 배포 기록이 없으면 ok=false 이고, 그때 영값 시각을 창의
 // 시작으로 쓰면 "전 역사"가 조용히 창이 된다 — 호출부가 그 갈래를 반드시 다뤄야 한다.
+//
+// ★ 이 값은 **리스너가 열린 기동**의 시각이다(NoteServerBuild 의 ★). 앞선 판에서 이
+// 독스트링이 거짓이던 기간이 있었고 — 바인드 전에 적혀 뜨지도 못한 바이너리의 시각이
+// 실렸다 — 지금은 순서가 그것을 막는다.
 func (s *Store) LastDeployAt(ctx context.Context) (at time.Time, ok bool, err error) {
 	var raw string
 	row := s.db.QueryRowContext(ctx,

@@ -69,8 +69,9 @@ func Serve(ctx context.Context, ln net.Listener, h Handler, log *slog.Logger) er
 새 정리 경로가 안 생긴다. `Listen` 과 `Serve` 사이에는 실패 경로를 두지 않는다.
 
 **부수 소득 둘**:
-- `serve_drain_test.go:22-30` 의 `serveAddrFromLog` 헬퍼가 죽는다. 시험이 `ln.Addr()` 를 직접
-  읽는다 — 로그 파싱으로 주소를 알아내던 우회가 사라진다.
+- `serve_drain_test.go:22-30` 의 `serveAddrFromLog` 가 **주소를 얻는 수단으로는 죽는다**.
+  주소를 쓰는 시험 3곳이 `ln.Addr()` 를 직접 읽어 로그 파싱과 5초 폴링이 사라진다. 헬퍼
+  자체는 남는다 — 요청을 안 보내는 시험 하나가 "서버가 떴다"를 기다리는 데 쓴다.
 - `PortAdvice` 가 제 갈래에만 붙는다. 지금은 `serveWithWatcher` 의 `serveErr` 갈래가 바인드
   실패와 "리스너가 스스로 죽음"을 섞어 받아 후자에도 포트 처방을 붙인다.
 
