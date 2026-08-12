@@ -82,6 +82,12 @@ const (
 	// ★ 값이 cmd/fd/cmds.go 의 runAfterCut 안 a.cli.Write 호출부와 글자 그대로 같아야
 	// 한다 — 위 CmdMove 와 같은 이유·같은 시험이 지킨다.
 	CmdAfterCut = "after cut"
+	// CmdLabel 은 이미 있는 항목의 꼬리표를 고치는 것이다(`fd label`).
+	//
+	// ★ 리터럴 대신 상수를 쓰는 이유는 CmdMove 와 같다 — offline.go·outbox.go 가
+	// 이 이름으로 명시 갈래를 잡고, write_cmd_table_coverage_test.go 가 그것을
+	// 기계로 지킨다.
+	CmdLabel = "label"
 	// CmdPrescriptions 는 Stop 훅이 이번 턴의 처방을 받아 오는 내부 호출이다 — 사람이
 	// 셸에 치는 서브명령이 아니라 cmd/fd/hook.go 의 hookStop 만 부른다.
 	//
@@ -156,6 +162,13 @@ func JudgeOffline(cmd string) OfflineVerdict {
 				"같은 선행이 다른 경로로 이미 사라졌거나 바뀌었을 수 있는데도 낡은 요청을 " +
 				"그대로 실행해 엉뚱한 관계를 끊거나 이미 없는 관계를 끊으려 든다. 되돌릴 수 " +
 				"없는 관계 편집이라 서버가 돌아오면 지금 상태를 보고 다시 실행하라"}
+	case CmdLabel:
+		// ★ CmdAfterCut 과 같은 결이다 — 표 밖으로 떨어지면 사유가 "정의돼 있지
+		//   않다"가 되어 설계 결함처럼 읽힌다. 동작(거절)은 default 와 같지만 사유가 다르다.
+		return OfflineVerdict{OfflineRefuse,
+			"꼬리표 더하기·빼기는 지금 그 항목에 무엇이 붙어 있는지를 원장에서 실시간으로 " +
+				"읽어 계산한다 — 아웃박스에 쌓아 재생하면 그 사이 다른 경로로 꼬리표가 " +
+				"바뀌었어도 낡은 요청이 그대로 덮는다. 서버가 돌아오면 지금 상태를 보고 다시 실행하라"}
 	case CmdPrescriptions:
 		// ★ 사람이 치는 명령이 아니라 Stop 훅(hook.go 의 hookStop)의 내부 호출이다. 이
 		//   거절은 훅을 안 막는다 — 훅은 fail-open 이라(hookStop 머리 주석) 경고 로그만

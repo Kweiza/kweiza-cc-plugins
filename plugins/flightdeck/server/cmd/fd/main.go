@@ -45,6 +45,7 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           cc 가 갈려 손이 안 닿는 카드를 그 축으로 지목한다
   fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
+  fd label <item-id> --add <꼬리표> --rm <꼬리표>  이미 있는 항목의 꼬리표를 고친다(둘 다 반복 지정 가능)
   fd after cut <item-id> --item <dep>     걸린 선행 하나를 끊는다(--job·--sha 도 된다).
                                           선행이 폐기됐거나 sha 가 해석 불가일 때의 **유일한 탈출구**
   fd land [--ok|--fail <사유>|--leave <사유>]
@@ -136,6 +137,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runClose(ctx, args[1:], stdout)
 	case "move":
 		return app.runMove(ctx, args[1:], stdout)
+	case "label":
+		return app.runLabel(ctx, args[1:], stdout)
 	case "after":
 		return app.runAfter(ctx, args[1:], stdout)
 	case "land":
