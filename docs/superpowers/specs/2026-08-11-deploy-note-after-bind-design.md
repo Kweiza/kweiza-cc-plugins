@@ -114,8 +114,11 @@ DB 열기
 **마이그레이션** — 시그니처 변경을 따라가는 기계적 수정:
 - `cmd/fd/serve_test.go:70, 119, 158` — `"127.0.0.1:0"` → `api.Listen` 으로 연 리스너
 - `internal/api/serve_drain_test.go:99, 201, 273, 325` — 같은 변경
-- `internal/api/serve_drain_test.go:100, 202, 274, 326` — `serveAddrFromLog(...)` → `ln.Addr().String()`
-- `serveAddrFromLog` 헬퍼 삭제(호출부가 0이 된다)
+- `internal/api/serve_drain_test.go:100, 202, 274` — `serveAddrFromLog(...)` → `ln.Addr().String()`
+  (326 은 빼고 그대로 둔다 — 아래를 보라)
+- `serveAddrFromLog` 헬퍼는 남는다. 네 호출부 중 셋은 위처럼 사라지지만, 요청을 안 보내는
+  시험 하나(`TestServeShutdownLogsDrainMs`)가 주소가 아니라 "서버가 떴다"를 기다리는
+  동기화 수단으로 계속 쓴다 — 호출부가 0이 되지 않는다.
 
 ### ④ 거짓이 되는 주석
 
