@@ -237,20 +237,21 @@ func containsStr(xs []string, s string) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ② 서버 미도달 — 도구 일곱이 각각 무엇을 하는가. **조용히 성공하지 않는다**
+// ② 서버 미도달 — 도구 여덟이 각각 무엇을 하는가. **조용히 성공하지 않는다**
 //
-// ★ 표는 도구 일곱을 다 덮지만 **갈래를 다 덮지는 않는다.** pick 은 인자에 따라 두 축이라
+// ★ 표는 도구 여덟을 다 덮지만 **갈래를 다 덮지는 않는다.** pick 은 인자에 따라 두 축이라
 //   두 행이고, land 는 인자 없는 취득 한 갈래만 여기 있다 — 보고·이탈·회수의 사유는
 //   land_seam_test.go 의 TestLandDegradeReasonsAreDistinct 가 순수 함수 쪽에서 가른다.
 //   여기서 재는 것은 그 판정이 **MCP 응답까지 건너오는가**이지 판정 자체가 아니다.
 //
-// ★ **그 "다 덮는다"를 잠그는 시험은 없다.** 아래 표를 mcpsrv.ToolNames() 와 대조하는 자리가
-//   이 패키지에 한 군데도 없다(cmd/fd 전체에 ToolNames·KnownTool·Tools 호출이 0건이다) —
-//   실측: alloc 행 하나를 지워도 이 시험이 초록으로 통과한다. 도구가 여덟이 되면
-//   mcpsrv 의 TestToolTableIsSeven 은 빨개지지만 그 빨간불은 **다른 패키지의 다른 사실**을
-//   말하고, 그것을 고치는 사람을 이 표로 데려오는 문장은 없다. 그래서 여덟째 도구의
-//   열화 처방은 조용히 안 덮인 채로 남을 수 있다(api/errors.go 의 "그 수를 잠그는 시험은
-//   없다", DESIGN.md 의 "이 수를 잠그는 시험은 없다"와 같은 부류의 결손이다).
+// ★ **그 "다 덮는다"를 잠그는 시험은 지금도 없다.** 아래 표를 mcpsrv.ToolNames() 와
+//   대조하는 자리가 이 패키지에 한 군데도 없다(cmd/fd 전체에 ToolNames·KnownTool·Tools
+//   호출이 0건이다) — 실측: alloc 행 하나를 지워도 이 시험이 초록으로 통과한다. label
+//   행은 항목 꼬리표 표면(Task 7)이 바로 이 주석을 읽고 손으로 찾아와 채웠다 — 도구가
+//   아홉이 되면 그 사람도 똑같이 손으로 찾아와야 한다. mcpsrv 의 TestToolTableIsEight
+//   는 그때 빨개지지만 그 빨간불은 **다른 패키지의 다른 사실**을 말하고, 그것을 고치는
+//   사람을 이 표로 데려오는 문장은 없다(api/errors.go 의 "그 수를 잠그는 시험은 없다",
+//   DESIGN.md 의 "이 수를 잠그는 시험은 없다"와 같은 부류의 결손이다).
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
@@ -304,6 +305,11 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 		// 오프라인에서 '내 차례'를 만들면 두 세션이 동시에 랜딩한다(offline.go 의 그 갈래).
 		{"land", map[string]any{}, true,
 			"배타의 정본이 서버의 DB 제약", "하지 않았다"},
+		// 꼬리표는 지금 붙은 것을 원장에서 실시간으로 읽어 add·rm 을 계산한다 —
+		// 아웃박스에 쌓으면 그 사이 다른 경로로 바뀐 꼬리표를 낡은 요청이 덮는다
+		// (offline.go 의 CmdLabel 판정, CmdAfterCut·CmdMove 와 같은 결).
+		{"label", map[string]any{"item_id": "t9-offline", "add": []string{"x"}}, true,
+			"실시간으로", "하지 않았다"},
 	}
 	for _, c := range cases {
 		frames := mcpServe(t, rig, mcpCall(c.tool, c.args))

@@ -467,6 +467,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		res = s.toolAlloc(ctx, sessionID, args)
 	case "land":
 		res = s.toolLand(ctx, sessionID, args)
+	case "label":
+		res = s.toolLabel(ctx, sessionID, args)
 	default:
 		// KnownTool 을 통과했는데 여기 오면 도구 표와 디스패치가 어긋난 것이다.
 		res = textResult(fmt.Sprintf("도구 %q 가 표에는 있는데 디스패치에 없다 — 서버 결함이다", clip(name, 64)), true)
@@ -986,6 +988,27 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 		return textResult(s.withTail(ctx, s.errText("land", err), tailOpts{}), true)
 	}
 	return textResult(s.withTail(ctx, RenderLand(res, s.now()), tailOpts{}), false)
+}
+
+// toolLabel 은 이미 있는 항목의 꼬리표를 고친다.
+//
+// ★ 고칠 수 있는 축은 **꼬리표 하나뿐**이다 — 일반 amend 가 아니다(설계 §11).
+func (s *Server) toolLabel(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
+	var a labelArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return textResult(s.withTail(ctx, s.errText("label", err), tailOpts{}), true)
+	}
+	res, err := s.be.SetLabels(ctx, service.LabelInput{
+		Project: s.id.ProjectID, SessionID: sessionID,
+		ItemID: strings.TrimSpace(a.ItemID), Add: a.Add, Rm: a.Rm,
+	})
+	if err != nil {
+		if r, ok := s.degradedResult(ctx, "label", err); ok {
+			return r
+		}
+		return textResult(s.withTail(ctx, s.errText("label", err), tailOpts{}), true)
+	}
+	return textResult(s.withTail(ctx, RenderLabel(res), tailOpts{}), false)
 }
 
 // toAfter 는 인자의 선행 조건을 도메인 타입으로 옮긴다.

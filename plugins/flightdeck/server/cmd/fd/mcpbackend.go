@@ -31,12 +31,12 @@ import (
 // ★ **이 백엔드는 한 번에 한 호출만 도는 전제 위에 있다.** 그 전제의 보증인은
 // mcpsrv.Serve 의 프레임 루프다 — 읽기만 고루틴이고 handle 은 루프 본문에서 인라인으로 돈다.
 //
-// 아래 여섯 자리(Pick 둘 · Note · AddItem · Finish · land)가 호출마다
+// 아래 일곱 자리(Pick 둘 · Note · AddItem · Finish · land · label)가 호출마다
 // `b.app.cli.Session` 을 갈아 쓴다. 클라이언트를 한 벌로 둔 대가이고, 지금은 공유가
 // 아니라 **직렬 재사용**이라 안전하다.
 //
 // 병렬로 도구를 돌리기 시작하는 순간 이 자리가 깨진다. 그런데 깨지는 것이 여기만이 아니라서
-// 이 여섯만 고치면 **더 조용한 결함이 남는다** — 무엇이 함께 깨지는지는 client.go 의
+// 이 일곱만 고치면 **더 조용한 결함이 남는다** — 무엇이 함께 깨지는지는 client.go 의
 // Client 타입 주석에 적어 뒀다. 다만 그 목록의 **프로세스 간 축(아웃박스·캐시)은 이미
 // 닫혔다**(outbox_lock.go). 여기 남은 것은 프로세스 **내부** 축뿐이다.
 //
@@ -460,6 +460,28 @@ func (b *mcpBackend) RecentNotes(ctx context.Context, project string, limit int)
 		return v.Notes, deg
 	}
 	return v.Notes, nil
+}
+
+// SetLabels 는 꼬리표 고침을 REST 로 보낸다.
+//
+// ★ b.write 가 실패를 이미 mcpsrv 좌표계로 옮긴다(미도달 → Degraded, 4xx → apiError) —
+// AddItem·Finish 와 같은 모양으로 **err 를 다시 감싸지 않는다.** 감싸면 b.apiError 를
+// 두 번 태우는 것인데, 그 함수는 *APIError 가 아닌 값을 그대로 돌려주므로 겉보기엔
+// 무해하지만 읽는 사람에게 "여기서 뭔가 더 한다"는 거짓 신호를 남긴다.
+func (b *mcpBackend) SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error) {
+	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
+	b.app.cli.Session = in.SessionID
+	var res service.LabelResult
+	raw, err := b.write(ctx, CmdLabel, labelPath(in.ItemID), labelReq{
+		Project: in.Project, SessionID: in.SessionID, Add: in.Add, Rm: in.Rm,
+	})
+	if err != nil {
+		return res, err
+	}
+	if uerr := json.Unmarshal(raw, &res); uerr != nil {
+		return res, fmt.Errorf("꼬리표 고침 응답 해석 실패: %w", uerr)
+	}
+	return res, nil
 }
 
 func toAfterWire(in []model.After) []afterWire {

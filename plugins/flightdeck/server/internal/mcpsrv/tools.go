@@ -1,7 +1,8 @@
 package mcpsrv
 
-// 도구 7개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
-// land 하나를 더했다. 더는 늘리지 않는다.
+// 도구 8개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
+// land 를, 항목 꼬리표 표면(2026-08-12-item-label-surface-design.md)이 label 을 더했다.
+// 더는 늘리지 않는다.
 //
 // ★ 설명 문구를 짧게 유지하는 것이 이 파일의 규율이다. 세션 시작에 실리는 것은
 // 도구 이름과 설명, 그리고 서버 instructions 뿐이고 그 예산이 도구 수를 눌러 잡는
@@ -149,6 +150,15 @@ var tools = []Tool{
 			"resources": strArr("줄을 설 자원들. 비면 landing. 경로 자원은 path:<경로>"),
 		}),
 	},
+	{
+		Name:        "label",
+		Description: "항목의 꼬리표를 더하거나 뺀다. 'tickler' 만 굶김 축에서 빠진다.",
+		InputSchema: obj(map[string]any{
+			"item_id": str("꼬리표를 고칠 항목 id"),
+			"add":     strArr("더할 꼬리표. 'tickler' 는 기한까지 늙는 항목을 굶김 축에서 뺀다"),
+			"rm":      strArr("뺄 꼬리표"),
+		}, "item_id"),
+	},
 }
 
 // Tools 는 tools/list 가 내는 목록의 사본이다.
@@ -253,4 +263,10 @@ type landArgs struct {
 	Leave     string   `json:"leave"`
 	Release   string   `json:"release"`
 	Resources []string `json:"resources"`
+}
+
+type labelArgs struct {
+	ItemID string   `json:"item_id"`
+	Add    []string `json:"add"`
+	Rm     []string `json:"rm"`
 }
