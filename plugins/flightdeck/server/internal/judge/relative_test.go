@@ -28,6 +28,8 @@ func TestRelativeTo(t *testing.T) {
 		{"/login", "https://evil.example/x", "./"},
 		{"/login", "", "./"},
 		{"/login", "relative", "./"},
+		{"/login", "/../../etc", "./"},        // 점 마디 — 호스트는 그대로지만 접두 밖으로 나간다
+		{"/actions/reclaim", "/a/../b", "./"}, // 중간의 점 마디도 막는다
 	}
 	for _, c := range cases {
 		if got := RelativeTo(c.from, c.to); got != c.want {

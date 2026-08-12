@@ -23,7 +23,12 @@ func RelativeTo(from, to string) string {
 	// ★ to 는 이 서버 안의 절대경로여야 한다. `//` 로 시작하면 스킴 상대 URL 이라
 	// 브라우저가 다른 호스트로 나간다 — 호출부의 JudgeNext 가 이미 막지만, 순수 함수는
 	// 자기 방어를 진다. 못 읽은 것은 통과시키지 않고 뿌리로 접는다.
-	if !strings.HasPrefix(to, "/") || strings.HasPrefix(to, "//") {
+	//
+	// ★ 점 마디도 막는다. `/../../etc` 같은 값은 호스트를 안 바꾸므로 오픈 리다이렉트는
+	// 아니지만 접두 **밖**으로 나간다 — 이 함수가 막으려는 것이 정확히 그것이다.
+	// 호출부의 JudgeNext 는 url.Parse 와 RequestURI() 를 쓰는데 그 둘이 점 마디를
+	// 정규화하지 않아 그대로 통과시킨다(실측). 그래서 이 자리에서 막는다.
+	if !strings.HasPrefix(to, "/") || strings.HasPrefix(to, "//") || strings.Contains(to, "..") {
 		return "./"
 	}
 	rest := to[1:]

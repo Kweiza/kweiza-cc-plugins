@@ -364,7 +364,7 @@ func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
 	// 실제로 폼을 그리는지 본다. nil 아님만 재면 func(...){} 빈 몸통도 통과한다.
 	//
 	// ★ 필드마다 **서로 구분되는** 값을 준다 — 같은 타입의 문자열 셋이라 어댑터가 둘을
-	// 맞바꿔도 컴파일이 통과한다. Action 은 뿌리 값(`login`)이 아니라 `../login` 이다:
+	// 맞바꿔도 컴파일이 통과한다. Action 은 뿌리 값(`./login`)이 아니라 `../login` 이다:
 	// 뿌리 값은 제로값과 구분은 되지만 "옮겨졌다"를 덜 확실하게 보인다.
 	rec := httptest.NewRecorder()
 	opt.LoginScreen(rec, httptest.NewRequest("GET", "/", nil),

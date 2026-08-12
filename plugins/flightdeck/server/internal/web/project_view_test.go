@@ -89,6 +89,12 @@ func TestProjectViewWritePinsAndRedirects(t *testing.T) {
 	if rec.Code != 303 {
 		t.Fatalf("응답 %d, 기대 303 — 쓰기는 리다이렉트로 돌아온다(더블 제출 방지)", rec.Code)
 	}
+	// ★ 이 단정이 없으면 이 자리의 되돌림 수정에 회귀 방어가 하나도 없다. 실측:
+	// h.seeOther 를 옛 http.Redirect 로 되돌려도 전 스위트가 초록이었다 —
+	// back() 이 낳는 시험 둘만 Location 을 보고 있었고 이 갈래는 아무도 안 봤다.
+	if landed := resolveFrom(t, "/actions/project-view", rec.Header().Get("Location")); landed.Path != "/dcp-dev-board/" {
+		t.Fatalf("Location 이 %q 에 착지한다 — 접두 안의 뿌리여야 한다", landed.Path)
+	}
 
 	_, html := f.get("")
 	nav := navOf(t, html)
