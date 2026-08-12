@@ -49,8 +49,13 @@ func TestInstructionsBudget(t *testing.T) {
 		}
 	}
 	// 설계 §6 이 못박은 세 줄이 그대로 있어야 한다.
+	//
+	// ★ 첫 줄 갱신(2026-08-12, Task 13): "락은 없다" 앞에 "랜딩 전에 `land` 로 줄을 선다"가
+	// 늘었다 — lane-turn 큐가 전 기간 0건이었던 원인이 "문이 없다"였다. pick·note·finish
+	// 셋만 이름을 대던 시절에는 land 라는 낱말 자체가 세션 시작 컨텍스트 어디에도 없었고,
+	// 그러니 세션이 land 를 부를 이유를 스스로 찾아낼 길이 없었다.
 	for _, want := range []string{
-		"작업은 `pick`, 판단은 `note`, 끝나면 `finish`. 락은 없다.",
+		"작업은 `pick`, 판단은 `note`, 끝나면 `finish`, 랜딩 전에 `land` 로 줄을 선다. 락은 없다.",
 		"head·branch·sha·랜딩 이력은 서버가 git 에서 읽으므로 적지 마라.",
 		"겹침·선점·미확인 결과는 응답 꼬리에 온다.",
 	} {

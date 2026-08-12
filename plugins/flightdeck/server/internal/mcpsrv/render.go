@@ -1230,6 +1230,12 @@ func RenderPick(r service.PickResult, now time.Time) string {
 			b.WriteString("워크트리 준비 명령을 만들지 않았다 — " +
 				"항목 id 가 브랜치·디렉토리 이름으로 안전하지 않거나 프로젝트 경로가 없다.\n")
 		}
+		// ★ 새 꼬리(2026-08-12, Task 13): 워크트리 절 다음에 랜딩 순서를 말한다.
+		// lane-turn 큐가 전 기간 0건이었던 원인 셋 중 하나가 이 자리다 — pick 응답이
+		// "집었으면 다음은 무엇인가"를 끝까지 말하지 않으면 세션은 finish 뒤에 land 로
+		// 줄을 선다는 것을 스스로 찾아내야 한다. 워크트리 명령을 못 만든 갈래에서도
+		// 낸다 — 이 문장의 질문(다음 순서)은 워크트리 성패와 무관하다.
+		b.WriteString("끝나면: finish → land 로 줄 서기 → 차례에 랜딩. 기다림은 `fd lane wait` 가 턴 안에서 잇는다.\n")
 	}
 
 	// 연결된 판단. 지정 선점·재개는 **전문**이고 추천은 제목만이다(설계 §6).
@@ -2067,7 +2073,9 @@ func RenderLand(r service.LandResult, now time.Time) string {
 		// 그대로 남아 있다는 사실. 키 이름을 본문에 박는 이유는 세션이 실제로 받는 처방과
 		// 이 문장을 이어 읽어야 하기 때문이다.
 		b.WriteString("차례가 오면 처방이 턴 끝에 온다(Stop 훅이 끌어간다) — 키는 lane-turn 이고 그 줄 행 앞으로 한 번뿐이다.\n")
-		b.WriteString("한 번 지나가면 같은 줄 행에는 다시 안 온다 — land 를 다시 불러 묻는 길은 그대로 열려 있다.\n")
+		// ★ 둘째 문장 교체(2026-08-12): "land 를 다시 불러 묻는 길" 은 손 폴링 안내였다.
+		// 대기의 통로는 이제 fd lane wait 다 — 취득의 정본이 land 인 것은 그대로다.
+		b.WriteString("`fd lane wait` 가 턴 안에서 차례까지 기다린다(취득은 land 가 트랜잭션 안에서 다시 판정한다) — 기다림을 끊으려면 leave 다.\n")
 
 	case "released":
 		fmt.Fprintf(&b, "land · 보고하고 레인을 반납했다 (줄 행 %d)\n", r.RowID)

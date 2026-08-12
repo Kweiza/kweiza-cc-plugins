@@ -206,6 +206,16 @@ func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {
 	if !strings.Contains(got, "git worktree add '.flightdeck/worktrees/t5-iam' -b t5-iam 'main'") {
 		t.Fatalf("워크트리 준비 명령이 없다:\n%s", got)
 	}
+	// ★ 새 꼬리(2026-08-12, Task 13): 워크트리 절 다음에 랜딩 순서를 알려준다 —
+	// lane-turn 큐가 전 기간 0건이었던 원인의 한 자리("문이 없다")다. pick 꼬리가
+	// finish→land 순서를 말하지 않으면 세션은 집은 뒤 land 를 부를 이유를 스스로
+	// 찾아내야 한다.
+	if !strings.Contains(got, "끝나면: finish → land 로 줄 서기 → 차례에 랜딩") {
+		t.Fatalf("워크트리 절 꼬리에 랜딩 순서 안내가 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "fd lane wait") {
+		t.Fatalf("랜딩 순서 안내가 기다림의 통로(fd lane wait)를 안 가리킨다:\n%s", got)
+	}
 	// 기계가 세는 값(사유 코드)은 사람 말로 풀지 않고 그대로 보인다.
 	for _, code := range []string{judge.RejectClaimed, judge.AfterUnmetItem} {
 		if !strings.Contains(got, code) {
@@ -220,8 +230,14 @@ func TestRenderPickCarriesBranchAndWorktree(t *testing.T) {
 	bad := res
 	bad.Branch = "--evil"
 	bad.Setup = service.SetupCommands("/home/a/proj", "main", "--evil")
-	if out := RenderPick(bad, t0); !strings.Contains(out, "워크트리 준비 명령을 만들지 않았다") {
+	out := RenderPick(bad, t0)
+	if !strings.Contains(out, "워크트리 준비 명령을 만들지 않았다") {
 		t.Fatalf("명령을 못 만든 사실이 응답에 없다:\n%s", out)
+	}
+	// 워크트리 명령을 못 만들어도 랜딩 순서 안내는 그 절의 꼬리라 여전히 나온다 —
+	// 이 문장은 워크트리 성패와 무관하게 "집었으면 다음은 무엇인가"를 답한다.
+	if !strings.Contains(out, "끝나면: finish → land") {
+		t.Fatalf("명령을 못 만들어도 랜딩 순서 안내는 나와야 한다:\n%s", out)
 	}
 }
 

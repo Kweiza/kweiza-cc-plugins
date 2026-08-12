@@ -123,10 +123,16 @@ func TestRenderLandReleasedAndLeft(t *testing.T) {
 // 문장을 이어 읽을 수 있어야 한다. 한글 문장만 넣고 키 이름을 빼면 이 시험은 초록인 채
 // 아무것도 안 잠근다.
 //
-// ★ 그리고 waiting 은 "**한 번뿐**"과 "그래서 다시 물어도 된다"를 함께 말해야 한다.
+// ★ 그리고 waiting 은 "**한 번뿐**"과 "기다림의 통로"를 함께 말해야 한다.
 // 처방은 (세션 × 키) 1회라 흘리면 같은 줄 행에는 다시 안 오는데, 그 사실을 뺀 문장은
 // "서버가 알려주니 가만히 있으면 된다"로 읽힌다 — 이 항목이 고치는 결함("산문이 사실보다
 // 넓게 말한다")의 재발이고, 그렇게 서 있는 세션 뒤로 줄 전원이 선다.
+//
+// ★ 둘째 문장 갱신(2026-08-12, Task 13): 예전에는 "land 를 다시 불러 묻는 길은 그대로
+// 열려 있다"였다 — 손으로 다시 물으라는(폴링) 안내였고, `fd lane wait` 가 서기 전에는
+// 그게 유일한 길이었다. 지금은 그 안내가 낡았다: 기다림의 정본 통로는 `fd lane wait` 다
+// (턴 안에서 차례까지 기다린다). land 가 취득의 정본이라는 사실은 그대로다 — wait 가
+// 대신 부르는 것도 결국 land 고, 트랜잭션 안에서 다시 판정한다.
 func TestRenderLandWaitingPointsAtLaneTurn(t *testing.T) {
 	signal := t0.Add(-1 * time.Minute)
 	waiting := []service.LandResult{
@@ -139,12 +145,17 @@ func TestRenderLandWaitingPointsAtLaneTurn(t *testing.T) {
 			t.Errorf("대기 응답이 처방 키 lane-turn 을 안 가리킨다 — 세션이 받은 처방과 이 화면이 안 이어진다(줄 행 %d):\n%s",
 				c.RowID, got)
 		}
-		// 밀어 온다는 사실만 적고 1회라는 사실을 빼면 폴링이 닫힌 것처럼 읽힌다.
-		for _, want := range []string{"한 번", "다시 안 온다", "land 를 다시"} {
+		// 밀어 온다는 사실(한 번뿐) · 기다림의 통로(fd lane wait) · 취득의 정본은
+		// 여전히 land 라는 사실(다시 판정한다) 셋을 함께 말해야 한다.
+		for _, want := range []string{"한 번", "fd lane wait", "다시 판정한다", "leave"} {
 			if !strings.Contains(got, want) {
-				t.Errorf("대기 응답에 %q 가 없다 — 처방이 (세션 × 키) 1회라는 사실이 빠지면 화면이 사실보다 넓게 말한다(줄 행 %d):\n%s",
+				t.Errorf("대기 응답에 %q 가 없다 — 기다림의 통로가 빠지면 화면이 다시 손 폴링 안내로 읽힌다(줄 행 %d):\n%s",
 					want, c.RowID, got)
 			}
+		}
+		if strings.Contains(got, "land 를 다시 불러") {
+			t.Errorf("대기 응답이 여전히 손 폴링 문구를 낸다 — 통로가 fd lane wait 로 바뀌었다(줄 행 %d):\n%s",
+				c.RowID, got)
 		}
 	}
 
