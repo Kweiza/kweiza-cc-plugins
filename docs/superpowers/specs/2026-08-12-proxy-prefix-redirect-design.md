@@ -100,10 +100,15 @@ func RelativeTo(from, to string) string
 접두 **밖**으로 나가 배포 전체가 깨진다. `to` 가 `/` 로 시작하지 않거나 `//` 로 시작하면 `./`
 로 접는다 — `JudgeNext` 가 이미 막지만 순수 함수는 자기 방어를 진다.
 
-**`JudgeLoginAction` 은 이 함수로 대체한다.** `RelativeTo(path, "/login")` 이 같은 셈이다.
-남기면 깊이 셈이 두 벌이 되고, 그건 §3 이 기각한 것이다. 대가는 폼 `action` 이 `login` →
-`./login` 으로 바뀌는 것 — 브라우저 해석은 동일하고, `web/login_test.go:27` 의 단정 한 줄을
-갱신한다.
+**`JudgeLoginAction` 은 이름만 남고 몸통이 위임된다** — `return RelativeTo(path, "/login")`.
+셈을 두 벌로 두는 것은 §3 이 기각했고, 반대로 함수를 통째로 없애면 `"/login"` 리터럴이 호출자
+두 자리(`middleware.go:183` · `login.go:166`)로 흩어진다. 이름이 의도를 말하고 경로가 한 자리에
+남는 쪽을 고른다.
+
+대가는 폼 `action` 이 `login` → `./login` 으로 바뀌는 것이다. 브라우저 해석은 동일하다.
+`api/pure_test.go` 의 `TestJudgeLoginAction` 표를 갱신한다. `web/login_test.go` 의
+`action="login"` 은 **안 깨진다** — 그 시험은 `Action` 값을 직접 주입해서 `api` 의 셈을 안 탄다.
+그래도 시험 데이터를 현실과 맞춘다. 그 문자열은 다음 사람에게 실물의 예시로도 읽히기 때문이다.
 
 ## 5. `seeOther` — 쓰기는 얇게
 
@@ -157,6 +162,13 @@ target := base.ResolveReference(mustParse(rec.Header().Get("Location")))
 
 `url.ResolveReference` 는 RFC 3986 구현이라 브라우저와 같은 규칙이다. **회귀를 붙드는 것은 이
 층이다** — 누가 `http.Redirect` 로 되돌리면 여기서 `/` 가 나와 깨진다.
+
+★ **기존 시험 넷이 이 변경으로 빨개진다.** `api/login_test.go:77,179` 의 `Location` 값 단정 둘,
+`web/actions_test.go:71` 의 `HasPrefix(loc, "/?")`, 그리고 `web/actions_test.go:124` 가
+`Location` 을 **요청 URL 로 그대로** 쓰는 자리다. 마지막 것은 `../?…` 가 요청 경로로 성립하지
+않아서 깨지는데, 처방은 값을 바꾸는 것이 아니라 `ResolveReference` 로 푸는 것이다 — 고치고 나면
+그 시험도 2층이 된다. **깨지는 것이 옳다**: 상대 `Location` 을 절대경로처럼 다루던 가정이
+시험에도 박혀 있었다는 뜻이다.
 
 **3층 · 왕복 (`cmd/fd`).** 접두를 벗기는 프록시를 세우고 실제 배선으로 로그인 전 과정을 돈다.
 
