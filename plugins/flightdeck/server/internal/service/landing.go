@@ -292,8 +292,17 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 
 // LandReport 는 레인을 쓰고 난 결과를 보고하고 레인을 놓는다.
 //
-// ★ **먼저 내가 아직 점유자인지 본다.** 아니면 "회수됐다"로 답한다 — 여기서 줄 행을
-// ok 로 닫으면 "성공적으로 랜딩했다"는 거짓 기록이 원장에 남고, 회수 사유는 덮여 사라진다.
+// ★ **먼저 내 살아 있는 줄 행을 본다.** 이 행의 자원 집합이 반납 대상이다 — Task 3 이
+// 자원 집합을 행 하나에 묶었으므로(landing_queue_resource), "무엇을 반납할지"는 이제
+// HeldBy(LaneResource) 하나가 아니라 행이 정한다. 행이 없으면 "회수됐다"로 답한다 —
+// 여기서 줄 행을 ok 로 닫으면 "성공적으로 랜딩했다"는 거짓 기록이 원장에 남고, 회수
+// 사유는 덮여 사라진다.
+//
+// ★ **옛 "hold-without-row" 어긋남 치유는 없앴다(Task 4).** 점유는 있는데 줄 행이 없는
+// 어긋남을 예전엔 HeldBy 를 먼저 봐서 여기서 스스로 고쳤다. 지금은 행을 먼저 읽으므로
+// 행이 없으면 **무엇을 반납해야 할지 모른다**(자원 집합이 행에만 있다) — 그 어긋남은
+// 이제 report 가 못 고치고, 네 반납 경로가 행과 점유를 항상 같은 트랜잭션에서 함께
+// 닫아 애초에 안 생기게 막는 쪽(TestLiveHoldAlwaysHasALiveRowForAnyResource)이 방어선이다.
 func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land report", Reason: "프로젝트나 세션 좌표가 비었다"}
@@ -316,33 +325,41 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 			"mode": string(in.Kind), "bytes": len(in.Detail),
 		})
 
-		held, herr := t.HeldBy(in.Project, LaneResource)
-		if herr != nil && !errors.Is(herr, store.ErrNotFound) {
-			return herr
-		}
-		if herr != nil || held.SessionID != in.SessionID {
-			// 내 레인이 아니다. 줄 행을 **건드리지 않고** 사실만 답한다.
-			return s.laneNotMine(t, in.Project, in.SessionID, &out)
-		}
-
-		// 여기부터는 내가 점유자다. 줄 행 번호를 응답에 싣기 위해 먼저 읽는다.
+		// 내 살아 있는 줄 행을 먼저 읽는다 — 이 행의 자원 집합이 반납 대상이다.
 		row, rerr := t.LiveLandingRow(in.Project, in.SessionID)
 		switch {
 		case rerr == nil:
-			out.RowID = row.ID
+			out.RowID, out.Resources = row.ID, row.Resources
 		case errors.Is(rerr, store.ErrNotFound):
-			// 점유는 있는데 줄 행이 없다 = 두 표가 어긋난 상태다. 그래도 **반납은 한다** —
-			// 여기서 멈추면 아무도 못 잡는 레인이 그대로 남는다. 사실은 원장에 남긴다.
-			t.LogEvent("lane.divergent", in.Project, in.SessionID,
-				map[string]any{"mode": "report", "state": "hold-without-row"})
+			// 줄 행이 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
+			return s.laneNotMine(t, in.Project, in.SessionID, &out)
 		default:
 			return rerr
 		}
-
-		if err := t.ReleaseResource(in.Project, LaneResource, store.Holder{SessionID: in.SessionID}); err != nil {
-			return err
+		// 행 자원 중 내가 쥔 것을 전부 반납한다. 하나도 안 쥐었으면 "내 레인이 아니다"다.
+		mineCount := 0
+		for _, r := range row.Resources {
+			held, herr := t.HeldBy(in.Project, r)
+			if herr != nil && !errors.Is(herr, store.ErrNotFound) {
+				return herr
+			}
+			if herr == nil && held.SessionID == in.SessionID {
+				if err := t.ReleaseResource(in.Project, r, store.Holder{SessionID: in.SessionID}); err != nil {
+					return err
+				}
+				mineCount++
+			}
 		}
-		// 살아 있는 행이 없으면 무동작으로 통과한다(CloseLandingRowBySession 의 규율).
+		if mineCount == 0 {
+			// 줄엔 있는데 아무것도 안 쥐었다 = 아직 차례가 아니거나 회수됐다.
+			return s.laneNotMine(t, in.Project, in.SessionID, &out)
+		}
+		if mineCount < len(row.Resources) {
+			// all-or-nothing 이 지켜졌다면 없는 모양이다 — 어긋남을 원장에 남기고 계속한다
+			// (기존 lane.divergent 규율: 여기서 멈추면 아무도 못 잡는 레인이 남는다).
+			t.LogEvent("lane.divergent", in.Project, in.SessionID,
+				map[string]any{"mode": "report", "state": "partial-hold", "count": mineCount})
+		}
 		if err := t.CloseLandingRowBySession(in.Project, in.SessionID, in.Kind, in.Detail); err != nil {
 			return err
 		}
@@ -365,8 +382,10 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 // LandLeave 는 줄에서 스스로 빠진다. **레인 미보유여도 성립한다** —
 // 줄 서 놓고 포기한 세션이 스스로 빠지는 유일한 길이다.
 //
-// ★ 쥐고 있으면 점유도 함께 놓는다. 줄 행만 닫으면 "대응하는 줄 행이 없는 살아 있는 점유"가
-// 남아 그 프로젝트의 랜딩이 전원 정지한다(파일 위쪽의 불변식).
+// ★ 쥐고 있으면 점유도 함께 놓는다 — 이제 **행의 자원 집합 전부**를 훑는다(Task 4).
+// 줄 행만 닫으면 "대응하는 줄 행이 없는 살아 있는 점유"가 남아 그 프로젝트의 랜딩이
+// 전원 정지한다(파일 위쪽의 불변식). 행이 아예 없으면(줄에 안 서 있다) 반납할 자원
+// 집합 자체가 없으니 아래 루프는 그냥 안 돈다 — 이탈은 그래도 멱등하게 성립한다.
 func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land leave", Reason: "프로젝트나 세션 좌표가 비었다"}
@@ -383,24 +402,28 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 		row, rerr := t.LiveLandingRow(in.Project, in.SessionID)
 		switch {
 		case rerr == nil:
-			out.RowID = row.ID
+			out.RowID, out.Resources = row.ID, row.Resources
 		case errors.Is(rerr, store.ErrNotFound):
 			// 줄에 안 서 있다. 오류로 올리지 않는다 — 이탈은 멱등해야 한다
-			// (item.go 의 ReleaseClaim 과 같은 규율). 아래 점유 반납은 그대로 시도한다.
+			// (item.go 의 ReleaseClaim 과 같은 규율). row.Resources 가 비어 있으니
+			// 아래 반납 루프는 그냥 안 돈다.
 		default:
 			return rerr
 		}
 
-		held, herr := t.HeldBy(in.Project, LaneResource)
-		switch {
-		case herr == nil && held.SessionID == in.SessionID:
-			if err := t.ReleaseResource(in.Project, LaneResource, store.Holder{SessionID: in.SessionID}); err != nil {
-				return err
+		// 행의 자원 중 내가 쥔 것을 전부 반납한다(행이 없으면 range 가 안 돈다).
+		for _, r := range row.Resources {
+			held, herr := t.HeldBy(in.Project, r)
+			switch {
+			case herr == nil && held.SessionID == in.SessionID:
+				if err := t.ReleaseResource(in.Project, r, store.Holder{SessionID: in.SessionID}); err != nil {
+					return err
+				}
+			case herr == nil, errors.Is(herr, store.ErrNotFound):
+				// 남이 쥐었거나 아무도 안 쥐었다. 남의 점유는 건드리지 않는다.
+			default:
+				return herr
 			}
-		case herr == nil, errors.Is(herr, store.ErrNotFound):
-			// 남이 쥐었거나 아무도 안 쥐었다. 남의 점유는 건드리지 않는다.
-		default:
-			return herr
 		}
 
 		if err := t.CloseLandingRowBySession(in.Project, in.SessionID, model.LandingLeftLeave, in.Detail); err != nil {
@@ -660,22 +683,31 @@ func (s *Service) ReleaseLaneRow(ctx context.Context, project string, rowID int6
 		}
 		out.RowID, out.SessionID = target.ID, target.SessionID
 
-		held, herr := t.HeldBy(project, LaneResource)
-		if herr != nil && !errors.Is(herr, store.ErrNotFound) {
-			return herr
-		}
-		holdLine := "점유: 없음(대기 중인 줄 행이라 반납할 것이 없다)"
-		switch {
-		case herr == nil && held.SessionID == target.SessionID:
-			if err := t.ForceReleaseResource(project, LaneResource, reason); err != nil {
-				return err
+		// 대상 행의 자원 집합 전부를 훑는다 — "landing" 하나만 보면 회수 대상이 다른
+		// 자원(r1·r2 …)일 때 그 점유를 아예 안 건드리고 행만 force 로 닫아,
+		// "대응하는 줄 행이 없는 살아 있는 점유"를 새로 만든다(파일 위쪽 불변식 위반).
+		var holdLines []string
+		for _, res := range target.Resources {
+			held, herr := t.HeldBy(project, res)
+			if herr != nil && !errors.Is(herr, store.ErrNotFound) {
+				return herr
 			}
-			out.HeldRelease = true
-			holdLine = fmt.Sprintf("점유: 회수함(획득 %s · 경과 %s)",
-				held.AcquiredAt.Format(time.RFC3339), now.Sub(held.AcquiredAt).Round(time.Second))
-		case herr == nil:
-			holdLine = fmt.Sprintf("점유: 다른 세션 %s 가 쥐고 있어 건드리지 않았다", held.SessionID)
+			switch {
+			case herr == nil && held.SessionID == target.SessionID:
+				if err := t.ForceReleaseResource(project, res, reason); err != nil {
+					return err
+				}
+				out.HeldRelease = true
+				holdLines = append(holdLines, fmt.Sprintf("점유(%s): 회수함(획득 %s · 경과 %s)",
+					res, held.AcquiredAt.Format(time.RFC3339), now.Sub(held.AcquiredAt).Round(time.Second)))
+			case herr == nil:
+				holdLines = append(holdLines, fmt.Sprintf("점유(%s): 다른 세션 %s 가 쥐고 있어 건드리지 않았다",
+					res, held.SessionID))
+			default:
+				holdLines = append(holdLines, fmt.Sprintf("점유(%s): 없음(대기 중이라 반납할 것이 없다)", res))
+			}
 		}
+		holdLine := strings.Join(holdLines, "\n")
 
 		if err := t.CloseLandingRow(project, rowID, model.LandingLeftForce, reason); err != nil {
 			return err
@@ -778,6 +810,19 @@ func containsString(ss []string, v string) bool {
 	return false
 }
 
+// resourcesOverlap 은 두 자원 집합에 공통 원소가 있는지 본다. 순수 함수다.
+//
+// laneReleaseBody 가 "그때 줄에 있던 사람"을 자원이 겹치는 줄로만 좁힐 때 쓴다 —
+// 집합이 보통 한둘이라 정렬 이점을 볼 만큼 크지 않으므로 이중 루프로 충분하다.
+func resourcesOverlap(a, b []string) bool {
+	for _, x := range a {
+		if containsString(b, x) {
+			return true
+		}
+	}
+	return false
+}
+
 // laneNotMine 은 "레인이 내 것이 아니다"를 응답으로 옮긴다. 줄 행은 건드리지 않는다.
 //
 // 회수된 세션에게 **왜** 레인을 잃었는지 그대로 답하는 것이 이 함수의 목적이다.
@@ -824,13 +869,24 @@ func laneReleaseBody(now time.Time, target model.LandingRow, queue []model.Landi
 	fmt.Fprintf(&b, "줄 행: %d · 세션 %s (대기 시작 %s · 경과 %s)\n",
 		target.ID, target.SessionID, target.EnqueuedAt.Format(time.RFC3339),
 		now.Sub(target.EnqueuedAt).Round(time.Second))
+	fmt.Fprintf(&b, "자원: %s\n", strings.Join(target.Resources, " "))
 	fmt.Fprintf(&b, "사유: %s\n", reason)
 	b.WriteString(holdLine + "\n")
 	b.WriteString(signalLine + "\n")
 
-	b.WriteString("그때 줄에 있던 사람:")
-	for i, r := range queue {
-		fmt.Fprintf(&b, " %d.%s(행 %d)", i+1, r.SessionID, r.ID)
+	// ★ 자원이 겹치는 줄만 적는다. 안 겹치면 이 회수와 무관한 다른 자원의 대기자를
+	// 불변 기록에 박아 넣는 것이다 — 판단은 :635(신호 관측 실패를 "없다"로 적지 않는
+	// 자리)와 같은 "못 읽은/무관한 사실을 값으로 채우지 않는다" 규율을 여기서도 지킨다.
+	// (브리프 초안은 이 줄이 :525-527 이라 적었는데, Task 3 리뷰가 Land 독스트링에
+	// ★ 개정 문단을 더하며 이 파일 아래쪽 줄번호가 전부 밀렸다 — 지금 실제 자리로 정정.)
+	b.WriteString("그때 줄에 있던 사람(자원이 겹치는 줄만):")
+	n := 0
+	for _, r := range queue {
+		if !resourcesOverlap(r.Resources, target.Resources) {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, " %d.%s(행 %d)", n, r.SessionID, r.ID)
 	}
 	b.WriteString("\n")
 

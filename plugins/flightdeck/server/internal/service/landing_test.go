@@ -916,18 +916,29 @@ func TestLandingLaneHolderSignalIsTheHoldersOwnNotAQueueMates(t *testing.T) {
 	}
 }
 
-// TestReportReleasesTheLaneEvenWhenTheQueueRowIsGone — 점유는 있는데 줄 행이 없는
-// **어긋난 상태에서도 보고는 반납한다.**
+// TestReportOfAHoldWithoutRowLeavesItForHumanRecovery — 점유는 있는데 줄 행이 없는
+// **어긋난 상태에서 보고는 더는 스스로 안 고친다.**
 //
-// ★ 여기서 멈추면(반납을 건너뛰고 응답만 released 로 내면) 아무도 못 잡는 레인이 그대로
-// 남아 그 프로젝트의 랜딩이 전원 정지하고, 복구 수단이 sqlite3 직접 UPDATE 뿐이 된다.
-// LandReport 가 이 갈래에 "그래도 **반납은 한다**"고 적어 둔 이유가 그것인데,
-// 이 커밋 전까지 그 판정을 잠그는 것이 하나도 없었다 —
-// TestLiveLandingHoldAlwaysHasALiveQueueRow 는 어긋난 상태를 만들어 놓고 report 를 부르는
-// 경로가 없어 이 갈래에 **도달하지 않는다.**
+// ★ **Task 4 전에는(옛 이름 TestReportReleasesTheLaneEvenWhenTheQueueRowIsGone) 반대를
+// 잠갔다** — LandReport 가 `HeldBy(LaneResource)`를 먼저 봐서 "점유가 있으면 내 것"으로
+// 판정했으므로, 줄 행이 없어도 반납 대상이 `LaneResource` 하나로 고정돼 있어 스스로 고칠
+// 수 있었다. Task 4 가 반납을 임의 자원 집합으로 넓히며 그 판정 순서를 뒤집었다(행을
+// **먼저** 읽어 그 행의 자원 집합을 반납 대상으로 삼는다 — landing.go 의 LandReport
+// 독스트링 참고) — 그러면 행이 없는 순간 "무엇을 반납해야 하는지" 자체를 모른다.
+// 그래서 이 어긋남은 이제 report 로 못 고친다. 이 시험은 그 트레이드오프를 잠근다:
+// report 가 거짓 성공("released")을 답하지 않고 정직하게 "reclaimed"를 답하며, 점유는
+// 손대지 않고 그대로 둔다는 것.
+//
+// ★ 이 상태의 실제 방어선은 치유가 아니라 **예방**이다 — 네 반납 경로(report·leave·
+// release·finish) 전부가 행과 점유를 같은 트랜잭션에서 함께 닫아 이 상태 자체가 정상
+// 경로로는 안 생기게 막는다. 그 예방을 자원 무관하게 잠그는 것이
+// TestLiveHoldAlwaysHasALiveRowForAnyResource(landing_resource_test.go)다. 정상 경로
+// 밖(직접 store 조작 등)에서 이 상태가 실제로 생기면, 지금은 sqlite3 직접 UPDATE 가
+// 유일한 복구 수단이다(파일 머리 주석) — ReleaseLaneRow 도 대상 행이 살아 있어야
+// 찾아지므로 이미 닫힌 행에는 못 쓴다.
 //
 // 어긋난 상태를 만드는 수법은 바로 위 시험과 같다: 점유는 두고 줄 행만 저장층으로 닫는다.
-func TestReportReleasesTheLaneEvenWhenTheQueueRowIsGone(t *testing.T) {
+func TestReportOfAHoldWithoutRowLeavesItForHumanRecovery(t *testing.T) {
 	s, st := newSvc(t)
 	a, b := twoSessions(t, s)
 
@@ -947,40 +958,38 @@ func TestReportReleasesTheLaneEvenWhenTheQueueRowIsGone(t *testing.T) {
 
 	rep, err := s.LandReport(ctx(), LandReportInput{Project: "p", SessionID: a, Kind: model.LandingLeftOK})
 	if err != nil {
-		t.Fatalf("어긋난 상태의 보고가 오류가 됐다 — 오류로 올려 롤백하면 레인이 영영 안 풀린다: %v", err)
+		t.Fatalf("어긋난 상태의 보고가 오류가 됐다 — 사실만 답해야 한다: %v", err)
 	}
-	if rep.State != "released" {
-		t.Fatalf("state 가 %q 다(기대 released): %+v", rep.State, rep)
+	if rep.State != "reclaimed" {
+		t.Fatalf("state 가 %q 다(기대 reclaimed) — 행이 없으니 반납할 자원 집합을 모른다: %+v", rep.State, rep)
 	}
-	if rep.RowID != 0 {
-		t.Errorf("줄 행이 없는데 행 번호 %d 를 지어냈다", rep.RowID)
+	if rep.RowID != mine.RowID {
+		t.Errorf("응답이 다른 줄 행을 가리킨다: %d(기대 %d — LastLandingRow 가 낸 닫힌 행)", rep.RowID, mine.RowID)
 	}
 
-	// ★ 이 시험의 심장 — 점유가 **실제로** 풀렸다.
-	if n := laneHolders(t, st, ""); n != 0 {
-		t.Fatalf("보고했는데 랜딩 점유가 %d건 남았다 — 아무도 못 잡는 레인이다", n)
+	// ★ 이 시험의 심장 — 점유가 **그대로 남는다.** 행 기준 구조에서는 자원 집합을 몰라
+	// 반납할 수 없다(위 독스트링의 트레이드오프) — report 가 이 사실을 숨기고 거짓
+	// "released"를 답하지 않는지가 진짜 단정이다.
+	if n := laneHolders(t, st, ""); n != 1 {
+		t.Fatalf("보고가 조용히 점유를 %d건으로 바꿨다(기대 1 — 안 건드림)", n)
 	}
-	if n := divergentHolds(t, st); n != 0 {
-		t.Errorf("보고 뒤에도 두 표가 %d건 어긋나 있다", n)
+	if n := divergentHolds(t, st); n != 1 {
+		t.Errorf("보고 뒤 어긋남이 %d건이다(기대 1 — 그대로)", n)
 	}
-	// 조용히 고치지 않는다 — 사실이 원장에 남아야 왜 그 상태가 생겼는지 되짚을 수 있다.
-	if n := countRows(t, st,
-		`SELECT count(*) FROM event WHERE project = 'p' AND kind = 'lane.divergent'`); n != 1 {
-		t.Errorf("어긋남이 원장에 %d건 남았다(기대 1)", n)
-	}
-	// 이미 닫힌 행은 ok 로 덮이지 않는다(CloseLandingRowBySession 은 살아 있는 행만 본다).
+	// 닫혀 있던 행의 종류가 두 번째(사실은 reclaimed 인) 보고로 덮이지 않는다.
 	if n := countRows(t, st,
 		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_kind = 'finish'`, mine.RowID); n != 1 {
 		t.Errorf("닫혀 있던 행이 다른 종류로 덮였다(id=%d)", mine.RowID)
 	}
 
-	// 대조: 레인이 **진짜로** 열렸다. 위 카운트가 0이어도 다음 사람이 못 서면 의미가 없다.
+	// 대조: b 는 여전히 못 선다 — 반납 안 된 점유가 실제로 레인을 막고 있다는 뜻이다.
+	// (예방이 실패해 이 상태가 실제로 벌어지면 치르는 대가가 정확히 이것이다.)
 	next, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.State != "turn" {
-		t.Fatalf("반납했다는데 다음 세션이 차례를 못 받았다: %+v — 레인이 물린 것이다", next)
+	if next.State != "waiting" {
+		t.Fatalf("어긋난 점유가 안 풀렸는데 b 가 %q 다(기대 waiting): %+v", next.State, next)
 	}
 }
 

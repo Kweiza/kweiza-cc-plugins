@@ -10,11 +10,14 @@ import (
 )
 
 // landing_resource_test.go — Task 3: service.Land 가 자원 집합의 all-or-nothing 취득이 되는지를 잠근다.
+// Task 4 는 반납(LandReport)·이탈(LandLeave)·회수(ReleaseLaneRow)가 같은 자원 집합을
+// 따라가는지를 이어서 잠근다(파일 하단 "Task 4" 절).
 //
-// ★ 이 파일의 여섯 시험도 landing_test.go 와 같은 이유로 전부 실물 DB 로 돈다: 두 표
+// ★ 이 파일의 시험은 전부 landing_test.go 와 같은 이유로 실물 DB 로 돈다: 두 표
 // (resource_hold · landing_queue)가 어긋나는 것이 유일한 치명적 실패 모양이라 가짜
-// 저장층으로는 원리적으로 못 본다. 픽스처(twoSessions·newSvc·openSession·ctx·countRows)는
-// landing_test.go·helper_test.go 것을 그대로 쓴다.
+// 저장층으로는 원리적으로 못 본다. 픽스처(twoSessions·newSvc·openSession·ctx·countRows·
+// newRepoWithWorktree·addItem·claimed)는 landing_test.go·helper_test.go·finish_test.go·
+// board_test.go 것을 그대로 쓴다.
 
 // TestLandGrantsDisjointResourceSetsIndependently — ① 서로 다른 자원을 요구한 두 세션은
 // 서로를 안 막는다. 줄이 자원마다 갈린다는 것이 이 시험의 전제다.
@@ -118,8 +121,10 @@ func TestLandFrontOfAQueueIsNotOvertaken(t *testing.T) {
 // TestLandGrantsAllResourcesAtOnceWhenAllFree — ④ ③에서 A 가 빠지면 B 의 다음 land 가
 // {r1,r2} 를 **한 번에** 잡는다. 그 뒤 C 는 여전히 waiting 이다(B 가 r2 도 함께 가져갔으므로).
 //
-// ★ A 를 빼는 수단은 s.LandReport 가 아니라 store 직접 호출이다 — 아래 본문 주석 참조
-// (LandReport 는 아직 LaneResource 하나만 안다. 반납의 일반화는 Task 3 범위 밖이다).
+// ★ A 를 빼는 수단은 s.LandReport(ok) 다 — Task 3 리포트가 남긴 "store 직접 호출로
+// 흉내 냈다" 우회는 Task 4 가 LandReport 를 행 기준 자원 집합 반납으로 일반화하며
+// 없앴다(A 는 "r1" 하나로 서서 그 자원만 쥐었고, LandReport 는 이제 자기 살아 있는 줄
+// 행의 자원 집합을 읽어 그중 쥔 것을 전부 반납한다).
 func TestLandGrantsAllResourcesAtOnceWhenAllFree(t *testing.T) {
 	s, st := newSvc(t)
 	a, b := twoSessions(t, s)
@@ -136,17 +141,8 @@ func TestLandGrantsAllResourcesAtOnceWhenAllFree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ★ s.LandReport 는 안 쓴다 — Task 3 은 Land(취득)만 자원 집합을 다루고, LandReport
-	// (반납)는 아직 LaneResource="landing" 하나만 본다(A 는 "landing" 을 쥔 적이 없으므로
-	// LandReport 를 부르면 "내 레인이 아니다"로 reclaimed 만 답하고 r1 은 그대로 쥔 채
-	// 남는다 — 반납의 일반화는 이 태스크 범위 밖이다). 그래서 A 의 반납은 이 시험이
-	// store 를 직접 불러 흉내 낸다(landing_test.go 의 기존 시험들이 어긋난 상태를 만들
-	// 때 쓰는 것과 같은 수법).
-	if err := st.ReleaseResource(ctx(), "p", "r1", store.Holder{SessionID: a}); err != nil {
-		t.Fatalf("A 의 r1 반납 흉내가 실패했다: %v", err)
-	}
-	if err := st.CloseLandingRowBySession(ctx(), "p", a, model.LandingLeftOK, ""); err != nil {
-		t.Fatalf("A 의 줄 행 닫기 흉내가 실패했다: %v", err)
+	if _, err := s.LandReport(ctx(), LandReportInput{Project: "p", SessionID: a, Kind: model.LandingLeftOK}); err != nil {
+		t.Fatalf("A 의 report(ok) 가 실패했다: %v", err)
 	}
 
 	got, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1", "r2"}})
@@ -233,5 +229,255 @@ func TestLandReentryOfHolderStaysTurn(t *testing.T) {
 	if n := countRows(t, st,
 		`SELECT count(*) FROM event WHERE project = 'p' AND session_id = ? AND kind = 'lane.grant'`, a); n != 1 {
 		t.Errorf("grant 이벤트가 %d건이다(기대 1) — 재진입은 재확인이지 부여가 아니다", n)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 4 — 반납(LandReport)·이탈(LandLeave)·회수(ReleaseLaneRow)가 행의 자원 집합을 따라간다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// divergentHoldsForAnyResource 는 **자원 무관** 어긋남 건수다. landing_test.go 의
+// divergentHolds 는 `resource = 'landing'` 으로 고정돼 있어 r1·r2 같은 임의 자원의 어긋남을
+// 못 본다 — Task 4 가 반납 계열을 자원 집합으로 넓히면서 그 하드코딩도 시험 쪽에서 걷어야
+// 이 개편이 실제로 새는 자리(하나의 자원만 반납하고 나머지를 흘리는 것)를 잠글 수 있다.
+//
+// resource_hold 의 살아 있는 점유마다: 그 (project, session_id) 의 살아 있는 줄 행이 있고
+// **그 행이 이 자원을 담고 있는지**까지 본다(landing_queue_resource 조인) — 자원 필터가
+// 없으면 "행은 있는데 그 행의 자원 집합에 이 자원이 없다"는 어긋남(예: r2 만 쥐고 있는데
+// 행은 r1 만 담은 경우)을 못 잡는다.
+func divergentHoldsForAnyResource(t *testing.T, st *store.Store) int {
+	t.Helper()
+	return countRows(t, st, `
+		SELECT count(*) FROM resource_hold h
+		WHERE h.released_at IS NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM landing_queue q
+		    JOIN landing_queue_resource r ON r.row_id = q.id
+		    WHERE q.project = h.project AND q.session_id = h.session_id AND q.left_at IS NULL
+		      AND r.resource = h.resource)`)
+}
+
+// TestLandReportReleasesTheWholeResourceSet — ⑦ {r1,r2} 를 쥔 세션의 report(ok) →
+// 두 자원 다 반납되고 행이 닫힌다.
+func TestLandReportReleasesTheWholeResourceSet(t *testing.T) {
+	s, st := newSvc(t)
+	a, _ := twoSessions(t, s)
+
+	mine, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mine.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 빈 레인에서 두 자원을 못 잡았다: %+v", mine)
+	}
+
+	rep, err := s.LandReport(ctx(), LandReportInput{Project: "p", SessionID: a, Kind: model.LandingLeftOK})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.State != "released" {
+		t.Fatalf("state 가 %q 다(기대 released): %+v", rep.State, rep)
+	}
+	if rep.RowID != mine.RowID {
+		t.Errorf("응답이 다른 줄 행을 가리킨다: %d(기대 %d)", rep.RowID, mine.RowID)
+	}
+
+	// ★ 이 시험의 심장 — 두 자원 다 반납됐다. 하나만 보고 통과시키면 나머지가 영영
+	// 안 풀리는 레인으로 남는다.
+	if _, err := st.HeldBy(ctx(), "p", "r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("r1 이 반납 안 됐다 — HeldBy 가 %v 다(기대 ErrNotFound)", err)
+	}
+	if _, err := st.HeldBy(ctx(), "p", "r2"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("r2 가 반납 안 됐다 — HeldBy 가 %v 다(기대 ErrNotFound)", err)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_at IS NULL`, mine.RowID); n != 0 {
+		t.Errorf("줄 행이 안 닫혔다(id=%d)", mine.RowID)
+	}
+}
+
+// TestReleaseLaneRowTouchesOnlyTheRowsResources — ⑧ 자원 r2 만 걸린 줄 행을 회수해도
+// landing 점유는 안 건드린다.
+//
+// ★ 개편 전엔 빨갛다 — ReleaseLaneRow 가 LaneResource="landing" 을 하드코딩해서 봤으므로,
+// B(자원 r2)의 행을 회수해도 실제로는 "landing"(A 가 쥔 것)만 들여다보고 "다른 세션이
+// 쥐고 있어 건드리지 않았다"로 접는다. 그러면 B 가 실제로 쥔 r2 는 반납되지 않은 채
+// 남고, 행만 force 로 닫혀 **대응하는 줄 행이 없는 살아 있는 r2 점유**가 생긴다.
+func TestReleaseLaneRowTouchesOnlyTheRowsResources(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	holdA, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holdA.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — a 가 landing 을 못 잡았다: %+v", holdA)
+	}
+	holdB, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holdB.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 겹치지 않는 자원인데 b 가 못 잡았다: %+v", holdB)
+	}
+
+	rel, err := s.ReleaseLaneRow(ctx(), "p", holdB.RowID, "aaron", "r2 회수 시험")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rel.HeldRelease {
+		t.Fatalf("r2 를 쥔 채 회수했는데 점유가 안 풀렸다: %+v", rel)
+	}
+	if _, err := st.HeldBy(ctx(), "p", "r2"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("r2 가 회수 뒤에도 쥐어 있다 — %v(기대 ErrNotFound)", err)
+	}
+	// ★ 이 시험의 심장 — landing 은 안 건드렸다.
+	if held, err := st.HeldBy(ctx(), "p", "landing"); err != nil || held.SessionID != a {
+		t.Errorf("landing 점유가 %+v(err=%v) 다(기대 %s) — r2 회수가 landing 을 건드렸다", held, err, a)
+	}
+	if n := divergentHoldsForAnyResource(t, st); n != 0 {
+		t.Errorf("회수 뒤 어긋남이 %d건이다(기대 0)", n)
+	}
+}
+
+// TestLaneReleaseBodyScopesQueueToOverlappingResources — ⑨ 회수 판단 본문의 "그때 줄에
+// 있던 사람"에 다른 자원의 대기자가 안 섞인다.
+//
+// ★ 개편 전엔 빨갛다 — laneReleaseBody 의 옛 루프가 queue 전체(자원 무관)를 그대로
+// 적어서, r2 만으로 선 C 가 r1 회수 판단에 끼어든다.
+func TestLaneReleaseBodyScopesQueueToOverlappingResources(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+	dirC := tmpBase(t)
+	c := openSession(t, s, "p", dirC, dirC, "cc-C", "트랙C").Session.ID
+
+	holdA, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holdA.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다: %+v", holdA)
+	}
+	waitB, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waitB.State != "waiting" {
+		t.Fatalf("사전 조건이 깨졌다 — b 가 r1 대기가 아니다: %+v", waitB)
+	}
+	turnC, err := s.Land(ctx(), LandInput{Project: "p", SessionID: c, Resources: []string{"r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnC.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — c 가 r2 를 못 잡았다: %+v", turnC)
+	}
+
+	rel, err := s.ReleaseLaneRow(ctx(), "p", holdA.RowID, "aaron", "r1 겹침 시험")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := st.GetJudgment(ctx(), rel.JudgmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(j.Body, b) {
+		t.Errorf("판단 본문에 r1 을 같이 기다리던 %s 가 없다: %s", b, j.Body)
+	}
+	if strings.Contains(j.Body, c) {
+		t.Errorf("판단 본문에 자원이 안 겹치는 c 가 섞였다: %s", j.Body)
+	}
+}
+
+// TestLiveHoldAlwaysHasALiveRowForAnyResource — ⑩ 살아 있는 자원 점유가 있으면 반드시
+// 대응하는 살아 있는 줄 행이 있다 — 임의 자원판.
+//
+// TestLiveLandingHoldAlwaysHasALiveQueueRow(landing_test.go) 와 같은 방식으로,
+// {r1,r2} 시나리오에서 네 반납 경로(report·leave·release·finish) 를 전부 돈다.
+// 반납 계열 중 하나라도 여전히 LaneResource="landing" 을 하드코딩해 다른 자원을 흘리면
+// 그 경로 직후 divergentHoldsForAnyResource 가 0 이 아니게 된다.
+func TestLiveHoldAlwaysHasALiveRowForAnyResource(t *testing.T) {
+	s, st := newSvc(t)
+	a, b := twoSessions(t, s)
+	repo, wt := newRepoWithWorktree(t, "feat")
+	fin := openSession(t, s, "p", repo, wt, "cc-fin", "트랙F").Session.ID
+	addItem(t, s, "p", "batch9", nil, nil)
+	claimed(t, s, "p", fin, "batch9")
+
+	check := func(step string) {
+		t.Helper()
+		if n := divergentHoldsForAnyResource(t, st); n != 0 {
+			t.Fatalf("%s 뒤에 두 표가 어긋났다: %d건 — 레인이 영영 안 풀린다", step, n)
+		}
+	}
+
+	// ── ① report ──
+	if _, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1", "r2"}}); err != nil {
+		t.Fatal(err)
+	}
+	check("a 가 {r1,r2} 를 잡은")
+	if _, err := s.LandReport(ctx(), LandReportInput{
+		Project: "p", SessionID: a, Kind: model.LandingLeftOK}); err != nil {
+		t.Fatal(err)
+	}
+	check("a 가 report 로 반납한")
+	if held, err := st.HeldBy(ctx(), "p", "r1"); err == nil {
+		t.Fatalf("report 뒤에도 r1 이 쥐어 있다: %+v", held)
+	}
+
+	// ── ② leave(쥔 채) — 함정. 줄 행만 닫고 점유를 안 놓으면 여기서 어긋난다.
+	turnB, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnB.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — b 가 {r1,r2} 를 못 잡았다: %+v", turnB)
+	}
+	check("b 가 {r1,r2} 를 잡은")
+	if _, err := s.LandLeave(ctx(), LandLeaveInput{
+		Project: "p", SessionID: b, Detail: "레인을 쥔 채 포기한다"}); err != nil {
+		t.Fatal(err)
+	}
+	check("b 가 쥔 채 leave 한")
+	if held, err := st.HeldBy(ctx(), "p", "r2"); err == nil {
+		t.Fatalf("leave 뒤에도 r2 가 쥐어 있다: %+v", held)
+	}
+
+	// ── ③ release(사람) ──
+	turnA, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnA.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — leave 뒤 레인이 안 풀렸다: %+v", turnA)
+	}
+	check("a 가 다시 {r1,r2} 를 잡은")
+	if _, err := s.ReleaseLaneRow(ctx(), "p", turnA.RowID, "aaron", "사람이 회수한다"); err != nil {
+		t.Fatal(err)
+	}
+	check("사람이 회수한")
+	if held, err := st.HeldBy(ctx(), "p", "r1"); err == nil {
+		t.Fatalf("회수 뒤에도 r1 이 쥐어 있다: %+v", held)
+	}
+
+	// ── ④ finish ──
+	turnFin, err := s.Land(ctx(), LandInput{Project: "p", SessionID: fin, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnFin.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — 회수 뒤 레인이 안 풀렸다: %+v", turnFin)
+	}
+	check("fin 이 {r1,r2} 를 잡은")
+	if _, err := s.Finish(ctx(), FinishInput{
+		Project: "p", SessionID: fin, ItemID: "batch9",
+		Outcome: model.ItemDone, Title: "batch9 랜딩", Body: "① 왜 그렇게 했나 …",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check("fin 이 마무리로 반납한")
+	if held, err := st.HeldBy(ctx(), "p", "r2"); err == nil {
+		t.Fatalf("finish 뒤에도 r2 가 쥐어 있다: %+v", held)
 	}
 }

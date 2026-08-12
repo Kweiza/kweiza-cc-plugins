@@ -456,7 +456,18 @@ func TestLaneTurnFiresOnceWhenTheLaneBecomesMine(t *testing.T) {
 	}
 
 	// ③ a 가 놓는다. 이제 맨 앞도 나고 레인도 비었다.
-	releaseLaneOrFail(t, svc, a)
+	//
+	// ★ releaseLaneOrFail(=s.LandReport)을 못 쓴다 — 위 ②에서 a 의 줄 행을 store 로
+	// 직접 닫아 "점유는 있는데 행이 없는" 어긋남을 만들었는데, Task 4 이후 LandReport 는
+	// 행을 먼저 읽어 반납 대상 자원 집합을 정하므로 행이 없으면 **무엇을 반납할지 몰라**
+	// laneNotMine 으로 빠지고 점유를 안 놓는다(landing.go 의 LandReport 독스트링 "★ 옛
+	// hold-without-row 어긋남 치유는 없앴다" 참고). 이 시험이 필요한 것은 "레인이 실제로
+	// 비었다"는 사실 하나뿐이라, 그 어긋남을 만든 수법과 짝을 맞춰 store 를 직접 불러
+	// 놓는다 — 실제 운영에서 이 상태의 유일한 복구 수단(landing.go 머리 주석의
+	// "sqlite3 직접 UPDATE")과 같은 층이다.
+	if err := st.ReleaseResource(ctx(), "p", LaneResource, store.Holder{SessionID: a}); err != nil {
+		t.Fatalf("어긋난 점유의 직접 반납이 실패했다: %v", err)
+	}
 
 	// ★ 줄에서 나간 a 에게는 아무 일도 안 일어난다. **지금이 정확히 그 오발화 상태다** —
 	//   줄은 비지 않았고(b 가 맨 앞) 레인도 비었으니, "맨 앞이 나인가" 비교를 빼먹으면
