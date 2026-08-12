@@ -24,6 +24,13 @@ import (
 func leaveFixture(t *testing.T) (*Service, *store.Store, model.Session) {
 	t.Helper()
 	svc, st := newSvc(t)
+	return svc, st, seedLeaveClaims(t, st)
+}
+
+// seedLeaveClaims 는 leaveFixture 의 씨앗만 떼어낸 것이다 — 시계를 주입한 서비스
+// (newSvcWithClock)는 Service 를 자기가 짓기 때문에 씨앗을 따로 부를 자리가 필요하다.
+func seedLeaveClaims(t *testing.T, st *store.Store) model.Session {
+	t.Helper()
 	ctx := context.Background()
 	if err := st.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"}); err != nil {
 		t.Fatal(err)
@@ -43,7 +50,7 @@ func leaveFixture(t *testing.T) (*Service, *store.Store, model.Session) {
 			t.Fatal(err)
 		}
 	}
-	return svc, st, sess
+	return sess
 }
 
 // 반납의 본체다 — 항목이 open 으로 **살아서** 돌아오고, 판단이 not-done 으로 남는다.
@@ -194,5 +201,87 @@ func TestLeaveClaimWithNothingHeldIsRefused(t *testing.T) {
 	var refused *RefusedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("빈손 반납이 거절되지 않았다: %v", err)
+	}
+}
+
+// ★ 묶음 반납의 **중간 실패**다. 여러 항목을 놓는 도중 하나가 깨지면 앞서 놓은 것이
+// 롤백되어야 한다 — 안 그러면 실패한 반납이 **절반만 남고**, 응답은 오류인데 원장에는
+// 놓인 항목이 있다. 그 상태를 아무 문장도 설명하지 못한다.
+//
+// 여기까지 이 자리의 근거는 "한 Tx 안이라 설계상 된다"였고 **그것은 관측이 아니다.**
+//
+// ## 무엇이 중간에 깨지나 — 지어낸 실패가 아니다
+//
+// 대상 후보(ClaimedItems)는 트랜잭션 **밖**에서 읽는다(reclaim.go 의 주석: 쓰기 잠금을
+// 쥔 채 커넥션 풀을 기다리면 그 대기가 다른 쓰기 전부를 세운다). 권위는 Tx 안의
+// LiveClaim 이고, 그래서 그 사이에 창이 있다 — 사람이 `fd claim release` 로 회수하면
+// 후보에 실린 항목의 살아 있는 선점이 사라진다. 프로덕션 주석이 예고한 "후보가 낡았으면
+// 거기서 걸린다"의 바로 그 자리다.
+//
+// ## 창을 시계로 잠근다
+//
+// LeaveClaim 은 `now := s.now()` 를 **후보 조회와 Tx 사이에서 정확히 한 번** 부른다.
+// 주입한 시계 안에서 y 를 회수하면 경합이 결정론이 된다 — helper_test.go 의
+// newSvcWithClock 주석이 지정한 용법("시계가 불리는 자리가 곧 창인 갈래")이고
+// 선례는 outOfWindowLister 다.
+//
+// ## 변이로 닿는 것을 실측했다(둘 다 빨간)
+//
+//	루프의 `return lerr` → `continue`          x 가 놓인 채 남고 판단까지 남는다
+//	릴리스를 Tx **앞**으로 옮긴다(Tx 를 가른다) x 의 반납이 커밋돼 롤백이 사라진다
+func TestLeaveClaimRollsBackTheFirstReleaseWhenALaterTargetIsGone(t *testing.T) {
+	ctx := context.Background()
+
+	var st *store.Store
+	fired := false
+	var reclaimErr error
+	svc, opened := newSvcWithClock(t, func() time.Time {
+		// 후보 조회는 끝났고 Tx 는 아직 안 열렸다 — 사람의 회수가 여기서 끼어든다.
+		// 한 번만 쏜다: 이 갈래가 시계를 한 번 부르는 것에 시험을 걸지 않는다.
+		if st != nil && !fired {
+			fired = true
+			reclaimErr = st.ForceReleaseClaim(ctx, "p", "y", "무신호 20시간을 보고 사람이 회수했다")
+		}
+		return time.Now()
+	})
+	st = opened
+	sess := seedLeaveClaims(t, st)
+
+	_, err := svc.LeaveClaim(ctx, LeaveInput{Project: "p", SessionID: sess.ID, ItemID: "", Reason: "묶음 통째로 놓는다"})
+	if reclaimErr != nil {
+		t.Fatalf("창을 만드는 회수 자체가 실패했다 — 시험이 성립하지 않았다: %v", reclaimErr)
+	}
+	if !fired {
+		t.Fatal("시계가 안 불렸다 — 창이 후보 조회와 Tx 사이에서 사라졌다면 이 시험은 아무것도 안 문다")
+	}
+	// 낡은 후보를 권위로 삼으면 안 된다 — 이미 없는 선점을 "놓았다"고 답하는 것이다.
+	var nf *store.NotFoundError
+	if !errors.As(err, &nf) || nf.Kind != store.NFLiveClaim || nf.ID != "y" {
+		t.Fatalf("의도한 실패가 아니다(y 의 살아 있는 선점 없음이어야 한다): %v", err)
+	}
+
+	// ★ 본체. 실패 전에 놓은 x 가 되돌아와야 한다.
+	mine, err := st.ClaimedItems(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 1 || mine[0] != "x" {
+		t.Fatalf("x 의 반납이 롤백되지 않았다 — 실패한 반납이 절반만 남았다: %v", mine)
+	}
+	// claim 만 되돌리고 item.state 를 흘리면 x 는 **선점 없는 claimed** 나
+	// **선점 있는 open** 이 된다 — 같은 Tx 라야 둘이 함께 되돌아온다.
+	it, err := st.GetItem(ctx, "p", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.State != model.ItemClaimed {
+		t.Fatalf("선점은 살아 있는데 항목 상태가 흘렀다: %v", it.State)
+	}
+	// 판단도 안 남아야 한다 — "놓았다"는 불변 기록이 안 놓인 항목에 붙으면
+	// 다음에 집는 사람이 읽는 첫 문장이 거짓이 된다.
+	if js, err := st.JudgmentsForItem(ctx, "p", "x"); err != nil {
+		t.Fatal(err)
+	} else if len(js) != 0 {
+		t.Fatalf("실패한 반납이 판단을 남겼다: %d건", len(js))
 	}
 }
