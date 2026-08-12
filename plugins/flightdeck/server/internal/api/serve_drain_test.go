@@ -19,10 +19,13 @@ import (
 //
 // 시계 단정이 없다. 판별은 전부 인과(채널 악수)와 로그 한 줄의 유무로 한다.
 
-// serveAddrFromLog 는 Serve 가 실제로 잡은 주소를 로그에서 읽는다.
+// serveAddrFromLog 는 Serve 가 실제로 떴음을 로그로 기다린다.
 //
-// ★ ":0" 을 미리 잡았다 놓고 재사용하면 TOCTOU 가 남는다(그 사이 남이 잡을 수 있다).
-// 로그의 "서버 기동" 줄은 **실제로 잡힌** 주소라 그 창이 없다.
+// ★ 주소를 얻는 수단으로는 더 이상 안 쓴다 — 호출부가 Listen 이 준 ln.Addr() 를 직접
+// 읽는다. 리스너를 **닫지 않고 그대로 넘기므로** 옛 주석이 걱정하던 TOCTOU("':0' 을
+// 잡았다 놓고 주소만 재사용하면 그 사이 남이 잡는다")가 애초에 안 생긴다.
+//
+// 남은 쓰임은 하나뿐이다: 요청을 안 보내는 시험이 "서버가 떴다"를 기다리는 자리.
 func serveAddrFromLog(t *testing.T, logs *syncBuffer) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -94,10 +97,15 @@ func TestDrainFinishesInflightWrite(t *testing.T) {
 	e.srv.mux = mux
 	h := surface{Handler: e.srv.chain(mux), srv: e.srv}
 
+	ln, lerr := Listen(context.Background(), "127.0.0.1:0", e.srv.log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
+	addr := ln.Addr().String()
+
 	serveCtx, drain := context.WithCancel(context.Background())
 	ret := make(chan error, 1)
-	go func() { ret <- Serve(serveCtx, "127.0.0.1:0", h, e.srv.log) }()
-	addr := serveAddrFromLog(t, e.logs)
+	go func() { ret <- Serve(serveCtx, ln, h, e.srv.log) }()
 
 	// ① 요청이 인플라이트임이 보장된다.
 	resp := make(chan *http.Response, 1)
@@ -196,10 +204,15 @@ func TestSSEStreamDoesNotHoldShutdown(t *testing.T) {
 	e := newEnv(t, nil)
 	h := surface{Handler: e.h, srv: e.srv}
 
+	ln, lerr := Listen(context.Background(), "127.0.0.1:0", e.srv.log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
+	addr := ln.Addr().String()
+
 	serveCtx, drain := context.WithCancel(context.Background())
 	ret := make(chan error, 1)
-	go func() { ret <- Serve(serveCtx, "127.0.0.1:0", h, e.srv.log) }()
-	addr := serveAddrFromLog(t, e.logs)
+	go func() { ret <- Serve(serveCtx, ln, h, e.srv.log) }()
 
 	sseResp, err := http.Get("http://" + addr + "/api/v1/events")
 	if err != nil {
@@ -268,10 +281,15 @@ func TestGraceExceededCutsAndSaysSo(t *testing.T) {
 	e.srv.mux = mux
 	h := surface{Handler: e.srv.chain(mux), srv: e.srv}
 
+	ln, lerr := Listen(context.Background(), "127.0.0.1:0", e.srv.log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
+	addr := ln.Addr().String()
+
 	serveCtx, drain := context.WithCancel(context.Background())
 	ret := make(chan error, 1)
-	go func() { ret <- Serve(serveCtx, "127.0.0.1:0", h, e.srv.log) }()
-	addr := serveAddrFromLog(t, e.logs)
+	go func() { ret <- Serve(serveCtx, ln, h, e.srv.log) }()
 
 	go func() {
 		resp, err := http.Get("http://" + addr + "/zz-stuck")
@@ -320,10 +338,14 @@ func TestServeShutdownLogsDrainMs(t *testing.T) {
 	e := newEnv(t, nil)
 	h := surface{Handler: e.h, srv: e.srv}
 
+	ln, lerr := Listen(context.Background(), "127.0.0.1:0", e.srv.log)
+	if lerr != nil {
+		t.Fatalf("Listen: %v", lerr)
+	}
 	serveCtx, drain := context.WithCancel(context.Background())
 	ret := make(chan error, 1)
-	go func() { ret <- Serve(serveCtx, "127.0.0.1:0", h, e.srv.log) }()
-	serveAddrFromLog(t, e.logs)
+	go func() { ret <- Serve(serveCtx, ln, h, e.srv.log) }()
+	serveAddrFromLog(t, e.logs) // 주소가 아니라 "떴다"를 기다린다
 	drain()
 	if err := <-ret; err != nil {
 		t.Fatalf("Serve 가 오류로 끝났다: %v", err)

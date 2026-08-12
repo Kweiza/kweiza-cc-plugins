@@ -418,24 +418,45 @@ func (s *server) chain(h http.Handler) http.Handler {
 // TestComposeStopGraceExceedsShutdownGrace 가 그 부등식을 붙든다).
 const ShutdownGrace = 10 * time.Second
 
-// Serve 는 핸들러를 주소에 붙이고 ctx 가 끝날 때까지 돌린다.
+// Listen 은 수신 주소를 연다. **바인드 성공을 값으로 낸다.**
 //
 // 포트 선점은 **사유를 남기고 종료한다**(설계 §7) — 조용히 실패하면
 // 전 세션이 "서버 미도달"만 보고 원인을 모른다.
 //
-// ★ h 가 http.Handler 가 아니라 Handler 인 이유는 Handler 의 독 코멘트에 있다.
-func Serve(ctx context.Context, addr string, h Handler, log *slog.Logger) error {
+// ★ Serve 에서 뽑아낸 이유는 호출부가 "리스너가 실제로 열렸다"를 알아야 하기 때문이다.
+// 배포 관측(cmd/fd 의 noteBuild)이 정확히 그 사실에 매달린다 — 뜨지도 못한 기동이 원장에
+// 배포를 남기면 LastDeployAt 이 **한 번도 응답한 적 없는 바이너리**의 시각을 낸다.
+//
+// ★ **ready 콜백이 아니라 값이다.** 콜백을 받으면 시험이 넘길 수 있는 것이 nil 뿐이라
+// 콜백 안이 안 잠긴다 — 이 저장소가 자기 갱신 축에서 이미 치른 값이다(2026-08-07 실측,
+// cmd/fd 의 serveAPIOptions 주석). 값으로 내면 순서가 호출부에서 자명해지고, 그 순서를
+// 어기는 것은 시험이 잡는다(cmd/fd 의 TestServeSkipsDeployNoteWhenBindFails).
+//
+// ★ ctx 를 받는 이유는 실패 로그가 ErrorContext 라서다 — 상관키를 잃지 않으려면 함께 온다.
+func Listen(ctx context.Context, addr string, log *slog.Logger) (net.Listener, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	// service.name 은 진입점이 이미 걸어 두었다 — 여기서 다시 걸면 한 줄에 두 번 찍힌다.
-
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.ErrorContext(ctx, "포트를 열 수 없다 — 이미 쓰고 있는 프로세스가 있는지 확인해라",
 			"route", clip(addr, 120), "error", err.Error())
-		return fmt.Errorf("%s 를 열 수 없다: %w", addr, err)
+		return nil, fmt.Errorf("%s 를 열 수 없다: %w", addr, err)
 	}
+	return ln, nil
+}
+
+// Serve 는 핸들러를 **이미 열린 리스너**에 붙이고 ctx 가 끝날 때까지 돌린다.
+//
+// ★ 리스너 소유권을 가져간다 — srv.Serve 가 반환할 때 net/http 가 ln 을 닫으므로
+// 호출부는 Listen 이 준 것을 넘긴 뒤 잊으면 된다. 정리 경로를 두 벌로 만들지 않는다.
+//
+// ★ h 가 http.Handler 가 아니라 Handler 인 이유는 Handler 의 독 코멘트에 있다.
+func Serve(ctx context.Context, ln net.Listener, h Handler, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	// service.name 은 진입점이 이미 걸어 두었다 — 여기서 다시 걸면 한 줄에 두 번 찍힌다.
 
 	// ★ 인플라이트 요청 컨텍스트를 ctx 에서 **뗀다.** 취소만 뗀다 —
 	// middleware.go 의 멱등 기록 저장이 쓰는 것과 같은 관용구다.
