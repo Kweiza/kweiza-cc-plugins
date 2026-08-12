@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +85,28 @@ func TestSetLabelsWritesLedgerWithBeforeAndAfter(t *testing.T) {
 		found = true
 		if e.SessionID != "sess" {
 			t.Errorf("이벤트의 세션이 %q 다 — sess 여야 한다", e.SessionID)
+		}
+
+		// ★ **페이로드를 푼다.** Kind 와 SessionID 만 보면 LogEvent 에서 before 키가
+		// 사라져도 이 시험이 조용히 통과한다 — 그런데 before 야말로 이 표면이 메우려던
+		// 공백이다(사고 당시 원장의 흔적은 판단 하나뿐이었다). 이름이 …WithBeforeAndAfter
+		// 인 시험이 before·after 를 안 재면 그 이름이 거짓이다.
+		var payload struct {
+			Item   string   `json:"item"`
+			Before []string `json:"before"`
+			After  []string `json:"after"`
+		}
+		if uerr := json.Unmarshal([]byte(e.Payload), &payload); uerr != nil {
+			t.Fatalf("이벤트 페이로드를 못 읽었다: %v (원문 %q)", uerr, e.Payload)
+		}
+		if got := strings.Join(payload.Before, ","); got != "a" {
+			t.Errorf("원장의 before 가 %q 다 — a 여야 한다", got)
+		}
+		if got := strings.Join(payload.After, ","); got != "tickler" {
+			t.Errorf("원장의 after 가 %q 다 — tickler 여야 한다", got)
+		}
+		if payload.Item != "it" {
+			t.Errorf("원장의 item 이 %q 다 — it 여야 한다", payload.Item)
 		}
 	}
 	if !found {
