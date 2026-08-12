@@ -289,7 +289,11 @@ func TestLandRefusesWithoutSessionIdentity(t *testing.T) {
 	if !isErr {
 		t.Fatalf("세션 정체 없이 land 가 통과했다 — 원장에 세션 좌표 없는 행이 남는다:\n%s", body)
 	}
-	if !strings.Contains(body, EnvSessionID) {
+	// ★ **본문으로 좁힌다 — 실측된 거짓 초록이다.** 응답 전체로 재면 꼬리의 정체 배너
+	// (Identity.Banner 가 결손 축 이름을 나열한다)가 이 단정을 대신 만족시킨다. 실측:
+	// 거절 본문을 통째로 비우는 변이를 넣어도 이 시험은 **초록이었다** — 거절이 축 이름을
+	// 한 글자도 안 말해도 통과한다는 뜻이다. 재려는 것은 거절 사유이지 배너가 아니다.
+	if !strings.Contains(bodyOf(t, body), EnvSessionID) {
 		t.Errorf("거절 사유가 결손 축을 안 말한다:\n%s", body)
 	}
 }
