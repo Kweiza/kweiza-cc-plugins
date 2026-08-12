@@ -84,6 +84,21 @@ func TestRenderPrescriptionsSaysWhatItFolded(t *testing.T) {
 	}
 }
 
+// ★ **접힘 줄은 조건 없는 약속을 하면 안 된다(2026-08-12 실측).** 배포 뒤 이틀치 원장에서
+// 접힌 키 25개 중 **9개(36%)가 끝내 안 올라왔고**, 9개 전부가 "그 카드에 다음 Stop 훅이
+// 안 온" 경우다. 처방은 Stop 훅에서만 뜨므로 대화가 거기서 끝나면 접힌 것은 영영 안 나온다.
+//
+// 사람이 접힘 시점에 받는 신호는 이 한 줄뿐이다 — 그래서 이 줄이 "다음 턴에 올라온다"로
+// 끝나면 36% 에 대해 거짓 약속이 된다. 조건을 적는 것이 아니라 **한계를 적는 것**이라
+// (2026-08-09 이 기각한 "같은 조건이면"과 다르다) 세션이 안 해도 될 일을 하게 만들지 않는다:
+// 대화를 이어 갈 사람에게는 아무 일도 안 시키고, 끝낼 사람에게만 지금 보라고 말한다.
+func TestRenderPrescriptionsDoesNotPromiseATurnThatMayNotCome(t *testing.T) {
+	got := RenderPrescriptions([]PrescriptionLine{{Key: "outside:a", Text: "a"}}, 2)
+	if !strings.Contains(got, "끝나면") {
+		t.Fatalf("접힘 줄이 조건 없는 약속을 한다 — 여기서 끝나면 안 온다는 것을 안 적었다: %q", got)
+	}
+}
+
 // 처방이 0건이면 **아무것도 안 낸다.** 빈 머리글을 내면 매 턴 컨텍스트를 먹고,
 // 그러면 세션이 이 채널 자체를 읽지 않게 된다.
 func TestRenderPrescriptionsEmptyIsSilent(t *testing.T) {
