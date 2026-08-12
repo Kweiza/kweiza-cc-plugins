@@ -243,7 +243,8 @@ EOF
 **Files:**
 - Modify: `plugins/flightdeck/server/internal/api/auth.go:208-241`
 - Modify: `plugins/flightdeck/server/internal/api/pure_test.go:734-760` (기대값 표)
-- Modify: `plugins/flightdeck/server/internal/web/login_test.go:13,72` (시험 데이터를 현실과 맞춘다)
+- Modify: `plugins/flightdeck/server/internal/api/login_test.go:114` (재시도 폼의 `Action` 단정 — **실제로 빨개진다**)
+- Modify: `plugins/flightdeck/server/internal/web/login_test.go:13,27,72` (시험 데이터를 현실과 맞춘다 — 안 깨진다)
 
 **Interfaces:**
 - Consumes: Task 1 의 `judge.RelativeTo(from, to string) string`
@@ -318,9 +319,19 @@ go test ./internal/api/ -run TestLoginFormActionReachesLoginRoute -count=1
 
 기대: 둘 다 `ok`. 두 번째 시험은 값이 `login` 에서 `./login` 로 바뀌어도 `ResolveReference` 로 풀어서 보므로 **안 고쳐도 통과해야 한다.** 여기서 빨개지면 `RelativeTo` 의 깊이 셈이 기존 셈과 어긋난 것이니 Task 1 로 돌아간다.
 
-- [ ] **Step 5: `web` 쪽 시험 데이터를 현실과 맞춘다**
+- [ ] **Step 5: 남은 `Action` 단정을 맞춘다 — `api` 하나는 진짜 깨진다**
 
-이 둘은 **안 고쳐도 통과한다** — `Action` 값을 시험이 직접 주입해서 `api` 의 셈을 안 타기 때문이다. 그래도 고친다. 그 문자열이 다음 사람에게 실물의 예시로 읽히기 때문이다.
+먼저 `plugins/flightdeck/server/internal/api/login_test.go:114`, `TestLoginRejectsWrongTokenWithoutEcho` 안이다. **이것은 실제로 빨개진다** — 재시도 폼을 채우는 자리가 `withAuth` 와 `loginRefused` 둘인데 이 시험이 뒤엣것을 잰다:
+
+```go
+	if gotView.Action != "./login" {
+		t.Fatalf("재시도 폼의 action 이 %q 다 — /login 에서 뜬 폼이라 \"./login\" 이어야 한다", gotView.Action)
+	}
+```
+
+★ 이 시험이 재는 축은 값이 아니라 **`Action` 이 채워졌는가**다. 위 주석이 그 이유를 적어 뒀다 — 안 채우면 `action=""` 이 되어 폼이 문서 URL 자신으로 제출되고, 틀린 토큰을 한 번 친 사람만 무한 폼에 갇힌다. 그 축은 그대로 살아 있고 기대 문자열만 바뀐다.
+
+아래 셋은 **안 고쳐도 통과한다** — `Action` 값을 시험이 직접 주입해서 `api` 의 셈을 안 타기 때문이다. 그래도 고친다. 그 문자열이 다음 사람에게 실물의 예시로 읽히기 때문이다.
 
 `plugins/flightdeck/server/internal/web/login_test.go:13` 에서:
 
@@ -355,7 +366,7 @@ go test ./internal/api/ ./internal/web/ ./internal/judge/ -count=1
 
 ```bash
 cd /home/aaron/cdo-dev/kweiza-cc-plugins/.flightdeck/worktrees/fd-login-redirect-escapes-proxy-prefix
-git add plugins/flightdeck/server/internal/api/auth.go plugins/flightdeck/server/internal/api/pure_test.go plugins/flightdeck/server/internal/web/login_test.go
+git add plugins/flightdeck/server/internal/api/auth.go plugins/flightdeck/server/internal/api/pure_test.go plugins/flightdeck/server/internal/api/login_test.go plugins/flightdeck/server/internal/web/login_test.go
 git commit -F - <<'EOF'
 refactor(flightdeck): 폼 action 의 깊이 셈을 judge 에 위임한다
 
@@ -1146,5 +1157,11 @@ Task 5 에서 출처 대조(`JudgeScreenOrigin`)가 프록시 뒤에서 어떻�
 - `api.LoginCookieName` 은 exported 다(`auth.go:189`, 값 `"fd_token"`) — Task 5 가 패키지 밖에서 부를 수 있다.
 - `cmd/fd` 에 `prefixStripper`·`formAction`·`clipForTest` 라는 이름이 없다 — Task 5 의 새 헬퍼 셋이 안 부딪힌다.
 - `judge` 는 `model` 만 물고 `model` 은 아무것도 안 문다(`go list -deps`) — Task 2 가 여는 `api` → `judge` 방향에 순환이 없다.
+
+**계획이 놓쳤고 실행 중에 드러난 것 하나 (2026-08-12, Task 2 구현자가 발견):**
+
+`api/login_test.go:114` 의 `Action` 단정이 빠져 있었다. 계획을 쓰며 `Location` 을 단정하는 자리는 전수로 찾았으나 **`Action` 을 단정하는 자리는 안 찾았다.** `LoginView.Action` 은 `api` 안에서 두 자리가 채우는데(`withAuth` 와 `loginRefused`) 그 시험이 뒤엣것을 잰다. Task 2 Step 5 에 넣었다.
+
+같은 grep 으로 함께 확인한 결과 `cmd/fd/serve_test.go:392` 의 `action="../login"` 은 **안 깨진다** — 깊이 1 이라 새 규칙에서도 같은 값이다.
 
 **한 가지는 실행 시점에만 알 수 있다:** Task 5 의 ③에서 출처 대조가 프록시 뒤에서 통과하는지. 통과를 가정하고 썼으나(`NewSingleHostReverseProxy` 가 `req.Host` 를 안 바꾸므로 `Origin` 과 `r.Host` 가 둘 다 프록시의 것이 된다), 403 이 나오면 **고치지 말고 멈추라고** 그 태스크에 적어 뒀다. 스펙 §11 이 열어 둔 위험이다.
