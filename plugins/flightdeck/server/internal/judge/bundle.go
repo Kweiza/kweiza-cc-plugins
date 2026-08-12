@@ -434,6 +434,18 @@ func closeDeclaredDetail(d model.CloseDeclaration) string {
 // 사유가 전부 after-unmet-item 인 탈락 항목만 여기 들어온다.
 func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candidate, sib SiblingIndex) Bundle {
 	b := Bundle{Lead: lead, Dependents: lead.Dependents, Oldest: lead.Item.CreatedAt}
+	// ★ 굶김 축은 **선두만** 본다. 구성원은 안 본다.
+	//
+	// 아래 CloseDeclared 판정과 같은 논법이다("보는 것은 선두 하나다 — 이 축은
+	// '지금 새로 집어도 되나'에 답하고 그 질문의 주어는 브랜치를 받는 선두다").
+	// 앞선 판은 이 축만 구성원까지 봤고, 그 비대칭이 결함이었다: 선두에 티클러를
+	// 달아도 구성원이 티클러가 아니면 기아 값이 거기서 다시 채워져 **사용자 판정이
+	// 조용히 무효가 됐다**(실측 2026-08-12 — created_at 이 글자까지 같은 두 항목).
+	//
+	// 오래된 구성원이 감춰지지 않는 이유: EligibleBundle 은 fit 전원을 **각각 선두로
+	// 세워** 묶음을 만드므로, 굶은 항목은 자기가 선두인 묶음에서 제 나이로 판정된다.
+	// 자기 묶음이 없는 것은 흡수분뿐인데 그들은 선행이 선두 하나뿐이라(blockedOnlyBy)
+	// 선두 없이 못 간다 — 굶김이 선두에 종속되는 것은 감춤이 아니라 사실이다.
 	if !IsTickler(lead.Item.Labels) {
 		b.StarveOldest = lead.Item.CreatedAt
 	}
@@ -443,10 +455,6 @@ func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candida
 		b.Dependents += c.Dependents
 		if c.Item.CreatedAt.Before(b.Oldest) {
 			b.Oldest = c.Item.CreatedAt
-		}
-		if !IsTickler(c.Item.Labels) &&
-			(b.StarveOldest.IsZero() || c.Item.CreatedAt.Before(b.StarveOldest)) {
-			b.StarveOldest = c.Item.CreatedAt
 		}
 	}
 	for _, c := range fit {
