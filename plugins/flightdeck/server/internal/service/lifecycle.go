@@ -22,19 +22,22 @@ type LifecycleGate struct {
 // 선점을 안 끝낸 것은 그 세션 하나의 사정이지만, 줄은 **공유 자원**이라 한 세션의 실수가
 // 여럿에게 번진다 — 그래서 순서가 lane-wait → finish → land 다.
 //
-// ★ 쥔 자원이 하나라도 있으면 lane-wait 를 안 낸다. 전부 쥔 것은 정당한 대화 중일 수
-// 있고(스펙 §4 — 랜딩 중 사람과 상의하며 턴이 여러 번 오가는 것은 정상이다), 일부만 쥔 것은
-// all-or-nothing 이 깨진 어긋남이라 block 이 아니라 사람의 회수가 푸는 자리다 — 이 판정이
-// "회수하라"를 대신 말하면 그 문구가 실제 회수 절차(ForceReleaseResource, 사유 필수)를
-// 우회하는 지름길처럼 읽힌다. 그래서 그 갈래는 조용히 통과시킨다(nil).
+// ★ **줄 행이 요구하는 자원을 하나도 안 쥐었을 때만 lane-wait 를 낸다.** 판정은 교집합
+// 기준이다 — `LaneRow.Resources ∩ HeldRes` 가 공집합이면 lane-wait, 아니면(부분이든
+// 전부든 겹치면) 억제한다. 전부 쥔 것은 정당한 대화 중일 수 있고(스펙 §4 — 랜딩 중
+// 사람과 상의하며 턴이 여러 번 오가는 것은 정상이다), 그 행의 자원 일부만 쥔 것은
+// all-or-nothing 이 깨진 어긋남이라 block 이 아니라 사람의 회수가 푸는 자리다 — 이
+// 판정이 "회수하라"를 대신 말하면 그 문구가 실제 회수 절차(ForceReleaseResource, 사유
+// 필수)를 우회하는 지름길처럼 읽힌다. 그래서 그 두 갈래는 조용히 통과시킨다(nil).
 //
-// ★ **쥠의 판정은 LaneRow 의 자원 집합과 대조하지 않는다 — HeldRes 가 하나라도 있으면 그것으로
-// 족하다.** laneTurnRow(prescribe.go)의 같은 판정("남이든 나든 쥔 자원이 하나라도 있으면
-// 0")과 일관되게 뒀다. 대조하려면 "그 줄 행이 요구하는 자원 집합 중 몇 개를 쥐었나"를 다시
-// 비교해야 하는데, 그 비교가 필요한 값(LaneRow.Resources)과 HeldRes 는 이미 같은 관측에
-// 실려 있으므로 원한다면 나중에 더 좁힐 수 있다 — 지금은 "쥔 것이 있다=지금 뭔가 하는 중이다"
-// 라는 거친 신호만으로 lane-wait 오탐(사람이 자원을 들고 상의 중인데 "차례를 놓친다"고
-// 겁주는 것)을 막는 것이 목적이다.
+// ★ **정정(리뷰 실측, 2026-08-12)**: 앞 판은 여기서 `len(c.HeldRes) == 0` 전칭으로만
+// 걸렀다 — "형제 카드가 이 줄 행과 **서로소인** 자원(예: `path:a.go`)을 쥐고 있어도
+// HeldRes 가 비지 않는다"는 이유로 lane-wait 가 억제됐다(리뷰어 재현: B 가 landing 대기
+// 중인데 형제 A 가 path:a.go 를 쥐면 block 이 안 나갔다). 그리고 그 판을 "laneTurnRow 와
+// 일관된 판정"이라고 적었는데 그것도 부정확했다 — laneTurnRow(prescribe.go)는 `row.
+// Resources` 각 자원을 개별로 `HeldBy` 대조하지, "아무 자원이나 쥐었나"를 안 묻는다.
+// 그 오독이 이 함수에 그대로 옮았다. 지금은 교집합으로 좁혀 그 사고를 막는다 —
+// TestJudgeLifecycleGate 의 "형제가 서로소 자원만 쥠" 사례가 이 자리를 잠근다.
 //
 // ★ finish 단계는 LiveClaims 만 본다 — 그 항목이 랜딩 줄과 무관해도 뜬다. 선점을 쥔 채
 // 대화를 끝내는 것 자체가 다음 세션의 관측을 막기 때문이다(claim 에 만료가 없다).
@@ -46,7 +49,7 @@ type LifecycleGate struct {
 // 묻는 것은 정확히 "줄에 섰나" 하나다: done 을 선언하고 랜딩 줄에 한 번도 안 선 대화는
 // (성공이든 실패든) 그 절차 자체를 건너뛴 것이므로 그 사실만으로 충분히 block 할 근거가 된다.
 func judgeLifecycleGate(c store.ConvLifecycle) *LifecycleGate {
-	if c.LaneRow != nil && len(c.HeldRes) == 0 {
+	if c.LaneRow != nil && !sharesAny(c.LaneRow.Resources, c.HeldRes) {
 		res := strings.Join(c.LaneRow.Resources, " ")
 		return &LifecycleGate{Stage: "lane-wait", Reason: fmt.Sprintf(
 			"자원 %s 줄에 서 있다(행 %d). 지금 턴을 끝내면 차례가 와도 못 받는다 — "+
@@ -66,4 +69,23 @@ func judgeLifecycleGate(c store.ConvLifecycle) *LifecycleGate {
 			strings.Join(c.DoneItems, " "))}
 	}
 	return nil
+}
+
+// sharesAny 는 a·b 가 원소를 하나라도 공유하는지 본다. 순수 함수다.
+//
+// judgeLifecycleGate 하나만 쓰지만 별도 함수로 뺐다 — "교집합 공집합 여부"라는 판정의
+// 이름을 그 자리 인라인 루프가 아니라 함수 이름으로 말하기 위해서다(위 ★ 정정의 재발
+// 방지: 다음에 이 자리를 고치는 사람이 "하나라도 있으면"과 "겹치면"을 다시 혼동하지
+// 않으려면 그 구분이 호출부에서 한눈에 보여야 한다).
+func sharesAny(a, b []string) bool {
+	set := make(map[string]bool, len(b))
+	for _, x := range b {
+		set[x] = true
+	}
+	for _, x := range a {
+		if set[x] {
+			return true
+		}
+	}
+	return false
 }

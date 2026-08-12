@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -181,5 +182,60 @@ func TestConversationLifecycleAllHeldSuppressesLaneWaitSignal(t *testing.T) {
 	}
 	if got.LaneRow == nil {
 		t.Fatalf("LaneRow 가 nil 이다 — 아직 안 빠졌는데 살아 있는 행이 안 보인다")
+	}
+}
+
+// TestConversationLifecycleExcludesDroppedAndRolledBackFinishes 는 DoneItems 가 정말로
+// dropped 와 롤백된 시도를 거르는지 잠근다(리뷰 지적: 이 축을 뮤테이션으로 지워도
+// lifecycle_test.go 의 표만으로는 전 시험이 초록이었다 — DoneItems 는 store 층에서만
+// 걸러지므로 그 축을 잠그는 시험도 store 층에 있어야 한다).
+//
+// 대조군으로 정상 커밋된 done 하나를 같이 심는다 — dropped·rolled_back 이 빠진 것이
+// "필터가 다 지웠다"가 아니라 "그 둘만 걸러졌다"인지 확인하기 위해서다.
+func TestConversationLifecycleExcludesDroppedAndRolledBackFinishes(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "p")
+
+	a, _, err := s.OpenSession(ctx, "p", "m1", "/w/A", "cc-filter", "", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// dropped 로 닫은 항목 — 커밋은 됐지만 mode 가 done 이 아니므로 DoneItems 에 안
+	// 들어와야 한다(스펙: land 게이트는 outcome='done' 에만 반응한다).
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		tx.LogEvent("item.finish", "p", a.ID, map[string]any{"item": "it-dropped", "mode": "dropped"})
+		return nil
+	}); err != nil {
+		t.Fatalf("dropped 이벤트 심기 실패: %v", err)
+	}
+
+	// 롤백된 시도 — mode 는 done 이지만 그 트랜잭션이 롤백돼 markTxOutcome 이
+	// tx="rolled_back" 을 찍는다. 그 후속(count)이 실제로 안 만들어졌으므로 이 시도는
+	// "닫았다"로 안 세야 한다.
+	boom := errors.New("일부러 실패")
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		tx.LogEvent("item.finish", "p", a.ID, map[string]any{"item": "it-rolled", "mode": "done"})
+		return boom
+	}); !errors.Is(err, boom) {
+		t.Fatalf("롤백 오류가 안 올라왔다: %v", err)
+	}
+
+	// 대조: 정상적으로 커밋된 done.
+	if err := s.Tx(ctx, func(tx *Tx) error {
+		tx.LogEvent("item.finish", "p", a.ID, map[string]any{"item": "it-done", "mode": "done"})
+		return nil
+	}); err != nil {
+		t.Fatalf("done 이벤트 심기 실패: %v", err)
+	}
+
+	got, err := s.ConversationLifecycle(ctx, "p", a.ID)
+	if err != nil {
+		t.Fatalf("대화 라이프사이클 조회 실패: %v", err)
+	}
+	if len(got.DoneItems) != 1 || got.DoneItems[0] != "it-done" {
+		t.Fatalf("done 항목이 %v 다 — want [it-done] 하나뿐(it-dropped·it-rolled 는 빠져야 한다)",
+			got.DoneItems)
 	}
 }

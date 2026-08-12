@@ -61,18 +61,27 @@ func TestJudgeLifecycleGate(t *testing.T) {
 			},
 			wantStage: "",
 		},
-		{
-			name: "dropped 만 닫음 → 통과", // DoneItems 가 done 만 담으므로 자연 통과다
-			in: store.ConvLifecycle{
-				DoneItems:    nil,
-				EverEnqueued: false,
-			},
-			wantStage: "",
-		},
+		// "dropped 만 닫음 → 통과"는 이 표에서 안 잠근다 — DoneItems 는 store 층에서 이미
+		// done 만 담게 걸러지므로(dropped 는 안 들어온다), 이 순수 함수 입장에서는
+		// `DoneItems: nil` 인 "아무것도 없음" 행과 입력이 완전히 같아 아무것도 못 가른다
+		// (그렇게 적어 뒀다가 리뷰에서 지적됨 — mutation 으로 store 의 dropped 배제 조건을
+		// 지워도 이 표는 초록이었다). dropped 배제는
+		// store.TestConversationLifecycleExcludesDroppedAndRolledBackFinishes 가 잠근다.
 		{
 			name:      "아무것도 없음 → nil",
 			in:        store.ConvLifecycle{},
 			wantStage: "",
+		},
+		{
+			// 리뷰어 재현(Critical): 형제 카드가 이 줄 행과 **서로소인** 자원을 쥐면
+			// HeldRes 는 비지 않지만 그 행 자체는 하나도 안 쥔 것이다 — lane-wait 가 떠야
+			// 한다. 앞 판은 `len(HeldRes)==0` 전칭이라 이 사례에서 억제가 잘못 걸렸다.
+			name: "형제가 줄 행과 서로소인 자원만 쥠 → lane-wait 뜸(그 행 자체는 하나도 안 쥐었다)",
+			in: store.ConvLifecycle{
+				LaneRow: &model.LandingRow{ID: 7, Resources: []string{"landing"}},
+				HeldRes: []string{"path:a.go"},
+			},
+			wantStage: "lane-wait",
 		},
 		{
 			name: "줄에 섰고 선점도 있고 done 도 있음 → lane-wait 가 이긴다(가장 급한 것이 줄이다)",
