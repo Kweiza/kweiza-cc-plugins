@@ -503,3 +503,16 @@ func (c *Client) Healthz(ctx context.Context) (healthzResponse, error) {
 	}
 	return h, nil
 }
+
+// ReadFresh 는 캐시를 전혀 안 거치는 GET 이다 — Healthz 와 같은 판정이다:
+// "지금 줄이 어떤가"에 캐시로 답하면 그 질문 자체가 무의미해진다.
+// fd lane wait 의 폴링 전용이다. 캐시된 줄 상태로 "내 차례"를 판정하면
+// 배타가 깨지는 게 아니라 우회된다(Client.Read 주석의 그 사고).
+// 아웃박스와도 무관하다 — GET 이라 잃을 쓰기가 없다.
+func (c *Client) ReadFresh(ctx context.Context, path string) ([]byte, error) {
+	raw, _, err := c.do(ctx, http.MethodGet, path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
