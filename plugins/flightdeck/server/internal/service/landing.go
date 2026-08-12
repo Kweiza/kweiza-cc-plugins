@@ -164,7 +164,25 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	// ★ 정정(2026-08-12, 리뷰 Important #2) — 빈 값 판정은 **정규화 전** 원본으로 한다.
+	// normalizeResources 뒤엔 빈 입력도 항상 {LaneResource} 가 되어 판정 자체가 불가능해진다.
+	// 이 값은 아래 재진입 대조에서 쓴다: 호출자가 자원을 아예 안 준 재진입(맨몸 `fd lane
+	// wait`가 정확히 이 모양이다)은 "다른 집합"이 아니라 "네가 아는 그 집합"이라 거절 대상이
+	// 아니다.
+	callerGaveResources := len(in.Resources) > 0
 	resources := normalizeResources(in.Resources)
+	// ★ 정정(2026-08-12, 리뷰 Important #1) — 자원 이름은 여기서도 검증한다.
+	// store.EnqueueLanding 이 같은 검증(store.ValidateResourceName)을 이미 돌리지만, 그
+	// 오류는 평범한 error 라 internal/api.ClassifyError 의 화이트리스트(RefusedError·
+	// ClaimHeldError…)를 못 타고 500 으로 나간다. 공백·한글이 든 경로를 그대로 자원 이름에
+	// 준 흔한 실수가 "서버가 고장났다"로 보이면 안 된다 — 여기서 감싸 400(refused)으로 낸다.
+	for _, r := range resources {
+		if err := store.ValidateResourceName(r); err != nil {
+			return LandResult{}, &RefusedError{What: "land", Reason: err.Error(),
+				Guidance: "자원 이름은 [A-Za-z0-9._/:-] 1~200자다 — 경로 자원은 path:<경로> 모양이고, " +
+					"공백·한글이 든 경로는 이 축의 자원이 될 수 없다."}
+		}
+	}
 	// ★ 시각을 **한 번만** 잡아 줄 서기와 취득 둘에 같은 값을 넘긴다.
 	//   ① 저장층이 각자 실시계를 찍으면 화면(주입된 시계로 now 를 잡는다)과 갈려
 	//      대기·획득 두 경과가 통째로 거짓이 된다 — 이 함수가 그 시계의 유일한 출처다.
@@ -183,13 +201,23 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 			return err
 		}
 		if !equalStringSlices(mine.Resources, resources) {
-			// 재진입인데 집합이 다르다 — store 는 기존 행을 그대로 냈고(재진입 안전),
-			// 거절은 여기서 한다. 조용히 기존 집합으로 진행하면 세션은 요청한 자원을
-			// 기다린다고 믿는데 실제로는 다른 줄에 서 있다(재진입 결함 그 자체다).
-			return &RefusedError{What: "land",
-				Reason: fmt.Sprintf("이미 자원 %s 로 줄에 서 있다(행 %d) — 요청한 %s 와 다르다",
-					strings.Join(mine.Resources, " "), mine.ID, strings.Join(resources, " ")),
-				Guidance: "집합을 바꾸려면 land(leave:\"사유\") 로 빠진 뒤 다시 서라 — 순번은 잃는다(맨 뒤)."}
+			// ★ 정정(2026-08-12, 리뷰 Important #2) — 호출자가 자원을 **명시하지 않은**
+			// 재진입은 거절하지 않는다. 빈 요청은 "다른 집합"이 아니라 "네가 아는 그 집합"이다.
+			// 맨몸 `fd lane wait`(--resource 없음)가 정확히 이 모양으로 재진입한다 — 정규화가
+			// 그 빈 요청을 {LaneResource} 로 접고, 그것이 실제로 선 {r1,r2} 와 어긋나 보여
+			// 여기서 거절되면 "leave 로 빠져라"는 안내가 뒤따르는데, 그 안내를 따르면 순번을
+			// 잃는다(맨 뒤로 다시 선다). 실제로는 아무것도 안 바꾸겠다는 뜻이므로 mine.Resources
+			// 를 그대로 채택하고 진행한다 — 아래는 이미 mine.Resources 를 쓰므로 별도 대입은
+			// 필요 없다. **명시적으로 다른 집합을 준 경우만** 거절한다.
+			if callerGaveResources {
+				// 재진입인데 집합이 다르다 — store 는 기존 행을 그대로 냈고(재진입 안전),
+				// 거절은 여기서 한다. 조용히 기존 집합으로 진행하면 세션은 요청한 자원을
+				// 기다린다고 믿는데 실제로는 다른 줄에 서 있다(재진입 결함 그 자체다).
+				return &RefusedError{What: "land",
+					Reason: fmt.Sprintf("이미 자원 %s 로 줄에 서 있다(행 %d) — 요청한 %s 와 다르다",
+						strings.Join(mine.Resources, " "), mine.ID, strings.Join(resources, " ")),
+					Guidance: "집합을 바꾸려면 land(leave:\"사유\") 로 빠진 뒤 다시 서라 — 순번은 잃는다(맨 뒤)."}
+			}
 		}
 		out = LandResult{State: "waiting", RowID: mine.ID, Resources: mine.Resources}
 

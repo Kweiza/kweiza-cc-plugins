@@ -429,7 +429,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	// 자원 수만큼**(0건이면 한 줄) 나온다 — foot 은 줄마다 하나씩 이어 붙이는 슬라이스라
 	// append(...,) 로 펼친다.
 	if v.Lane != nil {
-		foot = append(foot, renderLane(v.Lane, now)...)
+		foot = append(foot, renderLane(v.Lane, now, opt.Detail)...)
 	}
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
@@ -878,13 +878,32 @@ func boardDetailFoot(v service.BoardView) []string {
 // (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
 // 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
 //
+// laneResourceCap 은 renderLane 이 brief 모드에서 내는 자원 절의 상한이다.
+//
+// ★ 리뷰 Important #3(2026-08-12, 실측 재현) — 자원별 레인 절은 이 함수가 생기기 전에는
+// 상한이 없었고, 그 절은 joinAll 의 foot(고정분)이라 board 예산 루프가 **못 자른다**
+// (RenderBoard 의 카드 자르기는 blocks 만 본다). 실측: 자원 6개짜리 레인 절 하나가 1422토큰
+// (예산 1200)을 혼자 먹었다 — 카드가 하나도 없어도 고정분만으로 예산을 넘긴다.
+// 값 4는 조율값이다: 회수 판정에 절실한 것은 "지금 막힌 자원"이지 "이 프로젝트가 쓰는
+// 자원 전부"가 아니고, 어긋남(⚠) 자원은 이 상한과 무관하게 전부 낸다(아래 참고).
+const laneResourceCap = 4
+
+// renderLane 은 보드의 레인 절이다 — Task 6 부터는 **자원별로** 한 줄씩 낸다. 순수 함수다.
+//
+// 설계 §9 ① 이 요구하는 축을 전부 낸다: **점유자의 획득 경과**(머리) · 대기 줄 전체
+// (순번 · 세션 · 대기 경과 · **마지막 신호 나이**). 회수는 자동 만료가 아니라 사람이
+// 이 두 나이를 보고 내리는 판정이라, 그 주 표면인 보드에서 빠지면 판정의 근거가 없다.
+//
 // ★ 호출부(RenderBoard)가 v.Lane == nil 이면 이 함수를 아예 안 부른다. 그래서 여기 들어온
 // 이상 질의는 이미 돈 것이고, Resources 가 비었어도 그 사실("질의는 돌았다")을 문장에
 // 반드시 남긴다 — 안 남기면 "질의가 안 돌았다"(nil)와 "아무도 안 섰다"(빈 Resources)가
 // 화면에서 같아진다(service.LaneView 주석과 같은 판정). **이 0건 문구는 프로젝트 전체
 // 기준이다** — len(l.Resources)==0(자원 우주 자체가 빈 것)일 때만 나가고, 한 줄 고정이다.
 // 자원이 하나라도 있으면 그 수만큼 줄이 나온다(renderResourceLane 이 자원 하나씩을 맡는다).
-func renderLane(l *service.LaneView, now time.Time) []string {
+//
+// ★ detail=true 는 상한을 안 둔다(laneResourceCap 주석·아래 접기 문구의 "detail=true 로
+// 전부 본다" 약속을 지키려면 detail 이 실제로 전부를 내야 한다).
+func renderLane(l *service.LaneView, now time.Time, detail bool) []string {
 	if len(l.Resources) == 0 {
 		// ★ 짧게 쓴다. 이 줄은 레인이 비어 있어도 **매 보드마다** 나가고 잘리지 않는
 		//   고정분이라(joinAll 의 foot), 한 낱말이 세션 카드 하나를 접는 값이 된다.
@@ -893,9 +912,45 @@ func renderLane(l *service.LaneView, now time.Time) []string {
 		//   락이 걸린 축은 "질의는 돌았다"(nil 과 빈 슬라이스를 가르는 문구)뿐이다.
 		return []string{"랜딩 레인 0건(질의는 돌았다)"}
 	}
-	lines := make([]string, 0, len(l.Resources))
+	if detail || len(l.Resources) <= laneResourceCap {
+		lines := make([]string, 0, len(l.Resources))
+		for _, rl := range l.Resources {
+			lines = append(lines, renderResourceLane(rl, now))
+		}
+		return lines
+	}
+	// ★ 자원이 상한을 넘는다 — 접되, **어긋남(⚠) 자원은 접지 않는다.** 가장 시끄러운
+	// 문장(회수해야 할 대상)이 접히면 예산은 지켜도 이 절의 존재 이유가 사라진다.
+	// 순서는 원래 순서(이름순, service.LandingLane)를 그대로 유지한다 — warn·rest 로
+	// 나눠도 각 버킷 안에서는 훑은 순서를 그대로 담으므로 안정적이다.
+	var warn, rest []service.ResourceLane
 	for _, rl := range l.Resources {
+		if resourceLaneWarns(rl) {
+			warn = append(warn, rl)
+		} else {
+			rest = append(rest, rl)
+		}
+	}
+	// 어긋남 자원은 상한과 무관하게 전부 보여준다 — 남는 자리만 나머지로 채운다.
+	remaining := laneResourceCap - len(warn)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > len(rest) {
+		remaining = len(rest)
+	}
+	shown := make([]service.ResourceLane, 0, len(warn)+remaining)
+	shown = append(shown, warn...)
+	shown = append(shown, rest[:remaining]...)
+	folded := len(rest) - remaining
+
+	lines := make([]string, 0, len(shown)+1)
+	for _, rl := range shown {
 		lines = append(lines, renderResourceLane(rl, now))
+	}
+	if folded > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"…자원 %d개는 예산 때문에 접었다 — detail=true 로 전부 본다", folded))
 	}
 	return lines
 }
@@ -1017,6 +1072,14 @@ func resourceLaneHolderIsQueued(rl service.ResourceLane) bool {
 		}
 	}
 	return false
+}
+
+// resourceLaneWarns 는 자원 하나가 renderResourceLane 에서 ⚠(정합 어긋남)를 낼지를 본다.
+// 순수 함수다 — renderResourceLane 이 실제로 ⚠ 를 찍는 두 갈래(항목 0건인데 점유자가
+// 있다 · 항목은 있는데 그중 점유자가 없다)를 여기서 한 판정으로 합친다. renderLane 의
+// 자원 상한이 이 값으로 "접지 않을 자원"을 고른다.
+func resourceLaneWarns(rl service.ResourceLane) bool {
+	return rl.Holder != nil && !resourceLaneHolderIsQueued(rl)
 }
 
 func heldLine(held []model.ResourceHold) string {

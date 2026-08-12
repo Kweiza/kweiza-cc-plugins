@@ -1176,3 +1176,61 @@ func TestReclaimedReasonAlwaysTellsTheSessionWhatToDoNext(t *testing.T) {
 		}
 	}
 }
+
+// TestLandReentryWithoutResourcesAdoptsTheAlreadyQueuedSet 은 최종 리뷰 Important #2 를
+// 잠근다(2026-08-12, 실측 재현).
+//
+// {r1,r2} 로 줄에 선 세션이 **자원을 명시하지 않고**(맨몸 `fd lane wait` 가 정확히 이
+// 모양이다) 재진입하면, 고치기 전에는 normalizeResources 가 빈 요청을 {landing} 으로
+// 접어 실제로 선 {r1,r2} 와의 대조가 어긋나 거절됐다 — 그 거절의 처방은 "land(leave)로
+// 빠진 뒤 다시 서라"였는데, 그것을 따르면 순번을 잃는다(맨 뒤로 다시 선다). 빈 요청은
+// "다른 집합"이 아니라 "네가 아는 그 집합"이므로 거절 대신 기존 집합을 채택하고
+// 진행해야 한다.
+func TestLandReentryWithoutResourcesAdoptsTheAlreadyQueuedSet(t *testing.T) {
+	s, _ := newSvc(t)
+	a, b := twoSessions(t, s)
+
+	// a 가 {r1,r2} 로 서서 레인을 쥔다.
+	firstA, err := s.Land(ctx(), LandInput{Project: "p", SessionID: a, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstA.State != "turn" {
+		t.Fatalf("사전 조건이 깨졌다 — a 가 차례를 못 받았다: %+v", firstA)
+	}
+
+	// b 도 같은 집합으로 서서 대기한다.
+	firstB, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstB.State != "waiting" {
+		t.Fatalf("사전 조건이 깨졌다 — b 가 대기 상태가 아니다: %+v", firstB)
+	}
+
+	// ★ b 가 자원을 안 준 채 재진입한다 — 리뷰가 잡은 결함의 실물 재현.
+	again, err := s.Land(ctx(), LandInput{Project: "p", SessionID: b})
+	if err != nil {
+		t.Fatalf("자원을 안 준 재진입이 거절됐다 — 빈 요청은 \"다른 집합\"이 아니라 "+
+			"\"네가 아는 그 집합\"이어야 한다: %v", err)
+	}
+	if again.State != "waiting" {
+		t.Errorf("재진입 상태가 %q 다(기대 waiting)", again.State)
+	}
+	if again.RowID != firstB.RowID {
+		t.Errorf("재진입이 줄 행을 바꿨다: %d → %d — 재진입은 같은 행이어야 한다", firstB.RowID, again.RowID)
+	}
+	if got := strings.Join(again.Resources, ","); got != "r1,r2" {
+		t.Errorf("재진입 응답의 Resources 가 %q 다(기대 r1,r2) — 기존에 선 집합을 채택하지 않았다", got)
+	}
+
+	// 대조: 자원을 **명시적으로** 다르게 주면 여전히 거절돼야 한다(명시된 불일치만 거절한다).
+	_, err = s.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r3"}})
+	if err == nil {
+		t.Fatal("명시적으로 다른 집합을 준 재진입이 거절되지 않았다 — 대조가 깨졌다")
+	}
+	var refused *RefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("명시적 불일치의 오류가 RefusedError 가 아니다: %v", err)
+	}
+}

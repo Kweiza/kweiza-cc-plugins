@@ -139,6 +139,45 @@ func TestLaneWaitTurnJudgement(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ①-2 posKey — 변화 감지는 위치 사실만 본다. 나이는 line(출력 전용)에만 실린다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestJudgeLaneWaitPosKeyIgnoresSignalAge 는 최종 리뷰 Important #4 를 잠근다(2026-08-12,
+// 실측 재현). 옛 코드는 변화 감지를 st.line(FormatAge 로 신호 나이가 실린 문자열)으로
+// 했다 — 앞사람이 활동 중이면 매 폴링마다 나이가 달라져 line 이 계속 바뀌고, 그때마다
+// runLaneWaitWith 가 백오프 간격을 2s 로 리셋했다(실측: 9분 대기 = 270회 GET + 270줄 출력).
+// posKey 는 자원·순번·점유자 세션id·앞 행 id 로만 조립돼 나이가 안 들어간다 — 신호 나이만
+// 바뀐 연속 조회에서는 그대로여야 한다.
+func TestJudgeLaneWaitPosKeyIgnoresSignalAge(t *testing.T) {
+	base := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	sig := base.Add(-1 * time.Minute) // 신호 시각 자체는 안 바뀐다 — now 만 흐른다
+	view := service.LaneView{Resources: []service.ResourceLane{
+		{Resource: "landing",
+			Holder: &service.LaneHolder{SessionID: "s-front", LastSignalAt: &sig},
+			Entries: []service.LaneEntry{
+				{RowID: 5, SessionID: "s-front"},
+				{RowID: 9, SessionID: "me"},
+			}},
+	}}
+
+	first := judgeLaneWait(view, 9, "me", base)
+	later := judgeLaneWait(view, 9, "me", base.Add(5*time.Minute)) // 조회 시각만 5분 흐른다
+
+	// ── 대조 먼저 ── line 은 나이가 실려 있으니 반드시 바뀌어야 한다. 안 바뀌면 이
+	// 시험이 애초에 posKey 축을 못 보는 입력이다.
+	if first.line == later.line {
+		t.Fatalf("대조가 성립하지 않았다 — line 이 안 바뀌면 이 시험이 posKey 축을 못 본다: %q", first.line)
+	}
+	if first.posKey == "" {
+		t.Fatal("posKey 가 비었다 — 정상 대기인데 위치 사실이 아예 안 잡혔다")
+	}
+	if first.posKey != later.posKey {
+		t.Fatalf("posKey 가 신호 나이만으로 바뀌었다(%q → %q) — runLaneWaitWith 의 백오프가 계속 리셋된다"+
+			"(line %q → %q)", first.posKey, later.posKey, first.line, later.line)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ② stale 폴백 — 신호(LastSignalAt) 우선, nil 이면 대기 시작(EnqueuedAt) 나이로
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -229,6 +268,31 @@ func TestLaneWaitStaleUsesSignalThenEnqueueAge(t *testing.T) {
 		}
 		if got.staleRow != 4 {
 			t.Errorf("staleRow = %d, 기대 4", got.staleRow)
+		}
+	})
+
+	// ★ 리뷰 Important #5(2026-08-12, 실측 재현) — hold-without-row 어긋남: 점유자(s1)의
+	// 줄 행이 이 자원 큐에 아예 없고, 줄에는 **내 행(9)만** 남아 있다. 고치기 전에는
+	// entries[0]을 점유자의 행으로 단정해 staleRow 가 9(내 행)가 됐다 — stale 에스컬레이션이
+	// "앞사람을 회수해라"가 아니라 "네 자신을 회수해라"를 시킨 사고다.
+	t.Run("hold-without-row 어긋남 — 점유자의 행이 큐에 없으면 내 행을 회수 대상으로 내지 않는다", func(t *testing.T) {
+		view := service.LaneView{Resources: []service.ResourceLane{
+			{Resource: "r1",
+				Holder: &service.LaneHolder{SessionID: "s1", AcquiredAt: now.Add(-70 * time.Minute)},
+				Entries: []service.LaneEntry{
+					{RowID: 9, SessionID: "me", EnqueuedAt: now.Add(-2 * time.Minute)},
+				}},
+		}}
+		got := judgeLaneWait(view, 9, "me", now)
+		if got.staleRowKnown {
+			t.Fatalf("점유자의 행이 큐에 없는데 staleRowKnown 이 true 다 — 회수 대상 행이 있다고 잘못 말한다")
+		}
+		if got.staleRow == 9 {
+			t.Fatalf("staleRow 가 내 행(9)이다 — 대기자 자신의 행을 회수하라고 시키는 사고다")
+		}
+		// 신호도 점유자의 줄 행도 없으니 획득 경과(AcquiredAt)로 접는다.
+		if got.staleFor != 70*time.Minute {
+			t.Errorf("staleFor = %v, 기대 70분(점유자의 획득 경과로 접는다)", got.staleFor)
 		}
 	})
 }

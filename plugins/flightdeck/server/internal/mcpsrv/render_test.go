@@ -1335,6 +1335,86 @@ func TestRenderBoardLaneShowsTheTwoAgesAHumanJudgesReclaimBy(t *testing.T) {
 	}
 }
 
+// TestRenderBoardLaneCapsResourceCountWithinBudget 은 최종 리뷰 Important #3 을 잠근다
+// (2026-08-12, 실측 재현: 자원 6개짜리 레인 절 하나가 1422토큰을 먹어 예산 1200 을 뚫었다).
+//
+// 레인 절은 joinAll 의 foot(고정분)이라 board 의 카드 자르기 루프가 못 자른다 — renderLane
+// 자체가 자원 수에 상한(laneResourceCap)을 둬야 예산이 지켜진다. 실측을 넘는 자원 8개로
+// 재현한다(카드 0장짜리 보드로 고정분만 잰다 — 카드가 섞이면 무엇이 예산을 지켰는지 갈린다).
+func TestRenderBoardLaneCapsResourceCountWithinBudget(t *testing.T) {
+	const n = 8
+	var resources []service.ResourceLane
+	for i := 0; i < n; i++ {
+		holder := fmt.Sprintf("01HOLDER%04d", i)
+		waiter := fmt.Sprintf("01WAITER%04d", i)
+		resources = append(resources, service.ResourceLane{
+			Resource: fmt.Sprintf("r%d", i),
+			Holder: &service.LaneHolder{SessionID: holder,
+				AcquiredAt: t0.Add(-time.Duration(i+1) * time.Minute)},
+			Entries: []service.LaneEntry{
+				{RowID: int64(100 + i), SessionID: holder, EnqueuedAt: t0.Add(-time.Duration(i+2) * time.Minute)},
+				{RowID: int64(200 + i), SessionID: waiter, EnqueuedAt: t0.Add(-time.Duration(i+1) * time.Minute)},
+			},
+		})
+	}
+	v := service.BoardView{Lane: &service.LaneView{Resources: resources}}
+
+	got := RenderBoard(v, BoardRenderOptions{Now: t0})
+	if tok := EstimateTokens(got); tok > BoardTokenBudget {
+		t.Fatalf("자원 %d개짜리 레인 절이 예산을 뚫었다 — %d토큰(상한 %d):\n%s", n, tok, BoardTokenBudget, got)
+	}
+	if !strings.Contains(got, "예산 때문에 접었다") {
+		t.Fatalf("자원이 상한(%d)을 넘었는데 접었다는 사실이 없다:\n%s", laneResourceCap, got)
+	}
+	if !strings.Contains(got, "detail=true") {
+		t.Fatalf("전부 보는 방법이 안 적혀 있다:\n%s", got)
+	}
+	// 상한을 지켰다 — 자원 절이 laneResourceCap 줄을 넘지 않는다(접힘 안내 한 줄은 별도로 는다).
+	if kept := strings.Count(got, "레인 "); kept > laneResourceCap {
+		t.Fatalf("접힌 뒤에도 자원 레인 줄이 %d개다(상한 %d):\n%s", kept, laneResourceCap, got)
+	}
+
+	// detail=true 는 접지 않는다 — 위 문구("detail=true 로 전부 본다")의 약속을 지킨다.
+	detail := RenderBoard(v, BoardRenderOptions{Now: t0, Detail: true})
+	for i := 0; i < n; i++ {
+		if !strings.Contains(detail, fmt.Sprintf("r%d: 레인", i)) {
+			t.Fatalf("detail=true 인데 자원 r%d 가 안 보인다:\n%s", i, detail)
+		}
+	}
+}
+
+// TestRenderBoardLaneNeverFoldsAWarningResource 는 위 시험의 짝이다: 정합 어긋남(⚠) 자원은
+// 상한을 넘겨도 **절대 접지 않는다** — 회수 판정에 가장 절실한, 가장 시끄러운 문장이
+// 접히면 안 된다(리뷰 Important #3, "어긋남 자원은 접지 말고 우선 표시").
+func TestRenderBoardLaneNeverFoldsAWarningResource(t *testing.T) {
+	var resources []service.ResourceLane
+	// 정상 자원 5개 — 상한(4)보다 하나 많다.
+	for i := 0; i < 5; i++ {
+		resources = append(resources, service.ResourceLane{
+			Resource: fmt.Sprintf("ok%d", i),
+			Entries: []service.LaneEntry{
+				{RowID: int64(300 + i), SessionID: fmt.Sprintf("01OKSESSION%03d", i), EnqueuedAt: t0},
+			},
+		})
+	}
+	// 어긋남 자원 하나 — 점유자는 있는데 줄 행이 하나도 없다.
+	resources = append(resources, service.ResourceLane{
+		Resource: "ghost",
+		Holder:   &service.LaneHolder{SessionID: "01GHOSTHOLDER", AcquiredAt: t0.Add(-1 * time.Hour)},
+		Entries:  []service.LaneEntry{},
+	})
+
+	got := RenderBoard(service.BoardView{Lane: &service.LaneView{Resources: resources}},
+		BoardRenderOptions{Now: t0})
+
+	if !strings.Contains(got, "ghost:") || !strings.Contains(got, "⚠") {
+		t.Fatalf("어긋남 자원(ghost)이 접혔다 — 상한을 넘겨도 절대 접으면 안 된다:\n%s", got)
+	}
+	if !strings.Contains(got, "예산 때문에 접었다") {
+		t.Fatalf("정상 자원 5개 중 일부가 접혀야 하는데 접힌 사실이 없다:\n%s", got)
+	}
+}
+
 // TestRenderFinishSaysWhatItLinkedInsteadOfCreated 는 "만들었다"와 "이었다"를 화면에서 가른다.
 //
 // 같은 줄에 담으면 응답이 "후속 2건 등록"이라고 말하는데 큐에는 1건만 는다 — 세션이

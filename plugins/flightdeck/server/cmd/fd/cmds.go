@@ -938,7 +938,7 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 	// ② 차례까지 조회 폴링. 변화가 있으면 한 줄 내고 간격을 처음으로 되돌린다.
 	deadline := d.now().Add(*timeout)
 	wait := *interval
-	lastLine := ""
+	lastPosKey := ""
 	goneStreak := 0 // rowGone 을 연속으로 관측한 횟수 — 스냅숏 경합 배제(아래 ★)
 	for {
 		if d.now().After(deadline) {
@@ -957,9 +957,17 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 			return 1
 		}
 		st := judgeLaneWait(view, myRow, sess, d.now())
-		if st.line != lastLine && st.line != "" {
-			fmt.Fprintln(out, st.line)
-			lastLine = st.line
+		// ★ 정정(2026-08-12, 리뷰 Important #4) — 변화 감지는 **위치 사실만**(st.posKey)으로
+		// 한다. 예전엔 st.line 으로 감지했는데, line 에는 FormatAge(신호 나이)가 들어 있어
+		// 앞사람이 활동 중이면 매 폴링마다 line 이 달라져 간격이 2s 로 계속 리셋됐다
+		// (실측: 9분 대기 = 270회 GET + 270줄 출력). posKey 는 자원·순번·점유자 세션id·
+		// 앞 행 id 로만 조립돼 나이가 안 들어간다 — judgeLaneWait 주석 참고. line(나이 포함)은
+		// 출력 전용이라, 찍을 때는 여전히 나이가 실린 최신 line 을 쓴다.
+		if st.posKey != lastPosKey && st.posKey != "" {
+			if st.line != "" {
+				fmt.Fprintln(out, st.line)
+			}
+			lastPosKey = st.posKey
 			wait = *interval // 변화가 있었다 — 간격을 되돌린다
 		} else if wait = wait * 3 / 2; wait > 10*time.Second {
 			wait = 10 * time.Second
@@ -996,6 +1004,17 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 			myRow = lr.RowID
 		}
 		if st.staleFor > *stale {
+			// ★ 정정(2026-08-12, 리뷰 Important #5) — staleRowKnown 이 false 면
+			// hold-without-row 어긋남이다: 점유자의 줄 행이 이 자원 큐에 없어 회수 대상
+			// 행이 없다. 그때 staleRow 를 그대로 찍으면(이전에는 항상 entries[0]) 줄에
+			// 나만 남은 경우 **내 행**을 회수하라고 시키는 사고가 난다 — 행 번호를
+			// 아예 내지 않고 갈라 낸다.
+			if !st.staleRowKnown {
+				fmt.Fprintf(out, "%s 가 %s 무신호다. 점유자 %s 의 줄 행이 없다(정합 어긋남) — "+
+					"회수 대상 행이 없으니 보드에서 상태를 봐라.\n그대로 더 기다리려면 fd lane wait 를 다시 불러라.\n",
+					st.staleWho, st.staleFor.Round(time.Minute), st.staleWho)
+				return 1
+			}
 			fmt.Fprintf(out, "%s 가 %s 무신호다. 자동 회수는 없다 — 사람이 판정한다:\n  fd lane release --row %d --reason \"…\"\n그대로 더 기다리려면 fd lane wait 를 다시 불러라.\n",
 				st.staleWho, st.staleFor.Round(time.Minute), st.staleRow)
 			return 1
@@ -1011,10 +1030,22 @@ type laneWaitState struct {
 	// 아니다"(정상 대기)이고, rowGone=true 는 "기다릴 내 자리 자체가 없다"다. 호출부가
 	// 이 둘을 못 가르면 회수당한 세션이 9분 내내 "아직 차례가 아니다"를 기다리다 그
 	// 사실과 다른 사유로 끝난다(리뷰 Important, 2026-08-12 — 실측 재현).
-	line     string        // 사람이 읽는 현황 한 줄(변화 감지용 — 같으면 안 낸다)
+	line string // 사람이 읽는 현황 한 줄(출력 전용 — 나이가 실린다)
+	// posKey 는 **변화 감지 전용** 키다(리뷰 Important #4, 2026-08-12 — 실측 재현). line 에는
+	// FormatAge(신호 나이)가 들어 있어 앞사람이 활동 중이면 매 폴링마다 line 이 달라지고,
+	// 옛 코드는 line 으로 변화를 감지해 그때마다 백오프 간격을 2s 로 계속 리셋했다(실측:
+	// 9분 대기 = 270회 GET + 270줄 출력). posKey 는 자원·순번·점유자(또는 앞 행) 세션id·
+	// 그 행 id 로만 조립돼 나이가 안 들어간다 — **위치 사실**이 바뀔 때만 바뀐다.
+	posKey   string
 	staleWho string        // 가장 오래 막는 상대(세션 짧은 id 와 자원)
-	staleFor time.Duration // 그 상대의 무신호 나이(신호가 없으면 대기 시작 나이)
-	staleRow int64         // 회수 대상 줄 행
+	staleFor time.Duration // 그 상대의 무신호 나이(신호가 없으면 대기 시작 나이 · 그것도 없으면 획득 경과)
+	staleRow int64         // 회수 대상 줄 행. staleRowKnown 이 false 면 의미 없다(0).
+	// staleRowKnown 은 staleRow 가 실제로 회수할 수 있는 행을 가리키는지다(리뷰 Important
+	// #5, 2026-08-12 — 실측 재현). false 는 hold-without-row 어긋남이다: 점유자의 줄 행이
+	// 이 자원 큐에 아예 없다(landing.go 머리 불변식 위반). 그 상태에서 Entries[0]을 점유자의
+	// 행으로 단정하면 — 줄에 나만 남았을 때 그것이 **내 행**이라 — 대기자 자신의 행을
+	// 회수하라고 시키는 사고가 된다.
+	staleRowKnown bool
 }
 
 // judgeLaneWait 는 조회(GET landingQueuePath) 응답 하나로 "지금 내 차례로 보이는가"를
@@ -1047,11 +1078,13 @@ type laneWaitState struct {
 // (haveMine 의 부정 — 새 계산이 아니라 이미 있던 값을 노출만 한 것이다).
 func judgeLaneWait(view service.LaneView, myRow int64, mySession string, now time.Time) laneWaitState {
 	var fragments []string
+	var posFragments []string
 	haveMine := false
 	allPass := true
 	worstAge := time.Duration(-1)
 	var worstWho string
 	var worstRow int64
+	var worstRowKnown bool
 
 	for _, rl := range view.Resources {
 		idx := -1
@@ -1069,45 +1102,77 @@ func judgeLaneWait(view service.LaneView, myRow int64, mySession string, now tim
 
 		if (idx == 0 && rl.Holder == nil) || (rl.Holder != nil && rl.Holder.SessionID == mySession) {
 			fragments = append(fragments, fmt.Sprintf("%s: %d번째", rl.Resource, pos))
+			posFragments = append(posFragments, fmt.Sprintf("%s:%d:pass", rl.Resource, pos))
 			continue
 		}
 
 		allPass = false
-		// entries[0]은 "지금 이 자원에서 나를 막는 자리"다 — 살아 있는 점유에는 반드시
-		// 대응하는 살아 있는 줄 행이 있고(landing.go 머리 불변식), 그 행은 항상 그 자원
-		// 큐의 맨 앞이다(front 가 아니면 애초에 취득이 안 났다). 그래서 holder 가 있어도
-		// entries[0].RowID 가 곧 그 holder 의 행이다.
-		front := rl.Entries[0]
 		var blockerSession string
 		var lastSignal *time.Time
+		var blockerRow int64
+		var blockerRowKnown bool
+		var blockerEnqueuedAt time.Time
 		parts := []string{fmt.Sprintf("%d번째", pos)}
 		if rl.Holder != nil {
 			blockerSession, lastSignal = rl.Holder.SessionID, rl.Holder.LastSignalAt
 			parts = append(parts, "점유 "+mcpsrv.ShortID(blockerSession))
+			// ★ 정정(2026-08-12, 리뷰 Important #5, 실측 재현) — entries[0]을 점유자의
+			// 행으로 **단정하지 않는다.** "살아 있는 점유에는 반드시 대응하는 살아 있는
+			// 줄 행이 있다"(landing.go 머리 불변식)가 지켜질 때는 그 행이 항상 그 자원
+			// 큐의 맨 앞이라 옛 가정이 맞았지만, hold-without-row 어긋남(그 불변식이 깨진
+			// 상태)에서는 점유자의 행이 이 자원 큐에 아예 없다 — 그때 entries[0]은 실제
+			// 대기자의 행이고, 줄에 나만 남아 있으면 그것이 **내 행**이다. 옛 코드는 그
+			// 경우에도 front.RowID(=내 행)를 그대로 회수 대상으로 냈다 — "앞사람을
+			// 회수해라"가 "네 자신을 회수해라"로 뒤집힌 사고다. Holder.SessionID 로 실제
+			// 행을 찾고, 없으면 blockerRowKnown 이 false 로 남아 그 사실을 그대로 낸다.
+			for _, e := range rl.Entries {
+				if e.SessionID == rl.Holder.SessionID {
+					blockerRow, blockerRowKnown, blockerEnqueuedAt = e.RowID, true, e.EnqueuedAt
+					break
+				}
+			}
 		} else {
+			// entries[0]은 "지금 이 자원에서 나를 막는 자리"다 — 점유자가 없으므로(else
+			// 갈래) 위 divergence 는 적용되지 않는다: 맨 앞은 항상 실재하는 대기자의 행이다.
+			front := rl.Entries[0]
 			blockerSession, lastSignal = front.SessionID, front.LastSignalAt
+			blockerRow, blockerRowKnown, blockerEnqueuedAt = front.RowID, true, front.EnqueuedAt
 			parts = append(parts, fmt.Sprintf("앞 줄 행 %d(%s)", front.RowID, mcpsrv.ShortID(blockerSession)))
 		}
 		var age time.Duration
-		if lastSignal != nil {
+		switch {
+		case lastSignal != nil:
 			age = now.Sub(*lastSignal)
 			parts = append(parts, "신호 "+mcpsrv.FormatAge(age)+" 전")
-		} else {
-			age = now.Sub(front.EnqueuedAt) // ★ 신호 nil 폴백 — 대기 시작 나이로 접는다
+		case blockerRowKnown:
+			age = now.Sub(blockerEnqueuedAt) // ★ 신호 nil 폴백 — 대기 시작 나이로 접는다
+			parts = append(parts, "신호 없음")
+		default:
+			// ★ 점유자의 행이 아예 없다(hold-without-row) — 대기 시작 시각도 모른다.
+			// 점유 자체는 실재하므로(rl.Holder != nil) 획득 경과로 접는다.
+			age = now.Sub(rl.Holder.AcquiredAt)
 			parts = append(parts, "신호 없음")
 		}
 		fragments = append(fragments, rl.Resource+": "+strings.Join(parts, "·"))
+		// posKey 조각 — 나이(FormatAge)를 뺀 **위치 사실만**. line 과 달리 폴링 백오프는
+		// 이 값으로만 흔들려야 한다(runLaneWaitWith 의 ★ 정정 — 리뷰 Important #4).
+		posFragments = append(posFragments,
+			fmt.Sprintf("%s:%d:%s:%d", rl.Resource, pos, blockerSession, blockerRow))
 
 		if age > worstAge {
 			worstAge = age
 			worstWho = fmt.Sprintf("%s(%s)", mcpsrv.ShortID(blockerSession), rl.Resource)
-			worstRow = front.RowID
+			worstRow, worstRowKnown = blockerRow, blockerRowKnown
 		}
 	}
 
-	st := laneWaitState{myTurn: haveMine && allPass, rowGone: !haveMine, line: strings.Join(fragments, " | ")}
+	st := laneWaitState{
+		myTurn: haveMine && allPass, rowGone: !haveMine,
+		line: strings.Join(fragments, " | "), posKey: strings.Join(posFragments, "|"),
+	}
 	if worstAge >= 0 {
-		st.staleFor, st.staleWho, st.staleRow = worstAge, worstWho, worstRow
+		st.staleFor, st.staleWho = worstAge, worstWho
+		st.staleRow, st.staleRowKnown = worstRow, worstRowKnown
 	}
 	return st
 }
