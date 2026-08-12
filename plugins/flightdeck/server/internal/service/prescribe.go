@@ -61,6 +61,11 @@ type PrescribeResult struct {
 	Shown  []judge.Prescription `json:"shown"`  // 문구로 낼 것 (최대 judge.PrescribeMax) — **발화로 세는 것은 이것뿐이다**
 	Folded int                  `json:"folded"` // 요약으로 접힌 수 — 발화로는 안 세고 prescribe_folded 로 남는다
 	All    []judge.Prescription `json:"all"`    // 이번 턴에 판정된 전부(표시분 + 접힌 것). 발화로 세는 것은 Shown 뿐이다
+
+	// Lifecycle 은 이 세션이 속한 **대화**(machine + cc_session_id)의 라이프사이클 단계다.
+	// nil 이면 걸린 것이 없다. Task 12 의 hookStop 이 이 필드로 decision:block 을 낸다 —
+	// 훅이 이미 이 POST 를 부르므로 추가 왕복이 0이다.
+	Lifecycle *LifecycleGate `json:"lifecycle,omitempty"`
 }
 
 // prescribePayload 는 event.payload 의 모양이다.
@@ -349,7 +354,20 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		s.log.InfoContext(ctx, "처방 발화",
 			"session_id", sessionID, "count", len(all), "shown", len(shown), "folded", folded)
 	}
-	return PrescribeResult{Shown: shown, Folded: folded, All: all}, nil
+
+	result := PrescribeResult{Shown: shown, Folded: folded, All: all}
+	// 대화 단위 라이프사이클 판정 — Task 11. 카드 갈림을 넘어 (machine, cc_session_id) 로
+	// 접은 관측을 순수 함수(judgeLifecycleGate)에 넘긴다.
+	//
+	// ★ 실패해도 처방 전체를 죽이지 않는다 — laneTurnRow 와 같은 관용(WARN 뒤 계속)이다.
+	// 이 축이 하나 못 잡는다고 겹침·미선점·outside 같은 나머지 처방까지 함께 잃으면
+	// 대가가 이 축의 가치보다 크다.
+	if conv, cerr := s.st.ConversationLifecycle(ctx, sess.Project, sessionID); cerr != nil {
+		s.log.WarnContext(ctx, "라이프사이클 판정 실패", "session_id", sessionID, "error", cerr.Error())
+	} else {
+		result.Lifecycle = judgeLifecycleGate(conv)
+	}
+	return result, nil
 }
 
 // laneTurnRow 는 이 세션 차례가 된 줄 행의 번호다. 0 이면 차례가 아니다.
