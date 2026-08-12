@@ -20,6 +20,14 @@ const (
 	EnvProjectDir = "CLAUDE_PROJECT_DIR"
 )
 
+// 환경 축이 **아닌** 결손 축의 이름. 위 둘과 달리 환경변수에서 오지 않고 판정에서 나온다.
+//
+// ★ 이름을 상수로 뽑는 이유는 소비자가 셋으로 늘어서다 — 결손 목록에 넣는 자리(ResolveIdentity),
+// 주입 뒤 다시 판정하는 자리(mcpsrv.go), 그리고 그 축이 무엇을 막는지 배너가 갈래를 트는 자리
+// (Banner). 문자열을 세 곳에 박으면 한 곳만 고칠 때 조용히 어긋나고, 어긋난 쪽은 **배너가
+// 막힌 도구를 된다고 약속하는** 모양으로 드러난다 — 그것이 이 상수가 생긴 경위다.
+const axisProject = "project"
+
 // Identity 는 이 MCP 서버 프로세스가 자기가 누구인지 아는 전부다.
 //
 // Missing 이 **이름 목록**인 것이 핵심이다. "정체 불명"이라는 불리언 하나로 접으면
@@ -87,7 +95,7 @@ func ResolveIdentity(get func(string) (string, bool), cwd string, cwdErr error, 
 	}
 	id.ProjectID = ProjectIDFor(id.ProjectDir, id.Cwd)
 	if id.ProjectID == "" {
-		id.Missing = append(id.Missing, "project")
+		id.Missing = append(id.Missing, axisProject)
 	}
 
 	switch {
@@ -141,8 +149,25 @@ func (id Identity) Banner() string {
 		for _, m := range id.Missing {
 			fmt.Fprintf(&b, "   · %s: %s\n", m, axisWhy(m))
 		}
-		b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
-		b.WriteString("   안 되는 것: pick·note·add·finish·land — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
+		// ★ **프로젝트 축은 다른 축들과 급이 다르다 — 되는 것이 하나도 없다.**
+		//
+		// GateTool 의 첫 갈래(`id.ProjectID == ""`)가 sessionBoundTools 검사보다 **앞**이라
+		// board·alloc 까지 함께 막는다. 그런데 이 배너는 결손이 무엇이든 "되는 것: 읽기
+		// (board)·발번(alloc)" 을 찍었다 — 그 경우에 **거짓말**이고, 사람은 화면이 된다고
+		// 한 도구를 부르고 거절당한다.
+		//
+		// 오래 안 드러난 이유는 이 자리가 **도달 불가**였기 때문이다: 프로젝트 좌표는 폴백
+		// (경로의 마지막 성분)이 늘 채워서 첫 갈래가 사실상 안 걸렸다. 그 폴백을 "호출자가
+		// 모른다고 답한 경우"에 안 깨우게 고치면서 이 길이 열렸고, 그래서 문구도 같이 참이
+		// 돼야 한다 — 없던 결함이 아니라 **잠자던 것에 이빨이 달린** 자리다.
+		if containsAxis(id.Missing, axisProject) {
+			b.WriteString("   되는 것: 없다 — 프로젝트 좌표가 없으면 board 도 못 낸다(어느 프로젝트의 보드인지 모른다).\n")
+			b.WriteString("   안 되는 것: 전부. 이 축은 다른 결손과 급이 달라 읽기(board)·발번(alloc)까지 막는다.\n")
+			b.WriteString("   고치는 법: git 저장소 안에서 부르거나, FD_PROJECT 로 프로젝트를 명시해라.\n")
+		} else {
+			b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
+			b.WriteString("   안 되는 것: pick·note·add·finish·land — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
+		}
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
 	}
 	for _, w := range id.Warnings {
@@ -159,7 +184,7 @@ func axisWhy(axis string) string {
 		return "프로젝트 루트다. cwd 로 대신하지만 그 둘이 다를 수 있다"
 	case "cwd":
 		return "워크트리 절대경로다. 없으면 경로 겹침 축이 통째로 죽는다"
-	case "project":
+	case axisProject:
 		return "프로젝트 좌표다. 없으면 큐도 보드도 어느 프로젝트인지 모른다"
 	default:
 		return "관측되지 않았다"
@@ -208,6 +233,30 @@ func GateTool(tool string, id Identity) (ok bool, reason string) {
 	}
 	return true, fmt.Sprintf("3중키가 전부 있다(machine=%s, worktree=%s, cc_session=%s)",
 		clip(id.MachineID, 40), clip(id.Worktree, 80), clip(id.CCSessionID, 40))
+}
+
+// containsAxis · withoutAxis 는 결손 목록을 다루는 두 조각이다. 순수 함수다.
+//
+// 목록이 **이름의 슬라이스**라 집합 연산이 필요한데, 그 자료형을 map 으로 바꾸지 않는 이유는
+// Missing 이 **순서 있는 관측 기록**이기 때문이다 — 배너가 그 순서로 찍고, 사람이 두 실행의
+// 배너를 눈으로 견준다. 축이 다섯을 안 넘으므로 선형 훑기의 값은 재는 대상이 아니다.
+func containsAxis(axes []string, want string) bool {
+	for _, a := range axes {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutAxis(axes []string, drop string) []string {
+	out := axes[:0:0] // 원본을 공유하지 않는다 — 호출부가 들고 있는 슬라이스를 덮어쓰면 안 된다
+	for _, a := range axes {
+		if a != drop {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // MissingAxes 는 정렬된 결손 축 이름이다. 로그에 싣는다(사람이 두 실행을 비교할 수 있게).

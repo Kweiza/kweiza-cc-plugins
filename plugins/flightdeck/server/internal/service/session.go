@@ -65,7 +65,20 @@ func JudgeOpenSession(in OpenSessionInput) SessionVerdict {
 	wt := judge.JudgePathCoordinate(in.Worktree)
 	switch {
 	case strings.TrimSpace(in.Project) == "":
-		return SessionVerdict{Reason: "project 가 비었다 — 어느 프로젝트의 세션인지 없이는 큐도 보드도 좌표가 없다"}
+		// ★ 문구가 **원인과 탈출구를 함께** 말한다. 앞선 판은 "어느 프로젝트의 세션인지 없이는
+		// 큐도 보드도 좌표가 없다" 로 끝났는데, 그것은 **결과의 서술**이지 고칠 거리가 아니다.
+		//
+		// 이 축이 비어 오는 경로는 하나로 좁혀져 있다: 클라이언트가 `git rev-parse` 로 주
+		// 저장소를 못 찾으면 프로젝트 id 를 **일부러 안 짓는다**(cmd/fd 의 resolveProject —
+		// 옛 동작은 디렉토리 이름을 지어냈고 그것이 원장에 유령 프로젝트를 남겼다).
+		// 서버는 클라이언트 머신의 cwd 를 볼 수 없으니 그 실패를 직접 관측할 수는 없지만,
+		// **어디를 봐야 하는지**는 말할 수 있다.
+		//
+		// 그리고 여기까지 왔다는 것은 OpenSession 의 3중키 되찾기도 빈손이었다는 뜻이다 —
+		// 그 사실을 적어야 사람이 "이미 열린 세션인데 왜"를 되묻지 않는다.
+		return SessionVerdict{Reason: "project 가 비었다 — 클라이언트가 프로젝트 좌표를 못 풀었다는 뜻이다" +
+			"(git 저장소가 아니거나 `git rev-parse` 가 실패했다). 이 3중키로 열린 세션도 없어 되찾을 과거가 없다. " +
+			"지어내지 않는다 — git 저장소 안에서 부르거나 FD_PROJECT 로 프로젝트를 명시해라"}
 	case strings.TrimSpace(in.MachineID) == "":
 		return SessionVerdict{Reason: "machine_id 가 비었다 — 세션 정체는 (machine, worktree, cc_session) 3중키다"}
 	case strings.TrimSpace(in.Worktree) == "":
@@ -119,6 +132,38 @@ func PickDefaultBranch(declared string, refs []model.RefState, headBranch string
 // 같은 3중키면 **같은 세션**이다. 그 판정은 store 가 하고 여기서는 흉내 내지 않는다.
 func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (SessionResult, error) {
 	var res SessionResult
+
+	// ★ 프로젝트 좌표가 **비어 오면 3중키로 되찾는다** — 판정보다 앞이다.
+	//
+	// 되찾기는 지어내기가 아니다. 세션 정체는 (machine, worktree, cc_session) 3중키이고
+	// **project 가 그 키에 안 들어가므로**, 서버는 프로젝트를 몰라도 이 세션이 누구인지 안다.
+	// 여기서 읽는 값은 **이 세션이 처음 열릴 때 스스로 등록한** 좌표다 — 클라이언트가 방금
+	// 못 푼 것을 원장이 대신 기억하고 있는 것뿐이다.
+	//
+	// ★ **없으면 이 갈래가 필요한 이유.** 클라이언트가 git 실패 시 id 를 안 짓게 되면서
+	// (cmd/fd 의 resolveProject) 그 빈 값이 여기 온다. 무조건 거절하면 git 이 **일시적으로**
+	// 안 읽히는 순간 — 워크트리가 막 만들어지는 중이거나 지워지는 중 — 에 훅이 물었을 때
+	// 살아 있는 세션의 신호가 조용히 사라진다. 옛 동작에서는 (엉뚱한 이름으로나마) 성공하던
+	// 쓰기라, 그것은 이 브랜치가 **새로 만드는 회귀**다. a168c20 이 정확히 같은 모양의 회귀를
+	// 한 번 만들었고 리뷰가 잡았다(고아를 막자 후속 note·add 가 FK 에서 죽었다).
+	//
+	// ★ **아래 자동 등록 앞의 3중키 조회(② 소절)와 형제이되 다른 축이다.** 그쪽은 "이름이
+	// **틀리게** 왔다"를 다루고 여기는 "이름이 **안** 왔다"를 다룬다. 그쪽은 세션 등록
+	// 트랜잭션 안에서 돌아야 하지만(자동 등록과 경합한다), 이쪽은 JudgeOpenSession 을 통과할
+	// 값을 만드는 일이라 판정보다 앞에 있어야 한다 — 그래서 자리가 갈린다.
+	//
+	// 못 찾으면 **아무 말 없이 빈 채로 둔다.** 거절 문구가 그 사실까지 말한다(JudgeOpenSession).
+	if strings.TrimSpace(in.Project) == "" {
+		if prior, err := s.st.FindSession(ctx, in.MachineID, in.Worktree, in.CCSessionID); err == nil &&
+			strings.TrimSpace(prior.Project) != "" {
+
+			s.log.InfoContext(ctx, "프로젝트 좌표가 안 와 3중키로 되찾았다",
+				"project", clip(prior.Project, 64), "session", clip(prior.ID, 64),
+				"worktree", clip(in.Worktree, 200))
+			in.Project = prior.Project
+		}
+	}
+
 	if v := JudgeOpenSession(in); !v.OK {
 		return res, &RefusedError{What: "session open", Reason: v.Reason}
 	}
