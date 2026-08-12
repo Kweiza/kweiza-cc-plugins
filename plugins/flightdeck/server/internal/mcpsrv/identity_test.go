@@ -176,6 +176,7 @@ func TestGateTool(t *testing.T) {
 		{"세션 없음 · add 거절", "add", noSession, false, EnvSessionID},
 		{"세션 없음 · finish 거절", "finish", noSession, false, EnvSessionID},
 		{"세션 없음 · land 거절", "land", noSession, false, EnvSessionID},
+		{"세션 없음 · label 거절", "label", noSession, false, EnvSessionID},
 		{"세션 없음 · board 는 통과", "board", noSession, true, "세션 귀속이 없어도"},
 		{"세션 없음 · alloc 은 통과", "alloc", noSession, true, "세션 귀속이 없어도"},
 		{"프로젝트 없음 · board 도 거절", "board", noProject, false, "프로젝트 좌표가 없다"},

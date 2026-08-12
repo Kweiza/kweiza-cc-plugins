@@ -166,7 +166,7 @@ func (id Identity) Banner() string {
 			b.WriteString("   고치는 법: git 저장소 안에서 부르거나, FD_PROJECT 로 프로젝트를 명시해라.\n")
 		} else {
 			b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
-			b.WriteString("   안 되는 것: pick·note·add·finish·land — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
+			b.WriteString("   안 되는 것: pick·note·add·finish·land·label — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
 		}
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
 	}
@@ -202,8 +202,15 @@ func axisWhy(axis string) string {
 //	land 는 resource_hold.session_id 와 landing_queue.session_id 로 원장에 행을 남기므로
 //	반드시 넣는다. 빼먹으면 세션 좌표 없이 레인을 잡고, 실패는 "정체가 없다"가 아니라
 //	FK/CHECK 위반으로 엉뚱하게 나온다 — 그리고 어떤 시험도 안 깨져서 조용하다.
+//
+//	label 도 같은 이유로 넣는다 — store.SetLabels 가 event 표에 item.label 행을
+//	session_id 와 함께 남긴다(store/item.go 의 LogEvent 호출). event.session_id 는
+//	FK/NOT NULL 이 없어 land 처럼 크래시로 드러나지는 않는다 — 세션 없이 불러도
+//	조용히 성공하고 귀속이 빈 원장 행이 그대로 쌓인다. 크래시가 없다는 것은 조용해도
+//	된다는 뜻이 아니다: 이 표의 기준은 "원장에 세션 id 로 행을 남기는가" 하나뿐이고
+//	label 은 그 기준을 그대로 만족한다.
 var sessionBoundTools = map[string]bool{
-	"pick": true, "note": true, "add": true, "finish": true, "land": true,
+	"pick": true, "note": true, "add": true, "finish": true, "land": true, "label": true,
 }
 
 // GateTool 은 이 정체로 그 도구를 부를 수 있는지 판정한다. 순수 함수다.
