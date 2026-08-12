@@ -83,12 +83,15 @@ DB 열기
   → api.Listen
       실패 → PortAdvice 를 찍고 return 1        ★ 원장을 안 건드린다
   → noteBuild(...)                              ★ 바인드 성공 뒤
+  → go ledgerJob.Run(ctx)
   → log.Info("기동", route: ln.Addr())          ★ :0 이면 실제 포트가 찍힌다
   → serveWithWatcher(ctx, ln, handler, log, watcher)
 ```
 
 조립을 `Listen` **앞**에 둔다. 리스너가 열린 순간부터 backlog 가 쌓이므로 준비가 끝난 뒤 여는
-것이 맞다. `noteBuild` 는 SQLite 쓰기 한 번이라 그 사이 대기는 무시할 수 있다.
+것이 맞다. `noteBuild` 는 재기동(같은 exe)이면 SELECT 뿐이라 쓰기가 아예 없고, 경합해도
+DSN 의 `busy_timeout(5000)`(`internal/store/backup.go:388` 근처)로 최악 5초 유계다 — 그 동안
+들어오는 연결은 거부되지 않고 커널 backlog 에 쌓여 대기한다.
 
 `serveWithWatcher` 는 `addr string` 대신 `ln net.Listener` 를 받는다(`serve.go:322`).
 드레인 악수(`drainServe()` → `<-served`)와 감시기 join(`<-watchDone`)은 그대로다 — 리스너를
@@ -126,8 +129,9 @@ DB 열기
 
 - `store/deploy.go:35-41` — ★ "아직 못 가르는 것: 뜨지 못한 기동" 절 전체. 고쳐졌으므로
   **남는 경계**(바인드에 성공한 임시 기동)로 다시 쓴다.
-- `store/deploy.go:71-74` — `LastDeployAt` 독스트링. 지금 임시로 붙은 "처음 관측된 시각"
-  단서가 필요 없어진다. "지금 도는 실행 파일이 자리 잡은 시각"이 이제 참이다.
+- `store/deploy.go:71-74` — `LastDeployAt` 독스트링. "지금 도는 실행 파일이 자리 잡은
+  시각"이라는 문장 자체는 이제 참이 되므로 그대로 두고, 그 근거가 순서에 있다는 ★ 를
+  한 줄 더한다.
 - `serve.go:136-146` — `noteBuild` 주석에 **왜 바인드 뒤인지**를 넣는다. 순서가 이 함수의
   계약이 되었으므로 그것을 아는 자리가 있어야 한다.
 
