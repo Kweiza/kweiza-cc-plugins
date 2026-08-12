@@ -424,7 +424,18 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 			clip(string(res.Body), 300))
 		return 1
 	}
-	fmt.Fprintf(out, "항목 %s 등록 — %s (선행 %d · 경로 %d)\n", it.ID, it.Title, len(it.After), len(it.Paths))
+	// ★ mcpsrv.RenderAdd 로 낸다 — MCP 도구 뒤에 있는 CLI 명령은 **같은 렌더러**를 쓴다.
+	//
+	// 앞선 판은 여기서 한 줄("항목 X 등록 — 제목 (선행 N · 경로 M)")을 손으로 짰고,
+	// 그래서 `fd add` 를 친 사람은 RenderAdd 가 내는 것을 **하나도 못 봤다**:
+	// 어느 프로젝트에 들어갔는지 · 되돌리는 명령(`fd move`) · **본문은 나중에 못 고친다**.
+	// 그 셋은 RenderAdd 의 주석이 실측 사고로 적어 둔 것이다 — 항목 10건이 남의
+	// 프로젝트에 등록됐고 그중 하나는 id 가 전역 유일이라 이름이 영구히 죽었다.
+	// MCP 세션은 그 경고를 받고 사람은 못 받는 비대칭이 정확히 그 사고의 조건이다.
+	//
+	// 같은 결함이 label 에도 있었다(2026-08-12 최종 전수 리뷰가 잡았다). 이 갈림을
+	// 기계로 막는 것이 cmd/fd/renderer_pairing_test.go 다.
+	fmt.Fprint(out, mcpsrv.RenderAdd(it))
 	return 0
 }
 
