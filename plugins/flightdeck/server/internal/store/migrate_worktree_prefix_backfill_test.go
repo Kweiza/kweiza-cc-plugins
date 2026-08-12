@@ -70,6 +70,17 @@ func TestMigration006DeletesWorktreePrefixedFootprints(t *testing.T) {
 	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
 	// 만들어 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
 	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	// 008 증분(landing_queue_resource)이 prev(5) 뒤에 온다 — 위의 첫 OpenWithLogger 가
+	// 이미 SchemaVersion 까지 올려 그 표를 물리적으로 만들어 뒀으므로, 안 걷으면 재열기가
+	// 008 을 다시 돌려다 "table already exists" 로 죽는다.
+	for _, q := range []string{
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("옛 DB 구성 실패(%s): %v", q, err)
+		}
+	}
 	if _, err := s.db.Exec(
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev)); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)

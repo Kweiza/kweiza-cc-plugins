@@ -79,7 +79,8 @@ func TestDeclaredTablesMatchDesign(t *testing.T) {
 		"judgment",
 		"judgment_fts", // CREATE VIRTUAL TABLE
 		"judgment_link",
-		"landing_queue", // 증분 003 — 랜딩 순서 큐
+		"landing_queue",          // 증분 003 — 랜딩 순서 큐
+		"landing_queue_resource", // 증분 008 — 줄 행이 자원 집합을 갖는다
 		"machine",
 		"pick_eval",
 		"project",

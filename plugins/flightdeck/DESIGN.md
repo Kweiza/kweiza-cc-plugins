@@ -205,7 +205,7 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 ---
 
-## 3. 데이터 모델 — SQLite 파일 하나, 테이블 24개, 계층 셋
+## 3. 데이터 모델 — SQLite 파일 하나, 테이블 25개, 계층 셋
 
 계층이 곧 쓰기 권한이다.
 
@@ -217,14 +217,14 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 정본은 `server/internal/store/schema.sql`. 아래는 그 요지와 **각 제약이 막는 사고**다.
 
-**★ 24 는 세는 축을 밝혀 둔다 — 안 밝히면 다음 사람이 다른 축을 세고 어긋났다고 판단한다.**
+**★ 25 는 세는 축을 밝혀 둔다 — 안 밝히면 다음 사람이 다른 축을 세고 어긋났다고 판단한다.**
 사람이 선언한 것 = `schema.sql` 의 `CREATE TABLE` 21 + `CREATE VIRTUAL TABLE` 1(`judgment_fts`) +
-증분 `002_idempotency` 의 `idempotency` 1 + 증분 `003_landing_queue` 의 `landing_queue` 1 = **24**.
-반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **29** 가 나온다 — FTS5 가 `judgment_fts`
+증분 3(`idempotency` · `landing_queue` · `landing_queue_resource`) = 25
+반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **30** 이 나온다 — FTS5 가 `judgment_fts`
 하나마다 그림자 표 넷(`judgment_fts_config`·`_data`·`_docsize`·`_idx`)을 만들고, 거기에
-`AUTOINCREMENT` 가 있는 표마다 공유하는 `sqlite_sequence` 하나가 더해진다(24 + 4 + 1 = 29).
+`AUTOINCREMENT` 가 있는 표마다 공유하는 `sqlite_sequence` 하나가 더해진다(25 + 4 + 1 = 30).
 다섯 다 SQLite 엔진이 만드는 부산물이라 이 절이 말하는 데이터 모델이 아니다 — 그래서 이 절은
-24 를 쓴다. 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
+25 를 쓴다. 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
 관측해 넘겨 온 적이 있다(판단 `01KZ7DKQ3QHKH75X4XY0YDPFMC`) — 두 축을 같은 이름으로 부르면
 그 혼동이 반복된다.
 

@@ -151,6 +151,21 @@ var destructiveExempt = map[int]exemption{
 			"Beat 하나뿐이라 그것으로 0이 된다. 판올림 전 VACUUM INTO 백업이 자동으로 뜬다. " +
 			"근거 전문은 006 머리말에 있다.",
 	},
+	// 008 · landing_queue_resource 백필(INSERT … SELECT).
+	//
+	// ★ 005·006 의 사유(읽는 쪽이 이미 배제/오염된 행)를 복사하면 안 된다 — 이 이행은
+	// 지우는 쪽이 아니라 **새로 만든 표를 채우는 쪽**이라 축이 다르다.
+	8: {
+		ops: []op{opInsertSelect},
+		why: "이 INSERT…SELECT 는 기존 표(landing_queue)를 한 글자도 안 바꾼다 — 이 증분이 " +
+			"새로 만든 표 landing_queue_resource 에 파생 행을 채울 뿐이다. 채우는 값은 " +
+			"결정적이다: 이 증분 이전에는 자원이 'landing' 하나뿐이었으므로 " +
+			"`SELECT id, 'landing' FROM landing_queue` 는 원본이 그대로인 한 언제 다시 돌려도 " +
+			"같은 결과를 낸다 — 즉 이 백필은 **재현 가능**하다. 되돌리기도 간단하다: " +
+			"landing_queue_resource 를 참조하는 다른 표가 없으므로 DROP TABLE " +
+			"landing_queue_resource 한 줄로 이 증분 이전 상태와 동일해진다. 판올림 전 " +
+			"VACUUM INTO 백업도 자동으로 뜬다. 근거 전문은 008 머리말에 있다.",
+	},
 }
 
 // neverExempt 는 예외로도 못 여는 조작이다. 데이터가 아니라 **구조**가 사라지는 것들이다.

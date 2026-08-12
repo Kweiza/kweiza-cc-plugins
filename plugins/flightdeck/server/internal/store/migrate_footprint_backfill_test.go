@@ -61,6 +61,17 @@ func TestMigration005DeletesAbsoluteFootprints(t *testing.T) {
 	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
 	// 만들어 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
 	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	// 008 증분(landing_queue_resource)이 prev(4) 뒤에 온다 — 위의 첫 OpenWithLogger 가
+	// 이미 SchemaVersion 까지 올려 그 표를 물리적으로 만들어 뒀으므로, 안 걷으면 재열기가
+	// 008 을 다시 돌려다 "table already exists" 로 죽는다.
+	for _, q := range []string{
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("옛 DB 구성 실패(%s): %v", q, err)
+		}
+	}
 	if _, err := s.db.Exec(
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev)); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)
@@ -156,6 +167,16 @@ func TestMigration005IsIdempotent(t *testing.T) {
 	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
 	// 만들어 뒀으므로, 안 걷으면 아래의 재열기(1회차)가 007 을 다시 돌려다 죽는다.
 	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	// 008 증분(landing_queue_resource)도 4 뒤에 온다 — 안 걷으면 재열기(1회차)가
+	// 008 을 다시 돌려다 "table already exists" 로 죽는다.
+	for _, q := range []string{
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("옛 DB 구성 실패(%s): %v", q, err)
+		}
+	}
 	if _, err := s.db.Exec(`DELETE FROM schema_version WHERE version > 4`); err != nil {
 		t.Fatalf("옛 DB 구성 실패: %v", err)
 	}
@@ -189,11 +210,21 @@ func TestMigration005IsIdempotent(t *testing.T) {
 	// 놨다. 그 컬럼을 또 걷지 않으면 2회차 재열기도 같은 "duplicate column name" 으로
 	// 죽는다 — 이 시험이 재는 것은 005 의 멱등성이지 007 의 멱등성이 아니므로,
 	// dropNonIdempotentColumns 로 007 이 막 재적용될 수 있게 매 회차 앞에서 걷어 준다.
+	// 같은 이유로 008(landing_queue_resource)도 1회차 재열기가 되만든 표라 매 회차
+	// 앞에서 다시 걷는다.
 	raw, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		t.Fatalf("2회차 구성 실패(열기): %v", err)
 	}
 	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return raw.Exec(q) })
+	for _, q := range []string{
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("2회차 구성 실패(%s): %v", q, err)
+		}
+	}
 	if _, err := raw.Exec(`DELETE FROM schema_version WHERE version > 4`); err != nil {
 		t.Fatalf("2회차 구성 실패: %v", err)
 	}

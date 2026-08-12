@@ -109,6 +109,10 @@ func makeV1DB(t *testing.T, path string) {
 	for _, q := range []string{
 		`DROP INDEX IF EXISTS idempotency_by_at`,
 		`DROP TABLE IF EXISTS idempotency`,
+		// 008 증분이 만든 자원 표. landing_queue 를 참조하므로(FK) landing_queue 보다
+		// 먼저 걷는다 — 순서를 바꾸면 foreign_keys=1 아래서 DROP TABLE landing_queue 가 실패한다.
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
 		`DROP INDEX IF EXISTS landing_queue_waiting`,
 		`DROP INDEX IF EXISTS landing_queue_one_live_per_session`,
 		`DROP TABLE IF EXISTS landing_queue`,
@@ -234,6 +238,11 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 		`INSERT INTO pick_eval(project, session_id, at, picked, rejected)
 		   VALUES ('P','S1','2026-08-01T00:00:00.000000Z','old-lead','[]')`,
 		`ALTER TABLE pick_eval DROP COLUMN picked_with`,
+		// 008 증분(landing_queue_resource)이 prev(3) 뒤에 온다 — 위의 첫 Open 이 이미
+		// SchemaVersion 까지 올려 그 표를 물리적으로 만들어 뒀으므로, 안 걷으면 재열기가
+		// 008 을 다시 돌려다 "table already exists" 로 죽는다.
+		`DROP INDEX IF EXISTS landing_queue_resource_by_name`,
+		`DROP TABLE IF EXISTS landing_queue_resource`,
 		fmt.Sprintf(`DELETE FROM schema_version WHERE version > %d`, prev),
 	} {
 		if _, err := s.db.Exec(q); err != nil {
