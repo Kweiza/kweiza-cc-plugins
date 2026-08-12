@@ -1999,14 +1999,53 @@ func RenderLand(r service.LandResult, now time.Time) string {
 	var b strings.Builder
 	switch r.State {
 	case "turn":
-		fmt.Fprintf(&b, "land · 네 차례다 — 레인을 쥐었다 (줄 행 %d)\n", r.RowID)
+		// ★ Resources 가 있으면 그것을 낸다(Task 3 의 all-or-nothing 취득 — 이 land 가 실제로
+		// 쥔 자원 전부가 여기 있다). 비면 옛 문장으로 폴백한다 — **구서버 응답 호환**: 자원
+		// 개편 이전 REST 서버가 낸 JSON 에는 "resources" 필드 자체가 없어(cmd/fd/mcpbackend.go
+		// 의 json.Unmarshal 이 그대로 통과시킨다) 여기서 nil 슬라이스로 온다. 그때 자원 이름을
+		// 지어내지 않고 침묵하지도 않는 것이 이 갈래다.
+		if len(r.Resources) > 0 {
+			fmt.Fprintf(&b, "land · 네 차례다 — %s 를 쥐었다 (줄 행 %d)\n",
+				strings.Join(r.Resources, " "), r.RowID)
+		} else {
+			fmt.Fprintf(&b, "land · 네 차례다 — 레인을 쥐었다 (줄 행 %d)\n", r.RowID)
+		}
 		b.WriteString("다 쓰면 result 로 보고하고 반납해라. 줄 서 놓고 그만두려면 leave 를 써라.\n")
 
 	case "waiting":
-		fmt.Fprintf(&b, "land · 너는 %d번째다 (줄 행 %d)\n", r.Position, r.RowID)
-		if r.Holder == nil {
-			b.WriteString("지금 레인을 쥔 사람이 없다 — 앞사람이 아직 land 를 안 불렀다.\n")
-		} else {
+		fmt.Fprintf(&b, "land · 너는 %d번째다 (줄 행 %d · 자원 %s)\n",
+			r.Position, r.RowID, strings.Join(r.Resources, " "))
+		// ★ **Blockers 가 있으면 그것으로 자원별로 보인다.** service.Land 는 waiting 을 내는
+		// 유일한 경로이고, 대기로 남는 것 자체가 blockers 를 최소 하나 채운 뒤에만 일어난다
+		// (internal/service/landing.go:194 이하 — grantable=false 가 되는 자리마다 blockers
+		// append 가 함께 있다). 그래서 **실제 서비스 응답에는 이 갈래가 항상 온다.**
+		//
+		// ★ Blockers 가 비었는데 Holder 만 있는 갈래는 옛 한 줄 표시로 폴백한다 — 살아 있는
+		// 것은 둘이다: ① 자원 개편 이전 REST 응답(Blockers 필드 자체가 없던 시절의 JSON,
+		// turn 갈래와 같은 구서버 호환 사유), ② 이 파일의 옛 단위 시험들
+		// (TestRenderLandWaitingWithHolder 등)이 Holder 만 손으로 채워 재는 자리 — LandResult
+		// 주석의 "Holder 는 blockers[0] 과 같은 포인터"라는 불변식은 service.Land 가 실제로
+		// 채울 때만 성립하고 수기로 만든 값에는 안 미친다. Blockers 루프로만 바꾸면 그
+		// 시험들이 깨진다(실측: 처음 이 폴백 없이 구현해 돌렸더니 그 세 시험이 바로 빨강이
+		// 됐다) — 그래서 추가가 아니라 갈림이다.
+		switch {
+		case len(r.Blockers) > 0:
+			for _, bl := range r.Blockers {
+				switch {
+				case bl.Holder != nil:
+					fmt.Fprintf(&b, "%s: 점유 %s · 획득 %s 전", bl.Resource,
+						ShortID(bl.Holder.SessionID), FormatAge(now.Sub(bl.Holder.AcquiredAt)))
+					if bl.Holder.LastSignalAt != nil {
+						fmt.Fprintf(&b, " · 마지막 신호 %s 전\n", FormatAge(now.Sub(*bl.Holder.LastSignalAt)))
+					} else {
+						b.WriteString(" · 마지막 신호 없음\n")
+					}
+				default:
+					fmt.Fprintf(&b, "%s: %d번째 · 앞 줄 행 %d(%s)\n", bl.Resource, bl.Position,
+						bl.FrontRowID, ShortID(bl.FrontSessionID))
+				}
+			}
+		case r.Holder != nil:
 			fmt.Fprintf(&b, "지금 레인: %s · 획득 %s 전",
 				ShortID(r.Holder.SessionID), FormatAge(now.Sub(r.Holder.AcquiredAt)))
 			if r.Holder.LastSignalAt != nil {
@@ -2014,6 +2053,8 @@ func RenderLand(r service.LandResult, now time.Time) string {
 			} else {
 				b.WriteString(" · 마지막 신호 없음\n")
 			}
+		default:
+			b.WriteString("지금 레인을 쥔 사람이 없다 — 앞사람이 아직 land 를 안 불렀다.\n")
 		}
 		// ★ **교체다, 추가가 아니다.** 여기 있던 문장은 "차례는 서버가 밀어주지 않는다 —
 		// 다시 물으려면 land 를 다시 불러라." 였다. 통로가 서면서 그 첫 절이 거짓이 됐다.

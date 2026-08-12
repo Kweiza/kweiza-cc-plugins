@@ -945,6 +945,18 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 	result := strings.TrimSpace(a.Result)
 	leave := strings.TrimSpace(a.Leave)
 
+	// ★ resources 는 줄 서기(acquire)에만 성립한다 — 보고·이탈은 줄 행 전체(all-or-nothing 의
+	// 짝)에 걸리는 동작이라 자원 인자를 받을 자리가 없다. 조용히 버리면 세션은 "resources 로
+	// 준 자원만 반납/이탈했다"고 믿는데, 실제로는 행에 묶인 자원 집합 전부가 한 번에 움직인다
+	// (service.LandReport·LandLeave 가 행의 Resources 를 그대로 훑는다) — 그 믿음의 어긋남이
+	// 조용한 오반납이다. 그래서 다른 두 갈래(result·leave 동시 입력, release)와 같은 자리에서
+	// 거절한다.
+	if (result != "" || leave != "") && len(a.Resources) > 0 {
+		return textResult(s.withTail(ctx, RenderRefusal("land",
+			"resources 는 줄 서기(acquire)에만 성립한다 — 보고·이탈은 네 줄 행 전체에 걸린다",
+			"반납·이탈은 행의 자원 집합 전부가 한 번에 움직인다(all-or-nothing 의 짝)."), tailOpts{}), true)
+	}
+
 	var res service.LandResult
 	var err error
 	switch {
@@ -963,7 +975,9 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 			Project: s.id.ProjectID, SessionID: sessionID, Detail: leave,
 		})
 	default:
-		res, err = s.be.Land(ctx, service.LandInput{Project: s.id.ProjectID, SessionID: sessionID})
+		res, err = s.be.Land(ctx, service.LandInput{
+			Project: s.id.ProjectID, SessionID: sessionID, Resources: a.Resources,
+		})
 	}
 	if err != nil {
 		if r, ok := s.degradedResult(ctx, "land", err); ok {

@@ -2,11 +2,13 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
@@ -171,9 +173,70 @@ func TestRenderLandUnknownStateStaysLoud(t *testing.T) {
 	}
 }
 
+// TestRenderLandShowsPerResourceBlockers 는 waiting 이 옛 Holder 한 줄이 아니라
+// **자원마다** 무엇이 막는지를 낸다는 것이다(Task 3 의 LandResult.Blockers 소비).
+// 두 갈래를 함께 본다: 남이 쥔 자원(Holder)과, 점유는 없지만 내 앞에 줄 행이 있는 자원
+// (FrontRowID) — service.Land 의 blockers 채움 갈래 둘 그대로다.
+func TestRenderLandShowsPerResourceBlockers(t *testing.T) {
+	acquired := t0.Add(-5 * time.Minute)
+	signal := t0.Add(-1 * time.Minute)
+	got := RenderLand(service.LandResult{
+		State: "waiting", RowID: 9, Position: 2,
+		Resources: []string{"r1", "r2"},
+		Blockers: []service.LaneBlocker{
+			{Resource: "r1", Position: 2,
+				Holder: &service.LaneHolder{SessionID: "01ARZ3HOLDER", AcquiredAt: acquired, LastSignalAt: &signal}},
+			{Resource: "r2", Position: 3, FrontRowID: 4, FrontSessionID: "01ARZ3FRONT"},
+		},
+	}, t0)
+	for _, want := range []string{
+		"r1 r2", // 머리의 자원 집합
+		"r1: 점유 " + ShortID("01ARZ3HOLDER"), "5분", "1분",
+		"r2: 3번째 · 앞 줄 행 4(" + ShortID("01ARZ3FRONT") + ")",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("자원별 blocker 응답에 %q 가 없다:\n%s", want, got)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // land 도구 왕복 — 디스패치·게이트·거절
 // ─────────────────────────────────────────────────────────────────────────────
+
+// landSpyBackend 는 toolLand 가 만든 service.LandInput 을 캡처한다 — finishSpyBackend
+// (followups_arrival_wiring_test.go)와 같은 이유다: 도구 인자가 서비스 인자까지 실제로
+// 옮겨지는지는 배선 시험 하나가 없으면 필드 하나가 안 옮겨져도 전 패키지가 초록이다.
+type landSpyBackend struct {
+	Backend
+	got service.LandInput
+}
+
+func (b *landSpyBackend) Land(ctx context.Context, in service.LandInput) (service.LandResult, error) {
+	b.got = in
+	return service.LandResult{State: "turn", RowID: 1}, nil
+}
+
+func (b *landSpyBackend) RecentNotes(context.Context, string, int) ([]model.Judgment, error) {
+	return nil, nil
+}
+
+// TestToolLandForwardsResources 는 land(resources:["path:a.go"]) 가 서비스까지 그
+// 집합으로 도착한다는 것이다.
+func TestToolLandForwardsResources(t *testing.T) {
+	spy := &landSpyBackend{}
+	s := newSpyServer(spy)
+
+	raw := json.RawMessage(`{"resources":["path:a.go"]}`)
+	res := s.toolLand(context.Background(), "sess-1", raw)
+
+	if res.IsError {
+		t.Fatalf("land 가 실패했다:\n%s", resText(res))
+	}
+	if len(spy.got.Resources) != 1 || spy.got.Resources[0] != "path:a.go" {
+		t.Fatalf("서비스까지 자원 집합이 안 왔다: %+v", spy.got.Resources)
+	}
+}
 
 // TestLandNoArgsJoinsAndGetsTurn 은 빈 레인에 처음 서는 세션이 그 자리에서 차례를 받는다는
 // 것이다. 세션 귀속(ensureSession)이 land 호출 하나로 일어난다는 것도 함께 본다.
@@ -229,6 +292,47 @@ func TestLandResultAndLeaveTogetherIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(body, "다른 동작") {
 		t.Errorf("모호함을 설명하지 않는다:\n%s", body)
+	}
+}
+
+// TestLandReportWithResourcesIsRefused 는 result(보고)와 resources 를 함께 주면 조용히
+// 버리지 않고 거절한다는 것이다 — 보고·이탈은 줄 행 전체에 걸리는 all-or-nothing 동작이라
+// 자원 인자가 무의미하다. 조용히 버리면 세션이 "resources 로 준 자원만 반납했다"고 믿는데,
+// 실제 원장은 행에 묶인 자원 집합 전부를 반납한다(service.LandReport 참고).
+func TestLandReportWithResourcesIsRefused(t *testing.T) {
+	repo := newRepo(t)
+	svc, _ := newSvc(t)
+	srv := newServer(t, svc, repo, fullEnv(repo))
+
+	frames := serve(t, srv,
+		call("land", map[string]any{}),
+		call("land", map[string]any{"result": "ok", "resources": []string{"r1"}}),
+	)
+	body, isErr := toolText(t, frames[1])
+	if !isErr {
+		t.Fatalf("result 와 resources 동시 입력이 거절되지 않았다:\n%s", body)
+	}
+	for _, want := range []string{"resources 는 줄 서기(acquire)에만 성립한다", "all-or-nothing"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("거절 응답에 %q 가 없다:\n%s", want, body)
+		}
+	}
+}
+
+// TestLandLeaveWithResourcesIsRefused 는 leave 와 resources 조합에도 같은 거절이 있다는
+// 것이다 — 위 시험과 같은 판정, 다른 동작.
+func TestLandLeaveWithResourcesIsRefused(t *testing.T) {
+	repo := newRepo(t)
+	svc, _ := newSvc(t)
+	srv := newServer(t, svc, repo, fullEnv(repo))
+
+	frames := serve(t, srv, call("land", map[string]any{"leave": "그만둔다", "resources": []string{"r1"}}))
+	body, isErr := toolText(t, frames[0])
+	if !isErr {
+		t.Fatalf("leave 와 resources 동시 입력이 거절되지 않았다:\n%s", body)
+	}
+	if !strings.Contains(body, "resources 는 줄 서기(acquire)에만 성립한다") {
+		t.Errorf("거절 응답에 사유가 없다:\n%s", body)
 	}
 }
 

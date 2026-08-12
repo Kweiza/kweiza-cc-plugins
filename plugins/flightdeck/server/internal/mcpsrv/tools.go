@@ -146,6 +146,7 @@ var tools = []Tool{
 			"leave":  str("채우면 이 값을 사유로 줄에서 빠진다"),
 			"release": str("레인을 회수하는 사유. **이 서버는 회수하지 않는다** — " +
 				"주면 사유와 함께 거절한다"),
+			"resources": strArr("줄을 설 자원들. 비면 landing. 경로 자원은 path:<경로>"),
 		}),
 	},
 }
@@ -240,9 +241,16 @@ type allocArgs struct {
 // ★ 동작을 고르는 것은 도구 이름이 아니라 **채운 필드**다: 전부 비면 줄을 서거나 내 자리를
 // 다시 묻고, Result 를 채우면 보고+반납, Leave 를 채우면 이탈이다. Release 는 채워도 되는 동작이
 // 아니라 **거절 사유를 만드는 미끼**다 — pick 의 steal_reason 과 같은 자리(mcpsrv.go 참조).
+//
+// ★ Resources 는 **줄 서기에만** 성립한다(Task 3 의 all-or-nothing 자원 집합). 비면 서비스가
+// 기존 단일 레인("landing")으로 정규화한다(service.normalizeResources) — 자원 축을 아직 안
+// 보내는 옛 호출자와 이 개편 이전이 같은 동작을 그대로 받는다. Result·Leave 와 함께 오면
+// mcpsrv.go 의 toolLand 가 거절한다 — 보고·이탈은 줄 행 전체에 걸리는 동작이라 자원 인자가
+// 무의미하다(조용히 버리면 "r2 만 반납했다" 같은 거짓 믿음이 생긴다).
 type landArgs struct {
-	Result  string `json:"result"`
-	Detail  string `json:"detail"`
-	Leave   string `json:"leave"`
-	Release string `json:"release"`
+	Result    string   `json:"result"`
+	Detail    string   `json:"detail"`
+	Leave     string   `json:"leave"`
+	Release   string   `json:"release"`
+	Resources []string `json:"resources"`
 }
