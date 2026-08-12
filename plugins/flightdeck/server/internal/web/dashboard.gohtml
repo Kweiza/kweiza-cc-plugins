@@ -534,7 +534,11 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 <div class="note">
   <span class="k">[{{.Kind}}] {{.At}}{{if .Age}} ({{.Age}}){{end}}
     {{if .Session}}· 세션 <span class="mono">{{.Session}}</span>{{end}}
-    {{if .Links}}· {{join ", " .Links}}{{end}}</span>
+    {{if .Links}}· {{join ", " .Links}}{{end}}
+    {{/* 정정 축 — 옛 행 쪽 표식에는 역참조가 필요해 판단 검색(⑥)에서만 찬다.
+         "정정됨"만 적고 어디로 갈지를 안 주면 반쪽이라 대체한 id 를 같이 낸다. */}}
+    {{if .SupersededBy}}· <b>정정됨</b> → <span class="mono">{{.SupersededBy}}</span>{{end}}
+    {{if .Supersedes}}· <span class="mono">{{.Supersedes}}</span> 를 대체{{end}}</span>
   {{if .Title}}<div><b>{{.Title}}</b></div>{{end}}
   <div class="body">{{.Body}}</div>
 </div>

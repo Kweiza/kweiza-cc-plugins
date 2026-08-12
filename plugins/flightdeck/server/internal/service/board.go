@@ -355,7 +355,8 @@ func (s *Service) liveNotesOfKind(ctx context.Context, project string,
 	for _, sess := range live {
 		alive[sess.Session.ID] = true
 	}
-	superseded, err := s.st.SupersededJudgmentIDs(ctx, project)
+	// 값(무엇이 대체했나)은 화면(web ⑥)이 쓴다. 여기는 존재 검사만 한다.
+	superseded, err := s.st.SupersededBy(ctx, project)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +367,7 @@ func (s *Service) liveNotesOfKind(ctx context.Context, project string,
 	}
 	out := make([]model.Judgment, 0, limit)
 	for _, j := range js {
-		if !alive[j.SessionID] || superseded[j.ID] {
+		if _, corrected := superseded[j.ID]; !alive[j.SessionID] || corrected {
 			continue
 		}
 		if out = append(out, j); len(out) >= limit {

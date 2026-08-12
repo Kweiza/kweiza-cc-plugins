@@ -794,8 +794,25 @@ func queueItemAge(at time.Time, it model.Item) string {
 	age := at.Sub(it.CreatedAt)
 	// 티클러는 ★ 를 안 단다 — 대신 그 사실을 이름으로 낸다. 표식 없는 긴 나이가
 	// "잊힌 항목"으로 읽히면, 굶김 축에서 뺀 것이 침묵으로 바뀐다.
+	//
+	// ★ 그리고 **기한을 같이 낸다**(있으면). 나이만 있는 티클러는 뜻이 없다 — 언제
+	// 열리는지가 화면에 없으면 볼 때마다 원장을 다시 재게 된다. 2026-08-12 에 한 항목을
+	// 두고 세 시간 반에 네 세션이 같은 재측을 돌렸고, 앞 세션이 "아직 아니다"를 판단으로
+	// 남겼는데도 그랬다. 지난 기한은 그 사실까지 말한다 — 안 지난 것과 같아 보이면
+	// 기한이 와도 아무도 안 연다.
+	//
+	// 여기는 **표시뿐이다.** 기한이 지나도 승격시키지 않고 아무것도 안 막는다
+	// (judge.FiresOn 의 ★ 참조).
 	if judge.IsTickler(it.Labels) {
-		return FormatAge(age) + "·티클러"
+		out := FormatAge(age) + "·티클러"
+		if on, ok := judge.FiresOn(it.Labels); ok {
+			out += "(" + on.Format("01-02") + " 발화"
+			if !at.Before(on) {
+				out += "·지났다"
+			}
+			out += ")"
+		}
+		return out
 	}
 	if age >= judge.StarvationAge {
 		return "★" + FormatAge(age)
