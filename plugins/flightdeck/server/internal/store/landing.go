@@ -277,32 +277,6 @@ func (t *Tx) LastLandingRow(project, sessionID string) (model.LandingRow, error)
 	return lastLandingRow(t.ctx, t.tx, project, sessionID)
 }
 
-// frontLandingRow 는 줄의 맨 앞(살아 있는 행 중 가장 작은 id)을 읽는다. 없으면 ErrNotFound.
-func frontLandingRow(ctx context.Context, q dbtx, project string) (model.LandingRow, error) {
-	row := q.QueryRowContext(ctx, `
-		SELECT `+landingCols+` FROM landing_queue
-		WHERE project = ? AND left_at IS NULL
-		ORDER BY id LIMIT 1`, project)
-	r, err := scanLandingRow(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return r, notFoundNote(NFLiveLandingRow, fmt.Sprintf("프로젝트 %s 줄의 맨 앞에 해당하는", clip(project, 64)))
-	}
-	if err != nil {
-		return r, fmt.Errorf("랜딩 줄 맨 앞 조회 실패(project=%q): %w", clip(project, 64), err)
-	}
-	return r, nil
-}
-
-// FrontLandingRow 는 줄의 맨 앞을 낸다. 순서 집행(누가 다음 차례인가)이 걸리는 유일한 자리다.
-func (t *Tx) FrontLandingRow(project string) (model.LandingRow, error) {
-	return frontLandingRow(t.ctx, t.tx, project)
-}
-
-// FrontLandingRow 는 트랜잭션 밖에서 읽는다.
-func (s *Store) FrontLandingRow(ctx context.Context, project string) (model.LandingRow, error) {
-	return frontLandingRow(ctx, s.db, project)
-}
-
 // frontLandingRowFor 는 자원 하나의 줄 맨 앞이다. 순서 집행(land 의 all-or-nothing 판정과
 // 처방의 차례 판정)이 자원마다 이 함수를 본다. **Resources 를 안 채운다** — 쓰는 곳이
 // ID·SessionID 비교뿐이고, 채우면 자원 수만큼 질의가 는다.

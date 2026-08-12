@@ -549,6 +549,102 @@ func TestLaneTurnReturnsForANewQueueRow(t *testing.T) {
 	}
 }
 
+// TestLaneTurnIsJudgedPerResource — 자원 r2 줄의 맨 앞인 세션은, r1(landing) 레인을 남이
+// 쥐고 있어도 차례다.
+//
+// ★ 옛 `FrontLandingRow(project)`는 **프로젝트 전체** 줄에서 id 가 가장 작은 행 하나만
+// 봤다 — 그 행이 실제로 어느 자원으로 섰는지는 안 물었다. a 가 landing 으로 먼저 서서
+// 시험 끝까지 놓지 않으면, r2 만으로 선 세션은 자기 자원 줄에서 실제로 맨 앞이고 r2 가
+// 비어도 옛 정의 아래에서는 영영 a 의 행 앞에 가려 차례를 못 받는다(a 의 행 id 가 더
+// 작으므로). **이것이 이 시험이 옛 구현 아래에서 빨간 이유다 — 거짓 부정(차례인데 0)이다.**
+func TestLaneTurnIsJudgedPerResource(t *testing.T) {
+	svc, _ := newSvc(t)
+	a, b := twoSessions(t, svc)
+	dirC := tmpBase(t)
+	c := openSession(t, svc, "p", dirC, dirC, "cc-C", "트랙C").Session.ID
+
+	// a 는 landing(=r1) 레인을 쥔 채 시험 끝까지 놓지 않는다 — r1 은 계속 남의 것이다.
+	landOrFail(t, svc, a, "turn")
+
+	// r2 는 c 가 먼저 쥐고, b 는 그 뒤에 서서 기다린다.
+	if _, err := svc.Land(ctx(), LandInput{Project: "p", SessionID: c, Resources: []string{"r2"}}); err != nil {
+		t.Fatalf("c 의 land 실패: %v", err)
+	}
+	mine, err := svc.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r2"}})
+	if err != nil {
+		t.Fatalf("b 의 land 실패: %v", err)
+	}
+	if mine.State != "waiting" {
+		t.Fatalf("c 가 r2 를 쥔 채인데 b 가 바로 부여받았다(기대 waiting): %+v", mine)
+	}
+
+	// c 가 r2 를 정상 반납한다(land 경로 그대로 — 두 표가 어긋나지 않는다). 이제 b 가
+	// r2 줄의 맨 앞이고 r2 는 비었다. landing(r1)은 여전히 a 의 것이다.
+	releaseLaneOrFail(t, svc, c)
+
+	want := fmt.Sprintf("%s:%d", judge.PrescribeLaneTurn, mine.RowID)
+	got := laneTurnKeys(prescribeOrFail(t, svc, b))
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("r2 줄의 맨 앞이고 r2 가 빈 b 에게 차례 처방이 %v 다(기대 [%s])\n"+
+			"landing(r1)을 a 가 쥐고 있다는 사실은 b 의 r2 차례와 무관해야 한다 — "+
+			"판정은 자원마다 갈려야 한다", got, want)
+	}
+}
+
+// TestLaneTurnRequiresEveryResourceOfTheRow — {r1,r2} 로 선 세션은 r1 이 비어도 r2 를
+// 남이 쥐면 차례가 아니다(all-or-nothing 과 정합).
+//
+// ★ 이 시험은 위 시험의 **반대쪽** 결함을 잡는다(위는 거짓 부정, 이것은 거짓 긍정).
+// 옛 laneTurnRow 의 점유 판정은 `HeldBy(project, LaneResource)` — **"landing" 이라는
+// 문자열이 코드에 박혀 있었다.** 행의 실제 자원 집합이 무엇이든 그 이름 하나만 봤다.
+// c 가 r2 를 쥔 채로(점유는 두고) 자기 줄 행만 닫으면(TestLaneTurnFiresOnceWhenTheLaneBecomesMine
+// 의 국면 ②와 같은 수법 — store 를 직접 불러 두 표를 일부러 어긋낸다), 남은 살아 있는
+// 행은 프로젝트 전체에서 b 하나뿐이 된다. 그러면 옛 front 비교는 b 를 맨 앞으로 보고,
+// 옛 점유 판정은 "landing" 이 비어 있으니 통과시켜 **차례가 떴을 것이다** — 그 처방을
+// 믿고 land() 를 부른 b 는 r2 의 AcquireResource 가 반드시 실패하는 자리로 간다(r2 는
+// 여전히 c 가 쥐고 있다). 곱 정의는 이 거짓 긍정을 막는다: r1 은 비었어도 r2 하나가
+// 막히면 전체가 0 이다.
+func TestLaneTurnRequiresEveryResourceOfTheRow(t *testing.T) {
+	svc, st := newSvc(t)
+	_, b := twoSessions(t, svc)
+	dirC := tmpBase(t)
+	c := openSession(t, svc, "p", dirC, dirC, "cc-C", "트랙C").Session.ID
+
+	// c 가 r2 를 쥔다(다른 대기자가 없어 바로 부여받는다).
+	held, err := svc.Land(ctx(), LandInput{Project: "p", SessionID: c, Resources: []string{"r2"}})
+	if err != nil {
+		t.Fatalf("c 의 land 실패: %v", err)
+	}
+	if held.State != "turn" {
+		t.Fatalf("c 가 r2 를 못 쥐었다(기대 turn): %+v", held)
+	}
+
+	// b 는 {r1,r2} 로 선다. r1 은 b 혼자라 맨 앞이고 비어 있다 — r2 가 c 에게 쥐어져
+	// all-or-nothing 판정은 통째로 waiting 이다.
+	mine, err := svc.Land(ctx(), LandInput{Project: "p", SessionID: b, Resources: []string{"r1", "r2"}})
+	if err != nil {
+		t.Fatalf("b 의 land 실패: %v", err)
+	}
+	if mine.State != "waiting" {
+		t.Fatalf("r2 가 이미 c 에게 쥐어졌는데 b 가 부여받았다(기대 waiting): %+v", mine)
+	}
+
+	// 두 표를 일부러 어긋낸다 — 점유는 c 가 그대로 쥔 채 c 의 줄 행만 닫는다. 남는 살아
+	// 있는 행은 프로젝트 전체에서 b 하나뿐이 된다(옛 프로젝트 전체 front 비교가 b 를
+	// 맨 앞으로 잘못 보게 되는 조건을 만든다).
+	if err := st.CloseLandingRow(ctx(), "p", held.RowID, model.LandingLeftForce,
+		"두 표를 일부러 어긋낸다(점유는 두고 줄 행만 닫는다)"); err != nil {
+		t.Fatalf("어긋난 상태를 못 만들었다: %v", err)
+	}
+
+	if keys := laneTurnKeys(prescribeOrFail(t, svc, b)); len(keys) != 0 {
+		t.Fatalf("r1 이 비었는데(r2 는 여전히 c 에게 쥐어진 채) 차례 처방이 %v 다(기대 없음)\n"+
+			"차례의 정의는 자원 집합의 곱이다 — 하나라도 막히면 전체가 0이어야 land() 의 "+
+			"all-or-nothing 판정과 어긋나지 않는다. 이 처방을 믿었다면 b 는 r2 의 "+
+			"AcquireResource 가 반드시 실패하는 자리로 갔을 것이다", keys)
+	}
+}
+
 // TestLaneTurnIsClosedByLandAndUnrelatedJudgmentsLeaveItOpen — **확인은 처방이 지정한 행동을
 // 잰다.** 2026-08-09 개정으로 통로가 뚫렸고, 이 시험은 그 전에 여기 있던 시험을 뒤집은 것이다.
 //

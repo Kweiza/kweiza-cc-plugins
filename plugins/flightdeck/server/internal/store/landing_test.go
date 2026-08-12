@@ -302,8 +302,15 @@ func TestLandingLeftKindEnumIsEnforcedBySchema(t *testing.T) {
 	}
 }
 
-// TestFrontLandingRowIsTheSmallestLiveID — 순서 집행이 걸리는 유일한 자리.
-func TestFrontLandingRowIsTheSmallestLiveID(t *testing.T) {
+// TestFrontLandingRowForIsTheSmallestLiveIDOnThatResource — 순서 집행이 걸리는 유일한 자리다.
+//
+// ★ 옛 이름은 `TestFrontLandingRowIsTheSmallestLiveID` 였고 project 전체 맨 앞 하나를
+// 잰 `FrontLandingRow(project)`(구 frontLandingRow) 를 시험했다. 그 함수는 Task 5 가
+// 지웠다 — 자원마다 갈리는 순서 집행에서 project 전체 맨 앞은 애초에 틀린 질문이었다
+// (service.laneTurnRow 의 새 독스트링 참고). mustEnqueue 가 세 행 모두 자원 집합
+// `{"landing"}` 하나로 세우므로(그 헬퍼의 docstring), 여기서는 `FrontLandingRowFor(p,
+// "landing")` 로 옮겨도 이 시험이 잠그던 축(순서는 id 오름차순이다) 은 그대로 유지된다.
+func TestFrontLandingRowForIsTheSmallestLiveIDOnThatResource(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
 	ctx := context.Background()
@@ -315,7 +322,7 @@ func TestFrontLandingRowIsTheSmallestLiveID(t *testing.T) {
 	rb := mustEnqueue(t, s, "p", b.ID)
 	rc := mustEnqueue(t, s, "p", c.ID)
 
-	front, err := s.FrontLandingRow(ctx, "p")
+	front, err := s.FrontLandingRowFor(ctx, "p", "landing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +334,7 @@ func TestFrontLandingRowIsTheSmallestLiveID(t *testing.T) {
 	if err := s.CloseLandingRow(ctx, "p", ra.ID, model.LandingLeftOK, ""); err != nil {
 		t.Fatal(err)
 	}
-	front, err = s.FrontLandingRow(ctx, "p")
+	front, err = s.FrontLandingRowFor(ctx, "p", "landing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +349,7 @@ func TestFrontLandingRowIsTheSmallestLiveID(t *testing.T) {
 	if err := s.CloseLandingRow(ctx, "p", rc.ID, model.LandingLeftOK, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FrontLandingRow(ctx, "p"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.FrontLandingRowFor(ctx, "p", "landing"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("빈 큐의 맨 앞 조회가 ErrNotFound 가 아니다: %v", err)
 	}
 }

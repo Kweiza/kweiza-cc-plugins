@@ -352,53 +352,45 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	return PrescribeResult{Shown: shown, Folded: folded, All: all}, nil
 }
 
-// laneTurnRow 는 랜딩 줄에서 **지금 이 세션 차례가 된 줄 행**의 번호다. 0 이면 차례가 아니다.
+// laneTurnRow 는 이 세션 차례가 된 줄 행의 번호다. 0 이면 차례가 아니다.
 //
-// 차례의 정의는 곱이다: 줄 맨 앞이 이 세션이고 **그리고** 레인을 쥔 사람이 없다.
+// ★ **발화 0건은 기구 결함이 아니라 표본이다**(실측 2026-08-12, 항목
+// fd-lane-turn-machinery-is-dead-remove-it 의 판정 "안 지운다" — finish 세션 38건 중
+// 15건(39%)이 랜딩 줄에 안 섰고 done 196건에 landed_ref 0건. ρ=1.14% 가 실측 대기율
+// 1.06% 와 맞아, 대기 부재는 구조가 아니라 낮은 랜딩률의 결과다). 랜딩의 문(instructions·
+// pick 꼬리)과 라이프사이클 block 이 서면 이 축이 처음으로 표본을 갖는다.
+// wait 중인 세션에게는 이 처방이 안 뜬다(턴이 안 끝나 Stop 이 없다) — 이 축이 잡는 것은
+// wait 를 아직 안 부른(또는 타임아웃으로 나온) 세션의 턴 끝이고, block(stage=lane-wait)의
+// "줄에 서 있는데 안 쥠"보다 구체적인 신호("네 차례다")를 낸다.
 //
-// ★ **쥔 사람이 있으면 안 낸다 — 남이든 나든.** 남이 쥔 채 내가 맨 앞인 것은 두 표가
-// 어긋난 상태이고(Land 가 그 상태를 오류가 아니라 waiting 으로 인정한다. landing.go 의
-// "맨 앞인데 남이 쥐고 있다" 분기), 거기서 "네 차례다"를 내면 세션을 AcquireResource 가
-// 반드시 실패할 자리로 보낸다. 그 상태를 푸는 것은 사람의 회수다. 내가 쥐었으면 이미
-// land 응답이 turn 으로 답했으니 같은 말을 두 번 하는 것이다. 둘 다 0 이다.
-//
-// ★ **LandingLane 을 기각했다.** 새 SQL 을 안 만드는 것은 어느 쪽이든 같지만, LandingLane 은
-// 줄 전체(ListLandingQueue) + 점유 + (어긋나 보이면 줄 재조회) + **행마다 lastSignal 한 번씩**
-// 을 돈다(그 함수가 스스로 "줄 길이만큼 LastSignal 을 부른다"고 적어 뒀다). 처방은 모든
-// 세션의 모든 턴 종료에 도는데
-// 여기서 필요한 것은 맨 앞 하나와 점유 유무뿐이라 그 신호 나이들은 전부 버려질 값이다.
-// 그리고 LaneView.Entries[0] 으로 "맨 앞"을 다시 표현하면 순서 집행이 두 자리가 된다 —
-// FrontLandingRow 의 독스트링이 자기가 그 유일한 자리라고 선언한 것을 깨는 모양이다.
-// (앞사람의 신호 나이 같은 것을 처방 문구에 싣기로 하면 그때 갈아탈 자리다.)
-//
-// ★ **오류를 안 올린다.** ErrNotFound 둘은 정상 상태다 — 줄이 비었거나(줄에 한 번도 안 선
-// 세션이 다수다) 아무도 안 쥐었거나. 그 밖의 오류도 처방 전부를 죽일 이유가 아니다:
-// 여기서 return err 를 하면 레인 조회 하나가 unclaimed·outside·silent 까지 통째로 막는다.
-// 위 선점·반납 항목 조회와 같은 관용(WARN 을 남기고 계속)이고, 0 은 judge 쪽에서
-// "차례 아님"과 같은 값으로 접힌다(laneTurnPrescription 이 그 합침을 의도로 적어 뒀다).
+// 차례의 정의가 자원 집합의 곱으로 넓어졌다(2026-08-12): 내 살아 있는 줄 행이 있고,
+// 그 행의 **모든** 자원에서 (맨 앞이 그 행) 그리고 (레인이 비었다).
+// 남이든 나든 쥔 자원이 하나라도 있으면 0 이다 — 남이 쥔 것은 어긋남(사람의 회수가 푼다),
+// 내가 쥔 것은 land 가 이미 turn 으로 답한 것이라 같은 말을 두 번 하는 것이다.
+// (오류를 안 올리는 규율·LandingLane 기각 근거는 개편 전 주석 그대로다.)
 func (s *Service) laneTurnRow(ctx context.Context, project, sessionID string) int64 {
-	front, err := s.st.FrontLandingRow(ctx, project)
+	row, err := s.st.LiveLandingRow(ctx, project, sessionID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.log.WarnContext(ctx, "처방: 랜딩 줄 맨 앞을 못 읽었다",
+			s.log.WarnContext(ctx, "처방: 내 줄 행을 못 읽었다",
 				"session_id", sessionID, "project", project, "error", err.Error())
 		}
-		return 0 // 줄이 비었거나(정상) 못 읽었다
+		return 0 // 줄에 안 섰다(정상) 또는 못 읽었다
 	}
-	if front.SessionID != sessionID {
-		return 0 // 앞에 사람이 있다. 점유까지 물을 이유가 없다
-	}
-
-	// 맨 앞이 나다. 남은 질문은 레인이 비었나 하나뿐이다.
-	if _, herr := s.st.HeldBy(ctx, project, LaneResource); herr != nil {
-		if !errors.Is(herr, store.ErrNotFound) {
-			s.log.WarnContext(ctx, "처방: 랜딩 레인 점유를 못 읽었다",
+	for _, r := range row.Resources {
+		front, ferr := s.st.FrontLandingRowFor(ctx, project, r)
+		if ferr != nil || front.ID != row.ID {
+			return 0 // 그 자원 줄에 앞사람이 있거나 못 읽었다
+		}
+		if _, herr := s.st.HeldBy(ctx, project, r); herr == nil {
+			return 0 // 누가 쥐고 있다(나든 남이든)
+		} else if !errors.Is(herr, store.ErrNotFound) {
+			s.log.WarnContext(ctx, "처방: 레인 점유를 못 읽었다",
 				"session_id", sessionID, "project", project, "error", herr.Error())
 			return 0
 		}
-		return front.ID // 아무도 안 쥐었고 맨 앞이 나다 = 차례다
 	}
-	return 0
+	return row.ID
 }
 
 // emittedKeys 는 이미 낸 키와 그 시각, 그리고 마지막 발화 시각을 낸다.
