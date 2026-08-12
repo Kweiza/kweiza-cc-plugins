@@ -185,6 +185,33 @@ func TestRenderFinishTrendFlipsAtOne(t *testing.T) {
 	}
 }
 
+// R≥1 을 발화 조건으로 삼는 행동 요구가 없다는 판정(render.go:1678-1694 — 전 관측창에서
+// 상시 참이라 판별력 0 · 도입 당일 굿하트 실물 1건)을 시험으로 잠근다.
+// 지금까지 이 판정의 방벽은 주석 한 줄뿐이었다 — 주석은 다음 개정에서 지워져도 관문이 안 운다.
+func TestRateAboveOneAddsNoActionDemand(t *testing.T) {
+	for _, c := range []struct {
+		rate  float64
+		repro store.Reproduction
+	}{
+		{1.30, store.Reproduction{Finishes: 10, Followups: 8, Adds: 5}},
+		{2.00, store.Reproduction{Finishes: 10, Followups: 12, Adds: 8}},
+	} {
+		r := c.repro
+		got := RenderFinish(finishWithBalance(&service.QueueBalance{
+			Closed: 1, Added: 1, Open: 3, Repro: &r, ReproWindow: 20,
+		}))
+		for _, banned := range []string{"줄여라", "만들지 마라", "등록하지 마라", "경고", "⚠"} {
+			if strings.Contains(got, banned) {
+				t.Fatalf("R=%.2f 렌더에 행동 요구 %q 가 붙었다 — R≥1 조건은 기각된 판정이다(render.go 참조)",
+					c.rate, banned)
+			}
+		}
+		if !strings.Contains(got, "큐가 준다면 R<1 이어야 한다") {
+			t.Fatalf("R=%.2f 에서 기준 서술이 사라졌다:\n%s", c.rate, got)
+		}
+	}
+}
+
 // 굶은 것이 0건이면 그 절을 안 낸다 — 상시 점등된 경고는 판별력이 0이 된다.
 func TestRenderFinishOmitsStarvedClauseWhenNone(t *testing.T) {
 	got := RenderFinish(finishWithBalance(&service.QueueBalance{

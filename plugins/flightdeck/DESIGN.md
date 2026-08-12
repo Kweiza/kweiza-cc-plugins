@@ -550,7 +550,7 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 | `add` | `id`, `title`, `body`, `paths?`, `after?` | 생성 확인 |
 | `finish` | `item_id`, `outcome`, `body`, `followups?[]` | **한 호출이 판단 저장 + 후속 등록(이미 있는 id 면 잇기) + 종료 + 워크스페이스 해제를 원자적으로**. 커밋 뒤의 보조 조회 실패(남은 선점·큐 수지·항목 되읽기)는 결과를 안 죽인다 — 각자 "못 읽었다"로 화면에 나온다(0 과 못 잼을 가른다) |
 | `alloc` | `counter_name` | 다음 정수 |
-| `land` | `result?`, `detail?`, `leave?`, `release?` | 인자 없으면 랜딩 레인 줄에 서거나(재진입 안전) 내 차례를 재확인 — `turn`\|`waiting`(앞사람·순번)\|`reclaimed`(회수 사유). `result` 로 다 쓰고 보고+반납(`ok`\|`fail`), `leave` 로 줄에서 이탈. `release` 는 **이 서버가 거절한다**(레인 회수는 사람만, §4) |
+| `land` | `result?`, `detail?`, `leave?`, `release?`, `resources?` | 인자 없으면 랜딩 레인 줄에 서거나(재진입 안전) 내 차례를 재확인 — `turn`\|`waiting`(앞사람·순번)\|`reclaimed`(회수 사유). `resources` 는 **줄 서기에만** 성립한다(비면 기존 단일 레인 `landing`, 경로 자원은 `path:<경로>`) — `result`·`leave` 와 같이 주면 거절한다(보고·이탈은 줄 행 전체에 걸리는 all-or-nothing 이라 자원 부분집합이 무의미하다). `result` 로 다 쓰고 보고+반납(`ok`\|`fail`), `leave` 로 줄에서 이탈. `release` 는 **이 서버가 거절한다**(레인 회수는 사람만, §4) |
 
 **도구 수를 예산 안에 묶는 이유는 컨텍스트다.** 세션 시작에는 도구 이름과 서버 instructions 만 실리고,
 스킬 목록은 컨텍스트의 1%·항목당 1,536자에서 절단되며 덜 쓰는 것부터 버려진다(**측정 전
@@ -681,7 +681,7 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 | `UserPromptSubmit` | — | `fd beat --kind prompt` (2초 타임아웃) + 미확인 알림 주입 |
 | `PostToolUse` | `Edit\|Write` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
 | `PreCompact` | — | `async` `fd note --draft` — 압축으로 판단이 날아가는 것만 막는다 |
-| `Stop` | — | `fd hook stop` → 처방(발화 5조건, 전이 1회) 주입. **fail-open, 3초** |
+| `Stop` | — | `fd hook stop` → 처방(발화 5조건, 전이 1회) 주입 + 라이프사이클 단계면 decision:block(대화 단위 판정 · 방벽은 stop_hook_active). **fail-open, 3초** |
 | `SessionEnd` | `clear` | `async` `fd hook session-end` → 떠나는 대화의 카드를 닫는다. **선점이 있으면 안 닫는다** |
 
 **`Stop` 의 "발화 5조건"은 `judge.Prescribe` 가 부르는 생성기 다섯이다** —
