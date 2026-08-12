@@ -47,7 +47,9 @@ type Panel struct {
 	// max-height, text-overflow 중 무엇이든 붙는 순간 이득 ①·② 가 살아나고 그때는 접어야 한다.
 	// 그날은 갈래 2(웹에 따로 쓴다)로 가지 마라 — 두 자리가 각자 판정하면 한쪽만 고쳐진 날
 	// 화면 둘이 갈라진다. foldTwinFailures 일가를 공용 자리로 올려 **함수를 공유**해라.
-	// 그때도 service.Derived 자체는 안 바꾼다 — 원장과 /metrics 는 축 둘을 그대로 봐야 한다.
+	// 그때도 service.Derived 자체는 안 바꾼다 — 다른 화면(MCP)이 축 둘을 그대로 봐야 한다.
+	// (원장과 /metrics 는 이 축을 애초에 안 본다 — 2026-08-12 실측. 남는 것은 서버 로그
+	// "보드 조회" 줄의 skipped 수뿐이다.)
 	Fail []service.DerivedFailure
 
 	Err string // 이 패널을 못 만든 사유. 비어 있지 않으면 내용은 반쪽이다

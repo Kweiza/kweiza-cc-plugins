@@ -87,8 +87,13 @@ const (
 	//     부류다(schema.sql 의 claim 주석).
 	//
 	// ★ 위 표는 **한 시점 관측이고 원장으로 회고가 안 된다.** 파생 실패를 적는 event.kind 가
-	// 없고 counter 표는 비어 있고, 워크트리 실재는 지금만 잴 수 있다(지운 시각이 어디에도
-	// 없다). 시계열이 필요하면 **먼저 원장에 적어야 한다.**
+	// 없고 counter 표는 발번용이며(스키마 주석), 워크트리 실재는 지금만 잴 수 있다(지운 시각이
+	// 어디에도 없다). 다만 **실패 축의 수는 서버 로그가 매 조회마다 나른다** — board.go 의
+	// "보드 조회" 줄이 skipped=N 으로 찍고, 보존은 도커 json-file(10MB×5)이 자른다. 시계열이
+	// 필요하면 그 로그를 긁어라(2026-08-12 실측: 09~13시 UTC 804 조회에서 0·2·4 를 오갔다).
+	// 원장에는 적지 않기로 판정했다(fd-ledger-records-nothing-about-derive-failures) —
+	// 빈도가 beat 급인 데다 event·counter 는 판단 백업의 FK 폐포 밖이라(ledger.Losses)
+	// 원장에 적어도 재해 복원을 넘는 이력은 안 생긴다.
 	DefaultLiveWindow = 2 * time.Hour
 
 	// AckWindow 는 처방 확인율의 **최근 벌**을 자르는 폭이다.
