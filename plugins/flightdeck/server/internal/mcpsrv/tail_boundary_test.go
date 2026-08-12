@@ -21,16 +21,20 @@ import (
 //
 // TestBodyAndTailCutAtTheRealBoundary 가 그 둘을 막는다.
 //
-// ★ **꼬리를 붙이는 경로가 셋이고 서로 다르다** — 이것이 이 좌표계의 핵심 사실이다.
-// internal/web 은 템플릿 하나가 여섯 절을 다 냈지만 여기는 그렇지 않다:
+// ★ **진입점은 넷이지만 조립은 한 자리다** — `render.go` 의 `joinTail`:
 //
 //	① Server.withTail        — add · note · finish · alloc · land · 거절 · 열화 · 오류
-//	② RenderBoard 의 opt.Tail — board (joinAll 이 "\n\n" 로 잇는다)
-//	③ toolPick 의 손수 연결   — pick ("…+\"\\n\\n\"+tail")
+//	② RenderBoard 의 opt.Tail — board (joinAll 이 부른다)
+//	③ toolPick 정상 갈래      — pick
+//	④ toolPick 미회계 갈래    — pick (회계 경고가 **본문의 끝**에 붙고 그다음이 꼬리다)
 //
-// 셋 중 하나만 재면 나머지 둘에서 경계가 깨져도 조용하다. 실제로 처음 변이는 ①에만
-// 닿았고, 그 상태에서 board·pick 시험 다섯이 "본문 없이 통과"로 **잘못 보였다** —
-// 본문이 비어서가 아니라 변이가 그 경로에 안 닿아서였다. 그래서 아래 시험은 셋을 다 지난다.
+// 원래는 셋이 조립을 각각 손으로 적었고, 그래서 **변이가 한 자리만 덮었다**: 처음 실측에서
+// withTail 에만 변이를 넣었더니 board·pick 시험 다섯이 "본문 없이 통과"로 **잘못 보였다** —
+// 본문이 비어서가 아니라 변이가 그 경로에 안 닿았을 뿐이었다. 하마터면 없는 결함 다섯을
+// 고치러 갔다. 지금은 `joinTail` 한 자리에 변이를 넣으면 넷이 다 빨개진다(실측).
+//
+// **그래도 아래 시험은 넷을 다 지난다.** 조립이 하나로 모였다는 사실 자체가 시험 대상이다 —
+// 누가 다시 한 갈래에서 손으로 이으면 여기서 잡아야 한다.
 //
 // ★ **어디에 안 쓰나.** 이 헬퍼는 도구 응답(toolText 를 지난 문자열)에만 쓴다.
 // RenderBoard·RenderPick 같은 순수 함수를 직접 부르는 시험은 꼬리가 **원리적으로 없다** —
@@ -93,6 +97,27 @@ func TestBodyAndTailCutAtTheRealBoundary(t *testing.T) {
 		t.Fatalf("응답이 %d개다", len(frames))
 	}
 
+	// ★ **네 번째 경로 — pick 의 미회계 갈래다.** `toolPick` 은 조립을 두 갈래에서
+	// 각각 손으로 적는데, 이 갈래는 회계 경고를 본문과 꼬리 **사이에** 끼운다.
+	// 백엔드가 item_ids 를 조용히 버리는 서버에서만 나오므로 픽스처를 따로 세운다.
+	repo2 := newRepo(t)
+	svc2, _ := newSvc(t)
+	srv2 := New(backendIgnoringItemIDs{svc2}, discard(),
+		WithEnv(env(fullEnv(repo2))), WithCwd(repo2, nil), WithHostname("testhost", nil))
+	frames2 := serve(t, srv2,
+		call("add", map[string]any{"id": "tb-a", "title": "제목", "body": "본문"}),
+		call("add", map[string]any{"id": "tb-b", "title": "제목", "body": "본문"}),
+		call("pick", map[string]any{"item_ids": []string{"tb-a", "tb-b"}}),
+	)
+	if len(frames2) != 3 {
+		t.Fatalf("미회계 픽스처의 응답이 %d개다", len(frames2))
+	}
+	// 이 갈래는 isError=true 로 나가는 것이 정상이다 — 그것을 재는 시험은 따로 있다.
+	unaccounted, isErr := toolText(t, frames2[2])
+	if !isErr {
+		t.Fatalf("미회계 갈래가 정상 응답으로 나왔다 — 픽스처가 그 갈래를 안 지났다:\n%s", unaccounted)
+	}
+
 	// ★ 꼬리 누수는 **고정 낱말로 재면 안 된다.** 처음 이 시험은 "알림"·"겹침"을 꼬리
 	// 전용 표지로 삼았는데 곧바로 빨개졌다 — add 본문이 "경로가 없으면 이 항목은 겹침
 	// 축에 안 잡힌다"를 낸다. 본문과 꼬리가 같은 낱말을 쓴다(internal/web 의 "디스크"가
@@ -100,18 +125,15 @@ func TestBodyAndTailCutAtTheRealBoundary(t *testing.T) {
 	// 줄이 본문에 있는지로 잰다. 문구가 바뀌어도 따라가고, 낱말 겹침에 안 속는다.
 	for _, c := range []struct {
 		name     string // 꼬리를 붙이는 경로의 이름
-		frame    int
+		resp     string
 		bodyMark string // 그 경로의 **본문**만 내는 표지
 	}{
-		{"withTail(add)", 0, "add · tb-1"},
-		{"RenderBoard 의 opt.Tail(board)", 1, "보드 ·"},
-		{"toolPick 의 손수 연결(pick)", 2, "pick · 선점했다"},
+		{"withTail(add)", okText(t, frames[0]), "add · tb-1"},
+		{"RenderBoard 의 opt.Tail(board)", okText(t, frames[1]), "보드 ·"},
+		{"toolPick 의 손수 연결(pick)", okText(t, frames[2]), "pick · 선점했다"},
+		{"toolPick 의 미회계 갈래(pick)", unaccounted, "브랜치: tb-a"},
 	} {
-		resp, isErr := toolText(t, frames[c.frame])
-		if isErr {
-			t.Fatalf("%s 응답이 오류다:\n%s", c.name, resp)
-		}
-
+		resp := c.resp
 		body := bodyOf(t, resp)
 		tail := tailOf(t, resp)
 
@@ -137,5 +159,32 @@ func TestBodyAndTailCutAtTheRealBoundary(t *testing.T) {
 		if !strings.HasSuffix(strings.TrimSpace(resp), strings.TrimSpace(tail)) {
 			t.Fatalf("%s 의 꼬리가 응답의 끝이 아니다 — 꼬리 뒤에 무언가 더 있다:\n%s", c.name, resp)
 		}
+		// ⑤ 본문과 꼬리 사이는 **정확히 빈 줄 하나**(개행 둘)다.
+		//
+		// ★ **이 단정은 오늘의 결함을 안 잡았다 — 미래 위험을 막는다.** 정직하게 적는다:
+		// 네 경로가 지금 다 개행 둘이다. 그런데 미회계 갈래의 코드는 `+"\n"+tail` 로
+		// **하나만 적는다** — 앞의 `RenderBundleUnaccounted` 가 개행으로 끝나서
+		// 결과적으로 둘이 될 뿐이다. **우연히 맞는다.**
+		//
+		// 실측(변이): 그 함수의 끝 개행을 지우자 이 갈래만 `개행이 1개다` 로 빨개졌다.
+		// 조립을 경로마다 손으로 적는 한, 한쪽의 무관해 보이는 문구 수정이 다른 쪽의
+		// 빈 줄을 지운다. 그것이 이 항목이 없애려는 구조다.
+		i := strings.Index(resp, tailMarker)
+		gap := len(resp[:i]) - len(strings.TrimRight(resp[:i], "\n"))
+		if gap != 2 {
+			t.Errorf("%s 에서 본문과 꼬리 사이 개행이 %d개다(2여야 한다) — 조립 규율이 경로마다 다르다",
+				c.name, gap)
+		}
 	}
+}
+
+// okText 는 성공이어야 하는 응답의 본문이다. 오류면 그 자리에서 멈춘다 —
+// 케이스 리터럴 안에서 isError 를 따로 받을 수 없어 이 껍질을 둔다.
+func okText(t *testing.T, f outFrame) string {
+	t.Helper()
+	s, isErr := toolText(t, f)
+	if isErr {
+		t.Fatalf("성공이어야 할 응답이 오류다:\n%s", s)
+	}
+	return s
 }

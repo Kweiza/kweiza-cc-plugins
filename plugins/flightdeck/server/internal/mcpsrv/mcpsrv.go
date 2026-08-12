@@ -787,10 +787,13 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 	// isError=true 로 낸다. 본문은 그대로 실어 보낸다 — 선두는 실제로 집혔을 수 있고
 	// 그 브랜치·워크트리 명령을 지우면 성공한 절반까지 함께 버리는 셈이 된다.
 	if missing := judge.UnaccountedIDs(a.ItemIDs, res.AccountedIDs()); len(missing) > 0 {
-		return textResult(notice+RenderPick(res, s.now())+"\n\n"+
-			RenderBundleUnaccounted(missing)+"\n"+tail, true)
+		// 회계 경고는 **본문의 끝**이다 — 꼬리가 아니다. 그래서 본문 쪽에 이어 붙인 뒤
+		// joinTail 에 넘긴다. 앞선 판은 여기서 꼬리를 손으로 이으면서 개행을 하나만
+		// 적었고, 그것이 맞았던 것은 RenderBundleUnaccounted 가 개행으로 끝났기 때문이다.
+		return textResult(joinTail(
+			notice+RenderPick(res, s.now())+"\n\n"+RenderBundleUnaccounted(missing), tail), true)
 	}
-	return textResult(notice+RenderPick(res, s.now())+"\n\n"+tail, false)
+	return textResult(joinTail(notice+RenderPick(res, s.now()), tail), false)
 }
 
 func (s *Server) toolNote(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
@@ -1041,8 +1044,10 @@ func (s *Server) degradedResult(ctx context.Context, tool string, err error) (to
 	return textResult(s.withTail(ctx, RenderDegraded(deg), tailOpts{}), isErr), true
 }
 
+// withTail 은 본문에 이 호출의 꼬리를 붙인다. 조립 자체는 joinTail 한 자리가 한다 —
+// 이 함수는 꼬리를 **만드는** 일(s.tail)과 붙이는 일을 잇기만 한다.
 func (s *Server) withTail(ctx context.Context, body string, o tailOpts) string {
-	return strings.TrimRight(body, "\n") + "\n\n" + s.tail(ctx, o)
+	return joinTail(body, s.tail(ctx, o))
 }
 
 // tail 은 모든 응답에 붙는 꼬리다 — 미확인 알림 · 겹침 · 정체 배너.
