@@ -120,7 +120,7 @@ func renderFailures(d service.Derived, limit int) []string {
 // 화면이 같은 말을 두 번 하고, dangling 워크트리가 이미 수십 개라 창 안에 여럿 들어오면
 // 그 값이 배로 든다. 그래서 화면에서만 접는다 — **다른 소비자(웹 패널·Derived 원본)는
 // 축을 그대로 받는다.** 원장과 `/metrics` 는 이 축을 애초에 안 본다(2026-08-12 실측 —
-// event.kind 10종에 파생 축이 없고 /metrics 는 runs·cards·seconds 뿐이다).
+// event.kind 전수(33종)에 파생 축이 없고 /metrics 는 runs·cards·seconds 뿐이다).
 //
 // ★ **접기 조건이 좁은 것이 이 함수의 요점이다.** 셋을 다 만족할 때만 접는다:
 // 같은 세션 · 같은 경로 · 둘 다 실패. 한쪽만 실패한 경우를 접으면 "규모만 죽었다"와
