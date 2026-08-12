@@ -589,6 +589,7 @@ POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropp
 POST   /items/{id}/move             (고칠 수 있는 축은 프로젝트 하나뿐 — 본문·제목은 못 바꾼다)
 POST   /landing                     (줄 서기·보고·이탈 셋이 한 표면 — 셋 다 자기 줄 행 하나를 다룬다)
 POST   /landing/rows/{id}/release   (물린 줄 행을 사람이 회수 — 남의 점유를 끊는 일이라 위와 갈랐다)
+GET    /landing/queue               (줄 전체의 읽기 전용 조회 — 취득 판정은 여전히 POST 하나다)
 POST   /judgments                   GET    /judgments?q=
 POST   /counters/{name}/next        GET|PUT /snapshots/{key}
 GET    /projects                    POST   /projects/{id}/remove  (잔해 지우기 — `--yes` 없이는 세기만 한다)

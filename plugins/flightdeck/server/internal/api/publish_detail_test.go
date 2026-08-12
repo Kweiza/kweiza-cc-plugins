@@ -634,3 +634,70 @@ func TestLaneReleaseEventCarriesRowHeldAndActor(t *testing.T) {
 	pairAxis(t, "held_release", ev1, ev2, true, false) // 점유 회수 / 대기 행 회수
 	pairAxis(t, "actor", ev1, ev2, "사람-가", "사람-나")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REST — 자원 축과 줄 읽기 전용 조회 (Task 7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestLandCarriesResources 는 POST /api/v1/landing(mode=acquire)에 실은 resources 가
+// 응답 resources 에 그대로 돌아오는지, 그리고 lane.acquire 발행의 resources 축(자원 수)이
+// 그 집합과 맞는지를 함께 못박는다 — Task 3 의 service.LandInput.Resources 를 REST 표면이
+// 그대로 전달하는가가 이 시험의 전부다.
+func TestLandCarriesResources(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-res")
+
+	sub := e.srv.hub.Subscribe(testProject)
+	defer e.srv.hub.Unsubscribe(sub)
+
+	got := e.okBody(t, e.write(http.MethodPost, "/api/v1/landing", map[string]any{
+		"project": testProject, "session_id": sess, "mode": LandModeAcquire,
+		"resources": []string{"docs-land", "staging"},
+	}), "랜딩(acquire, resources)")
+	ev := nextEvent(t, sub)
+
+	res, ok := got["resources"].([]any)
+	if !ok || len(res) != 2 {
+		t.Fatalf("응답 resources 가 자원 둘로 안 돌아왔다: %#v", got["resources"])
+	}
+	if res[0] != "docs-land" || res[1] != "staging" {
+		t.Fatalf("응답 resources 가 보낸 집합과 다르다(순서 포함): %#v", res)
+	}
+	if d := ev.Detail["resources"]; d != wire(2) {
+		t.Errorf("lane.acquire 의 resources 축이 %#v 다(기대 2) — 자원 수를 안 실었다", d)
+	}
+}
+
+// TestLandingQueueReadIsAPlainGet 는 GET /api/v1/landing/queue?project=… 가
+// service.LandingLane 의 LaneView(resources 배열)를 낸다는 것과, 그 GET 이 쓰기 전용
+// 멱등 미들웨어에 안 걸린다는 것을 함께 못박는다 — Idempotency-Key 헤더 없이도 200 이어야
+// fd lane wait 의 폴링(Task 9)이 매 호출마다 새 키를 만들 필요가 없다.
+func TestLandingQueueReadIsAPlainGet(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-queue")
+	e.okBody(t, e.write(http.MethodPost, "/api/v1/landing", map[string]any{
+		"project": testProject, "session_id": sess, "mode": LandModeAcquire,
+		"resources": []string{"docs-land"},
+	}), "랜딩(acquire)")
+
+	// ★ e.do 를 쓴다 — e.write 는 모든 요청에 Idempotency-Key 를 붙인다. 이 시험은
+	// **그 헤더가 없어도** 200 인지를 재는 시험이라 e.write 를 쓰면 아무것도 안 잰다.
+	w := e.do(http.MethodGet, "/api/v1/landing/queue?project="+testProject, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET 줄 조회가 %d 다(기대 200): %s", w.Code, w.Body.String())
+	}
+	body := decodeBody(e.t, w)
+
+	resources, ok := body["resources"].([]any)
+	if !ok || len(resources) != 1 {
+		t.Fatalf("LaneView.resources 가 자원 하나로 안 돌아왔다: %#v", body["resources"])
+	}
+	lane, ok := resources[0].(map[string]any)
+	if !ok || lane["resource"] != "docs-land" {
+		t.Fatalf("자원 이름이 docs-land 가 아니다: %#v", resources[0])
+	}
+	entries, ok := lane["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("docs-land 줄에 항목이 하나 있어야 한다: %#v", lane["entries"])
+	}
+}

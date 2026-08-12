@@ -331,6 +331,7 @@ func (s *server) routes() *http.ServeMux {
 	// 랜딩 레인 — 순서와 배타. 셋(서기·보고·이탈)이 한 라우트인 이유는 handlers_landing.go 에 있다.
 	mux.HandleFunc("POST /api/v1/landing", s.handleLand)
 	mux.HandleFunc("POST /api/v1/landing/rows/{id}/release", s.handleReleaseLaneRow)
+	mux.HandleFunc("GET /api/v1/landing/queue", s.handleLandingQueue)
 
 	// 판단 — J 계층. **추가 전용**이라 PUT·DELETE 가 없다.
 	mux.HandleFunc("POST /api/v1/judgments", s.handleAddJudgment)

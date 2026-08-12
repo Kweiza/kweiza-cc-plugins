@@ -11,20 +11,25 @@ import (
 
 // 랜딩 레인 표면 — 순서(landing_queue)와 배타(resource_hold).
 //
-// 표면이 **둘뿐이다.**
+// 표면이 **셋이다.**
 //
 //	POST /api/v1/landing                      줄 서기 · 보고+반납 · 이탈 (mode 가 고른다)
 //	POST /api/v1/landing/rows/{id}/release     사람의 회수
+//	GET  /api/v1/landing/queue?project=…       줄 전체의 읽기 전용 조회 (아래 ★ 좁힘)
 //
 // ★ 셋(서기·보고·이탈)을 한 라우트에 모은 이유: 셋은 같은 좌표(project, session)에 대한
 // **같은 줄 행의 전이**이고, 응답 타입도 하나(service.LandResult)다. 라우트를 셋으로 쪼개면
 // 멱등 표(JudgePersistIdempotency)·지표 라벨·클라이언트 열화 표가 전부 세 벌이 되는데,
 // 그 세 벌이 갈라졌을 때 어느 쪽이 참인지 말해 주는 자리가 없다.
 //
-// ★ **읽기(GET)가 없다.** "지금 내 차례인가"는 mode=acquire 가 답한다(재진입 안전이라
-// 다시 물어도 새 자리가 안 생긴다 — service.Land 의 계약). 그 질문에 GET 을 열면
-// 클라이언트가 그 응답을 캐시하고, 서버가 죽은 뒤 30분 전의 "네 차례다"가 그대로 나온다.
-// 배타가 깨지는 게 아니라 **우회된다**(cmd/fd 의 Client.Read 주석에 같은 판정이 있다).
+// ★ **"지금 내 차례인가"에는 여전히 GET 이 없다.** 그 질문은 mode=acquire 만 답한다
+// (재진입 안전이라 다시 물어도 새 자리가 안 생긴다 — service.Land 의 계약). 그 질문에
+// GET 을 열면 클라이언트가 그 응답을 캐시하고, 서버가 죽은 뒤 30분 전의 "네 차례다"가
+// 그대로 나온다. 배타가 깨지는 게 아니라 **우회된다**(cmd/fd 의 Client.Read 주석에 같은
+// 판정이 있다). 이 판정은 그대로다 — 아래 GET /landing/queue 가 여는 것은 **다른 질문**이다.
+//
+// ★ 이 문단은 2026-08-12 에 좁혀졌다(handleLandingQueue 주석 참조): **취득 판정**은 여전히
+// POST(mode=acquire) 하나뿐이고, 새로 연 GET 은 "차례로 보이는가"의 힌트일 뿐이다.
 
 // 랜딩 모드 — POST /api/v1/landing 의 `mode` 어휘다.
 //
@@ -54,6 +59,10 @@ type landRequest struct {
 	Mode      string `json:"mode"`
 	Kind      string `json:"kind"`   // mode=report 일 때 ok|fail
 	Detail    string `json:"detail"` // fail·leave 는 필수(store.ValidateLandingLeave 가 본다)
+	// Resources 는 mode=acquire 일 때만 쓴다 — 비면 service.LandInput 이 기존 단일
+	// 레인({service.LaneResource})으로 정규화한다(Task 3). report·leave 는 이미 선
+	// 자원 집합을 줄 행에서 읽으므로 이 필드를 안 본다.
+	Resources []string `json:"resources"`
 }
 
 // handleLand 는 줄 서기·보고·이탈 셋을 mode 로 가른다.
@@ -74,7 +83,7 @@ func (s *server) handleLand(w http.ResponseWriter, r *http.Request) {
 	switch mode {
 	case LandModeAcquire:
 		res, err = s.svc.Land(r.Context(), service.LandInput{
-			Project: req.Project, SessionID: req.SessionID,
+			Project: req.Project, SessionID: req.SessionID, Resources: req.Resources,
 		})
 	case LandModeReport:
 		res, err = s.svc.LandReport(r.Context(), service.LandReportInput{
@@ -102,8 +111,25 @@ func (s *server) handleLand(w http.ResponseWriter, r *http.Request) {
 	// 곧바로 쓸모 있는 사실이다 — 조용하면 그 사실을 폴링으로만 알 수 있다.
 	s.publish(r, "lane."+mode, req.Project, req.SessionID, map[string]any{
 		"row": res.RowID, "state": res.State, "count": res.Position,
+		"resources": len(res.Resources),
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
+}
+
+// handleLandingQueue 는 줄 전체의 읽기 전용 조회다 — fd lane wait 의 폴링이 이것을 친다.
+//
+// ★ 머리 주석의 "읽기(GET)가 없다"는 2026-08-12 에 좁혀졌다: **취득 판정**은 여전히
+// POST(mode=acquire)만 한다. 이 GET 은 "차례로 보이는가"의 힌트일 뿐이고, 클라이언트는
+// 캐시를 안 타는 직행(client.ReadFresh — Healthz 선례)으로만 읽는다. 캐시된 줄 상태로
+// 취득을 판정하면 배타가 우회된다는 원판정은 그대로다.
+func (s *server) handleLandingQueue(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	view, err := s.svc.LandingLane(r.Context(), project)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, view)
 }
 
 // laneReleaseRequest 는 POST /api/v1/landing/rows/{id}/release 의 본문이다.
