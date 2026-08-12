@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/kweiza/flightdeck/internal/judge"
 )
 
 // 인증 게이트 — 사용자 1명, 토큰 1개, 역할 없음(설계 §6).
@@ -208,36 +210,19 @@ func JudgePreSessionPath(path string) bool {
 // JudgeLoginAction 은 이 경로에서 뜬 폼의 action 이 가리켜야 할 **상대경로**다. 순수 함수다.
 //
 // ★ 절대경로(`/login`)로 두면 리버스 프록시의 경로 접두 뒤에서 브라우저가 원점의 /login 을
-// 찾아가고 프록시는 그 경로를 모른다 — 이 화면의 폼·SSE 가 전부 상대경로인 이유다
-// (web.go 의 defaultSSEPath 주석). 그런데 상대경로는 **문서 URL 의 깊이**에 붙으므로
+// 찾아가고 프록시는 그 경로를 모른다. 그런데 상대경로는 **문서 URL 의 깊이**에 붙으므로
 // 뿌리가 아닌 자리에서 뜬 폼은 /actions/login 같은 없는 곳으로 간다. 그 자리도 세션 이전
 // 경로가 아니라 다시 401 이 나고, 사람은 토큰을 정확히 쳐도 같은 폼을 무한히 다시 본다.
 // 401 폼은 POST /actions/* 에서도 뜨므로(JudgeLoginScreen 이 메서드를 안 본다) 이것은
 // 가설이 아니라 그 설계가 명시로 든 시나리오다.
 //
-// 그래서 깊이만큼 거슬러 올라간다. 프록시 접두 안전성은 그대로 유지된다.
-//
-// ★ 깊이는 **마지막 슬래시까지의 슬래시 수**로 센다. RFC 3986 의 상대 해석이 문서 URL 의
-// 마지막 마디를 버리고 남은 자리에 붙이기 때문이다(`/a/b` 의 기준은 `/a/`).
-// 빈 마디(`//`)도 한 마디로 센다 — 해석 알고리즘이 그것을 마디로 세므로, 정규화해서
-// 걷어내면 그만큼 덜 올라가 다시 없는 자리를 가리킨다.
-//
-// ★ 슬래시가 아예 없는 경로(빈 문자열 · OPTIONS 의 `*`)는 뿌리로 본다. 못 읽은 것을
-// 깊이 0 으로 접는 쪽이 안전하다 — 그 경우의 최악은 "이 이상한 자리에서만 폼이 안 통한다"
-// 이고, 반대로 과하게 올라가면 접두 **밖**으로 나가 프록시 배포 전체가 깨진다.
+// ★ **깊이 셈은 여기 없다.** judge.RelativeTo 한 벌이 그것을 진다 — 같은 셈이 폼 action 과
+// 리다이렉트 Location 양쪽에 필요한데, 두 벌이 되면 반드시 표류하고 그 표류의 증상이
+// 바로 위 문단의 무한 폼이다. 이 함수가 남아 있는 이유는 이름이 의도를 말하고
+// `"/login"` 이 한 자리에 있기 때문이다 — 없애면 그 리터럴이 호출자 둘로 흩어진다.
 func JudgeLoginAction(path string) string {
-	// 라우트 등록(api.go 의 "POST /login")의 마지막 마디다.
-	const name = "login"
-	slash := strings.LastIndex(path, "/")
-	if slash < 0 {
-		return name
-	}
-	// 문서 URL 의 디렉토리 부분. 뿌리(`/`)는 슬래시가 하나뿐이라 깊이가 0 이다.
-	depth := strings.Count(path[:slash+1], "/") - 1
-	if depth <= 0 {
-		return name
-	}
-	return strings.Repeat("../", depth) + name
+	// 라우트 등록(api.go 의 "POST /login")의 경로다.
+	return judge.RelativeTo(path, "/login")
 }
 
 // JudgeNextFrom 은 **401 을 맞은 요청 자체**를 로그인 뒤 돌아갈 자리로 쓸 수 있는지 본다.

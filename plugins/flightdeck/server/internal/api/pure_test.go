@@ -738,16 +738,16 @@ func TestJudgeNext(t *testing.T) {
 // url.ResolveReference). 브라우저가 하는 계산이 그것이다.
 func TestJudgeLoginAction(t *testing.T) {
 	cases := map[string]string{
-		"/":                     "login",
-		"/login":                "login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
-		"/events":               "login",
+		"/":                     "./login",
+		"/login":                "./login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
+		"/events":               "./login",
 		"/actions/reclaim":      "../login",
 		"/actions/lane-release": "../login",
 		"/actions/":             "../login", // 뒤 슬래시면 마디가 하나 더다
 		"/api/v1/items/next":    "../../../login",
 		"/a//b":                 "../../login", // 빈 마디도 해석이 한 마디로 센다
-		"":                      "login",       // 못 읽은 것은 뿌리로 접는다
-		"*":                     "login",       // OPTIONS * — 슬래시가 없다
+		"":                      "./login",     // 못 읽은 것은 뿌리로 접는다
+		"*":                     "./login",     // OPTIONS * — 슬래시가 없다
 	}
 	for path, want := range cases {
 		got := JudgeLoginAction(path)

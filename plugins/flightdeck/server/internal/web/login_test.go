@@ -10,7 +10,7 @@ import (
 func TestLoginScreenRendersForm(t *testing.T) {
 	rec := httptest.NewRecorder()
 	LoginScreen(rec, httptest.NewRequest("GET", "/", nil),
-		LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=kweiza", Action: "login"})
+		LoginView{Error: "토큰이 일치하지 않는다", Next: "/?project=kweiza", Action: "./login"})
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("상태가 %d 다 — 401 이어야 한다", rec.Code)
@@ -24,8 +24,8 @@ func TestLoginScreenRendersForm(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`method="post"`,
-		`action="login"`,  // 상대경로다 — 프록시 접두 뒤에서도 맞는 자리를 가리킨다
-		`type="password"`, // 어깨너머로 안 보인다
+		`action="./login"`, // 상대경로다 — 프록시 접두 뒤에서도 맞는 자리를 가리킨다
+		`type="password"`,  // 어깨너머로 안 보인다
 		`name="token"`,
 		`name="next"`,
 		"토큰이 일치하지 않는다",
@@ -69,7 +69,7 @@ func TestLoginScreenFirstVisitHasNoError(t *testing.T) {
 // 값을 만드는 자리는 api 의 JudgeLoginAction 이고, 그 값과 로그인 라우트를 잇는 왕복
 // 시험은 api/login_test.go 의 TestLoginFormActionReachesLoginRoute 다.
 func TestLoginScreenUsesGivenAction(t *testing.T) {
-	for _, action := range []string{"login", "../login", "../../../login"} {
+	for _, action := range []string{"./login", "../login", "../../../login"} {
 		rec := httptest.NewRecorder()
 		LoginScreen(rec, httptest.NewRequest("GET", "/", nil), LoginView{Next: "/", Action: action})
 		if want := `action="` + action + `"`; !strings.Contains(rec.Body.String(), want) {
