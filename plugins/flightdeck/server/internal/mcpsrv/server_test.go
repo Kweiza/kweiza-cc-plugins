@@ -625,11 +625,29 @@ func TestMissingSessionIDRefusesAndWritesNothing(t *testing.T) {
 		if !isErr {
 			t.Fatalf("%s 가 세션 없이 성공했다:\n%s", name, text)
 		}
-		if !strings.Contains(text, EnvSessionID) {
+		// ★ **본문으로 좁힌다 — 실측된 거짓 초록이다.** 아래 두 문자열은 거절 본문에도
+		// 있고 꼬리의 정체 배너에도 있다(identity.go 의 GateTool 사유와 Banner 가 각각
+		// 낸다). 응답 전체로 재면 배너가 둘 다 대신 만족시키므로, 거절 본문을 통째로
+		// 비우는 변이를 넣어도 이 시험은 **초록이었다** — 실측했다.
+		//
+		// 같은 시험이 아래에서 board 꼬리 배너에 대해 **같은 문자열을** 다시 단정한다.
+		// 좁히기 전에는 그 둘이 서로 구분되지 않았다: 여기 둘이 배너를 보고 있었다.
+		refusal := bodyOf(t, text)
+		if !strings.Contains(refusal, EnvSessionID) {
 			t.Fatalf("%s 거절 사유가 어느 축이 없는지 안 말한다:\n%s", name, text)
 		}
-		if !strings.Contains(text, "지어내지 않는다") {
-			t.Fatalf("%s 거절이 '지어내지 않는다'를 안 말한다:\n%s", name, text)
+		// ★ **좁히기만으로는 안 나았다 — 본문 안에 같은 문자열이 두 자리 있다.**
+		// 원래 단정은 "지어내지 않는다" 하나였는데, 그것을 내는 자리가 둘이다:
+		//   ① GateTool 의 **사유** — 세션 축이 없는 갈래 전용 문장(identity.go)
+		//   ② RenderRefusal 의 **안내** — 게이트 거절 전부에 붙는 공통 문장(mcpsrv.go)
+		// 본문으로 좁힌 뒤에도 ①을 통째로 지우는 변이가 **초록이었다** — ②가 대신
+		// 만족시켰다. 둘을 각각 못박아 서로를 대신하지 못하게 한다(실측: 각 변이가
+		// 아래 둘 중 하나씩만 때린다).
+		if !strings.Contains(refusal, "익명으로 진행하면") {
+			t.Fatalf("%s 거절 사유가 왜 안 되는지(익명 진행이 원장을 거짓으로 만든다)를 안 말한다:\n%s", name, text)
+		}
+		if !strings.Contains(refusal, "값을 지어내지 않는다") {
+			t.Fatalf("%s 거절 안내가 '값을 지어내지 않는다'를 안 말한다:\n%s", name, text)
 		}
 	}
 
@@ -649,10 +667,14 @@ func TestMissingSessionIDRefusesAndWritesNothing(t *testing.T) {
 	if isErr {
 		t.Fatalf("정체가 반쪽이라고 읽기까지 막혔다:\n%s", board)
 	}
-	if !strings.Contains(board, EnvSessionID) {
+	// ★ **꼬리로 좁힌다 — 이 단정이 말하는 자리가 꼬리다.** 응답 전체로 재면 반대
+	// 방향의 같은 병이 생긴다: 본문이 축 이름을 내면 배너가 통째로 빠져도 초록이다.
+	// 위의 거절 단정과 대칭을 이룬다 — 거절은 본문, 배너는 꼬리.
+	banner := tailOf(t, board)
+	if !strings.Contains(banner, EnvSessionID) {
 		t.Fatalf("board 꼬리 배너에 결손 축 이름이 없다:\n%s", board)
 	}
-	if !strings.Contains(board, "안 되는 것") {
+	if !strings.Contains(banner, "안 되는 것") {
 		t.Fatalf("무엇이 안 되는지가 배너에 없다:\n%s", board)
 	}
 }
