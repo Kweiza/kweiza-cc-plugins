@@ -123,9 +123,12 @@ func emitContext(out io.Writer, event, text string) {
 // 우연한 edge-triggering 이라 방벽이 못 되고, 여기서는 지속(매 프롬프트 한 번)이 목적이라
 // 애초에 억제가 반대 방향이다.
 //
-// ★ 이 계약(decision/reason 최상위 필드)은 2026-08-12 시점 Claude Code 공개 훅 문서
-// 기준이고, 이 저장소의 실물 실측(additionalContext 는 2026-08-04 에 실측됨)은 아직
-// 없다 — 랜딩 뒤 첫 배포에서 block 발화를 실물로 확인하고 이 문단을 실측 기록으로 바꿔라.
+// ★ 이 계약(decision/reason 최상위 필드)은 **2026-08-12 에 실물로 실측됐다** — 0.19.0
+// 배포 직후, 항목을 선점한 세션이 finish 없이 턴을 끝내자 라이프사이클 관문(stage=finish)의
+// block 이 발화했고, 하네스가 "Stop hook feedback:" 으로 reason 전문을 주입하며 **사람 개입
+// 없이 턴을 되살렸다**(항목 fd-decision-block-first-live-observation — 그 항목 자체가 실험
+// 장치였다). 되살아난 턴이 finish 로 정상 종료됐으므로 stop_hook_active 사슬 절단도 같은
+// 실측에 들어 있다. 원문("공개 문서 기준·실측 아직 없음")은 이 문단이 대체한다.
 func emitBlock(out io.Writer, reason string) {
 	buf, err := json.Marshal(struct {
 		Decision string `json:"decision"`
