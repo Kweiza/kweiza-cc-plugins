@@ -110,11 +110,18 @@ API 계층에서 남기려면 그 값을 응답에 실어 되돌려 받아야 �
 
 ### 거절
 
-| 조건 | 결과 |
-|---|---|
-| 없는 항목 | `notFound(NFItem, …)` |
-| 종료된 항목(`done`·`dropped`) | `ItemClosedError` |
-| `add`·`rm` 둘 다 빔 | 거절 — 조용한 무작업을 안 만든다 |
+| 조건 | 결과 | 어느 계층 |
+|---|---|---|
+| 없는 항목 | `notFound(NFItem, …)` | store (`affectedOne`) |
+| 종료된 항목(`done`·`dropped`) | `service.RefusedError` (Guidance 포함) | service |
+| `add`·`rm` 둘 다 빔 | 거절 — 조용한 무작업을 안 만든다 | service (쓰기 전) |
+
+**종료 거절에 `store.ItemClosedError` 를 안 쓴다.** 그 타입은 **상태 전이용**이라 `State`(지금)와
+`Want`(되돌리려던 것) 둘을 담고, `api/errors.go` 가 그것을 `"이미 %s 다 — %s 로 되돌릴 수 없다"` 로
+찍는다. 꼬리표 수정은 상태 전이가 아니라 `Want` 에 넣을 값이 없고, 현재 상태를 넣으면
+**"이미 done 다 — done 로 되돌릴 수 없다"** 라는 틀린 문장이 사용자에게 나간다.
+`RefusedError` 는 그 문제가 없는 데다 **`Guidance` 를 싣는다** — 이 저장소가 거절에 처방을 함께
+내는 자리다. 거절이 service 로 올라가므로 `store.SetLabels` 는 상태를 안 보고 쓰기만 한다.
 
 **종료된 항목을 거절하는 이유**: `labels` 의 유일한 판정 소비자는 굶김 축이고 그 축은
 열린 항목만 본다. 끝난 항목의 꼬리표를 바꾸는 것은 아무 데도 안 닿으면서 원장만 늘린다.

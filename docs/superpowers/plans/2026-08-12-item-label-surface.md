@@ -534,20 +534,18 @@ go test ./internal/store/ -run TestSetLabels
 //
 // labels 는 표시 전용이고 배제 판정에 안 쓴다(설계 §5). 유일한 예외가 tickler 이고
 // 그것도 배제가 아니라 굶김 축에서의 승격 부재다(judge/tickler.go).
+// ★ **종료 상태는 여기서 안 본다.** 그 가드는 service 에 있다(`service.SetLabels`).
+//
+// 처음 판은 여기서 `ItemClosedError` 로 거절하려 했는데, 그 타입은 **상태 전이용**이다 —
+// `State`(지금)와 `Want`(되돌리려던 것) 둘을 담고, api/errors.go 가 그것을
+// "이미 %s 다 — %s 로 되돌릴 수 없다"로 찍는다. 꼬리표 수정은 상태 전이가 아니라
+// `Want` 에 넣을 값이 없고, 현재 상태를 넣으면 **"이미 done 다 — done 로 되돌릴 수 없다"**
+// 라는 틀린 문장이 사용자에게 나간다. 그래서 그 거절은 `service.RefusedError`(What·Reason·
+// **Guidance**)로 service 에 두고, 이 함수는 쓰기만 한다.
 func (t *Tx) SetLabels(project, itemID string, labels []string, sessionID string) error {
 	before, err := t.GetItem(project, itemID)
 	if err != nil {
 		return err
-	}
-	// 종료된 항목은 안 고친다. tickler 의 유일한 판정 소비자는 굶김 축이고 그 축은
-	// 열린 항목만 본다 — 끝난 항목의 꼬리표를 바꾸는 것은 아무 데도 안 닿으면서
-	// 원장만 늘린다. SetItemState 가 종료를 안 되돌리는 규율과 같은 방향이다.
-	switch before.State {
-	case model.ItemDone, model.ItemDropped:
-		return &ItemClosedError{
-			Project: clip(project, 64), ItemID: clip(itemID, 200),
-			State: before.State, Want: before.State,
-		}
 	}
 
 	labelsJSON, err := marshalStrings(labels)
@@ -717,7 +715,40 @@ func TestSetLabelsRefusesEmptyItemID(t *testing.T) {
 		t.Fatal("항목 id 가 비었는데 통과했다")
 	}
 }
+
+// 끝난 항목의 꼬리표는 안 고친다 — 꼬리표가 뜻을 갖는 곳은 굶김 축 하나이고
+// 그 축은 열린 항목만 본다. 아무 데도 안 닿으면서 원장만 늘린다.
+//
+// ★ store 의 ItemClosedError 가 **아니어야 한다.** 그 타입은 상태 전이용이라
+// Want(되돌리려던 상태)를 담고, api/errors.go 가 그것을 "이미 %s 다 — %s 로
+// 되돌릴 수 없다"로 찍는다. 꼬리표 수정에는 Want 에 넣을 값이 없어서 현재 상태를
+// 넣으면 "이미 done 다 — done 로 되돌릴 수 없다"가 사용자에게 나간다.
+// RefusedError 여야 하고, 그래야 Guidance 를 실을 수 있다.
+func TestSetLabelsRefusesClosedItemWithGuidance(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustAddItem(t, s, model.Item{
+		Project: "p", ID: "closed", Title: "제목", Body: "본문",
+		State: model.ItemDone,
+	})
+
+	_, err := s.SetLabels(ctx, LabelInput{
+		Project: "p", SessionID: "sess", ItemID: "closed", Add: []string{"tickler"},
+	})
+	if err == nil {
+		t.Fatal("끝난 항목에 꼬리표를 달았는데 통과했다")
+	}
+	var refused *RefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("오류가 %T(%v) 다 — *RefusedError 여야 한다", err, err)
+	}
+	if refused.Guidance == "" {
+		t.Error("거절에 Guidance 가 없다 — 이 저장소의 거절은 처방을 함께 낸다")
+	}
+}
 ```
+
+**주의:** `mustAddItem` 이 `State` 를 그대로 넘기는지 확인해라. 종료 항목을 만드는 다른 방법(`AddItem` 뒤 `FinishItem`)이 이 패키지의 관례면 그쪽을 써라 — 중요한 것은 **`state` 가 `done` 인 항목에 `RefusedError` 가 나는 것**이지 그 항목을 만드는 방법이 아니다.
 
 **주의:** `newTestService` 와 `mustAddItem` 은 이 패키지의 기존 헬퍼 이름이어야 한다. 확인:
 
@@ -811,6 +842,24 @@ func (s *Service) SetLabels(ctx context.Context, in LabelInput) (LabelResult, er
 		cur, gerr := t.GetItem(in.Project, in.ItemID)
 		if gerr != nil {
 			return gerr
+		}
+		// ★ 종료된 항목은 안 고친다. tickler 의 유일한 판정 소비자는 굶김 축이고 그
+		// 축은 열린 항목만 본다 — 끝난 항목의 꼬리표를 바꾸는 것은 아무 데도 안
+		// 닿으면서 원장만 늘린다. SetItemState 가 종료를 안 되돌리는 규율과 같은 방향이다.
+		//
+		// store 의 ItemClosedError 를 안 쓰는 이유: 그 타입은 상태 전이용이라
+		// Want(되돌리려던 상태)를 담고, 꼬리표 수정에는 거기 넣을 값이 없다.
+		// 여기 RefusedError 는 **Guidance 를 실을 수 있다** — 이 저장소가 거절에
+		// 처방을 함께 내는 그 자리다.
+		if cur.State == model.ItemDone || cur.State == model.ItemDropped {
+			return &RefusedError{
+				What: "label",
+				Reason: fmt.Sprintf("항목 %s 는 이미 %s 다 — 끝난 항목의 꼬리표는 안 고친다",
+					clip(in.ItemID, 64), cur.State),
+				Guidance: "꼬리표가 뜻을 갖는 곳은 굶김 축 하나이고 그 축은 열린 항목만 본다. " +
+					"끝난 항목에 대해 남길 것이 있으면 note(item_id=…) 를 얹어라 — " +
+					"그쪽은 닫힌 항목에도 붙고 원장에 남는다.",
+			}
 		}
 		before = cur.Labels
 		after = judge.ApplyLabels(cur.Labels, in.Add, in.Rm)
