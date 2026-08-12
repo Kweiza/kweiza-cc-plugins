@@ -363,3 +363,62 @@ func TestLaneWaitTimeoutExitsOne(t *testing.T) {
 	}
 	mustContain(t, "타임아웃 stdout", out.String(), "다시 불러라")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 회귀락 — 대기 중 내 줄 행이 회수되면 "사라졌다"로 끝난다(리뷰 Important, 2026-08-12)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestLaneWaitDetectsRowReclaimedWhileWaiting 는 리뷰어가 실측 재현한 결함을 잠근다:
+// 대기 중 사람이 `fd lane release` 로 내 줄 행을 회수하면, 고치기 전에는 judgeLaneWait 가
+// myTurn=false 만 내고 그 사실("차례가 아니다"·정상 대기)과 "회수됐다"(내 자리 자체가
+// 없어졌다)를 구분하지 못했다 — stale 안전망도 우회된 채(그 자원을 아예 안 훑는다) 기본
+// --timeout(9분)을 다 채우고 사실과 다른 사유("아직 차례가 아니다")로 끝났다.
+// rowGone 을 두 번 연속 관측하면 "사라졌다"로 끝나야 한다.
+func TestLaneWaitDetectsRowReclaimedWhileWaiting(t *testing.T) {
+	h := newHarness(t)
+	if code, out := h.runAs("cc-lw-front-gone", "land"); code != 0 {
+		t.Fatalf("전제가 깨졌다 — 앞사람이 레인을 못 잡았다(%d):\n%s", code, out)
+	}
+	frontRow := laneLive(t, h)[0]
+
+	env := map[string]string{}
+	for k, v := range h.env {
+		env[k] = v
+	}
+	env["CLAUDE_CODE_SESSION_ID"] = "cc-lw-gone"
+	app := newApp(envOf(env), quietLogger(), h.home, strings.NewReader(""))
+
+	clock := time.Now().UTC()
+	released := false
+	deps := laneWaitDeps{
+		now: func() time.Time { return clock },
+		sleep: func(d time.Duration) {
+			clock = clock.Add(d)
+			if released {
+				return
+			}
+			// 내 줄 행(front 의 것이 아닌 살아 있는 행)을 사람이 강제 회수한다.
+			var mine int64
+			for _, r := range laneLive(t, h) {
+				if r.ID != frontRow.ID {
+					mine = r.ID
+				}
+			}
+			if mine == 0 {
+				return // 아직 초기 acquire 의 커밋이 안 보인다 — 다음 sleep 에서 다시 본다
+			}
+			if code, out := h.run("", "lane", "release", "--row", itoa(mine),
+				"--reason", "리뷰 회귀락 — 대기 중 강제 회수"); code != 0 {
+				t.Fatalf("회수가 %d 로 끝났다:\n%s", code, out)
+			}
+			released = true
+		},
+	}
+
+	var out bytes.Buffer
+	code := app.runLaneWaitWith(context.Background(), nil, &out, deps)
+	if code != 1 {
+		t.Fatalf("회수된 뒤인데 종료코드가 %d 다(기대 1):\n%s", code, out.String())
+	}
+	mustContain(t, "회수 감지 stdout", out.String(), "사라졌다")
+}

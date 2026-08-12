@@ -939,6 +939,7 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 	deadline := d.now().Add(*timeout)
 	wait := *interval
 	lastLine := ""
+	goneStreak := 0 // rowGone 을 연속으로 관측한 횟수 — 스냅숏 경합 배제(아래 ★)
 	for {
 		if d.now().After(deadline) {
 			fmt.Fprintf(out, "아직 차례가 아니다(%s 경과) — fd lane wait 를 다시 불러라.\n", timeout)
@@ -963,6 +964,26 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 		} else if wait = wait * 3 / 2; wait > 10*time.Second {
 			wait = 10 * time.Second
 		}
+
+		// ★ rowGone — 내 줄 행이 이 조회의 어느 자원에도 안 보인다(회수됐거나 남이 닫았다).
+		// acquire(POST)로 재확인하지 않는다: service.Land 는 살아 있는 행이 없으면
+		// **새 행을 맨 뒤에 INSERT** 한다(재진입이 아니라 재줄서기다 — Land 의 mine, err :=
+		// t.EnqueueLanding(...) 갈래). 회수는 사람이 "이 자리를 뺏는다"는 판단인데, 여기서
+		// 조용히 다시 서면 그 판단이 뒤집힌다 — 취득 통로가 안전망이 되는 것은 "아직 내
+		// 행인데 조회가 낡아 틀리게 보였다"뿐이지 "내 행이 아예 없어졌다"에는 안 미친다.
+		// 그래서 이 갈래는 POST 를 안 치고 그 자리에서 사람을 부른다. 두 번 연속 관측만
+		// 인정하는 이유는 조회와 회수가 아주 살짝 어긋난 순간(스냅숏 경합)에 멀쩡한 대기를
+		// 한 번의 흔들림으로 오판하지 않기 위해서다.
+		if st.rowGone {
+			goneStreak++
+			if goneStreak >= 2 {
+				fmt.Fprintf(out, "네 줄 행(행 %d)이 사라졌다 — 회수됐거나 남이 닫았다. 사유는 `fd land` 로 확인해라.\n", myRow)
+				return 1
+			}
+			continue
+		}
+		goneStreak = 0
+
 		if st.myTurn {
 			lr, ok := acquire() // 정본 판정 — 조회가 낡았으면 여기서 waiting 으로 돌아온다
 			if !ok {
@@ -984,7 +1005,12 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 
 // laneWaitState 는 조회 한 번의 판정이다. judgeLaneWait 는 순수 함수다 — 시험은 이것만 찌른다.
 type laneWaitState struct {
-	myTurn   bool          // 모든 내 자원에서 entries[0].RowID==myRow && holder==nil(또는 재진입)
+	myTurn  bool // 모든 내 자원에서 entries[0].RowID==myRow && holder==nil(또는 재진입)
+	rowGone bool // 내 줄 행이 이 조회의 어느 자원에도 안 보인다 — 회수됐거나 남이 닫았다.
+	// myTurn=false 인 것과는 다른 사고다: myTurn=false·rowGone=false 는 "아직 내 차례가
+	// 아니다"(정상 대기)이고, rowGone=true 는 "기다릴 내 자리 자체가 없다"다. 호출부가
+	// 이 둘을 못 가르면 회수당한 세션이 9분 내내 "아직 차례가 아니다"를 기다리다 그
+	// 사실과 다른 사유로 끝난다(리뷰 Important, 2026-08-12 — 실측 재현).
 	line     string        // 사람이 읽는 현황 한 줄(변화 감지용 — 같으면 안 낸다)
 	staleWho string        // 가장 오래 막는 상대(세션 짧은 id 와 자원)
 	staleFor time.Duration // 그 상대의 무신호 나이(신호가 없으면 대기 시작 나이)
@@ -1011,6 +1037,14 @@ type laneWaitState struct {
 // 접힌다 — POST 재판정이 안전망이라 취득 자체는 안 다치지만, 그 전에 사람이 읽는 줄이
 // "차례다"라고 먼저 말해 버린다. 그래서 haveMine 가드를 더한다(정정 각주 — 시험 표
 // TestLaneWaitTurnJudgement 의 "내 행이 어디에도 없다" 사례가 이 축을 잠근다).
+//
+// ★★ 정정 각주 2(리뷰 Important, 2026-08-12, 실측 재현) — myTurn=false 로 접는 것만으로는
+// 안 끝난다. 그 값 하나로는 호출부가 "아직 차례가 아니다"(정상 대기 — 계속 기다리면 된다)와
+// "내 자리 자체가 없어졌다"(회수됐다 — 아무리 기다려도 안 온다)를 못 가른다. 못 가르면
+// stale 안전망도 우회된다(그 자원을 아예 안 훑으므로 staleFor 가 0에 머문다) — 그러면
+// 회수당한 세션은 fd lane wait 의 기본 --timeout(9분) 을 그대로 다 채운 뒤 "아직 차례가
+// 아니다"라는, 사실과 다른 사유로 끝난다. 그래서 그 신호를 rowGone 으로 밖에 낸다
+// (haveMine 의 부정 — 새 계산이 아니라 이미 있던 값을 노출만 한 것이다).
 func judgeLaneWait(view service.LaneView, myRow int64, mySession string, now time.Time) laneWaitState {
 	var fragments []string
 	haveMine := false
@@ -1071,7 +1105,7 @@ func judgeLaneWait(view service.LaneView, myRow int64, mySession string, now tim
 		}
 	}
 
-	st := laneWaitState{myTurn: haveMine && allPass, line: strings.Join(fragments, " | ")}
+	st := laneWaitState{myTurn: haveMine && allPass, rowGone: !haveMine, line: strings.Join(fragments, " | ")}
 	if worstAge >= 0 {
 		st.staleFor, st.staleWho, st.staleRow = worstAge, worstWho, worstRow
 	}
