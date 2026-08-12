@@ -335,6 +335,43 @@ func TestLandReportHealsHoldWithoutRow(t *testing.T) {
 	}
 }
 
+// TestLandLeaveHealsHoldWithoutRow — 어긋남(점유는 있는데 줄 행이 없음)에서 leave 도
+// 자가치유한다. TestLandReportHealsHoldWithoutRow 의 LandLeave 짝이다.
+//
+// ★ 리뷰 회귀 락 — LandReport 를 자가치유로 고칠 때 LandLeave 의 ErrNotFound 갈래는
+// "행이 없으면 반납 루프가 그냥 안 돈다"로만 남겨 뒀다. 그러면 이 어긋난 상태에서
+// leave 가 점유를 안 놓은 채 거짓 "left" 를 반환한다(리뷰어가 실측 재현: AcquireResource
+// 만으로 어긋남을 만들고 LandLeave 를 부르면 state=left 인데 HeldBy 는 여전히 그
+// 세션이었다). Task 4 이전 코드는 행 존재와 무관하게 HeldBy 를 무조건 확인해 이
+// 경로에서도 반납이 됐으므로 이것은 회귀였다 — 이 시험이 그 재현을 그대로 잠근다.
+func TestLandLeaveHealsHoldWithoutRow(t *testing.T) {
+	s, st := newSvc(t)
+	a, _ := twoSessions(t, s)
+
+	// 줄 행 없이 점유만 만든다 — a 는 land 를 한 번도 안 불렀으므로 landing_queue 에
+	// 행이 없다.
+	if _, err := st.AcquireResource(ctx(), "p", "r1", store.Holder{SessionID: a}, time.Time{}); err != nil {
+		t.Fatalf("어긋난 점유 흉내가 실패했다: %v", err)
+	}
+
+	left, err := s.LandLeave(ctx(), LandLeaveInput{Project: "p", SessionID: a, Detail: "쥔 채 이탈"})
+	if err != nil {
+		t.Fatalf("어긋난 상태의 이탈이 오류가 됐다: %v", err)
+	}
+	// ★ 이 시험의 심장 — 행이 없어도 반납된다.
+	if left.State != "left" {
+		t.Fatalf("state 가 %q 다(기대 left) — 자가치유 갈래가 안 돌았다: %+v", left.State, left)
+	}
+	if _, err := st.HeldBy(ctx(), "p", "r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("r1 이 반납 안 됐다 — HeldBy 가 %v 다(기대 ErrNotFound) — 거짓 성공이다", err)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE project = 'p' AND session_id = ? `+
+			`AND kind = 'lane.divergent'`, a); n != 1 {
+		t.Errorf("lane.divergent 이벤트가 %d건이다(기대 1) — 어긋났던 사실이 원장에 남아야 한다", n)
+	}
+}
+
 // TestReleaseLaneRowTouchesOnlyTheRowsResources — ⑧ 자원 r2 만 걸린 줄 행을 회수해도
 // landing 점유는 안 건드린다.
 //

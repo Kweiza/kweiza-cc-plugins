@@ -414,6 +414,12 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 // 줄 행만 닫으면 "대응하는 줄 행이 없는 살아 있는 점유"가 남아 그 프로젝트의 랜딩이
 // 전원 정지한다(파일 위쪽의 불변식). 행이 아예 없으면(줄에 안 서 있다) 반납할 자원
 // 집합 자체가 없으니 아래 루프는 그냥 안 돈다 — 이탈은 그래도 멱등하게 성립한다.
+//
+// ★ **hold-without-row 자가치유도 여기 있다(★ 정정 2026-08-12, LandReport 와 같은 결함).**
+// 행이 없다고 반납 루프를 건너뛰기만 하면, 점유는 있는데 행이 없는 어긋난 상태에서
+// leave 가 거짓 "left" 를 반환하며 점유를 영영 안 놓는다 — LandReport 를 고칠 때 놓쳤던
+// 자리다(리뷰 실측 재현). `ListHeld` 로 걷어 반납하는 것은 아래 `ErrNotFound` 갈래에서
+// 한다.
 func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land leave", Reason: "프로젝트나 세션 좌표가 비었다"}
@@ -433,13 +439,36 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 			out.RowID, out.Resources = row.ID, row.Resources
 		case errors.Is(rerr, store.ErrNotFound):
 			// 줄에 안 서 있다. 오류로 올리지 않는다 — 이탈은 멱등해야 한다
-			// (item.go 의 ReleaseClaim 과 같은 규율). row.Resources 가 비어 있으니
-			// 아래 반납 루프는 그냥 안 돈다.
+			// (item.go 의 ReleaseClaim 과 같은 규율). **그래도 내가 쥔 자원이 있으면
+			// 반납한다** — 점유는 있는데 행이 없는 것은 두 표가 어긋난 상태이고
+			// (LandReport 의 같은 갈래 참고), 여기서 안 놓으면 그 자원의 프로그램적
+			// 탈출구가 leave 쪽에서도 사라진다.
+			held, herr := t.ListHeld(in.Project)
+			if herr != nil {
+				return herr
+			}
+			mineCount := 0
+			for _, h := range held {
+				if h.SessionID != in.SessionID {
+					continue
+				}
+				if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+					return err
+				}
+				mineCount++
+			}
+			if mineCount > 0 {
+				t.LogEvent("lane.divergent", in.Project, in.SessionID,
+					map[string]any{"mode": "leave", "state": "hold-without-row", "count": mineCount})
+			}
+			// mineCount==0 이면 행도 없고 쥔 것도 없다 — 기존 멱등 통과 그대로
+			// (row.Resources 가 비어 있으니 아래 루프는 range 가 그냥 안 돈다).
 		default:
 			return rerr
 		}
 
-		// 행의 자원 중 내가 쥔 것을 전부 반납한다(행이 없으면 range 가 안 돈다).
+		// 행의 자원 중 내가 쥔 것을 전부 반납한다(행이 없으면 range 가 안 돈다 —
+		// 위 ErrNotFound 갈래가 그 경우를 이미 처리했다).
 		for _, r := range row.Resources {
 			held, herr := t.HeldBy(in.Project, r)
 			switch {
