@@ -324,6 +324,15 @@ type NoteRow struct {
 	Body    string
 	Session string
 	Links   []string
+
+	// Supersedes 는 이 행이 **대체한** 판단이다. 행 자체가 들고 있는 값이라
+	// 어느 패널에서든 채워진다.
+	Supersedes string
+	// SupersededBy 는 이 행을 **대체한** 판단이다. 옛 행은 자기가 정정당했다는 것을
+	// 모르므로(supersedes 는 새 행이 건다) 역참조를 받은 자리에서만 찬다 —
+	// 지금은 판단 검색(⑥)뿐이다. 빈 값은 "정정 안 됐다"와 "역참조를 안 읽었다"를
+	// 구분하지 않는다: 이 축은 그 둘을 가를 필요가 없는 표시 전용이다.
+	SupersededBy string
 }
 
 // SearchPanel 은 섹션 ⑥ 이다.
@@ -1205,6 +1214,7 @@ func (h *handler) searchPanel(ctx context.Context, project, q, label string) Sea
 		for _, j := range all {
 			pan.Results = append(pan.Results, noteRow(now, j))
 		}
+		h.markSuperseded(ctx, project, pan.Results, &pan)
 		if len(pan.Results) == 0 && pan.Err == "" {
 			pan.Empty = "핸드오프·결정 판단이 아직 0건이다."
 		}
@@ -1222,16 +1232,45 @@ func (h *handler) searchPanel(ctx context.Context, project, q, label string) Sea
 	for _, j := range js {
 		pan.Results = append(pan.Results, noteRow(now, j))
 	}
+	h.markSuperseded(ctx, project, pan.Results, &pan)
 	if len(pan.Results) == 0 {
 		pan.Empty = "검색 결과 0건 — 질의는 정상으로 돌았고 맞는 판단이 없다."
 	}
 	return pan
 }
 
+// markSuperseded 는 각 행에 **무엇이 이 행을 대체했나**를 채운다.
+//
+// 옛 행은 자기가 정정당했다는 것을 모른다 — `supersedes` 는 새 행이 건다. 그래서
+// 역참조를 한 번 읽어 붙인다. **거르지 않는다**: 이 절(⑥)은 "무슨 일이 있었나"를
+// 답하는 이력 축이라 전수가 맞고, 철회됐다는 사실은 표식으로만 말한다. 거르는 축은
+// 알림(service.liveNotesOfKind)이고 그쪽은 이미 뺀다.
+//
+// 실패해도 결과를 안 버린다 — 표식 없는 목록이 목록 없는 것보다 낫다. 다만 침묵하지도
+// 않는다: 사유가 패널 오류로 나가야 "정정이 하나도 없다"와 "역참조를 못 읽었다"가
+// 화면에서 갈린다.
+func (h *handler) markSuperseded(ctx context.Context, project string, rows []NoteRow, pan *SearchPanel) {
+	if len(rows) == 0 {
+		return
+	}
+	by, err := h.svc.Store().SupersededBy(ctx, project)
+	if err != nil {
+		pan.Err = joinErr(pan.Err, "정정 여부를 못 읽었다: "+Clip(err.Error(), 200))
+		h.log.ErrorContext(ctx, "정정 역참조 조회 실패", "project", project, "error", err.Error())
+		return
+	}
+	for i := range rows {
+		if cur, ok := by[rows[i].ID]; ok {
+			rows[i].SupersededBy = short(cur)
+		}
+	}
+}
+
 func noteRow(now time.Time, j model.Judgment) NoteRow {
 	r := NoteRow{
 		ID: j.ID, Kind: string(j.Kind), Title: Clip(j.Title, 200),
 		Body: Clip(j.Body, 600), Session: short(j.SessionID),
+		Supersedes: short(j.Supersedes),
 	}
 	if !j.At.IsZero() {
 		r.At, r.Age = j.At.Format("01-02 15:04"), Age(now.Sub(j.At))

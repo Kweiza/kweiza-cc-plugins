@@ -198,29 +198,37 @@ func (s *Store) ListJudgmentsByKind(ctx context.Context, project string, kind mo
 	return s.fillLinks(ctx, out)
 }
 
-// SupersededJudgmentIDs 는 이 프로젝트에서 **정정당한** 판단 id 들이다.
+// SupersededBy 는 이 프로젝트에서 **정정당한 판단 id → 그것을 대체한 판단 id** 다.
 //
 // 원장은 추가 전용이라(위 트리거) 옛 행을 지우거나 표시를 켜는 경로가 없다.
 // "이것은 정정됐다"는 사실은 **새 행이 거는 역참조로만** 읽힌다 — 그래서 이 질의가
 // 필요하다. 옛 행 자체는 아무것도 모른다.
 //
+// ★ 있음/없음이 아니라 **값**을 내는 이유: 화면이 "정정됐다"까지만 말하면 반쪽이다.
+// 어디로 가야 정정문을 읽는지가 없으면 사람이 옛 행을 그대로 믿거나, 대체한 행을
+// 찾느라 전체를 훑는다. 거르기만 하는 호출부(service)는 존재 검사로 쓰면 된다.
+//
 // ★ 거르는 것은 호출부(service)의 판정이다. ListJudgmentsByKind 를 여기서 좁히지 않는
 // 이유가 그것이다 — 백업(legacy/export.go)은 정정된 행까지 전수로 가져가야 한다.
-func (s *Store) SupersededJudgmentIDs(ctx context.Context, project string) (map[string]bool, error) {
+//
+// 한 행을 여럿이 대체하면(스키마가 막지 않는다) **가장 나중 것이 이긴다** — 정렬이
+// 그래서 붙어 있다. 정정의 정정이 났을 때 화면이 첫 정정으로 보내면 한 칸 뒤처진다.
+func (s *Store) SupersededBy(ctx context.Context, project string) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT supersedes FROM judgment WHERE project = ? AND supersedes IS NOT NULL`,
+		`SELECT supersedes, id FROM judgment WHERE project = ? AND supersedes IS NOT NULL
+		 ORDER BY at ASC, id ASC`,
 		project)
 	if err != nil {
 		return nil, fmt.Errorf("정정 대상 조회 실패(project=%q): %w", clip(project, 64), err)
 	}
 	defer rows.Close()
-	out := make(map[string]bool)
+	out := make(map[string]string)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var old, cur string
+		if err := rows.Scan(&old, &cur); err != nil {
 			return nil, fmt.Errorf("정정 대상 행 해석 실패: %w", err)
 		}
-		out[id] = true
+		out[old] = cur
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("정정 대상 조회 실패(project=%q): %w", clip(project, 64), err)
