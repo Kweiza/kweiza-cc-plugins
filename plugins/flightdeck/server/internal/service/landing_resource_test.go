@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -293,6 +294,44 @@ func TestLandReportReleasesTheWholeResourceSet(t *testing.T) {
 	if n := countRows(t, st,
 		`SELECT count(*) FROM landing_queue WHERE id = ? AND left_at IS NULL`, mine.RowID); n != 0 {
 		t.Errorf("줄 행이 안 닫혔다(id=%d)", mine.RowID)
+	}
+}
+
+// TestLandReportHealsHoldWithoutRow — 어긋남(점유는 있는데 줄 행이 없음)에서 report 가
+// 자가치유한다. 프로그램적 탈출구가 0 이 되면 안 된다.
+//
+// ★ 2026-08-12 계획 정정(커밋 8150e9d) 회귀 락 — 이 계획의 첫 판은 LandReport 의
+// ErrNotFound 갈래를 laneNotMine 직행으로만 적어, 점유는 있는데 행이 없는 어긋남을
+// 만나면 report 가 아무것도 안 건드리고 "reclaimed"만 답했다. 그러면 그 자원을
+// 프로그램적으로 풀 길이 하나도 없다 — ReleaseLaneRow 도 살아 있는 줄에서만 대상을
+// 찾으므로 이미 없는 행은 못 다룬다. 이 시험은 ListHeld 로 걷어 반납하는 자가치유
+// 갈래가 실제로 살아 있는지를 잠근다.
+func TestLandReportHealsHoldWithoutRow(t *testing.T) {
+	s, st := newSvc(t)
+	a, _ := twoSessions(t, s)
+
+	// 줄 행 없이 점유만 만든다 — a 는 land 를 한 번도 안 불렀으므로 landing_queue 에
+	// 행이 없다. store 직접 호출로 어긋남을 흉내 낸다(landing_test.go 의 기존 시험들과
+	// 같은 수법).
+	if _, err := st.AcquireResource(ctx(), "p", "r1", store.Holder{SessionID: a}, time.Time{}); err != nil {
+		t.Fatalf("어긋난 점유 흉내가 실패했다: %v", err)
+	}
+
+	rep, err := s.LandReport(ctx(), LandReportInput{Project: "p", SessionID: a, Kind: model.LandingLeftOK})
+	if err != nil {
+		t.Fatalf("어긋난 상태의 보고가 오류가 됐다: %v", err)
+	}
+	// ★ 이 시험의 심장 — 행이 없어도 반납된다.
+	if rep.State != "released" {
+		t.Fatalf("state 가 %q 다(기대 released) — 자가치유 갈래가 안 돌았다: %+v", rep.State, rep)
+	}
+	if _, err := st.HeldBy(ctx(), "p", "r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("r1 이 반납 안 됐다 — HeldBy 가 %v 다(기대 ErrNotFound)", err)
+	}
+	if n := countRows(t, st,
+		`SELECT count(*) FROM event WHERE project = 'p' AND session_id = ? `+
+			`AND kind = 'lane.divergent'`, a); n != 1 {
+		t.Errorf("lane.divergent 이벤트가 %d건이다(기대 1) — 어긋났던 사실이 원장에 남아야 한다", n)
 	}
 }
 

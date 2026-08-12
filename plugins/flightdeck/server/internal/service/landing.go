@@ -298,11 +298,13 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 // 여기서 줄 행을 ok 로 닫으면 "성공적으로 랜딩했다"는 거짓 기록이 원장에 남고, 회수
 // 사유는 덮여 사라진다.
 //
-// ★ **옛 "hold-without-row" 어긋남 치유는 없앴다(Task 4).** 점유는 있는데 줄 행이 없는
-// 어긋남을 예전엔 HeldBy 를 먼저 봐서 여기서 스스로 고쳤다. 지금은 행을 먼저 읽으므로
-// 행이 없으면 **무엇을 반납해야 할지 모른다**(자원 집합이 행에만 있다) — 그 어긋남은
-// 이제 report 가 못 고치고, 네 반납 경로가 행과 점유를 항상 같은 트랜잭션에서 함께
-// 닫아 애초에 안 생기게 막는 쪽(TestLiveHoldAlwaysHasALiveRowForAnyResource)이 방어선이다.
+// ★ **"hold-without-row" 어긋남 치유는 자원 집합판으로 남아 있다(★ 정정 2026-08-12).**
+// 행을 먼저 읽으므로 행의 자원 집합으로 "무엇을 반납할지"를 정하는 것이 기본이지만,
+// 행이 아예 없을 때는 `ListHeld`로 내가 쥔 자원을 **전부** 걷어 반납한다 — 여기서
+// laneNotMine 으로만 빠지면 그 자원의 프로그램적 탈출구가 0 이 된다: ReleaseLaneRow 도
+// 행 번호를 전제하므로(살아 있는 줄에서만 대상을 찾는다) 남는 복구 수단이 sqlite3
+// 직접 UPDATE 뿐이 된다 — 최초 계획은 이 갈래를 빠뜨렸고 구현 중 실측(전건 시험에서
+// 드러난 회귀 둘)이 그 결함을 잡아 계획을 정정했다.
 func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land report", Reason: "프로젝트나 세션 좌표가 비었다"}
@@ -331,8 +333,34 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 		case rerr == nil:
 			out.RowID, out.Resources = row.ID, row.Resources
 		case errors.Is(rerr, store.ErrNotFound):
-			// 줄 행이 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
-			return s.laneNotMine(t, in.Project, in.SessionID, &out)
+			// 줄 행이 없다. **그래도 내가 쥔 자원이 있으면 반납한다** — 점유는 있는데
+			// 행이 없는 것은 두 표가 어긋난 상태이고(lane.divergent), 여기서 laneNotMine
+			// 으로 빠지면 그 자원의 프로그램적 탈출구가 0 이 된다: ReleaseLaneRow 도
+			// 행 번호를 전제하므로 복구 수단이 sqlite3 직접 UPDATE 뿐이 된다.
+			// 기존 hold-without-row 갈래의 자가치유 규율을 자원 집합판으로 복원한 것이
+			// 이 갈래다.
+			held, herr := t.ListHeld(in.Project)
+			if herr != nil {
+				return herr
+			}
+			mineCount := 0
+			for _, h := range held {
+				if h.SessionID != in.SessionID {
+					continue
+				}
+				if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+					return err
+				}
+				mineCount++
+			}
+			if mineCount == 0 {
+				// 행도 없고 쥔 것도 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
+				return s.laneNotMine(t, in.Project, in.SessionID, &out)
+			}
+			t.LogEvent("lane.divergent", in.Project, in.SessionID,
+				map[string]any{"mode": "report", "state": "hold-without-row", "count": mineCount})
+			out.State = "released"
+			return nil
 		default:
 			return rerr
 		}
