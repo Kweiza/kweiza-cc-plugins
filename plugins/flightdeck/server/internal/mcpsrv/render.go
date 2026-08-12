@@ -395,10 +395,31 @@ func joinAll(head, blocks, foot []string, tail string) string {
 	if len(foot) > 0 {
 		parts = append(parts, strings.Join(foot, "\n"))
 	}
-	if strings.TrimSpace(tail) != "" {
-		parts = append(parts, tail)
+	return joinTail(strings.Join(parts, "\n\n"), tail)
+}
+
+// joinTail 은 본문에 꼬리를 잇는 **유일한 자리**다. 순수 함수다.
+//
+// ★ 왜 함수 하나로 두나. 이 조립이 일어나는 곳이 셋이었다 — `Server.withTail`(도구 대부분) ·
+// 이 `joinAll`(board) · `toolPick` 의 두 갈래. 셋이 같은 규율("본문 · 빈 줄 하나 · 꼬리")을
+// 손으로 각각 적고 있었고, 그래서 둘이 조용했다:
+//
+//	① **규율이 갈려도 아무도 모른다.** 미회계 갈래는 개행을 하나만 적는데 바로 앞의
+//	   RenderBundleUnaccounted 가 개행으로 끝나서 **우연히** 맞고 있었다. 그 함수의 끝
+//	   개행을 지우는 순간 그 응답만 꼬리 앞 빈 줄이 사라진다(변이로 확인했다).
+//	② **변이가 한 자리만 덮는다.** fd-mcp-render-assertions-may-be-response-wide 에서
+//	   "본문을 비우면 어떤 시험이 살아남나"를 잴 때 withTail 에만 변이를 넣었더니
+//	   board·pick 시험 다섯이 "본문 없이 통과"로 **잘못 보였다** — 본문이 비어서가 아니라
+//	   변이가 그 경로에 안 닿았을 뿐이었다. 하마터면 없는 결함 다섯을 고치러 갔다.
+//
+// 꼬리가 비면 본문만 낸다 — `Tail` 옵션 없이 `RenderBoard` 를 부르는 순수 함수 시험이
+// 그 갈래이고, joinAll 이 갖고 있던 거동을 그대로 옮겼다.
+func joinTail(body, tail string) string {
+	body = strings.TrimRight(body, "\n")
+	if strings.TrimSpace(tail) == "" {
+		return body
 	}
-	return strings.Join(parts, "\n\n")
+	return body + "\n\n" + tail
 }
 
 // rankCards 는 예산이 자를 순서를 정한다. 자르는 것은 이 순서의 **뒤부터**다.
