@@ -23,8 +23,34 @@ import (
 // Panel 은 모든 섹션이 공유하는 머리말이다.
 type Panel struct {
 	Derived string // "(파생: git@14:31 · 12초 전)"
-	Fail    []service.DerivedFailure
-	Err     string // 이 패널을 못 만든 사유. 비어 있지 않으면 내용은 반쪽이다
+
+	// Fail 은 **접지 않은 채** 템플릿으로 간다. MCP 화면은 접는데(mcpsrv.foldTwinFailures)
+	// 여기는 안 접는다 — 그 비대칭이 의도라는 것을 여기 적어 둔다.
+	//
+	// 워크트리가 사라지면 `uncommitted:<세션>` 과 `uncommitted-delta:<세션>` 이 **함께**
+	// 실패한다(같은 Session.Worktree 를 본다 — service/board.go 의 두 호출). 같은 사실이
+	// 두 줄로 오는 것은 두 화면이 같다. 다른 것은 **접기가 사는 이유**이고, 그 이유가 여기엔 없다:
+	//
+	//	                MCP (mcpsrv/render.go)        웹 (dashboard.gohtml 의 "pfail")
+	//	줄 상한         limit 3 또는 6 → `… N줄 더`    없다 — <ul> 이 전부 찍는다
+	//	원인 절단       clip(Detail, 200)             없다 — {{.Detail}} 원문 그대로
+	//	기본 표시       항상 펼쳐진다                  <details> 접힘 — 눌러야 보인다
+	//	머리줄 수       축 수                          축 수 — **이미 같다**
+	//
+	// MCP 에서 접기가 산 이득은 둘이었다(2026-08-12 실측): ① 상한에 밀려 안 보이던 줄이 보인다,
+	// ② `clip(…,200)` 이 먹던 stderr 가 되살아난다(경로가 한 줄에 두 번 들어가서 잘렸다).
+	// **웹엔 둘 다 없다** — 상한이 없어 더 보일 줄이 0이고, 절단이 없어 stderr 가 이미 다 보인다.
+	// CSS 도 확인했다: `.k` 는 색·폰트크기뿐이고 max-height·overflow·text-overflow 클램프가 없다.
+	// 남는 이득은 "접힌 <details> 안의 목록이 2N → N 으로 준다" 하나뿐이라 안 접는다.
+	//
+	// ★ **이 판정을 뒤집는 조건은 하나다 — 웹에 상한이나 절단이 생기는 것.** 목록에 개수 제한,
+	// max-height, text-overflow 중 무엇이든 붙는 순간 이득 ①·② 가 살아나고 그때는 접어야 한다.
+	// 그날은 갈래 2(웹에 따로 쓴다)로 가지 마라 — 두 자리가 각자 판정하면 한쪽만 고쳐진 날
+	// 화면 둘이 갈라진다. foldTwinFailures 일가를 공용 자리로 올려 **함수를 공유**해라.
+	// 그때도 service.Derived 자체는 안 바꾼다 — 원장과 /metrics 는 축 둘을 그대로 봐야 한다.
+	Fail []service.DerivedFailure
+
+	Err string // 이 패널을 못 만든 사유. 비어 있지 않으면 내용은 반쪽이다
 }
 
 // SessionRow 는 섹션 ① 의 세션 한 장이다.
