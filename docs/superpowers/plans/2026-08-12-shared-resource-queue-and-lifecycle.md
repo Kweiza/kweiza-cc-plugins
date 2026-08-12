@@ -623,8 +623,35 @@ func TestLiveHoldAlwaysHasALiveRowForAnyResource(t *testing.T)
 		case rerr == nil:
 			out.RowID, out.Resources = row.ID, row.Resources
 		case errors.Is(rerr, store.ErrNotFound):
-			// 줄 행이 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
-			return s.laneNotMine(t, in.Project, in.SessionID, &out)
+			// 줄 행이 없다. **그래도 내가 쥔 자원이 있으면 반납한다** — 점유는 있는데
+			// 행이 없는 것은 두 표가 어긋난 상태이고(lane.divergent), 여기서 laneNotMine
+			// 으로 빠지면 그 자원의 프로그램적 탈출구가 0 이 된다: ReleaseLaneRow 도
+			// 행 번호를 전제하므로 복구 수단이 sqlite3 직접 UPDATE 뿐이 된다 — 원설계가
+			// 명시로 금지한 모양이다(2026-08-05 스펙 §3). 기존 hold-without-row 갈래의
+			// 자가치유 규율을 자원 집합판으로 복원한 것이 이 갈래다(★ 정정 2026-08-12:
+			// 이 계획의 첫 판은 이 갈래를 빠뜨렸고 Task 4 구현자의 실측 걱정이 잡았다).
+			held, herr := t.ListHeld(in.Project)
+			if herr != nil {
+				return herr
+			}
+			mineCount := 0
+			for _, h := range held {
+				if h.SessionID != in.SessionID {
+					continue
+				}
+				if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+					return err
+				}
+				mineCount++
+			}
+			if mineCount == 0 {
+				// 행도 없고 쥔 것도 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
+				return s.laneNotMine(t, in.Project, in.SessionID, &out)
+			}
+			t.LogEvent("lane.divergent", in.Project, in.SessionID,
+				map[string]any{"mode": "report", "state": "hold-without-row", "count": mineCount})
+			out.State = "released"
+			return nil
 		default:
 			return rerr
 		}
