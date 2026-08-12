@@ -76,10 +76,25 @@ func newApp(env func(string) (string, bool), log *slog.Logger, cwd string, stdin
 	if w := strings.TrimSpace(cli.Endpoint.Warn); w != "" {
 		warn = strings.TrimSpace(warn + " · " + w)
 	}
+	proj := resolveProject(env, cwd)
+	// ★ **프로젝트 좌표를 못 푼 사실도 같은 자리로 합류시킨다.** 그것이 없으면 이 고침이
+	// 「조용한 오등록」을 「조용한 무등록」으로 바꾸는 데 그친다 — 셋 중 둘이 침묵하기 때문이다:
+	// 훅은 서버 거절을 log.Warn 으로 삼키고(훅이 세션을 막으면 안 된다), MCP 는 도구를
+	// 부르기 전까지 아무 말이 없다. 사람이 찾아가지 않고도 보는 표면은 SessionStart 배너뿐이다.
+	//
+	// notice 를 고른 이유는 그 셋을 이미 한 자리로 모으고 있어서다 — 배너(hook.go) ·
+	// `fd doctor`(cmds.go) · 기동 로그(main.go). 새 통로를 안 판다.
+	//
+	// 사유(proj.Detail)를 **그대로 나른다.** 「git 을 못 읽었다」의 실물이 거기 있고, 여기서
+	// 요약하면 두 자리가 같은 사실을 다르게 말하게 된다.
+	if strings.TrimSpace(proj.ID) == "" {
+		warn = strings.TrimSpace(warn + " 프로젝트 좌표를 못 풀어 이 실행은 프로젝트에 귀속되지 않는다(" +
+			clip(proj.Detail, 300) + "). git 저장소 안에서 부르거나 FD_PROJECT 로 명시해라 — 지어내지 않는다.")
+	}
 	a := &App{
 		env: env, log: log, sd: sd,
 		cli:        cli,
-		proj:       resolveProject(env, cwd),
+		proj:       proj,
 		machine:    mid,
 		machineSrc: midSrc,
 		beaconDir:  beaconDir,

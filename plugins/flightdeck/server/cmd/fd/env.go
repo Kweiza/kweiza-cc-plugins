@@ -610,9 +610,38 @@ func ProjectIDFromPath(p string) string {
 
 // resolveProject 는 cwd 에서 프로젝트 좌표를 읽는다.
 //
-// git 호출이 실패해도 **좌표를 낸다** — 그 경우 주 저장소 경로를 워크트리로 두고
+// git 호출이 실패해도 **워크트리 좌표는 낸다** — 그 경우 주 저장소 경로를 워크트리로 두고
 // 그 사실을 Detail 에 적는다. 침묵하면 "링크된 워크트리라 남이 안 보이는 것"과
 // "정말 아무도 없는 것"이 구분되지 않는다.
+//
+// ★ **그러나 프로젝트 id 는 안 짓는다.** 여기가 이 함수의 두 축이 갈리는 자리다.
+//
+// 옛 동작은 실패해도 `ProjectIDFromPath(c.Path)` 를 냈고, 그 c.Path 는 git 이 답한 주 저장소가
+// 아니라 **날 cwd** 였다 — 즉 디렉토리 이름이 프로젝트 id 가 됐다. 실패 사실은 Detail 에만
+// 적히는데 그 필드는 사람이 안 보는 자리이므로, 좌표는 **조용히 지어졌다.**
+//
+// 그 결과가 원장의 유령 프로젝트다. 서버는 클라이언트 머신의 cwd 를 볼 수 없어 받은 이름을
+// 믿을 수밖에 없고, 미등록 이름이 오면 자동 등록한다. 실측된 재현 경로 둘: ⑴ git 저장소가
+// 아닌 디렉토리(machine-probe 의 /tmp 경로가 그랬다 — `fatal: not a git repository`),
+// ⑵ 워크트리가 막 만들어지는 중이거나 지워지는 중일 때(그 창에서 rev-parse 가 실패한다).
+//
+// ★ **두 축이 왜 다르게 답하나.** 워크트리는 "이 프로세스가 어디서 도는가"라 cwd 가 이미
+// 참이고 지어낼 것이 없다 — 그리고 세션 정체 3중키의 둘째 축이라 비우면 정체가 통째로 죽는다.
+// 프로젝트는 "이 트리가 어느 저장소에 속하는가"라 **git 만이 답할 수 있고**, 못 읽었으면
+// 우리가 아는 것은 아무것도 없다. 디렉토리 이름은 답의 근사가 아니라 **다른 질문의 답**이다.
+//
+// ★ 비운 좌표가 어디서 걸리나 — 채널마다 다르고, 셋 다 사람에게 말한다.
+//   - MCP: mcpsrv 가 빈 **주입**을 "주입 없음"과 구분해 옛 폴백을 안 깨우고(그 계층의
+//     WithProject 주석), GateTool 이 도구를 거절하며 Banner 가 사유를 찍는다.
+//   - 서버: 3중키로 열린 세션이 있으면 **그 세션의 프로젝트로 잇고**(service.OpenSession),
+//     없으면 거절한다. 되찾기는 지어내기가 아니다 — 이 세션이 처음 열릴 때 스스로 등록한
+//     좌표를 되읽는 것이다.
+//   - 훅: SessionStart 배너의 Notice 에 사유가 실린다(hook.go). 훅은 세션을 막지 않으므로
+//     거절이 화면에 뜨는 유일한 자리다.
+//
+// ★ `FD_PROJECT` 는 **여전히 이긴다.** 명시는 사람이 정한 것이고, git 저장소 밖에서 이 도구를
+// 쓰는 유일한 탈출구다. 그것까지 막으면 이 고침이 "지어내지 않는다"를 넘어 "쓸 수 없게 한다"가
+// 된다. 그래서 아래 채택은 git 갈래 **밖**에 있다.
 func resolveProject(get func(string) (string, bool), cwd string) ProjectCoord {
 	wt := cwd
 	if v, ok := get("FD_WORKTREE"); ok && strings.TrimSpace(v) != "" {
@@ -626,11 +655,17 @@ func resolveProject(get func(string) (string, bool), cwd string) ProjectCoord {
 	// ★ 한 프로세스에서 값 **둘**을 받는다. 훅 이벤트마다 이 함수가 도는데(beatFromHook →
 	//   OpenSession) 여기에 git 호출을 하나 더 얹으면 가장 잦은 경로에 프로세스가 하나 는다.
 	//   `git rev-parse` 는 인자를 준 순서대로 한 줄씩 내므로 --show-toplevel 은 공짜다.
+	// ★ **git 이 주 저장소를 답했을 때만** 참이 되는 플래그다. `err == nil` 로는 부족하다 —
+	//   rev-parse 가 0으로 끝나고도 --git-common-dir 줄이 비어 MainRepoRoot 가 빈 문자열을
+	//   내면 c.Path 는 여전히 날 cwd 이고, 그 이름은 지어낸 것이다. 판정 기준은 호출의
+	//   성공이 아니라 **c.Path 가 git 이 답한 주 저장소인가**다.
+	repoResolved := false
 	if out, err := gitOut(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"); err == nil {
 		common, top := RevParseCoords(out)
 		if root := MainRepoRoot(common); root != "" {
 			c.Path = root
 			c.Detail = "git rev-parse --git-common-dir 로 주 저장소를 찾았다"
+			repoResolved = true
 		}
 		// ★ 워크트리 좌표를 **git 이 답한 트리 루트**로 접는다.
 		//
@@ -652,7 +687,14 @@ func resolveProject(get func(string) (string, bool), cwd string) ProjectCoord {
 		c.Detail = "git rev-parse 실패(" + clip(err.Error(), 200) + ") — 워크트리를 주 저장소로 뒀다"
 	}
 
-	c.ID = ProjectIDFromPath(c.Path)
+	if repoResolved {
+		c.ID = ProjectIDFromPath(c.Path)
+	} else {
+		// ★ 빈 채로 둔다. 이 자리에 폴백을 다시 넣지 마라 — 그것이 이 항목의 결함 자체다.
+		//   c.Path 는 여기서도 살아 있지만(워크트리 = cwd), **그 경로의 마지막 성분은
+		//   프로젝트 이름이 아니다.** 위 머리말의 "다른 질문의 답" 이 그 뜻이다.
+		c.Detail += " · 프로젝트 id 는 짓지 않았다(git 이 답해야 하는 값이다)"
+	}
 	if v, ok := get("FD_PROJECT"); ok && strings.TrimSpace(v) != "" {
 		c.ID = strings.TrimSpace(v)
 		c.Detail += " · 프로젝트 id 는 FD_PROJECT 가 이겼다"
