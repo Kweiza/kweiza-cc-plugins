@@ -260,6 +260,16 @@ JudgeNext         //evil.com · http://evil.com · 빈 값 → "/" │ /?project
   가능한 한 번의 헛걸음이다. 고친다면 `Next` 를 절대경로로 두는 대신 **폼이 자기 문서 URL 로
   상대화한 값을 싣게** 하는 쪽이다 — `Location` 에 `X-Forwarded-Prefix` 를 신뢰해 붙이는
   처방은 이 레포에 없는 신뢰를 새로 만드는 것이라 기각이다(`JudgeScreenOrigin` 의 그 근거).
+  **2026-08-12 에 닫혔다** — `docs/superpowers/specs/2026-08-12-proxy-prefix-redirect-design.md`.
+  이 문단의 처방("폼이 자기 문서 URL 로 상대화한 값을 싣게")은 **기각됐다**: 폼의 기준 문서
+  URL(`/actions/reclaim`)과 리다이렉트의 기준(`/login`)이 달라서 깊이가 어긋난다. 대신 서버가
+  응답하는 요청 경로를 기준으로 상대화한다(`judge.RelativeTo`). `X-Forwarded-Prefix` 기각은
+  유효하고 근거가 둘 늘었다 — nginx 가 그 헤더를 기본으로 안 보내고, 안 고쳐졌다는 사실이
+  증상으로도 안 드러난다.
+
+  **결함은 넷이 아니라 여섯이었다.** 이 문단은 `actions.go` 의 `../?` 를 안전한 쪽으로
+  분류했는데, `http.Redirect` 가 상대 URL 을 절대화해서 내보내므로 그 자리도 같은 결함이었다.
+  그렇게 분류하게 만든 것은 `back()` 의 주석이다("하위 경로에 마운트돼도 그대로 성립한다").
 - **무차별 대입 방어는 조건부다.** §5 는 "`rateLimit` 이 auth 바깥이라 새로 만들 게 없다"고
   적었으나, `cmd/fd/serve.go` 의 `-rate-per-minute` **기본값이 0(무제한)** 이고 컨테이너
   배포도 그 값을 안 켠다. 즉 그 문장은 **운영자가 값을 켰을 때만 참**이다. 회귀는 아니다 —
