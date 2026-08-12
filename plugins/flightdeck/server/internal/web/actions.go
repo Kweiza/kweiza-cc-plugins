@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -352,16 +353,31 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, kind string, in A
 	http.Error(w, msg, status)
 }
 
+// seeOther 는 303 과 함께 **상대 참조**를 Location 에 싣는다.
+//
+// ★ **http.Redirect 를 안 쓴다.** 그 함수는 상대 URL 을 받아도 요청 경로 기준으로
+// 절대화해서 내보낸다(net/http server.go 의 olddir+url → path.Clean). 이 자리에는
+// `"../?"` 라고 쓰여 있었는데 실제로 나간 값은 `"/?"` 였고, 아래 back() 의 옛 주석이
+// "하위 경로에 마운트돼도 성립한다"고 적어 그 사실을 가렸다. 소스의 상대경로는
+// 그 함수를 지나며 사라진다.
+func (h *handler) seeOther(w http.ResponseWriter, r *http.Request, to string) {
+	w.Header().Set("Location", judge.RelativeTo(r.URL.Path, to))
+	w.WriteHeader(http.StatusSeeOther)
+}
+
 // back 은 화면으로 되돌린다(POST-리다이렉트-GET).
 //
-// 상대 경로로 보낸다 — 이 핸들러가 하위 경로에 마운트돼도 그대로 성립한다.
+// ★ **뿌리를 절대경로로 말한다.** 깊이를 세는 것은 seeOther 안의 judge.RelativeTo 이고
+// 이 자리는 목적지만 말한다. 앞선 판은 여기에 `"../"` 를 손으로 박았는데, 그러면
+// /actions/x/y 처럼 깊이가 다른 라우트가 생길 때 조용히 틀린다.
+//
 // 알림은 **코드**로 넘기고 문장은 서버가 만든다(NoticeText).
 func (h *handler) back(w http.ResponseWriter, r *http.Request, in ActionInput, code ActionKind) {
 	q := url.Values{}
 	q.Set("project", in.Project)
 	q.Set("notice", string(code))
 	q.Set("item", in.Item)
-	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
+	h.seeOther(w, r, "/?"+q.Encode())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -524,5 +540,5 @@ func (h *handler) projectView(w http.ResponseWriter, r *http.Request) {
 	q.Set("project", in.Project)
 	q.Set("notice", in.Axis)
 	q.Set("item", in.Target)
-	http.Redirect(w, r, "../?"+q.Encode(), http.StatusSeeOther)
+	h.seeOther(w, r, "/?"+q.Encode())
 }

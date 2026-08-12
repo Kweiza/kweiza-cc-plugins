@@ -4,6 +4,8 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+
+	"github.com/kweiza/flightdeck/internal/judge"
 )
 
 // 화면 로그인 — 브라우저가 자격증명을 내놓는 유일한 길이다(설계 §6).
@@ -61,13 +63,31 @@ func LoginCookie(value string, maxAge int, secure bool) *http.Cookie {
 	}
 }
 
+// seeOther 는 303 과 함께 **상대 참조**를 Location 에 싣는다.
+//
+// ★ **http.Redirect 를 안 쓴다.** 그 함수는 상대 URL 을 받아도 요청 경로 기준으로
+// 절대화해서 내보낸다(net/http server.go 의 olddir+url → path.Clean). 그래서 `./` 를
+// 줘도 `/` 가 나가고, 접두를 벗기는 리버스 프록시 뒤에서 그 값은 접두 **밖**으로
+// 떨어진다 — 로그인은 성공했는데 화면을 못 보는 그 결함이다.
+//
+// ★ **to 는 절대경로로 준다.** 상대화는 여기서 한 번만 한다. 호출자가 `../` 를 손으로
+// 박으면 새 라우트가 깊이를 바꿀 때 조용히 틀리고, 그 값이 http.Redirect 를 지나며
+// 절대화되면 틀린 사실조차 안 보인다(web/actions.go 가 정확히 그 모양이었다).
+//
+// ★ 본문을 안 쓴다. http.Redirect 는 GET 에 <a href> 한 줄을 붙이는데, 303 을 못 따르는
+// 옛 클라이언트를 위한 것이고 이 화면의 대상이 아니다.
+func (s *server) seeOther(w http.ResponseWriter, r *http.Request, to string) {
+	w.Header().Set("Location", judge.RelativeTo(r.URL.Path, to))
+	w.WriteHeader(http.StatusSeeOther)
+}
+
 // handleLogin 은 토큰 폼을 받아 쿠키를 굽는다.
 //
 // GET 은 "/" 로 보낸다 — 사용자가 주소창에 칠 수 있는 URL 이라, 없으면 화면의
 // 404("대시보드는 / 한 장이다")가 나와 혼란스럽다. 인증이 안 됐으면 거기서 폼을 만난다.
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		s.seeOther(w, r, "/")
 		return
 	}
 	if s.refusedCrossSite(w, r, "로그인", "대시보드 화면의 폼에서 제출해라.") {
@@ -89,7 +109,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// ★ 인증이 꺼진 서버는 쿠키를 굽지 않는다. 구우면 나중에 토큰을 켰을 때 그 쿠키가
 	// **틀린 자격증명**이 되어, 브라우저가 폼이 아니라 거절을 만난다.
 	if s.opt.Token == "" {
-		http.Redirect(w, r, next, http.StatusSeeOther)
+		s.seeOther(w, r, next)
 		return
 	}
 	got := strings.TrimSpace(r.PostFormValue("token"))
@@ -102,7 +122,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.putLoginCookie(w, r, s.opt.Token, loginCookieMaxAge)
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	s.seeOther(w, r, next)
 }
 
 // refusedCrossSite 는 출처를 대조하고, 아니면 403 을 내고 **참**을 돌려준다.
@@ -145,7 +165,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	// MaxAge<0 이 삭제다. 값도 비운다 — 둘 중 하나만 하면 브라우저에 따라 남는다.
 	s.putLoginCookie(w, r, "", -1)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	s.seeOther(w, r, "/")
 }
 
 // loginRefused 는 거절을 폼으로 되돌린다.
@@ -158,7 +178,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // ★ Action 을 여기서도 계산한다. 이 자리의 r.URL.Path 는 폼이 제출된 경로이므로 언제나
 // 라우트 그대로인 `/login` 이고(다른 자리로 간 제출은 이 핸들러에 아예 안 닿는다 —
 // 세션 이전 경로가 아니라 withAuth 가 먼저 401 을 낸다), JudgeLoginAction 이 거기서
-// 깊이 0 을 내 `login` 을 돌려준다. 즉 재시도 폼도 같은 자리를 가리킨다.
+// 깊이 0 을 내 `./login` 을 돌려준다. 즉 재시도 폼도 같은 자리를 가리킨다.
 // 상수로 박지 않는 이유는 같은 계산이 두 벌이 되지 않게 하기 위해서다.
 func (s *server) loginRefused(w http.ResponseWriter, r *http.Request, why, next string) {
 	s.met.incUnauthorized()

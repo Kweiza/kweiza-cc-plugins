@@ -114,7 +114,7 @@ type LoginView struct {
 	// Next 는 로그인 뒤 돌아갈 자리다. **호출부가 이미 JudgeNext 를 통과시킨 값이다** —
 	// 렌더러가 그 검증을 다시 하지 않는다. 두 자리에서 검증하면 한쪽만 고쳐진다.
 	Next string
-	// Action 은 이 폼의 action 이 가리켜야 할 **상대경로**다(`login` · `../login` · …).
+	// Action 은 이 폼의 action 이 가리켜야 할 **상대경로**다(`./login` · `../login` · …).
 	// **호출부가 이미 JudgeLoginAction 으로 계산한 값이다** — 렌더러가 다시 계산하지
 	// 않는다(Next 와 같은 규율). 렌더러가 계산하면 그 깊이 셈이 두 벌이 되고, 두 벌은
 	// 반드시 표류한다 — 그리고 이 축의 표류는 "토큰을 정확히 쳐도 폼이 다시 뜬다"로
@@ -391,7 +391,7 @@ func (s *server) routes() *http.ServeMux {
 // screenWrite 가 idempotency **바깥**인 이유: 안쪽에 두면 키가 헤더로 올라가기 전에
 // 이미 400 이 나간 뒤다. accessLog 안쪽인 이유: 여기서 내는 403 도 로그에 남아야 한다.
 func (s *server) chain(h http.Handler) http.Handler {
-	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(h)))))))
+	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(s.withRelativeLocation(h))))))))
 }
 
 // ShutdownGrace 는 드레인이 인플라이트에 주는 시간이다.

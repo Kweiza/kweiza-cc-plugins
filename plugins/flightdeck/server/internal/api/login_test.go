@@ -74,7 +74,7 @@ func TestLoginSetsCookieAndRedirects(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("상태가 %d 다 — 303 이어야 한다", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/?project=kweiza" {
+	if loc := rec.Header().Get("Location"); loc != "./?project=kweiza" {
 		t.Fatalf("Location 이 %q 다", loc)
 	}
 	cookies := rec.Result().Cookies()
@@ -111,8 +111,8 @@ func TestLoginRejectsWrongTokenWithoutEcho(t *testing.T) {
 	// ★ **재시도 폼도 제출 가능해야 한다.** 폼을 채우는 자리가 둘인데(withAuth 와 여기)
 	// 왕복 시험이 닿는 것은 앞엣것뿐이라, 이 자리가 Action 을 안 채우면 action="" 이 되고
 	// 그러면 폼이 문서 URL 자신으로 제출된다 — 틀린 토큰을 한 번 친 사람만 무한 폼에 갇힌다.
-	if gotView.Action != "login" {
-		t.Fatalf("재시도 폼의 action 이 %q 다 — /login 에서 뜬 폼이라 \"login\" 이어야 한다", gotView.Action)
+	if gotView.Action != "./login" {
+		t.Fatalf("재시도 폼의 action 이 %q 다 — /login 에서 뜬 폼이라 \"./login\" 이어야 한다", gotView.Action)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestLoginGetRedirectsHome(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("상태가 %d 다 — 303 이어야 한다", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/" {
+	if loc := rec.Header().Get("Location"); loc != "./" {
 		t.Fatalf("Location 이 %q 다", loc)
 	}
 }
@@ -363,5 +363,85 @@ func TestLoginNextFoldsNonGET(t *testing.T) {
 
 	if got.Next != "/" {
 		t.Fatalf("돌아갈 자리가 %q 다 — POST 전용 경로라 / 로 접혀야 한다", got.Next)
+	}
+}
+
+// TestLoginRedirectsLandInsideProxyPrefix 는 로그인·로그아웃의 Location 이
+// **접두 안에** 착지하는지 본다.
+//
+// ★ 회귀를 붙드는 것은 이 시험이다. 누가 http.Redirect 로 되돌리면 Location 이
+// 경로만 있는 절대경로가 되어 여기서 "/" 에 착지하고 빨개진다. 그 함수는 상대 URL 을
+// 받아도 요청 경로 기준으로 절대화하므로(net/http server.go), "./" 를 줘도 마찬가지다.
+func TestLoginRedirectsLandInsideProxyPrefix(t *testing.T) {
+	const prefix = "/dcp-dev-board"
+	cases := []struct {
+		name      string
+		req       func(t *testing.T) *http.Request
+		docPath   string // 브라우저가 보는 문서 경로(접두 뒤)
+		wantPath  string // 접두를 포함한 착지 경로
+		wantQuery string
+	}{
+		{
+			name: "로그인 성공은 next 로 간다",
+			req: func(t *testing.T) *http.Request {
+				return loginPost(t, "/login", url.Values{
+					"token": {"s3cret"}, "next": {"/?project=kweiza"},
+				})
+			},
+			docPath: "/login", wantPath: prefix + "/", wantQuery: "project=kweiza",
+		},
+		{
+			name: "next 가 없으면 뿌리로 간다",
+			req: func(t *testing.T) *http.Request {
+				return loginPost(t, "/login", url.Values{"token": {"s3cret"}})
+			},
+			docPath: "/login", wantPath: prefix + "/",
+		},
+		{
+			name: "GET /login 은 뿌리로 보낸다",
+			req: func(t *testing.T) *http.Request {
+				req := httptest.NewRequest("GET", "/login", nil)
+				req.RemoteAddr = "203.0.113.9:1"
+				return req
+			},
+			docPath: "/login", wantPath: prefix + "/",
+		},
+		{
+			name: "로그아웃은 뿌리로 간다",
+			req: func(t *testing.T) *http.Request {
+				return loginPost(t, "/logout", url.Values{})
+			},
+			docPath: "/logout", wantPath: prefix + "/",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := NewServer(nil, Options{Token: "s3cret"})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, c.req(t))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("상태가 %d 다 — 303 이어야 한다\n%s", rec.Code, rec.Body.String())
+			}
+			loc := rec.Header().Get("Location")
+			if loc == "" {
+				t.Fatal("Location 이 비었다")
+			}
+			base, err := url.Parse("http://fd.example" + prefix + c.docPath)
+			if err != nil {
+				t.Fatalf("문서 URL 파싱 실패: %v", err)
+			}
+			ref, err := url.Parse(loc)
+			if err != nil {
+				t.Fatalf("Location %q 파싱 실패: %v", loc, err)
+			}
+			got := base.ResolveReference(ref)
+			if got.Path != c.wantPath {
+				t.Errorf("Location %q 가 %q 에 착지한다 — %q 여야 한다. "+
+					"접두 밖이면 로그인은 됐는데 화면을 못 본다", loc, got.Path, c.wantPath)
+			}
+			if got.RawQuery != c.wantQuery {
+				t.Errorf("질의가 %q 다 — %q 여야 한다", got.RawQuery, c.wantQuery)
+			}
+		})
 	}
 }

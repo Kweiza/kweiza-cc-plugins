@@ -356,7 +356,7 @@ func TestSelfUpdateStatusOfLosesNoFieldAcrossTheLine(t *testing.T) {
 // 접히므로 서버는 멀쩡히 뜨고 REST 도 다 돌고, 오직 브라우저에서만 폼 대신 JSON 이 뜬다.
 // serve.go 가 조립을 순수 함수로 뽑아둔 근거가 정확히 이것이다.
 func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
-	opt := serveAPIOptions("tok", 60, slog.Default(), false, nil, nil)
+	opt := serveAPIOptions("tok", 60, slog.Default(), false, nil, nil, false)
 	if opt.LoginScreen == nil {
 		t.Fatal("LoginScreen 이 nil 이다 — 브라우저가 폼 대신 JSON 401 을 본다")
 	}
@@ -364,7 +364,7 @@ func TestServeAPIOptionsWiresLoginScreen(t *testing.T) {
 	// 실제로 폼을 그리는지 본다. nil 아님만 재면 func(...){} 빈 몸통도 통과한다.
 	//
 	// ★ 필드마다 **서로 구분되는** 값을 준다 — 같은 타입의 문자열 셋이라 어댑터가 둘을
-	// 맞바꿔도 컴파일이 통과한다. Action 은 뿌리 값(`login`)이 아니라 `../login` 이다:
+	// 맞바꿔도 컴파일이 통과한다. Action 은 뿌리 값(`./login`)이 아니라 `../login` 이다:
 	// 뿌리 값은 제로값과 구분은 되지만 "옮겨졌다"를 덜 확실하게 보인다.
 	rec := httptest.NewRecorder()
 	opt.LoginScreen(rec, httptest.NewRequest("GET", "/", nil),

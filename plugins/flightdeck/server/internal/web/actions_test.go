@@ -17,6 +17,36 @@ import (
 // 쓰기 둘의 소비자 좌표계는 **응답 상태·Location 헤더·되돌아온 화면의 문자열**이다.
 // store 를 직접 들여다보고 끝내면 "DB 는 바뀌었는데 화면은 옛 상태를 보여준다"를 못 본다.
 
+// resolveFrom 은 Location 을 **브라우저처럼** 푼다.
+//
+// ★ Location 을 요청 URL 로 그대로 쓰면 안 된다. 이 서버의 리다이렉트는 상대 참조라
+// (`../?notice=…`) 요청 경로로 성립하지 않는다. 브라우저는 문서 URL 을 기준으로 그것을
+// 풀고, url.ResolveReference 가 그 규칙(RFC 3986)의 구현이다.
+//
+// ★ 접두를 일부러 씌운다. 접두 뒤 배포에서 착지가 접두 **안**인지가 이 축의 전부이고,
+// 접두 없이 풀면 그 사실을 영영 안 재게 된다.
+func resolveFrom(t *testing.T, docPath, loc string) *url.URL {
+	t.Helper()
+	const prefix = "/dcp-dev-board"
+	if loc == "" {
+		t.Fatal("Location 이 비었다")
+	}
+	base, err := url.Parse("http://fd.example" + prefix + docPath)
+	if err != nil {
+		t.Fatalf("문서 URL 파싱 실패(%q): %v", docPath, err)
+	}
+	ref, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("Location %q 파싱 실패: %v", loc, err)
+	}
+	got := base.ResolveReference(ref)
+	if !strings.HasPrefix(got.Path, prefix+"/") {
+		t.Fatalf("Location %q 가 %q 에 착지한다 — 접두 %q 밖이다. "+
+			"쓰기는 됐는데 화면으로 못 돌아온다", loc, got.Path, prefix)
+	}
+	return got
+}
+
 // claimed 는 선점된 항목 하나가 있는 픽스처를 만든다.
 func claimed(t *testing.T) (*fixture, string) {
 	t.Helper()
@@ -69,12 +99,13 @@ func TestReclaimReleasesClaimAndLeavesJudgment(t *testing.T) {
 		t.Fatalf("status = %d, 기대 303\n%s", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, "/?") || !strings.Contains(loc, "notice=reclaim") {
-		t.Fatalf("Location = %q — 화면으로 되돌리지 않았다", loc)
+	landed := resolveFrom(t, "/actions/reclaim", loc)
+	if landed.Path != "/dcp-dev-board/" || !strings.Contains(landed.RawQuery, "notice=reclaim") {
+		t.Fatalf("Location = %q → %q — 화면으로 되돌리지 않았다", loc, landed)
 	}
 
-	// 리다이렉트를 따라간 화면이 소비자 좌표계다.
-	req := httptest.NewRequest(http.MethodGet, loc, nil)
+	// 리다이렉트를 따라간 화면이 소비자 좌표계다. 접두를 벗긴 자리가 서버가 보는 경로다.
+	req := httptest.NewRequest(http.MethodGet, "/"+strings.TrimPrefix(landed.RequestURI(), "/dcp-dev-board/"), nil)
 	rec2 := httptest.NewRecorder()
 	f.h.ServeHTTP(rec2, req)
 	html := rec2.Body.String()
@@ -121,7 +152,8 @@ func TestDropMarksItemDroppedWithReason(t *testing.T) {
 		t.Fatalf("status = %d, 기대 303\n%s", rec.Code, rec.Body.String())
 	}
 
-	req := httptest.NewRequest(http.MethodGet, rec.Header().Get("Location"), nil)
+	landed := resolveFrom(t, "/actions/drop", rec.Header().Get("Location"))
+	req := httptest.NewRequest(http.MethodGet, "/"+strings.TrimPrefix(landed.RequestURI(), "/dcp-dev-board/"), nil)
 	rec2 := httptest.NewRecorder()
 	f.h.ServeHTTP(rec2, req)
 	html := rec2.Body.String()

@@ -101,12 +101,15 @@ func portOf(addr string) string {
 // **실패 모양**이다: 토큰이 끊기면 인증이 통째로 열려 시끄럽게 드러나고, self_update 가
 // 끊기면 화면이 아무 말도 안 하는 **침묵**이라 이 축만 한 칸 더 뺐다.
 func serveAPIOptions(token string, ratePerMinute int, log *slog.Logger, inContainer bool,
-	watcher *selfWatcher, ledgerJob *ledgerBackupJob) api.Options {
+	watcher *selfWatcher, ledgerJob *ledgerBackupJob, requireTokenOnLoopback bool) api.Options {
 	opt := api.Options{
 		Token:         token,
 		RatePerMinute: ratePerMinute,
 		Log:           log,
 		InContainer:   inContainer,
+		// ★ 기본값(false)이 설계의 기본 동작이다 — 그것을 여기서 바꾸지 않는다.
+		// 이 필드가 배선을 타야 하는 이유는 아래 플래그 주석에 있다.
+		RequireTokenOnLoopback: requireTokenOnLoopback,
 	}
 	// ★ nil 감시기면 콜백을 안 단다. api 쪽은 SelfUpdate 가 nil 이면 그 절을 통째로
 	// 빼므로(handlers_meta.go), "감시기가 없다"와 "감시기가 빈 값을 답한다"가 안 섞인다.
@@ -189,6 +192,21 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	addr := fs.String("addr", envOr(env, "FD_ADDR", ":7420"), "수신 주소")
 	dbPath := fs.String("db", "", "SQLite 파일 경로(비면 자동)")
 	rate := fs.Int("rate-per-minute", 0, "원격 주소당 분당 요청 상한(0 이면 무제한)")
+	// ★ 루프백 면제를 끄는 스위치다. **기본값은 면제 열림이고 그것을 안 바꾼다** —
+	// 로컬 루프백으로 토큰 없이 붙는 세션이 이 제품의 정상 사용이라, 기본값을 뒤집으면
+	// 그것들이 한꺼번에 전부 깨진다.
+	//
+	// ★ 이 플래그가 필요한 자리는 **리버스 프록시가 같은 호스트에 있는 배포**다.
+	// 면제 판정은 RemoteAddr 이므로(auth.go 의 IsLoopback) 그 프록시를 거친 요청이
+	// 전부 127.0.0.1 로 도착한다 — 토큰을 켜 뒀는데 바깥에서 오는 요청 전부가
+	// 무인증으로 통과한다. 컨테이너 배포는 해당 없다: 브리지 게이트웨이가 172.x 라
+	// 루프백으로 안 보인다(login.go 가 그 사실을 이미 적어 뒀다).
+	//
+	// ★ 환경변수를 안 만든다. 이 저장소의 불리언 설정은 전부 플래그이고
+	// (migrate.go·project.go), 불리언 환경변수는 선례가 없다. 한 축을 위해 새 관례를
+	// 만들면 다음 사람이 어느 쪽이 규칙인지 모른다.
+	requireTokenOnLoopback := fs.Bool("require-token-on-loopback", false,
+		"루프백 요청에도 토큰을 요구한다(리버스 프록시가 같은 호스트에 있으면 켜라)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -229,7 +247,7 @@ func runServe(args []string, env func(string) (string, bool), log *slog.Logger) 
 	// ★ 잡을 핸들러보다 먼저 만든다 — api.Options.LedgerBackup 콜백이 이 잡의 State() 를
 	//   물으므로 조립 시점에 이미 있어야 한다(감시기와 같은 이유).
 	ledgerJob := newLedgerBackupJob(log, st, LedgerOutDir(env, home, inContainer), ledgerBackupInterval)
-	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher, ledgerJob))
+	handler := buildHandler(svc, webH, serveAPIOptions(token, *rate, log, inContainer, watcher, ledgerJob, *requireTokenOnLoopback))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -738,16 +738,16 @@ func TestJudgeNext(t *testing.T) {
 // url.ResolveReference). 브라우저가 하는 계산이 그것이다.
 func TestJudgeLoginAction(t *testing.T) {
 	cases := map[string]string{
-		"/":                     "login",
-		"/login":                "login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
-		"/events":               "login",
+		"/":                     "./login",
+		"/login":                "./login", // 재시도 폼 — 제출이 실패한 자리도 뿌리 깊이다
+		"/events":               "./login",
 		"/actions/reclaim":      "../login",
 		"/actions/lane-release": "../login",
 		"/actions/":             "../login", // 뒤 슬래시면 마디가 하나 더다
 		"/api/v1/items/next":    "../../../login",
 		"/a//b":                 "../../login", // 빈 마디도 해석이 한 마디로 센다
-		"":                      "login",       // 못 읽은 것은 뿌리로 접는다
-		"*":                     "login",       // OPTIONS * — 슬래시가 없다
+		"":                      "./login",     // 못 읽은 것은 뿌리로 접는다
+		"*":                     "./login",     // OPTIONS * — 슬래시가 없다
 	}
 	for path, want := range cases {
 		got := JudgeLoginAction(path)
@@ -789,6 +789,21 @@ func TestJudgeNextFrom(t *testing.T) {
 	for _, c := range cases {
 		if got := JudgeNextFrom(c.method, c.uri); got != c.want {
 			t.Errorf("JudgeNextFrom(%q, %q) = %q, 기대 %q", c.method, c.uri, got, c.want)
+		}
+	}
+}
+
+// TestAuthNoticeWarnsAboutSameHostProxy 는 면제가 **실제로 열린** 갈래가 리버스 프록시를
+// 함께 경고하는지 본다.
+//
+// ★ 관측은 이미 있었다 — loopback_open 이 그 상태를 정확히 낸다. 없던 것은 **연결**이다.
+// 같은 호스트 프록시 뒤에서 그 값이 참이 되는데, 운영자가 그 사실을 프록시와 잇지
+// 못하면 "내 서버는 루프백으로 아무도 안 치는데 왜 열렸다고 하지"로 읽고 넘긴다.
+func TestAuthNoticeWarnsAboutSameHostProxy(t *testing.T) {
+	n := AuthNotice(true, LoopbackReach{Configured: true, Observed: true})
+	for _, want := range []string{"리버스 프록시", "require-token-on-loopback"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("문구에 %q 가 없다 — 운영자가 loopback_open 을 프록시와 못 잇는다: %s", want, n)
 		}
 	}
 }

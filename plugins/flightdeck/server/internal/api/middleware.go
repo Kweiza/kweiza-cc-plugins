@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/store"
 )
 
@@ -400,6 +401,64 @@ func (s *server) withRecover(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// withRelativeLocation 은 Location 헤더의 **경로만 있는 절대경로**를 상대 참조로 바꾼다.
+//
+// ★ 이 자리가 필요한 이유는 net/http.ServeMux 자신이다. 그 mux 는 경로를 정규화해야 할 때
+// (`//` · `/a//b` · `/a/../` 같은 요청) RedirectHandler 로 307 을 내는데, 그 Location 이
+// 경로만 있는 절대경로다 — 접두를 벗기는 프록시 뒤에서 접두 **밖**으로 떨어진다.
+// 저장소 코드가 아니라 표준 라이브러리 안이라 `grep 'http.Redirect('` 로는 안 보인다.
+//
+// ★ **이미 상대인 값은 안 건드린다.** 이 서버의 핸들러(seeOther)는 `./` · `../` 를 내고
+// 그것들은 `/` 로 시작하지 않는다. 그 값을 다시 상대화하면 RelativeTo 의 to 방어(`..` 포함)에
+// 걸려 `./` 로 접히고, 되돌아갈 자리를 잃는다.
+func (s *server) withRelativeLocation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &relativeLocationRecorder{ResponseWriter: w, from: r.URL.Path}
+		next.ServeHTTP(rw, r)
+	})
+}
+
+// relativeLocationRecorder 는 WriteHeader 직전에 Location 을 상대화한다. statusRecorder 와
+// 같은 모양이다 — WriteHeader 를 가로채고, Write 의 암묵 200 을 같은 자리에서 처리하고,
+// Unwrap 을 낸다.
+//
+// ★ **Unwrap 이 없으면 SSE 가 죽는다.** /events 는 http.NewResponseController(w) 로 Flush 를
+// 찾는데(handlers_meta.go), 이 래퍼가 Unwrap 을 안 주면 그 컨트롤러가 Flush 를 못 찾아
+// 하트비트가 안 나간다 — statusRecorder 의 Unwrap 주석이 그 이유를 이미 적어 뒀다.
+//
+// ★ **statusRecorder 를 고쳐서 겸용하지 않는다.** 그것은 "상태코드와 바이트 수를 본다"는
+// 단일 책임이다. 여기에 Location 을 얹으면 책임이 둘이 되고, 한쪽만 필요한 자리(액세스
+// 로그)가 다른 쪽(Location 재작성)의 존재를 몰라도 되는 이유가 사라진다.
+type relativeLocationRecorder struct {
+	http.ResponseWriter
+	from  string // 이 요청의 원 경로 — judge.RelativeTo 의 from(mux 가 정규화하기 전 값)
+	wrote bool
+}
+
+func (rw *relativeLocationRecorder) WriteHeader(code int) {
+	if rw.wrote {
+		return
+	}
+	rw.wrote = true
+	// ★ "/" 로 시작하는 값만 상대화한다. RelativeTo 자신이 "//" 스킴 상대와 ".." 를
+	// 이미 "./" 로 접으므로, 여기서 가를 것은 "이미 상대인가" 하나뿐이다.
+	if loc := rw.Header().Get("Location"); strings.HasPrefix(loc, "/") {
+		rw.Header().Set("Location", judge.RelativeTo(rw.from, loc))
+	}
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *relativeLocationRecorder) Write(b []byte) (int, error) {
+	if !rw.wrote {
+		rw.WriteHeader(http.StatusOK)
+	}
+	return rw.ResponseWriter.Write(b)
+}
+
+// Unwrap 은 http.NewResponseController 가 Flush 를 찾아가게 한다.
+// 없으면 SSE 가 이 래퍼 뒤에서 버퍼링돼 하트비트가 안 나간다.
+func (rw *relativeLocationRecorder) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
 
 func toString(v any) string {
 	switch t := v.(type) {
