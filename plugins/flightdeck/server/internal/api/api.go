@@ -390,7 +390,7 @@ func (s *server) routes() *http.ServeMux {
 // screenWrite 가 idempotency **바깥**인 이유: 안쪽에 두면 키가 헤더로 올라가기 전에
 // 이미 400 이 나간 뒤다. accessLog 안쪽인 이유: 여기서 내는 403 도 로그에 남아야 한다.
 func (s *server) chain(h http.Handler) http.Handler {
-	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(h)))))))
+	return s.withRequestID(s.withRateLimit(s.withAuth(s.withAccessLog(s.withScreenWrite(s.withIdempotency(s.withRecover(s.withRelativeLocation(h))))))))
 }
 
 // ShutdownGrace 는 드레인이 인플라이트에 주는 시간이다.

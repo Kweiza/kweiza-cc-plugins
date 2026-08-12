@@ -269,6 +269,31 @@ http://…/; }` 처럼 `location` 에 뒤 슬래시가 없으면 `/dcp-dev-board
 `Host` 를 그대로 넘기는 nginx 설정 한 줄, 그리고 `location` 에 뒤 슬래시를 붙여 `//` 가
 업스트림에 안 닿게 하는 설정 한 줄.
 
+★ **2026-08-12 후속 — 닫혔다.** 후속 브랜치 `fd-login-redirect-escapes-proxy-prefix` 가
+이 축을 처방으로 막았다. 둘이 한 벌이다 — ①이 ②의 전제다.
+
+1. **`RelativeTo` 가 `from` 을 셈하기 전에 점 마디를 걷어낸다**(`internal/judge/relative.go`
+   의 `removeDotSegments`, RFC 3986 §5.2.4 `remove_dot_segments` 를 손으로 옮긴 것). 이유는
+   브라우저가 base URL 을 그 알고리즘으로 정규화한 **뒤** 상대 참조를 풀기 때문이다 — 안
+   걷어내면 `/actions/../` 같은 from 에서 깊이가 실제보다 크게 나와 접두 **밖**으로 나간다
+   (실측: `../../` → `/`, 접두 밖). `path.Clean` 을 안 쓴 이유는 그것이 빈 마디(`//`)까지
+   접어 `TestRelativeTo` 의 `{"/a//b", ...}` 를 깨뜨리기 때문이다 — RFC 알고리즘은 점 마디만
+   걷고 빈 마디는 안 건드린다.
+2. **`internal/api` 의 게이트 사슬에 `withRelativeLocation` 미들웨어를 더했다**(`chain` 의
+   가장 안쪽, `withRecover(h)` 의 `h` 자리). mux 가 내는 307 의 절대경로 `Location` 을
+   `judge.RelativeTo` 로 상대화한다. 이미 상대인 값(이 서버의 핸들러가 내는 `./`·`../`)은
+   `/` 로 시작하지 않으므로 안 건드린다. `http.NewResponseController` 가 `Flush` 를 찾도록
+   `Unwrap` 을 낸다 — 없으면 `/events` 의 SSE 하트비트가 이 래퍼 뒤에서 버퍼링돼 죽는다.
+
+시험은 `internal/api/relative_location_test.go` 의 `TestMuxRedirectLocationIsRelative`(위 표
+넷을 실제 서버에 보내 접두 안에 착지하는지 `ResolveReference` 로 잰다)와
+`TestOwnHandlerRelativeLocationIsUnchanged`(로그인 성공의 `Location` 이 여전히 `./?...` 인지
+— 없으면 미들웨어가 모든 리다이렉트를 조용히 `./` 로 뭉갤 수 있다). 반증(미들웨어를 `chain`
+에서 뺐다가 되돌림)으로 새 시험 넷이 정확히 빨개지는 것을 확인했다. `internal/judge` 의
+`TestRelativeTo`·`TestRelativeToLandsInsideProxyPrefix` 도 `/actions/../`·뒤 슬래시 보존 줄로
+넓혔다. 세부는
+`.superpowers/sdd/2026-08-12-proxy-prefix-redirect/followup-servemux-report.md` 참조.
+
 ## 12. 실행 중 드러난 인접 결함 — 루프백 면제가 프록시를 받는다
 
 7절 3층을 만들다 나왔다. **이 스펙의 축(리다이렉트가 어디에 착지하는가)이 아니라 인접 축

@@ -20,6 +20,14 @@ func TestRelativeTo(t *testing.T) {
 		{"/actions/reclaim/", "/", "../../"},
 		{"/api/v1/items/next", "/login", "../../../login"},
 		{"/a//b", "/login", "../../login"}, // 빈 마디도 해석이 한 마디로 센다
+		// mux 가 정규화 요청(`/actions/../` 같은)에 내는 307 의 Location 이 여기로 들어온다 —
+		// from 자체에 점 마디가 있다. 브라우저는 base 를 remove_dot_segments 로 정규화한
+		// **뒤** 상대 참조를 푸므로, from 도 그렇게 셈해야 한다.
+		{"/actions/../", "/", "./"}, // remove_dot_segments("/actions/../") == "/" 라 깊이 0
+		// 뒤 슬래시 보존 케이스 — remove_dot_segments("/actions/reclaim/../") 는 "/actions/"
+		// 다(path.Clean 이면 "/actions" 가 되어 깊이가 하나 어긋난다). 깊이 1이라
+		// "/actions/" 와 같은 "../login" 이어야 한다({"/actions/", "/login", "../login"} 과 동일).
+		{"/actions/reclaim/../", "/login", "../login"},
 		// 못 읽은 from 은 뿌리로 접는다 — 과하게 올라가면 접두 밖으로 나간다.
 		{"", "/login", "./login"},
 		{"*", "/login", "./login"},
@@ -52,6 +60,9 @@ func TestRelativeToLandsInsideProxyPrefix(t *testing.T) {
 		{"/actions/reclaim", "/?notice=reclaim", "/", "notice=reclaim"},
 		{"/actions/reclaim", "/login", "/login", ""},
 		{"/api/v1/items/next", "/login", "/login", ""},
+		// mux 의 307 이 실어 오는 점 마디 from — TestRelativeTo 의 같은 줄과 짝이다.
+		{"/actions/../", "/", "/", ""},
+		{"/actions/reclaim/../", "/login", "/login", ""},
 	}
 	for _, c := range cases {
 		base, err := url.Parse("http://fd.example" + prefix + c.from)
