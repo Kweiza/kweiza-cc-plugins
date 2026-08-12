@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,7 +35,13 @@ import (
 const LaneResource = "landing"
 
 // LandInput 은 줄에 서거나 내 자리를 다시 묻는 인자다.
-type LandInput struct{ Project, SessionID string }
+//
+// Resources 가 비면 기존 단일 랜딩 레인({LaneResource})으로 정규화된다 — 자원 집합을
+// 아직 안 보내는 호출자(API·MCP 표면, 옛 CLI)가 이 개편 이전과 같은 동작을 그대로 받는다.
+type LandInput struct {
+	Project, SessionID string
+	Resources          []string // 빈 값 = ["landing"]
+}
 
 // LandReportInput 은 레인을 쓰고 난 뒤의 보고다.
 type LandReportInput struct {
@@ -50,12 +57,27 @@ type LandLeaveInput struct{ Project, SessionID, Detail string }
 //
 // ★ respond.go 가 이 타입을 그대로 직렬화하므로 json 태그가 REST 계약이자
 // CLI 파싱 대상이다. 태그가 어긋나면 CLI 가 오류 없이 0값을 찍는다.
+//
+// Resources·Blockers 는 자원 집합의 all-or-nothing 취득(Task 3)이 더한 필드다.
+// 기존 Position·Holder 는 하위 호환을 위해 유지한다 — Position 은 **가장 뒤인 자원
+// 기준**(최악 순번), Holder 는 **첫 blocker 의 점유자**다(렌더·CLI 가 아직 이 둘만 본다).
 type LandResult struct {
-	State    string      `json:"state"` // turn | waiting | released | left | reclaimed
-	RowID    int64       `json:"row_id"`
-	Position int         `json:"position"`         // 1이면 맨 앞. waiting 일 때만 의미 있다
-	Reason   string      `json:"reason,omitempty"` // reclaimed 일 때 회수 사유
-	Holder   *LaneHolder `json:"holder,omitempty"` // waiting 일 때 앞사람
+	State     string        `json:"state"` // turn | waiting | released | left | reclaimed
+	RowID     int64         `json:"row_id"`
+	Position  int           `json:"position"`            // 1이면 맨 앞. waiting 일 때만 의미 있다(최악 순번)
+	Reason    string        `json:"reason,omitempty"`    // reclaimed 일 때 회수 사유
+	Holder    *LaneHolder   `json:"holder,omitempty"`    // waiting 일 때 앞사람(blockers[0] 의 점유자와 같은 포인터)
+	Resources []string      `json:"resources,omitempty"` // 이 land 가 선 자원 집합(정렬)
+	Blockers  []LaneBlocker `json:"blockers,omitempty"`  // waiting 일 때 나를 막는 자원들
+}
+
+// LaneBlocker 는 waiting 일 때 나를 막는 자원 하나다.
+type LaneBlocker struct {
+	Resource       string      `json:"resource"`
+	Position       int         `json:"position"`               // 그 자원 줄에서 내 순번(1-based). 0 = 내 행이 그 줄에 안 보인다(어긋남)
+	Holder         *LaneHolder `json:"holder,omitempty"`       // 그 자원을 쥔 세션
+	FrontRowID     int64       `json:"front_row_id,omitempty"` // 점유는 없지만 내 앞인 줄 행
+	FrontSessionID string      `json:"front_session_id,omitempty"`
 }
 
 // LaneHolder 는 지금 레인을 쥔 세션이다.
@@ -103,14 +125,21 @@ type LaneReleaseResult struct {
 // 트랜잭션은 커밋한다. 여기서 롤백하면 줄 행과 순번이 함께 사라져 큐에 영원히
 // 한 명만 남고 "순서 큐"라는 이름이 거짓이 된다.
 //
-// ★ 순서 집행 지점은 front.ID == mine.ID 비교 **하나**다. 이 비교가 없으면 순번은
-// 표시용이 되고 아무것도 집행하지 않는다.
+// ★ (Task 3 정정) 순서 집행 지점은 이제 자원마다 하나씩이다 — 자원이 안 쥐어져 있으면
+// front.ID == mine.ID 비교가 순서를 집행하고(아니면 대기), 자원이 남에게 쥐어져 있으면
+// 그 사실 자체가 대기를 정한다(그때는 front 비교를 안 한다 — 맨 앞이든 아니든 남이 쥐고
+// 있으면 못 잡는 것은 같다). 옛 문장 "front.ID == mine.ID 비교 하나"는 단일 레인 시절의
+// 사실이었고, all-or-nothing 이 되며 자원마다 갈렸다.
 //
 // 차례를 미는 주체는 **다음 호출**이다(지연 부여). 서버가 남의 이름으로 자원을 잡지 않는다.
+// 자원 전체를 한 트랜잭션에서 all-or-nothing 으로 판정·취득한다(부분 취득은 안 한다 —
+// 부분 취득은 그 자체가 데드락의 재료다: 서로 다른 자원 하나씩을 쥔 두 세션이 서로의
+// 나머지를 기다리면 어느 쪽도 안 풀린다).
 func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	resources := normalizeResources(in.Resources)
 	// ★ 시각을 **한 번만** 잡아 줄 서기와 취득 둘에 같은 값을 넘긴다.
 	//   ① 저장층이 각자 실시계를 찍으면 화면(주입된 시계로 now 를 잡는다)과 갈려
 	//      대기·획득 두 경과가 통째로 거짓이 된다 — 이 함수가 그 시계의 유일한 출처다.
@@ -121,64 +150,108 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		// 시도를 **먼저** 예약한다 — 롤백돼도 남는다. 끝에 두면 성공한 것만 세게 되고,
 		// 그러면 §10 의 "세션당 쓰기 호출 수"가 대기 폴링의 비용을 못 본다.
-		t.LogEvent("lane.land", in.Project, in.SessionID, map[string]any{"mode": "acquire"})
+		t.LogEvent("lane.land", in.Project, in.SessionID,
+			map[string]any{"mode": "acquire", "resources": len(resources)})
 
-		// []string{LaneResource} — 자원 집합 판정(Task 3 이 다룰 겹침·차례 로직)은 아직
-		// 옛 동작(단일 랜딩 레인)을 그대로 보존한다. 여기서 개편하지 않는다.
-		mine, err := t.EnqueueLanding(in.Project, in.SessionID, []string{LaneResource}, now)
+		mine, err := t.EnqueueLanding(in.Project, in.SessionID, resources, now)
 		if err != nil {
 			return err
 		}
-		out = LandResult{State: "waiting", RowID: mine.ID}
-
-		front, err := t.FrontLandingRow(in.Project)
-		if err != nil {
-			return err // 방금 넣었으므로 ErrNotFound 는 불가능하다
+		if !equalStringSlices(mine.Resources, resources) {
+			// 재진입인데 집합이 다르다 — store 는 기존 행을 그대로 냈고(재진입 안전),
+			// 거절은 여기서 한다. 조용히 기존 집합으로 진행하면 세션은 요청한 자원을
+			// 기다린다고 믿는데 실제로는 다른 줄에 서 있다(재진입 결함 그 자체다).
+			return &RefusedError{What: "land",
+				Reason: fmt.Sprintf("이미 자원 %s 로 줄에 서 있다(행 %d) — 요청한 %s 와 다르다",
+					strings.Join(mine.Resources, " "), mine.ID, strings.Join(resources, " ")),
+				Guidance: "집합을 바꾸려면 land(leave:\"사유\") 로 빠진 뒤 다시 서라 — 순번은 잃는다(맨 뒤)."}
 		}
-		if front.ID == mine.ID {
-			_, aerr := t.AcquireResource(in.Project, LaneResource, store.Holder{SessionID: in.SessionID}, now)
-			if aerr == nil {
-				out.State = "turn"
-				out.Position = 1
+		out = LandResult{State: "waiting", RowID: mine.ID, Resources: mine.Resources}
+
+		// all-or-nothing 판정: 모든 자원에서 (내 행이 최선두) 그리고 (빈 레인이거나 내가 점유자).
+		// tx 가 _txlock=immediate 로 직렬화되므로 판정과 취득 사이에 남이 못 끼어든다.
+		grantable := true
+		var blockers []LaneBlocker
+		heldByMe := map[string]bool{}
+		for _, r := range mine.Resources {
+			front, ferr := t.FrontLandingRowFor(in.Project, r)
+			if ferr != nil {
+				return ferr // 방금 넣었으므로 ErrNotFound 는 불가능하다
+			}
+			held, herr := t.HeldBy(in.Project, r)
+			switch {
+			case herr == nil && held.SessionID == in.SessionID:
+				heldByMe[r] = true // 재진입 — 이미 내 것이다. front 와 무관하게 통과다
+			case herr == nil:
+				// 남이 쥐었다(정상 대기 또는 "맨 앞인데 남이 쥔" 어긋남 — 어느 쪽이든
+				// 취득 불가라는 사실은 같고, 어긋남을 푸는 것은 사람의 회수다).
+				grantable = false
+				blockers = append(blockers, LaneBlocker{Resource: r,
+					Holder: &LaneHolder{SessionID: held.SessionID, AcquiredAt: held.AcquiredAt}})
+			case errors.Is(herr, store.ErrNotFound):
+				if front.ID != mine.ID {
+					grantable = false
+					blockers = append(blockers, LaneBlocker{Resource: r,
+						FrontRowID: front.ID, FrontSessionID: front.SessionID})
+				}
+			default:
+				return herr
+			}
+		}
+
+		if grantable {
+			for _, r := range mine.Resources {
+				if heldByMe[r] {
+					continue // 재확인이지 부여가 아니다 — grant 를 다시 세지 않는 기존 규율
+				}
+				if _, aerr := t.AcquireResource(in.Project, r, store.Holder{SessionID: in.SessionID}, now); aerr != nil {
+					return aerr // 판정 직후라 ResourceHeldError 는 어긋남뿐이다 — 그대로 올려 롤백한다
+				}
+			}
+			out.State = "turn"
+			out.Position = 1
+			if len(heldByMe) < len(mine.Resources) {
 				t.LogEvent("lane.grant", in.Project, in.SessionID,
-					map[string]any{"row": mine.ID})
-				return nil
+					map[string]any{"row": mine.ID, "resources": len(mine.Resources)})
 			}
-			var held *store.ResourceHeldError
-			if !errors.As(aerr, &held) {
-				return aerr
-			}
-			if held.Holder.SessionID == in.SessionID {
-				// 이미 내가 쥐고 있다 = 재진입이다. **저장층 둘의 재진입 성질이 반대라
-				// 그것을 잇는 자리가 여기밖에 없다**: EnqueueLanding 은 재진입 안전이라
-				// 기존 행을 그대로 내주는데(store/landing.go), AcquireResource 는 같은
-				// 점유자여도 무조건 INSERT 하고 부분 유니크 위반을 ResourceHeldError 로
-				// 바꾼다(store/resource.go). 안 이으면 "이미 서 있으면 내 자리를 다시 낸다"는
-				// 이 함수의 계약이 점유자에게 {waiting, position:1, holder:자기 자신} 을
-				// 답하고, 그 세션은 **자기 자신을 기다리며** report·leave 를 안 불러
-				// 레인이 교착한다. 표시 오류가 아니라 교착이다.
-				//
-				// grant 이벤트는 다시 안 남긴다 — 부여가 아니라 재확인이고, 여기서 세면
-				// 대기 폴링 횟수가 부여 횟수로 둔갑한다.
-				out.State = "turn"
-				out.Position = 1
-				return nil
-			}
-			// 맨 앞인데 **남이** 쥐고 있다 = 두 표가 어긋난 상태다. 오류로 올리지 않고
-			// 점유자를 그대로 실어 보낸다 — 그 상태를 푸는 것은 사람의 회수다.
+			return nil
 		}
-		pos, holder, err := s.lanePosition(t, in.Project, mine.ID)
-		if err != nil {
-			return err
+
+		// 자원별 순번을 채운다. Position(대표값)은 최악 순번이다.
+		for i := range blockers {
+			pos, perr := s.resourcePosition(t, in.Project, blockers[i].Resource, mine.ID)
+			if perr != nil {
+				return perr
+			}
+			blockers[i].Position = pos
+			if pos > out.Position {
+				out.Position = pos
+			}
 		}
-		out.Position, out.Holder = pos, holder
+		out.Blockers = blockers
+		if len(blockers) > 0 && blockers[0].Holder != nil {
+			// ★ 포인터를 공유한다(사본이 아니다) — 아래 커밋 후 신호 채움이 Blockers 를
+			// 훑으며 이 값을 채우면 out.Holder 도 **같은 메모리**를 가리키므로 자동으로
+			// 채워진다. 대표 필드를 사본으로 두면 여기서 채운 값과 별도로 한 번 더
+			// 신호를 물어야 하고(중복 질의), 두 값이 갈릴 자리가 생긴다.
+			out.Holder = blockers[0].Holder
+		}
 		return nil
 	})
 	// ★ 앞사람의 마지막 신호는 **커밋 뒤에** 읽는다. 트랜잭션 안에서 다른 커넥션으로 읽으면
 	//   쓰기 잠금을 쥔 채 커넥션 풀(상한 8)을 기다리는 자리가 생기고, 그 대기 동안 다른 land
 	//   전부가 busy_timeout 만큼 선다. 이 값은 사람이 나이를 재는 표시용이라 커밋 직후 시점으로 충분하다.
-	if err == nil && out.Holder != nil {
-		out.Holder.LastSignalAt, _ = s.lastSignal(ctx, out.Holder.SessionID)
+	//
+	// ★ Blockers 전체를 훑어 채운다(Holder 하나가 아니다) — waiting 은 자원마다 다른
+	//   점유자를 가질 수 있다. out.Holder 는 blockers[0].Holder 와 **같은 포인터**이므로
+	//   이 루프의 첫 반복이 이미 out.Holder 도 채운다. 그래서 out.Holder 를 따로 또
+	//   채우는 코드는 없다 — 있었다면 그 자체가 중복 질의였을 것이다.
+	if err == nil {
+		for i := range out.Blockers {
+			if h := out.Blockers[i].Holder; h != nil {
+				h.LastSignalAt, _ = s.lastSignal(ctx, h.SessionID)
+			}
+		}
 	}
 	if err != nil {
 		s.logFail(ctx, "lane.land", in.Project, in.SessionID, err, failAbout{})
@@ -626,40 +699,72 @@ func (s *Service) ReleaseLaneRow(ctx context.Context, project string, rowID int6
 // 헬퍼
 // ─────────────────────────────────────────────────────────────────────────────
 
-// lanePosition 은 줄에서 내 자리(1-based)와 지금 점유자를 낸다.
-//
-// ★ 트랜잭션 안에서 센다. 밖에서 읽으면 방금 넣은 내 행이 아직 커밋 전이라 안 보이고,
-// 그러면 자기 자신이 빠진 줄에서 순번을 세게 된다.
+// resourcePosition 은 자원 하나의 줄에서 내 행의 순번(1-based)이다. 트랜잭션 안에서 센다
+// (밖에서 읽으면 방금 넣은 내 행이 안 보인다 — 옛 lanePosition 의 규율 그대로다).
 //
 // 내 행을 못 찾으면 0을 낸다 — 없는 자리를 1로 채우면 "맨 앞"이라는 거짓이 된다.
-//
-// ★ 점유자의 LastSignalAt 은 **여기서 안 채운다.** 신호 표는 이 트랜잭션 밖에 있어
-// 다른 커넥션으로 읽어야 하는데, 쓰기 잠금을 쥔 채 커넥션을 기다리면 그 대기가
-// 다른 land 전부를 세운다. 호출부가 커밋 뒤에 채운다.
-func (s *Service) lanePosition(t *store.Tx, project string, rowID int64) (int, *LaneHolder, error) {
+func (s *Service) resourcePosition(t *store.Tx, project, resource string, rowID int64) (int, error) {
 	rows, err := t.ListLandingQueue(project)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	pos := 0
-	for i, r := range rows {
+	for _, r := range rows {
+		if !containsString(r.Resources, resource) {
+			continue
+		}
+		pos++
 		if r.ID == rowID {
-			pos = i + 1
-			break
+			return pos, nil
 		}
 	}
+	return 0, nil // 내 행이 그 줄에 안 보인다 — 없는 자리를 1로 채우면 "맨 앞"이라는 거짓이 된다
+}
 
-	hold, herr := t.HeldBy(project, LaneResource)
-	switch {
-	case herr == nil:
-		return pos, &LaneHolder{SessionID: hold.SessionID, AcquiredAt: hold.AcquiredAt}, nil
-	case errors.Is(herr, store.ErrNotFound):
-		// 아무도 안 쥐었는데 내 차례도 아니다 = 앞사람이 아직 land 를 안 불렀다.
-		// 점유자를 지어내지 않는다.
-		return pos, nil, nil
-	default:
-		return 0, nil, herr
+// normalizeResources 는 빈 집합을 {landing} 으로 접고 정렬·중복 제거한다. 순수 함수다.
+func normalizeResources(in []string) []string {
+	if len(in) == 0 {
+		return []string{LaneResource}
 	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, r := range in {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		return []string{LaneResource}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// equalStringSlices 는 두 문자열 슬라이스가 같은 순서로 같은 값을 담았는지 본다. 순수 함수다.
+// 양쪽 다 store 가 정렬해 낸 것이라(normalizeResources·EnqueueLanding) 순서 비교로 충분하다.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsString 은 슬라이스에 값이 있는지 본다. 순수 함수다.
+func containsString(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // laneNotMine 은 "레인이 내 것이 아니다"를 응답으로 옮긴다. 줄 행은 건드리지 않는다.
