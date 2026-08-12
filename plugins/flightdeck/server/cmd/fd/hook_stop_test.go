@@ -180,3 +180,69 @@ func TestHookStopStaysSilentWhenPayloadFailsToParse(t *testing.T) {
 			"파싱 실패가 재진입 가드를 0값(false)으로 만들었다:\n%s", out)
 	}
 }
+
+// 처방 응답에 lifecycle 이 실려 오면 decision:block 이 나간다. 처방 문구는 reason 꼬리에 붙는다.
+func TestHookStopBlocksOnLifecycleGate(t *testing.T) {
+	srv := fakeServer(t, map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0,` +
+			`"lifecycle":{"stage":"land","reason":"LANE-GATE-REASON"}}`,
+	})
+	defer srv.Close()
+
+	out := runHookForTest(t, srv.URL, "stop", `{"session_id":"cc-1","cwd":"."}`)
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Fatalf("lifecycle 이 있는데 decision:block 이 안 나왔다: %q", out)
+	}
+	if !strings.Contains(out, "LANE-GATE-REASON") {
+		t.Fatalf("라이프사이클 사유가 없다: %q", out)
+	}
+	if !strings.Contains(out, "XYZ-MARK") {
+		t.Fatalf("block 텍스트에 처방 본문이 없다 — 꼬리에 안 붙었다: %q", out)
+	}
+	if strings.Contains(out, "hookSpecificOutput") {
+		t.Fatalf("block 턴에서 additionalContext 도 같이 나갔다: %q", out)
+	}
+}
+
+// stop_hook_active=true 면 lifecycle 이 있어도 **아무것도** 안 나간다 — 이 가드가
+// 루프 방벽의 전부다(억제표는 방벽이 아니다 — hook.go:525-533 이 명시로 기각했다).
+func TestHookStopNeverBlocksItsOwnTurn(t *testing.T) {
+	srv := fakeServer(t, map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0,` +
+			`"lifecycle":{"stage":"land","reason":"LANE-GATE-REASON"}}`,
+	})
+	defer srv.Close()
+
+	out := runHookForTest(t, srv.URL, "stop",
+		`{"session_id":"cc-1","cwd":".","stop_hook_active":true}`)
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("재진입인데 lifecycle 로 뭔가 냈다 — 이게 무한 루프의 씨앗이다: %q", out)
+	}
+}
+
+// 페이로드 해석 실패면 block 도 additionalContext 도 없다(fail-close 유지).
+func TestHookStopStaysSilentOnParseFailure(t *testing.T) {
+	out := runHookForTest(t, "http://127.0.0.1:1", "stop", "이건 JSON 이 아니다")
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("페이로드 파싱이 실패했는데 뭔가 냈다: %q", out)
+	}
+}
+
+// lifecycle 이 없으면 기존 그대로 additionalContext 처방만 나간다(회귀 방지).
+func TestHookStopStillEmitsPrescriptionsWithoutGate(t *testing.T) {
+	srv := fakeServer(t, map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0}`,
+	})
+	defer srv.Close()
+
+	out := runHookForTest(t, srv.URL, "stop", `{"session_id":"cc-1","cwd":"."}`)
+	if strings.Contains(out, `"decision":"block"`) {
+		t.Fatalf("lifecycle 이 없는데 block 이 나갔다: %q", out)
+	}
+	if !strings.Contains(out, "hookSpecificOutput") {
+		t.Fatalf("lifecycle 이 없는데 기존 additionalContext 도 안 나갔다: %q", out)
+	}
+	if !strings.Contains(out, "XYZ-MARK") {
+		t.Fatalf("처방 본문이 없다: %q", out)
+	}
+}

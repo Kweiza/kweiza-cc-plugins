@@ -113,6 +113,26 @@ func emitContext(out io.Writer, event, text string) {
 	fmt.Fprintln(out, string(buf))
 }
 
+// emitBlock 은 Stop 훅의 decision:block 이다 — 턴을 끝내려는 모델을 reason 과 함께 되살린다.
+//
+// ★ 무한루프 방벽은 이 함수가 아니라 **호출자의 stop_hook_active 가드**다. block 이 만든
+// 턴이 끝나면 Stop 이 stop_hook_active=true 로 다시 오고, hookStop 은 그 자리에서 반환한다 —
+// 그래서 block 은 사람이 몰던 턴의 끝마다 최대 한 번이다. 2026-08-04 의 additionalContext
+// 무한루프(hook.go 위 ★★ 실측)와 같은 사슬이고 같은 가드가 끊는다.
+// (세션×키) 억제표를 방벽으로 쓰지 않는 이유는 ★★★ 문단이 이미 적었다 — 그것은
+// 우연한 edge-triggering 이라 방벽이 못 되고, 여기서는 지속(매 프롬프트 한 번)이 목적이라
+// 애초에 억제가 반대 방향이다.
+func emitBlock(out io.Writer, reason string) {
+	buf, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: reason})
+	if err != nil {
+		return // 직렬화가 실패해도 세션을 막지 않는다. 사유는 호출부가 로그로 남긴다
+	}
+	fmt.Fprintln(out, string(buf))
+}
+
 // runHook 은 훅 하나를 처리한다. **항상 0 을 돌려준다.**
 func (a *App) runHook(ctx context.Context, event string, stdin io.Reader, out io.Writer) int {
 	raw, rerr := io.ReadAll(io.LimitReader(stdin, 4<<20))
@@ -570,14 +590,28 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Wr
 		return
 	}
 	var got struct {
-		Shown  []PrescriptionLine `json:"shown"`
-		Folded int                `json:"folded"`
+		Shown     []PrescriptionLine `json:"shown"`
+		Folded    int                `json:"folded"`
+		Lifecycle *struct {
+			Stage  string `json:"stage"`
+			Reason string `json:"reason"`
+		} `json:"lifecycle"`
 	}
 	if err := json.Unmarshal(wr.Body, &got); err != nil {
 		a.log.Warn("stop: 처방 응답 해석 실패", "error", err.Error())
 		return
 	}
-	if text := RenderPrescriptions(got.Shown, got.Folded); text != "" {
+
+	text := RenderPrescriptions(got.Shown, got.Folded)
+	if got.Lifecycle != nil && strings.TrimSpace(got.Lifecycle.Reason) != "" {
+		reason := got.Lifecycle.Reason
+		if text != "" {
+			reason += "\n\n" + text // 처방을 잃지 않는다 — block 턴에서 additionalContext 는 안 나간다
+		}
+		emitBlock(out, reason)
+		return
+	}
+	if text != "" {
 		emitContext(out, "Stop", text)
 	}
 }
