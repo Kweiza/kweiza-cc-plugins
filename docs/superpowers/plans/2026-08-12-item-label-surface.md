@@ -62,7 +62,7 @@ DESIGN 의 REST ` ```routes ` 표는 그쪽이 "다른 자리라 둘 다 선다"
 | `cmd/fd/outbox.go` | `IdempotencyStable` 갈래 |
 | `cmd/fd/mcpbackend.go` | `SetLabels` 구현(파일 끝) |
 | `internal/store/item_body_immutable_test.go` | **머리 주석만** |
-| `plugins/flightdeck/DESIGN.md` | §5 티클러 절 · §6 도구 표·제목 · §6 routes 표 · §11 표 |
+| `plugins/flightdeck/DESIGN.md` | §8 프로젝트 등록 절의 티클러 문단 · §6 도구 표·제목 · §6 routes 표 · §11 표 |
 
 ---
 
@@ -76,7 +76,7 @@ DESIGN 의 REST ` ```routes ` 표는 그쪽이 "다른 자리라 둘 다 선다"
 
 **Interfaces:**
 - Consumes: 없음 (기존 `bundleAround`·`Candidate`·`IsTickler`)
-- Produces: `judge.Bundle.StarveOldest` 의 의미가 "선두가 티클러가 아니면 선두의 생성 시각, 티클러면 zero" 로 확정된다. Task 8 의 DESIGN §5 문장이 이 의미를 적는다.
+- Produces: `judge.Bundle.StarveOldest` 의 의미가 "선두가 티클러가 아니면 선두의 생성 시각, 티클러면 zero" 로 확정된다. Task 8 의 DESIGN §8(프로젝트 등록 절의 티클러 문단) 문장이 이 의미를 적는다.
 
 - [ ] **Step 1: 실패하는 시험을 쓴다**
 
@@ -1666,8 +1666,14 @@ EOF
 
 **시험이 안 깨지는 쪽**이라 가장 위험하다. 주석과 설계가 조용히 거짓이 된 채 초록으로 남는다.
 
+★ 이 절의 "DESIGN §5 티클러 절" 표기는 실행 리뷰(2026-08-12)에서 **§8(프로젝트 등록,
+`.flightdeck.yaml` 스키마)의 오기**로 밝혀져 아래 세 자리를 §8 로 고쳤다. 이 계획 문서
+자신의 §5(위 "묶음 전파")와 DESIGN.md 의 §5(파생)가 이름이 같은 다른 좌표계인데, 이
+계획을 쓸 때 그 둘을 섞어 적었다 — 실행 자리(bundleAround 등)는 처음부터 맞게 짚었지만
+라벨만 잘못 붙었다.
+
 **Files:**
-- Modify: `plugins/flightdeck/DESIGN.md` (§5 티클러 절 · §6 도구 표·제목 · §11 표)
+- Modify: `plugins/flightdeck/DESIGN.md` (§8 프로젝트 등록 절의 티클러 문단 · §6 도구 표·제목 · §11 표)
 - Modify: `plugins/flightdeck/server/internal/store/item_body_immutable_test.go` (머리 주석만)
 - Modify: `plugins/flightdeck/server/internal/judge/bundle.go:192-197` (`Bundle.StarveOldest` 필드 doc 주석만 — Task 1 리뷰 이월)
 
@@ -1737,7 +1743,7 @@ go test ./internal/judge/
 나르는 규율(티클러의 뜻·선두 규칙)은 도구 설명이 아니라 **응답**(`RenderLabel`)에만 있다.
 ```
 
-- [ ] **Step 2: DESIGN §5 티클러 절 — 선두 규칙을 적는다**
+- [ ] **Step 2: DESIGN §8 프로젝트 등록 절의 티클러 문단 — 선두 규칙을 적는다**
 
 "판정의 정본은 `judge.IsTickler`(…)다." 문장 **뒤**에 문단 하나를 더한다:
 

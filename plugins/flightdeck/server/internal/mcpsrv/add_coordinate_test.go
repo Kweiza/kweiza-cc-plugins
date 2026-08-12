@@ -15,7 +15,7 @@ import (
 //
 // 처음에는 MCP 에 move 도구를 더하는 쪽으로 갔다. **설계 §6 이 그 판정을 뒤집었다** —
 // "도구 수를 예산 안에 묶는 이유는 컨텍스트다"가 근거와 함께 적힌 원칙이고,
-// 시험 둘(TestToolTableIsSeven · TestInitializeAndToolsListRoundTrip)이 그것을 강제한다.
+// 시험 둘(TestToolTableIsEight · TestInitializeAndToolsListRoundTrip)이 그것을 강제한다.
 // 그리고 같은 절이 이 부류의 처방을 이미 정해 뒀다:
 // **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."**
 //
@@ -65,10 +65,10 @@ func TestAddResponseNamesTheProjectAndTheWayBack(t *testing.T) {
 }
 
 // ★ 이 항목은 move 를 도구로 더하지 않고 응답 문구로 푸는 쪽으로 판정했다 — 그 판정이
-// 여기서 못박는 전부다. 도구 **개수**의 정본은 protocol_test.go 의 TestToolTableIsSeven
+// 여기서 못박는 전부다. 도구 **개수**의 정본은 protocol_test.go 의 TestToolTableIsEight
 // 하나여야 한다(정본이 둘이면 하나만 고쳐진 날 조용히 갈린다) — 그래서 개수는 여기서 안 잰다.
 // ★ 다만 그 "하나"는 아직 의도지 사실이 아니다 — 지금 개수를 실제로 세는 시험은 셋이다:
-// TestToolTableIsSeven · TestInitializeAndToolsListRoundTrip · TestPickGainsItemIDsWithoutGrowingToolCount.
+// TestToolTableIsEight · TestInitializeAndToolsListRoundTrip · TestPickGainsItemIDsWithoutGrowingToolCount.
 // 여기서 안 재는 판정은 그대로 옳지만, 넷째를 만들지 않는 것만으로 "정본 하나"가 되지는 않는다.
 func TestFixingMisregistrationDidNotGrowTheToolTable(t *testing.T) {
 	for _, n := range ToolNames() {

@@ -692,7 +692,7 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 **`Stop` 의 "발화 5조건"은 `judge.Prescribe` 가 부르는 생성기 다섯이다** —
 `lane-turn` · `overlap` · `outside` · `unclaimed` · `silent`(`judge/prescribe.go` 의 상수 다섯).
 넷에서 다섯이 된 것은 랜딩 레인의 **차례 통지**(`lane-turn`)가 들어오면서다.
-★ **이 수를 잠그는 시험은 없다.** 도구 수(`mcpsrv/protocol_test.go` 의 `TestToolTableIsSeven`)나
+★ **이 수를 잠그는 시험은 없다.** 도구 수(`mcpsrv/protocol_test.go` 의 `TestToolTableIsEight`)나
 테이블 수(`store/schema_table_count_test.go` 의 `TestDeclaredTablesMatchDesign`)와 달리,
 여섯째 조건을 더하는 사람에게 빨간불이 날 자리가 한 군데도 없다 — 그래서 이 숫자는
 넷에서 다섯으로 갈 때 그랬듯 다음에도 조용히 표류할 수 있다.
