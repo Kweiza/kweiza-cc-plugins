@@ -8,6 +8,7 @@ Personal Claude Code plugins marketplace.
 /plugin marketplace add kweiza/kweiza-cc-plugins
 /plugin install grafik-bar@kweiza-cc-plugins
 /plugin install session-handoff@kweiza-cc-plugins
+/plugin install flightdeck@kweiza-cc-plugins
 ```
 
 ## Plugins
@@ -28,3 +29,26 @@ Session handoff — save progress to a durable file under `.claude/handoffs/`, p
 |-------|-------------|
 | `/session-handoff` | Wrap up session, save context to a handoff file + memory, write next-session prompt |
 | `/session-resume` | Reload a saved handoff to continue prior work — `list`, or pass a date/keyword to pick which one (default: most recent) |
+
+### flightdeck
+
+Coordination layer for parallel Claude Code sessions. One self-hosted server (Docker); many sessions, across machines and repos, register with it.
+
+Run ten sessions on one product and they have no way to talk to each other, so each one *guesses* what the others picked up. When the guess is wrong, a session takes over work another session is already doing. flightdeck removes the guess — who is alive, which paths they touch, what they claimed, what has landed are all **derived from git and the database**, never hand-copied.
+
+- **A queue with claims, not locks.** `pick` claims an item; the item id becomes the branch name and the worktree path. Nothing is held exclusively except the one thing that must be.
+- **Path overlap, before the merge.** A `PostToolUse` hook reports uncommitted footprints, so "we're both editing that file" surfaces while it is still cheap.
+- **A landing lane.** A serialized queue in front of the merge — `fd land` exits non-zero unless it is your turn, so `fd land && <your merge command>` is a correct one-liner.
+- **Judgments.** The one asset that cannot be derived: why you did it, what you rejected, what you deliberately did not do. They travel with the item to whoever picks it up next.
+- **A read-only board** at `localhost:7420`, plus a `SessionStart` hook that injects the same board into every new session — including a banner when the server is unreachable, so no agent assumes coordination exists when it doesn't.
+
+| Skill | Description |
+|-------|-------------|
+| `/fd-setup` | Set up this machine — measure state, decide server vs. client, install and start only what's missing |
+| `/fd-pickup` | Start a session: board → recommendation → claim → read the judgments linked to that item |
+| `/fd-handoff` | Wrap up: judgment + followups + close item + release resources, in one call and one transaction |
+| `/fd-update` | Bring server, plugin, and DB up to date |
+
+Eight MCP tools (`board` `pick` `note` `add` `finish` `alloc` `land` `label`) and a `fd` CLI expose the same operations to the agent and to you. Requires Docker (or Go) for the server.
+
+Guide: [`plugins/flightdeck/README.md`](plugins/flightdeck/README.md) · design of record: [`plugins/flightdeck/DESIGN.md`](plugins/flightdeck/DESIGN.md)
