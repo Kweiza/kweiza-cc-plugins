@@ -1,12 +1,15 @@
+**English** | [한국어](README.ko.md)
+
 # flightdeck
 
-병렬 Claude Code 세션의 조정 계층. 서버 하나에 여러 프로젝트·여러 세션이 붙는다.
+A coordination layer for parallel Claude Code sessions. One server; many projects, many sessions.
 
-세션끼리 대화할 수단이 없어 "저쪽이 뭘 집었나"를 추측하게 되고, 그 추측이 틀리면
-남의 작업을 통째로 집는 사고가 난다. flightdeck 은 그 추측을 없앤다 —
-누가 살아 있나 · 어느 경로를 만지나 · 무엇을 집었나를 **git 과 DB 에서 파생해서** 낸다.
+Sessions have no way to talk to each other, so each one *guesses* what the others picked up — and
+when the guess is wrong, one session takes over work another session is already doing. flightdeck
+removes the guess: who is alive, which paths they touch, what they claimed are all
+**derived from git and the database**.
 
-새 세션을 열면 아무것도 안 쳐도 이것이 먼저 뜬다.
+Open a new session and this appears before you type anything:
 
 ```
 보드 · kweiza-cc-plugins · 2026-08-13 06:40 UTC · 파생 git@06:40:08 최신
@@ -20,82 +23,94 @@
 랜딩 레인 0건(질의는 돌았다)
 ```
 
-설계 정본은 [`DESIGN.md`](DESIGN.md) 다. 여기 없는 것은 만들지 않는다.
+> **The tool speaks Korean.** Every runtime surface — the board, prescriptions, refusal messages,
+> `fd doctor` — is Korean, and this README quotes it verbatim rather than translating it, so that
+> what you read here is what you will actually see. Each quote is explained in English right below it.
+> The document of record is [`DESIGN.md`](DESIGN.md), also Korean.
+>
+> **Korean is the source of truth for this documentation.** [`README.ko.md`](README.ko.md) is edited
+> first and this file follows. If the two disagree, the Korean one is right.
+
+Nothing exists here that is not in [`DESIGN.md`](DESIGN.md).
 
 ---
 
-## 목차
+## Contents
 
-- [왜 필요한가](#왜-필요한가)
-- [병렬 세션은 이렇게 굴러간다](#병렬-세션은-이렇게-굴러간다) ← 먼저 읽을 절
-- [5분 설치](#5분-설치)
-- [쓰는 법](#쓰는-법)
-- [실제로 이만큼 돌았다](#실제로-이만큼-돌았다)
-- [서버가 죽으면](#서버가-죽으면-l1)
-- [뭔가 안 될 때](#뭔가-안-될-때)
-- [설계 원칙 셋](#설계-원칙-셋)
+- [Why this exists](#why-this-exists)
+- [How parallel sessions actually run](#how-parallel-sessions-actually-run) ← read this first
+- [Install in 5 minutes](#install-in-5-minutes)
+- [Using it](#using-it)
+- [How much it actually ran](#how-much-it-actually-ran)
+- [When the server dies](#when-the-server-dies-l1)
+- [When something breaks](#when-something-breaks)
+- [Three design principles](#three-design-principles)
 
 ---
 
-## 왜 필요한가
+## Why this exists
 
-한 사람이 Claude Code 세션을 10개 넘게 병렬로 돌려 한 제품을 개발하면, 세션끼리 대화할
-수단이 없어 "저쪽이 뭘 집었나"를 추측하게 된다. 그 추측이 틀리면 남의 작업을 통째로 집는
-사고가 난다.
+When one person runs more than ten Claude Code sessions in parallel on a single product, the
+sessions cannot talk to each other, so each one guesses what the others picked up. When that guess
+is wrong, a session takes over another session's work wholesale.
 
-흔한 처방은 레포마다 셸 스크립트 네 벌(게시판·큐·핸드오프·대시보드)과 배타 락 다섯 종이다.
-그 구조를 8축으로 실측했더니 병목이 이렇게 나왔다 — **세션 수 N 에 대해 악화하는 순서다.**
+The common remedy is four shell scripts per repo (board, queue, handoff, dashboard) plus five kinds
+of exclusive lock. Measuring that structure along 8 axes produced this — **ordered by how badly each
+degrades as the session count N grows.**
 
-| # | 병목 | 무엇이 문제였나 |
+| # | Bottleneck | What was actually wrong |
 |---|---|---|
-| 1 | 대시보드 | 조정 산출물 중 유일하게 공유되는 것이라 전 세션이 2회씩 편집한다(수요 = 2N). 배타 단위가 카드 한 장이 아니라 **파일 전체**이고, 모든 커밋이 `asOf` 한 줄을 건드려 리베이스가 반드시 충돌한다 |
-| 2 | 랜딩 락 | 검증 11단계 중 이미지 태그를 쓰는 것은 4단계뿐인데 **전 구간이 잠긴다** |
-| 3 | 큐 착수 경로 | 1차 필터가 죽어 있고, 그 값의 출처가 브랜치 diff 라 **규율을 지킨 착수 직후 세션에는 정의상 비어 있다** |
-| 4 | 수동 호출 | 세션당 20회 넘게 손으로 불러야 하는데 자동 강제 지점이 둘뿐이고, **안 불렀다는 사실조차 안 남는다** |
-| 5 | 계약 락 | 세션 발자국의 절반만 덮고, 실제로 난 사고(같은 날 개정 차수 충돌)는 **락이 원리적으로 못 지키는** 논리 카운터였다 |
-| 6 | 스테이징 락 | 자동 반납이 없고, 갱신을 안 해 **긴 세션이 남에게 죽은 것으로 보인다** |
-| 7 | 게시판 조회 | 파일이 안 지워져 신호 대 소음이 단조 악화한다(실측 6%) |
+| 1 | Dashboard | The only shared coordination artifact, so every session edits it twice (demand = 2N). The unit of exclusion is **the whole file**, not one card, and every commit touches the `asOf` line, so a rebase conflict is guaranteed |
+| 2 | Landing lock | Only 4 of 11 verification steps use the image tag, yet **the entire range is locked** |
+| 3 | Queue entry path | The first-pass filter was dead, and its input came from a branch diff — which is **by definition empty for a session that just followed the discipline and started clean** |
+| 4 | Manual calls | Over 20 per session, only two automatic enforcement points, and **no record that a call was skipped** |
+| 5 | Contract lock | Covers only half of a session's footprint, and the accident that actually happened (same-day revision-number collision) was a logical counter **a lock cannot protect in principle** |
+| 6 | Staging lock | No automatic release, and it never refreshed its own timestamp, so **a long session looks dead to everyone else** |
+| 7 | Board reads | Files are never deleted, so signal-to-noise degrades monotonically (measured: 6%) |
 
-뿌리는 하나로 모인다. **파생 가능한 사실을 손으로 다시 적는다.** 누가 살아 있나 · 무엇이
-랜딩됐나 · 어느 경로를 건드리나 · HEAD 가 무엇인가는 전부 git 과 파일시스템에 이미 있다.
-손으로 베낀 스냅숏은 원본이 움직이는 순간 조용히 거짓이 되고, **거짓임을 알려 주는 자리가 없다.**
+The roots converge on one. **Facts that could be derived are re-typed by hand.** Who is alive, what
+landed, which paths are being touched, what HEAD is — all of it is already in git and the filesystem.
+A hand-copied snapshot becomes quietly false the moment the original moves, and **nothing tells you
+it went false.**
 
-flightdeck 은 그 자리들을 지운다. 파생할 수 있는 것에는 **쓰기 API 파라미터를 아예 안 만든다** —
-틀리게 적을 필드가 없으면 검사할 것도 우회할 것도 없다.
+flightdeck deletes those places. For anything derivable there is **no write-API parameter at all** —
+if there is no field to fill in wrongly, there is nothing to validate and nothing to bypass.
 
 ---
 
-## 병렬 세션은 이렇게 굴러간다
+## How parallel sessions actually run
 
-### ① 한 세션의 하루
+### 1. One session's day
 
 ```
-세션이 열린다  →  SessionStart 훅이 보드를 주입한다 (아무것도 안 쳐도 뜬다)
+session opens   →  SessionStart hook injects the board (no command needed)
       ↓
-pick           →  "무엇을 집을까"를 추천만 한다. 아직 선점하지 않는다
+pick            →  recommends what to take. ★ does NOT claim
       ↓
-pick(item_id)  →  선점 + 항목 본문 + 연결된 판단 전문 + 브랜치·워크트리 명령
+pick(item_id)   →  claim + item body + every linked judgment + branch/worktree commands
       ↓
-워크트리에서 작업  →  PostToolUse 훅이 편집할 때마다 미커밋 발자국을 보고한다
+work in worktree → PostToolUse hook reports uncommitted footprints on every edit
       ↓
-finish         →  판단 + 후속 등록 + 항목 종료 + 자원 반납이 한 호출·한 트랜잭션
+finish          →  judgment + followups + close item + release, one call, one transaction
       ↓
-land           →  랜딩 줄에 선다. 내 차례면 종료코드 0, 아니면 1
+land            →  join the landing queue. Exit 0 if it is your turn, 1 if not
       ↓
-머지하고 land(result: ok)  →  레인 반납. 다음 세션이 들어온다
+merge, land(ok) →  release the lane. The next session comes in
 ```
 
-핵심은 **`pick` 이 두 단계라는 것**이다. 인자 없이 부르면 추천과 **탈락 사유 전부**를 내고
-선점하지 않는다. 그래서 "뭘 집을지 보기"가 남의 후보를 뺏지 않는다.
+The key is that **`pick` has two stages**. Called with no arguments it returns a recommendation and
+**every rejection reason**, and claims nothing. So "look at what I could take" never steals anyone
+else's candidate.
 
-### ② 두 세션이 같은 파일을 만지면 — 겹침
+### 2. When two sessions touch the same file — overlap
 
-락을 걸지 않는다. **알린다.** 그리고 거르지 않는다.
+It does not lock. **It tells you.** And it does not filter.
 
-편집할 때마다 `PostToolUse` 훅이 미커밋 발자국을 서버에 보낸다. 다른 세션의 발자국과
-경로가 겹치면, 턴이 끝날 때 `Stop` 훅이 처방을 물어 화면에 주입한다.
+On every edit the `PostToolUse` hook sends uncommitted footprints to the server. When paths overlap
+with another session's footprint, the `Stop` hook asks for a prescription at end of turn and injects
+it into the transcript.
 
-원장에 실제로 남은 처방이다(2026-08-13):
+An actual prescription from the ledger (2026-08-13):
 
 ```json
 {
@@ -103,155 +118,169 @@ land           →  랜딩 줄에 선다. 내 차례면 종료코드 0, 아니�
   "reason": "이번에 만진 CLAUDE.md 가 세션 01KZWPMRGEEX81D8VFKTJ9MKHJ 의
              발자국 CLAUDE.md 와 겹친다(겹친 쌍 1)",
   "sibling_claims": ["ddl-backfill-createdat-signal-comment-misleading",
-                     "mcp-server-exchange-opaque-token-hole", … 9건],
+                     "mcp-server-exchange-opaque-token-hole", … 9 more],
   "workspace_claims": ["mcp-server-exchange-opaque-token-hole"]
 }
 ```
 
-여기서 중요한 것은 **막지 않는다**는 점이다. 겹침은 사고가 아니라 정보다 — 한 줄 순삽입과
-47줄 개정이 같은 무게로 뜨면 안 되므로 규모(`+증가/-감소`)를 함께 내고 큰 것부터 세운다.
-**못 잰 것은 0 이 아니라 `(규모?)` 로 낸다.**
+*"The `CLAUDE.md` you just touched overlaps with session 01KZWPMR…'s footprint `CLAUDE.md`
+(1 overlapping pair)."*
 
-그리고 `pick` 은 겹침을 **거르지 않고 명시한다**:
+What matters is that **it does not block**. An overlap is information, not an accident — and since a
+one-line insertion and a 47-line rewrite must not carry equal weight, the size (`+added/-removed`) is
+reported alongside and the largest go first. **What could not be measured is reported as `(규모?)`
+("size?"), never as 0.**
+
+`pick` also **states overlaps instead of filtering them out**:
 
 ```
 겹침 판정 범위: 항목 fd-… 의 경로만 봤다 — 이 응답이 합친 경로는 그것뿐이다.
 겹침: 없음 — 살아 있는 세션 어느 것과도 경로가 안 겹친다.
 ```
 
-침묵하면 "겹침 없음"과 "이 축을 안 본다"가 구분되지 않는다. 그래서 **안 본 축도 말한다.**
+*"Overlap scope: only the paths of item fd-… were examined — those are the only paths this response
+combined. / Overlap: none — no live session's paths intersect."*
 
-### ③ 두 세션이 동시에 머지하려 하면 — 랜딩 레인
+Stay silent and "no overlap" becomes indistinguishable from "this axis was never examined." So
+**the axis it did not look at is stated too.**
 
-여기만 진짜 배타다. 나머지는 전부 알림이다.
+### 3. When two sessions merge at once — the landing lane
 
-아래는 **원장에 남은 실제 이벤트**다(2026-08-12, 이 저장소, 세션 id 끝 6자리로 표기):
+This is the only real exclusion. Everything else is notification.
+
+Below are **actual events from the ledger** (2026-08-12, this repo, sessions shown by the last 6
+characters of their id):
 
 ```
 14:08:14.889  TPEJ6D  item.add      fd-release-0.20.0
 14:08:20.806  TPEJ6D  item.claim    overlaps=0  outside=0  paths=1
 14:08:56.771  1YST6H  lane.land     mode=acquire
-14:08:56.773  1YST6H  lane.grant    row=117          ← A 가 2ms 만에 차례를 받는다
-14:11:39.384  TPEJ6D  item.finish   판단 2425바이트
-14:11:42.119  TPEJ6D  lane.land     mode=acquire     ← B 가 줄을 선다. grant 가 안 온다
-14:11:43.187  1YST6H  lane.report   mode=ok          ← A 가 머지를 끝내고 반납
+14:08:56.773  1YST6H  lane.grant    row=117          ← A gets its turn 2 ms later
+14:11:39.384  TPEJ6D  item.finish   judgment, 2425 bytes
+14:11:42.119  TPEJ6D  lane.land     mode=acquire     ← B queues. No grant comes
+14:11:43.187  1YST6H  lane.report   mode=ok          ← A finishes its merge and releases
 14:11:51.975  TPEJ6D  lane.land     mode=acquire
-14:11:51.979  TPEJ6D  lane.grant    row=118          ← B 가 차례를 받는다
-14:12:16.564  1YST6H  judgment.note verified          ← A 는 기다리지 않고 다음 일로 갔다
+14:11:51.979  TPEJ6D  lane.grant    row=118          ← B gets its turn
+14:12:16.564  1YST6H  judgment.note verified         ← A did not wait; it moved on
 14:14:33.211  TPEJ6D  lane.report   mode=ok
 ```
 
-두 줄행이 실제로 무엇이었는지도 원장에 있다:
+The ledger even records what those two queue rows were:
 
-- `#117` — `94fc82e (merge) ← 8a14eaf`. "event.kind 10종"이라 적힌 거짓을 전수(33종)로 정정
-- `#118` — `0.20.0 릴리스 머지`. plugin.json 한 줄. 머지 후 main 에서 gofmt·vet 무출력, 13개 패키지 ok
+- `#117` — `94fc82e (merge) ← 8a14eaf`. Correcting a false claim of "event.kind: 10 kinds" to the full count (33)
+- `#118` — the `0.20.0` release merge. One line in plugin.json. After merging, `gofmt`/`vet` silent on main, 13 packages ok
 
-시간순으로 그리면 이렇다.
+Drawn in time order:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as 세션 A (1YST6H)
+    participant A as Session A (1YST6H)
     participant FD as flightdeck
-    participant B as 세션 B (TPEJ6D)
+    participant B as Session B (TPEJ6D)
 
     B->>FD: add · claim (fd-release-0.20.0)
-    FD-->>B: overlaps=0 — 아무와도 안 겹친다
+    FD-->>B: overlaps=0 — nothing intersects
 
     A->>FD: land
-    FD-->>A: grant row=117 — 네 차례다 (종료코드 0)
+    FD-->>A: grant row=117 — your turn (exit 0)
     Note over A: git merge 94fc82e
 
-    B->>FD: finish (판단 2425바이트)
+    B->>FD: finish (judgment, 2425 bytes)
     B->>FD: land
-    FD-->>B: waiting — 앞에 1건 (종료코드 1)
-    Note over B: 기다린다. fd lane wait 가 턴 안에서 잇는다
+    FD-->>B: waiting — 1 ahead (exit 1)
+    Note over B: waits. fd lane wait bridges it within the turn
 
-    A->>FD: land(result: ok) — 반납
-    B->>FD: land (재시도)
-    FD-->>B: grant row=118 — 네 차례다
+    A->>FD: land(result: ok) — release
+    B->>FD: land (retry)
+    FD-->>B: grant row=118 — your turn
     Note over B: git merge 0.20.0
-    A->>FD: note(verified) — A 는 이미 다음 일 중
-    B->>FD: land(result: ok) — 반납
+    A->>FD: note(verified) — A is already on the next thing
+    B->>FD: land(result: ok) — release
 ```
 
-**`fd land` 의 종료코드가 답하는 질문은 "요청이 성공했나"가 아니라 "지금 랜딩해도 되는가"** 다.
-그래서 이 한 줄이 그대로 성립한다:
+**The question `fd land`'s exit code answers is not "did the request succeed" but "may I land right
+now."** That is what makes this one-liner correct:
 
 ```bash
 fd land && git merge --ff-only "$BRANCH"
 ```
 
-`turn`·`released`·`left` 만 0 이고 `waiting`·`reclaimed`·모르는 상태는 전부 1 이다 —
-대기에 0 을 내면 그 한 줄이 배타를 통째로 우회하는데 서버는 내내 옳고 아무 로그도 안 남는다.
+Only `turn`, `released` and `left` exit 0; `waiting`, `reclaimed` and any unknown state all exit 1 —
+because returning 0 while waiting would let that single line bypass exclusion entirely, with the
+server correct the whole time and nothing in any log.
 
-### ④ 항목은 이 길을 돈다
+### 4. The path an item travels
 
 ```mermaid
 stateDiagram-v2
     [*] --> open: add
     open --> claimed: pick(item_id)
-    claimed --> open: pick(leave) — 사유 필수
-    claimed --> open: fd claim release — 사람이 회수
+    claimed --> open: pick(leave) — reason required
+    claimed --> open: fd claim release — a human reclaims
     claimed --> done: finish(outcome=done)
-    claimed --> dropped: finish(outcome=dropped) — 사유 필수
+    claimed --> dropped: finish(outcome=dropped) — reason required
     done --> [*]
     dropped --> [*]
 
     note right of claimed
-        브랜치 이름 = 항목 id
-        워크트리 = .flightdeck/worktrees/ 아래 그 id
-        랜딩 레인은 이 상태 밖에서 따로 돈다
+        branch name = item id
+        worktree = that id under .flightdeck/worktrees/
+        the landing lane runs outside this state machine
     end note
 ```
 
-전이마다 도구가 하나씩 붙는다.
+Each transition has exactly one tool.
 
-| 전이 | 도구 | 무엇이 함께 일어나나 |
+| Transition | Tool | What else happens |
 |---|---|---|
-| `→ open` | `add` | 항목 id 가 **그대로 브랜치 이름**이 된다. 전역 유일이라 브랜치 충돌이 구조적으로 소멸한다 |
-| `open → claimed` | `pick(item_id)` | 선점 + 연결된 판단 전문 + 겹침 + 워크트리 명령이 한 응답에 온다 |
-| `claimed → open` | `pick(leave:)` | **id 와 이력이 산다.** `finish(dropped)` 로 때우면 id 가 바뀌어 이력이 끊긴다 |
-| `claimed → done` | `finish` | 판단·후속 등록·종료·반납이 **한 트랜잭션**. 중간에 실패하면 통째로 롤백된다 |
-| (언제든) | `note` | 파생 불가능한 유일한 자산 — 왜 그렇게 했나, 무엇을 기각했나, **일부러 안 한 것** |
-| (랜딩 시) | `land` | 항목 상태와 무관하게 도는 별도 줄. 자원 이름을 주면 그 자원의 줄에 선다 |
+| `→ open` | `add` | The item id **becomes the branch name**. It is globally unique, so branch-name collisions disappear structurally |
+| `open → claimed` | `pick(item_id)` | Claim + every linked judgment + overlaps + worktree commands, in one response |
+| `claimed → open` | `pick(leave:)` | **The id and its history survive.** Papering over it with `finish(dropped)` changes the id and severs the history |
+| `claimed → done` | `finish` | Judgment, followups, close and release in **one transaction**. A failure midway rolls back all of it |
+| (any time) | `note` | The one asset that cannot be derived — why you did it, what you rejected, **what you deliberately did not do** |
+| (at landing) | `land` | A separate queue that runs independently of item state. Name a resource and you queue for that resource |
 
-### ⑤ "저 세션 살아 있나"에는 답하지 않는다
+### 5. It refuses to answer "is that session alive?"
 
-이 도구에는 **생존 판정 불리언이 없다.** 만드는 순간 그것이 회수·회피·탈락 셋의 상류가 되기
-때문이다. 그 판정은 실측에서 두 번 틀렸다 — 죽었다고 판정한 세션이 그 뒤 **6커밋을 랜딩했고**,
-419분 무갱신으로 표시된 세션이 실제로는 **17초 전에 살아 있었다.**
+There is **no liveness boolean** in this tool. The moment you create one it becomes the upstream of
+reclaiming, avoidance and exclusion. That judgment was measured wrong twice — a session declared dead
+**landed 6 commits afterwards**, and a session shown as 419 minutes idle was in fact
+**alive 17 seconds ago**.
 
-대신 신호 넷을 **나란히** 낸다. 합치지 않는다.
+Instead four signals are reported **side by side**. They are never merged.
 
-| kind | 언제 찍히나 | 무슨 뜻인가 |
+| kind | When it fires | What it means |
 |---|---|---|
-| `prompt` | `UserPromptSubmit` | 사람이 지금 몰고 있다 — 가장 강한 신호 |
-| `tool` | `PostToolUse(Edit\|Write)` | 에이전트가 일하고 있다(사람이 자리를 비워도) |
-| `mcp` | MCP 도구 호출 | 세션이 살아 있다 — 일하고 있다는 뜻은 **아니다** |
-| `commit`·`push` | 서버의 git 리더가 직접 관측 | **클라이언트를 안 믿는 유일한 신호** |
+| `prompt` | `UserPromptSubmit` | A human is driving right now — the strongest signal |
+| `tool` | `PostToolUse(Edit\|Write)` | The agent is working (even with nobody at the keyboard) |
+| `mcp` | An MCP tool call | The session is alive — **not** that it is working |
+| `commit`·`push` | Observed directly by the server's git reader | **The only signal that does not trust the client** |
 
-`prompt` 와 `tool` 을 가른 이유가 있다. 에이전트가 20분짜리 도구를 돌리는 동안 `prompt` 는
-안 오지만 `tool` 은 온다. 반대로 사람이 읽기만 하는 동안은 `prompt` 만 온다.
-**하나만 보면 둘 중 한 상황을 반드시 오판한다.**
+There is a reason `prompt` and `tool` are kept apart. While an agent runs a 20-minute tool, `prompt`
+stops arriving but `tool` keeps coming. While a human only reads, only `prompt` arrives.
+**Watch just one and you will necessarily misread one of those two situations.**
 
-그래서 화면은 **"죽었다"고 쓰지 않고 나이를 숫자로만 낸다.** 회수가 필요하면 사람이,
-사유와 함께, 근거 여섯 축을 나란히 본 뒤에 한다.
+So the screen **never writes "dead" — it prints an age as a number.** When a reclaim is needed a
+human does it, with a stated reason, after seeing six axes of evidence side by side.
 
-> **★ 반드시 알아야 하는 한계** — 창을 닫고 나간 세션·`tmux kill`·SIGKILL 은 종료 경로를
-> 안 지난다(플랫폼이 프로세스 종료를 안 알려 준다). 그 카드는 창(기본 2시간)으로만 사라진다.
-> 실측: 보드가 카드 26장을 냈을 때 `/proc` 으로 잰 살아 있는 프로세스는 **5개**였다.
-> 이 한계를 모르면 "닫히니까 카드는 항상 정확하다"고 믿게 되고, 그 믿음이 위의 두 오판을 다시 만든다.
+> **★ A limit you must know** — a session whose window was closed, `tmux kill`, or SIGKILL never
+> passes through the close path (the platform does not announce process exit). Those cards disappear
+> only by the window (2 hours by default). Measured: when the board showed 26 cards, the live
+> `claude` processes counted through `/proc` were **5**.
+> Not knowing this leads to believing "cards are always accurate because they get closed," and that
+> belief is exactly what produced the two misjudgments above.
 
 ---
 
-## 5분 설치
+## Install in 5 minutes
 
-**플러그인을 이미 켰다면 `fd-setup` 스킬이 아래를 대신 해 준다** — 상태를 재고, 서버로 쓸지
-클라이언트로 붙을지 묻고, 없는 것의 설치 명령을 **승인받아** 실행한다. 판정은 `fd setup` 이
-내므로 그 명령을 직접 쳐도 같은 값이 나온다. 아래는 그 스킬이 하는 일의 정본이다.
+**If the plugin is already on, the `fd-setup` skill does all of this for you** — it measures state,
+asks whether this machine is the server or a client, and runs the install commands **after your
+approval**. The decision comes from `fd setup`, so typing that command yourself yields the same
+answer. What follows is the document of record for what that skill does.
 
-### 1. 서버를 띄운다 (한 머신에서 한 번)
+### 1. Start the server (once, on one machine)
 
 ```bash
 cd plugins/flightdeck
@@ -259,181 +288,186 @@ FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null)" docker compose up -d
 curl -s localhost:7420/healthz
 ```
 
-`{"ok":true,"api_version":"1","db_ok":true,…}` 가 나오면 됐다.
-화면은 <http://localhost:7420> — 읽기 전용 한 장이다.
+`{"ok":true,"api_version":"1","db_ok":true,…}` means you are done.
+The screen is at <http://localhost:7420> — one read-only page.
 
-세 가지를 환경에서 받는다:
+Three things come from the environment:
 
-- **`FD_TOKEN`** — 안 주면 인증이 꺼진 채 뜬다. 그 사실은 `/healthz` 가 말하지만,
-  **말할 뿐 막지는 않는다.** 이미 토큰을 쓰던 서버를 옮기는 중이라면 반드시 같은 값을 준다.
-  컨테이너로 띄우면 호스트에서 오는 요청도 **루프백이 아니다**(브리지 게이트웨이로 보인다) —
-  즉 토큰 면제가 안 걸리므로, 클라이언트 쪽도 `fd setup --token …` 으로 같은 값을 가져야 한다.
-- **`FD_UID`/`FD_GID`** — 볼륨 `~/.flightdeck` 와 저장소는 호스트 사용자의 것이다.
-  기본값 1000 이 아니면(`id -u`) 주지 않는 한 DB 를 열되 못 쓰고, git 은 소유권을 의심한다.
-- **`FD_REPOS`** — 저장소들이 있는 자리(기본 `~/cdo-dev`). **파생의 전부가 여기서 나온다** —
-  브랜치 · sha · 미커밋 발자국 · 경로 겹침. 안 붙이면 서버는 정상으로 보이면서 보드에
-  `브랜치 ?(못 읽음)` 만 적는다. 호스트와 컨테이너의 경로가 **같아야 한다**(워크트리의
-  `.git` 이 주 저장소를 절대경로로 가리키기 때문이다).
+- **`FD_TOKEN`** — omit it and the server comes up with auth disabled. `/healthz` says so, but it
+  **only says so; it does not block.** If you are moving a server that already used a token, you must
+  supply the same value. Note that with the container, requests from the host are **not loopback**
+  either (they arrive from the bridge gateway), so the token exemption does not apply and the client
+  needs the same value via `fd setup --token …`.
+- **`FD_UID`/`FD_GID`** — the `~/.flightdeck` volume and the repositories belong to the host user.
+  If yours is not the default 1000 (`id -u`), then without these the DB opens but cannot be written,
+  and git becomes suspicious about ownership.
+- **`FD_REPOS`** — where the repositories live (default `~/cdo-dev`). **Everything derived comes from
+  here** — branch, sha, uncommitted footprints, path overlap. Without it the server looks healthy while
+  writing only `브랜치 ?(못 읽음)` ("branch ? (unreadable)") on the board. The path must be **identical**
+  on host and container, because a worktree's `.git` points at the main repository by absolute path.
 
-플러그인으로 켰다면 저장소가 아니라 **설치된 캐시 자리**에서 띄운다 — 그것이
-`/plugin` 이 받아 둔 그 판이다:
+If you enabled it as a plugin, start it from the **installed cache directory**, not from the repo —
+that is the copy `/plugin` fetched:
 
 ```bash
-cd ~/.claude/plugins/cache/<마켓플레이스>/flightdeck/<버전>
+cd ~/.claude/plugins/cache/<marketplace>/flightdeck/<version>
 ```
 
-도커 없이 돌리려면:
+To run without Docker:
 
 ```bash
 cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 ```
 
-> **컨테이너 대신 쓰는 명령이다 — 같이 돌리지 마라.** compose 가 `~/.flightdeck:/data` 를
-> 마운트하므로 위의 `--db` 는 **컨테이너가 쥔 바로 그 DB** 다. 같은 포트면 바인드에서
-> 멈추지만(그때는 원장을 안 건드린다), 포트만 바꿔 띄우면 그 임시 바이너리가 원장에
-> **배포로 적힌다** — 그 뒤 컨테이너가 재기동하면 배포가 한 건 더 생긴다.
-> 컨테이너를 띄운 채 실험하려면 `--db` 도 함께 딴 자리로 돌려라.
+> **This replaces the container — do not run both.** compose mounts `~/.flightdeck:/data`, so the
+> `--db` above is **the very database the container holds**. On the same port you stop at bind (and
+> the ledger is untouched), but change only the port and that throwaway binary **records itself as a
+> deployment** in the ledger — and the container's next restart adds another. To experiment while the
+> container runs, move `--db` somewhere else too.
 
-### 2. 플러그인을 켠다 (세션을 돌리는 머신마다)
+### 2. Enable the plugin (on every machine that runs sessions)
 
-이 레포가 마켓플레이스다. `/plugin` 에서 `flightdeck` 을 켜거나, 설정에 직접 넣는다.
+This repo is the marketplace. Enable `flightdeck` from `/plugin`, or put it in your settings directly.
 
 ```
 /plugin marketplace add kweiza/kweiza-cc-plugins
 /plugin install flightdeck@kweiza-cc-plugins
 ```
 
-켜면 다음이 자동으로 붙는다.
+Enabling it attaches all of the following.
 
-| 무엇 | 언제 |
+| What | When |
 |---|---|
-| `SessionStart` 훅 | 세션을 등록하고 보드 요약·내 선점·미확인·**서버 상태 배너**를 주입한다 |
-| `UserPromptSubmit` 훅 | `prompt` 신호 + 미확인 알림 |
-| `PostToolUse`(Edit\|Write) 훅 | `tool` 신호 + **미커밋 발자국** — 경로 겹침 축의 유일한 원천 |
-| `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
-| `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
-| `SessionEnd`(clear) 훅 | `/clear` 로 대화가 떠난 것을 관측으로 남긴다 |
-| MCP 도구 8개 | `board` `pick` `note` `add` `finish` `alloc` `land` `label` |
-| 스킬 4개 | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
+| `SessionStart` hook | Registers the session and injects the board summary, your claims, unacknowledged notes and a **server status banner** |
+| `UserPromptSubmit` hook | `prompt` signal + unacknowledged notices |
+| `PostToolUse`(Edit\|Write) hook | `tool` signal + **uncommitted footprints** — the only source for the path-overlap axis |
+| `PreCompact` hook | Leaves the coordinates as a draft judgment just before compaction |
+| `Stop` hook | Asks for prescriptions at end of turn and injects them as `additionalContext` |
+| `SessionEnd`(clear) hook | Records, as an observation, that `/clear` ended that conversation |
+| 8 MCP tools | `board` `pick` `note` `add` `finish` `alloc` `land` `label` |
+| 4 skills | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
-**훅은 전부 fail-open 이다.** `bin/fd` 는 셸 런처고, 첫 훅이 `server/` 를 빌드해
-`~/.cache/flightdeck/bin` 에 **소스 트리별로** 캐시한다 — 자리가 채널(훅·MCP·셸)을 안 타고,
-서로 다른 소스 트리는 **서로 다른 파일**을 갖는다. **Go 가 없으면 안내만 내고 세션은 그대로
-진행된다.**
+**Every hook is fail-open.** `bin/fd` is a shell launcher; the first hook builds `server/` and caches
+it under `~/.cache/flightdeck/bin` **per source tree** — so the location does not vary by channel
+(hook, MCP, shell) and different source trees get **different files**. **Without Go it prints guidance
+and the session continues unaffected.**
 
-### 3. 서버가 다른 머신이면 주소를 알려준다
+### 3. If the server is on another machine, say where
 
 ```bash
-export FD_URL=http://<서버머신>:7420
-export FD_TOKEN=<서버와 같은 토큰>   # 서버에 FD_TOKEN 을 줬을 때만
+export FD_URL=http://<server-host>:7420
+export FD_TOKEN=<same token as the server>   # only if you gave the server FD_TOKEN
 ```
 
-토큰을 안 주면 인증이 꺼진다. **그 사실은 `/healthz` 가 알린다** — 조용히 열어 두지 않는다.
+Without a token, auth is off. **`/healthz` announces that** — it is never left open quietly.
 
 ---
 
-## 쓰는 법
+## Using it
 
-### 세션 안에서 — MCP 도구 8개
+### Inside a session — 8 MCP tools
 
-외워야 할 것은 넷이다: **집고(`pick`) · 남기고(`note`) · 끝내고(`finish`) · 줄 선다(`land`).**
+There are four to remember: **claim (`pick`) · record (`note`) · close (`finish`) · queue (`land`).**
 
-| 도구 | 파라미터 | 언제 부르나 |
+| Tool | Parameters | When to call |
 |---|---|---|
-| `board` | `detail` | 지금 어느 작업이 잡혀 있나. 선점을 든 카드만 낸다 |
-| `pick` | — | 추천 1건 + 왜 + **탈락 사유 전부**. 선점하지 않는다 |
-| `pick` | `item_id` / `item_ids` | 선점 + 항목 본문 + 연결된 판단 + 브랜치·워크트리 명령 |
-| `pick` | `leave` | 내 선점을 놓는다. 항목은 `open` 으로 돌아가고 **id·이력이 산다** |
-| `note` | `kind` `body` `item_id` `supersedes` | 판단을 남긴다. 종류 8: `handoff` `decision` `blocked` `ask` `rejected` `not-done` `verified` `draft` |
-| `add` | `id` `title` `body` `paths` `after` `labels` | 큐 항목. **id 가 그대로 브랜치 이름**이 된다 |
-| `finish` | `item_id` `outcome` `body` `followups` | 판단+후속+종료+반납을 한 호출·한 트랜잭션으로 |
-| `alloc` | `counter_name` | 원자 발번(개정 차수 같은 논리 카운터) |
-| `land` | `resources` `result` `detail` `leave` | 랜딩 줄에 선다 / 내 차례를 본다 / 보고하고 반납한다 |
-| `label` | `item_id` `add` `rm` | 표시 전용 꼬리표. `tickler` 만 굶김 축에서 빠진다 |
+| `board` | `detail` | What work is held right now. Only cards holding a claim |
+| `pick` | — | One recommendation + why + **every rejection reason**. Claims nothing |
+| `pick` | `item_id` / `item_ids` | Claim + item body + linked judgments + branch/worktree commands |
+| `pick` | `leave` | Release your claim. The item returns to `open` and **its id and history survive** |
+| `note` | `kind` `body` `item_id` `supersedes` | Record a judgment. 8 kinds: `handoff` `decision` `blocked` `ask` `rejected` `not-done` `verified` `draft` |
+| `add` | `id` `title` `body` `paths` `after` `labels` | A queue item. **The id becomes the branch name** |
+| `finish` | `item_id` `outcome` `body` `followups` | Judgment + followups + close + release, one call, one transaction |
+| `alloc` | `counter_name` | Atomic allocation (logical counters such as a revision number) |
+| `land` | `resources` `result` `detail` `leave` | Join the landing queue / check your turn / report and release |
+| `label` | `item_id` `add` `rm` | Display-only labels. Only `tickler` is exempt from the starvation axis |
 
-세 가지 규율이 이 표에 숨어 있다.
+Three disciplines hide in that table.
 
-1. **후속은 `add` 가 아니라 `finish` 의 `followups` 에 싣는다.** 미리 `add` 하면 판단과의
-   연결을 영영 못 산다 — 같은 호출에 넣어야 판단에 이어진다.
-2. **선점을 놓을 때는 `pick(leave:)` 다.** `finish(dropped)` 로 때우면 id 가 바뀌어 이력이 끊긴다.
-3. **판단은 덮어쓰지 않는다.** 정정은 `note(supersedes: <판단 id>)` 로 새 행을 얹는다.
+1. **Followups ride in `finish`'s `followups`, not in `add`.** Call `add` beforehand and you can never
+   buy back the link to the judgment — it must be in the same call to be attached.
+2. **Release a claim with `pick(leave:)`.** Papering over it with `finish(dropped)` changes the id and
+   severs the history.
+3. **Judgments are never overwritten.** A correction is a new row via `note(supersedes: <judgment id>)`.
 
-### 터미널에서 — `fd`
+### From the terminal — `fd`
 
 ```bash
-fd status                 # 서버 상태 배너 + 보드
-fd next                   # 추천만
-fd pick <item-id> [<item-id>…]  # 선점(여럿이면 첫째가 선두)
-fd note --kind decision --body "왜 그렇게 했나"
-fd finish <item-id> --outcome done --body "① 왜 ② 기각 ③ 안 한 것 ④ 확인만 한 것"
-fd land                   # 랜딩 줄에 선다(--ok|--fail <사유>|--leave <사유> 로 보고·이탈)
-fd lane wait              # 내 차례를 턴 안에서 기다린다
-fd lane release --row <id> --reason "왜 끊었나"   # 물린 줄 행을 사람이 회수한다
-fd claim release --item <id> --reason "왜 끊었나" # 무신호 세션의 선점을 사람이 회수한다
-fd doctor                 # 이 머신의 플랫폼 축과 서버 상태를 실제로 잰다
+fd status                 # server status banner + board
+fd next                   # recommendation only
+fd pick <item-id> [<item-id>…]  # claim (with several, the first leads)
+fd note --kind decision --body "why it was done this way"
+fd finish <item-id> --outcome done --body "① why ② rejected ③ not done ④ only verified"
+fd land                   # join the landing queue (--ok|--fail <reason>|--leave <reason> to report/leave)
+fd lane wait              # wait for your turn within the turn
+fd lane release --row <id> --reason "why it was cut"   # a human reclaims a stuck queue row
+fd claim release --item <id> --reason "why it was cut" # a human reclaims a silent session's claim
+fd doctor                 # actually measure this machine's platform axes and the server
 ```
 
-### 스킬 4개 — 순서를 외우지 않으려고 있다
+### 4 skills — they exist so you do not memorize the order
 
-| 스킬 | 언제 | 무엇을 하나 |
+| Skill | When | What it does |
 |---|---|---|
-| `/fd-setup` | 머신을 처음 켤 때 | 상태를 재고 서버/클라이언트를 정한 뒤 **필요한 것만** 설치·기동 |
-| `/fd-pickup` | 세션을 시작할 때 | 보드 확인 → 추천 → 선점 → **연결된 판단 읽기** 순서로 |
-| `/fd-handoff` | 작업이 끝났을 때 | 판단 저장 + 후속 등록 + 항목 종료 + 자원 반납을 한 호출로 |
-| `/fd-update` | 보드가 낡았을 때 | 서버·플러그인·DB 를 최신으로 |
+| `/fd-setup` | First time on a machine | Measure state, decide server vs. client, install and start **only what is missing** |
+| `/fd-pickup` | Starting a session | Board → recommendation → claim → **read the linked judgments** |
+| `/fd-handoff` | Work is done | Judgment + followups + close item + release, in one call |
+| `/fd-update` | The board looks stale | Bring server, plugin and DB up to date |
 
 ---
 
-## 실제로 이만큼 돌았다
+## How much it actually ran
 
-2026-08-03 이후 열흘 동안 이 저장소에 **759 커밋**이 쌓였다(8월 12일 하루에만 115건).
-아래는 같은 서버가 물고 있는 원장의 실측이다 — 추정치가 아니라 쿼리 결과다(2026-08-13 06:40 UTC).
+In the ten days after 2026-08-03 this repository accumulated **759 commits** (115 on August 12 alone).
+Below is what the ledger behind the same server measures — query results, not estimates
+(2026-08-13 06:40 UTC).
 
-| 축 | 저장소 A (사내 제품) | 이 저장소 |
+| Axis | Repo A (internal product) | This repo |
 |---|---|---|
-| 큐 항목 | 830 | 245 |
-| 판단(judgment) | 2,015 | 745 |
-| 세션 카드 | 331 | 300 |
-| 선점 | 472 | 240 |
-| 랜딩 줄서기 | 56회 (성공 48) | 101회 (성공 99) |
-| **동시에 선점을 든 세션 최대** | **7개 세션 · 61항목** | 5개 세션 · 13항목 |
-| 랜딩 레인 동시 대기 최대 | 6건 | 2건 |
+| Queue items | 830 | 245 |
+| Judgments | 2,015 | 745 |
+| Session cards | 331 | 300 |
+| Claims | 472 | 240 |
+| Landing queue entries | 56 (48 succeeded) | 101 (99 succeeded) |
+| **Max sessions holding claims at once** | **7 sessions · 61 items** | 5 sessions · 13 items |
+| Max concurrent waiters in the lane | 6 | 2 |
 
-선점이 아니라 **하트비트**로 세면 더 큰 수가 나온다. `session.beat` 17,195건을 슬라이딩 창으로
-훑으면:
+Count by **heartbeat** rather than by claim and the number grows. Sweeping the 17,195 `session.beat`
+signals with a sliding window:
 
-| 창 | 동시에 신호를 낸 세션 | 언제 |
+| Window | Sessions signalling at once | When |
 |---|---|---|
-| 5분 | **18개** | 2026-08-05 03:07 UTC |
-| 10분 | **24개** | 2026-08-05 02:33 UTC |
+| 5 min | **18** | 2026-08-05 03:07 UTC |
+| 10 min | **24** | 2026-08-05 02:33 UTC |
 
-24개 순간의 내역은 저장소 A 12 · 이 저장소 10 · 그 밖 2, 고유 워크트리 16개다.
-**한 머신에서 24개 세션이 동시에 뛰었고 그중 22개가 같은 두 저장소를 만지고 있었다.**
+That 24-session moment breaks down as repo A 12 · this repo 10 · other 2, across 16 distinct worktrees.
+**24 sessions ran at once on one machine, and 22 of them were touching the same two repositories.**
 
-겹침 처방은 601건 나갔고, 이유별로 이렇게 갈린다.
+601 overlap prescriptions went out, split by reason:
 
-| 처방 종류 | 건수 | 무엇을 말했나 |
+| Prescription | Count | What it said |
 |---|---|---|
-| `overlap` | 352 | 네가 만진 경로가 저 세션의 발자국과 겹친다 |
-| `unclaimed` | 124 | 선점 없이 편집하고 있다 |
-| `silent` | 84 | 오래 조용하다 |
-| `outside` | 41 | 선점한 항목의 경로 밖을 만지고 있다 |
+| `overlap` | 352 | A path you touched intersects that session's footprint |
+| `unclaimed` | 124 | You are editing without a claim |
+| `silent` | 84 | You have been quiet a long time |
+| `outside` | 41 | You are touching paths outside your claimed item |
 
-전체 원장은 이벤트 39,381건 · 판단 2,766건 · 발자국 3,618행이다.
+The whole ledger holds 39,381 events · 2,766 judgments · 3,618 footprint rows.
 
-> **이 수들은 전부 하한이다.** 이유가 둘이다.
+> **Every one of these numbers is a lower bound.** For two reasons.
 >
-> ① 이벤트 쓰기 실패는 WARN 으로만 삼키고, 트랜잭션이 시작 전에 실패하면 이벤트를
-> 예약조차 안 한다. **"0건"은 "없었다"가 아니다** — 임계값을 세우는 데 쓰면 안 된다.
-> ② `claim` 의 PK 가 `(project, item_id)` 라 **같은 항목을 다시 집으면 앞 행을 덮어쓴다.**
-> 실제로 `claim` 표는 701행인데 `item.claim` 이벤트는 734건이다. 위의 동시 선점
-> 최대치는 그만큼 낮게 잡힌 값이다.
+> ① A failed event write is swallowed as a WARN, and a transaction that fails before it starts never
+> even reserves an event. **"0" does not mean "it did not happen"** — do not build a threshold on it.
+> ② `claim`'s primary key is `(project, item_id)`, so **re-claiming an item overwrites the previous
+> row.** The `claim` table holds 701 rows while `item.claim` events number 734. The concurrency maxima
+> above are understated by exactly that much.
 
 ---
 
-## 서버가 죽으면 (L1)
+## When the server dies (L1)
 
-`SessionStart` 가 배너를 **명시 주입**한다. 조용히 두면 에이전트가 조정 기구가 있는 줄 알고 움직인다.
+`SessionStart` **explicitly injects** a banner. Left silent, an agent proceeds believing coordination
+exists.
 
 ```
 ⚠ 조정 서버 미도달(http://localhost:7420, 마지막 접속 14:02 · 37분 전).
@@ -442,92 +476,107 @@ fd doctor                 # 이 머신의 플랫폼 축과 서버 상태를 실�
   아래는 14:02 시점의 스냅숏이다. 그 뒤 남이 무엇을 집었는지는 알 수 없다.
 ```
 
-- **읽기** — 마지막 성공 응답을 낡음 배너와 함께 낸다. 침묵하지 않는다.
-- **판단·노트** — 아웃박스에 쌓이고 재연결 시 **멱등 재생**된다. 종료코드 0.
-- **선점** — 거절된다. 배타는 서버만 보장할 수 있고, 오프라인 획득을 허용하면 배타가 거짓이 된다.
-- **발번** — 거절된다. 오프라인에서 발급하면 두 세션이 같은 번호를 쓴다.
-- **랜딩 레인 넷**(`land` 취득 · 보고 · 이탈 · `lane release`) — 전부 거절되고 **사유가 셋으로 갈린다.**
-  취득은 배타의 정본이 서버 DB 제약이라 여기서 "내 차례"를 만들면 두 세션이 동시에 랜딩한다.
-  보고·이탈은 재생 시점에 이미 남이 레인을 잡았을 수 있어 재생하면 **남의 점유를 반납한다.**
-  회수는 지금 무엇이 물렸나를 보고 사람이 내린 판정이라, 재생 시점의 레인은 그 판정이 본 레인이 아니다.
-- **선점 회수**(`fd claim release`) — 거절된다. 같은 이유에 하나가 더 붙는다: 재생 시점에는
-  그 세션이 되살아나 일하고 있을 수 있다(생존 오판 실측 2회가 자동 회수를 기각한 그 축이다).
+*"Coordination server unreachable (last contact 14:02, 37 minutes ago). Works: writing code,
+committing, investigating — all of it; and work on items you already claimed. Does not work: claiming
+new items; the current state of other sessions. What follows is a snapshot as of 14:02. What others
+picked up since then is unknowable."*
+
+- **Reads** — the last successful response is served with a staleness banner. It never goes silent.
+- **Judgments and notes** — queued in an outbox and **replayed idempotently** on reconnect. Exit 0.
+- **Claims** — refused. Only the server can guarantee exclusion; allowing offline acquisition would make that exclusion a lie.
+- **Allocation** — refused. Issued offline, two sessions would use the same number.
+- **The four landing-lane operations** (`land` acquire, report, leave, `lane release`) — all refused,
+  and **for three different reasons.** Acquisition: the document of record for exclusion is a server-side
+  DB constraint, so manufacturing "my turn" here would let two sessions land simultaneously.
+  Report and leave: by replay time someone else may hold the lane, so replaying would **release
+  someone else's hold.** Reclaim: it is a human decision made by looking at what is stuck right now,
+  and the lane at replay time is not the lane that decision saw.
+- **Claim reclaim** (`fd claim release`) — refused, for those reasons plus one more: by replay time
+  that session may have come back and be working (this is the axis where two measured liveness
+  misjudgments rejected automatic reclaiming).
 
 <details>
-<summary><b>상태를 세 자리로 갈라 둔 이유</b> (심화)</summary>
+<summary><b>Why state is split across three locations</b> (deep dive)</summary>
 
-**상태는 한 자리가 아니라 세 부류로 갈라 둔다.** 가르는 축은 둘이다 — ① 재생성 가능한가
-② 갈린 사본이 각자 옳은가. 둘 다 "예"인 것만 채널마다 갈리는 자리에 남는다.
+**State is not one place but three.** Two axes divide them — ① can it be regenerated ② if copies
+diverge, is each one still correct. Only things answering "yes" to both may live in a
+channel-dependent location.
 
-| 무엇 | 어디 | 왜 |
+| What | Where | Why |
 |---|---|---|
-| **응답 캐시** | `${CLAUDE_PLUGIN_DATA}` | 다시 만들면 되고, 갈려도 **각자 옳다** — 값에 시각이 붙어 "낡음: 37분 전"으로 스스로 말한다. `${CLAUDE_PLUGIN_ROOT}` 는 갱신마다 경로가 바뀌므로 거기 두지 않는다 |
-| **바이너리 캐시** | `~/.cache/flightdeck/bin/fd-<소스 트리>` | 다시 만들 수는 있지만 exec 되면 **어느 판인지 안 말한다** — 두 벌이 다르면 하나는 최신인 척하는 옛 코드다. 그래서 채널을 안 타는 고정 자리에 두고 이름에 소스를 박는다 |
-| **판단·정체** (아웃박스·`machine-id`·`config.json`·비콘) | `~/.flightdeck` | 재생성 불가하거나 같은 머신이면 같아야 한다. 갈린 자리에 두면 셸에서 쌓인 판단을 훅·MCP 가 **영영 못 보낸다** |
+| **Response cache** | `${CLAUDE_PLUGIN_DATA}` | Regenerable, and if copies diverge **each is still correct** — values carry a timestamp and say "stale: 37 minutes ago" themselves. `${CLAUDE_PLUGIN_ROOT}` changes path on every update, so nothing lives there |
+| **Binary cache** | `~/.cache/flightdeck/bin/fd-<source tree>` | Regenerable, but once exec'd it **will not tell you which build it is** — if two copies differ, one is old code pretending to be current. So it lives in a channel-independent fixed location with the source encoded in the name |
+| **Judgments and identity** (outbox, `machine-id`, `config.json`, beacons) | `~/.flightdeck` | Either not regenerable, or required to be identical on the same machine. Put it in a divergent location and judgments queued from the shell can **never** be sent by the hook or MCP |
 
-`FD_STATE_DIR` 를 주면 셋 다 그 아래로 모인다 — 채널이 아니라 **사람이** 지정하는 축이라
-프로세스마다 갈리지 않는다.
+Set `FD_STATE_DIR` and all three move under it — an axis chosen by **a human**, not by the channel,
+so it does not diverge per process.
 
-**옛 자리에 남은 옛 바이너리는 옮기지도 지우지도 않는다.** 복사하면 mtime 이 따라와 필요한
-재빌드를 억제하고, 재빌드는 어차피 1초 안이다. 대신 **`fd doctor` 가 말은 한다**:
+**Old binaries in old locations are neither moved nor deleted.** Copying carries the mtime along and
+suppresses a rebuild that is needed, and a rebuild takes under a second anyway. Instead
+**`fd doctor` says something**:
 
 ```
 ! 옛 바이너리 자리 /home/you/.local/state/flightdeck/bin — fd 1개 · 22.1MB(아무도 안 쓴다. 지우려면 사람이 지운다)
 ```
 
-**doctor 는 말만 한다. 지우는 것은 사람이 한다:**
+*"! Old binary location … — 1 fd · 22.1 MB (nobody uses it; a human deletes it if it should go)."*
+
+**doctor only speaks. A human deletes:**
 
 ```sh
 rm -f ~/.local/state/flightdeck/bin/fd ~/.claude/plugins/data/*/flightdeck/bin/fd
 ```
 
-위 진단 줄은 **이 채널이 계산할 수 있는 자리만** 본다 — 사용자 셸에는 대개
-`${CLAUDE_PLUGIN_DATA}` 가 안 걸려 있어 두 자리 중 **한 줄만** 뜬다(그 사실을 doctor 가 바로
-아래 줄에 스스로 적는다). 그래서 위 `rm` 은 doctor 가 말한 자리보다 넓다.
-`${CLAUDE_PLUGIN_DATA}` 를 그대로 명령에 쓰지 마라 — 안 걸려 있으면 `/flightdeck/bin` 으로 편다.
-그 자리를 아직 물고 도는 프로세스가 있어도 안전하다(unlink 는 inode 를 안 건드린다).
-반대로 **이 축을 되돌린다면** GC 도 함께 사라지므로 `rm -rf ~/.cache/flightdeck/bin` 을 한 번
-쳐야 새 자리에 남은 벌들이 주인을 찾는다.
+That diagnostic line sees **only the locations this channel can compute** — a user shell usually has
+no `${CLAUDE_PLUGIN_DATA}`, so only **one of the two lines** appears (doctor states that fact on the
+next line itself). The `rm` above is therefore broader than what doctor reported. Do not put
+`${CLAUDE_PLUGIN_DATA}` in a command literally — unset, it expands to `/flightdeck/bin`. It is safe
+even if a process still holds that path (unlink does not touch the inode). Conversely, **if you revert
+this axis** the GC goes with it, so run `rm -rf ~/.cache/flightdeck/bin` once so the copies left in
+the new location find an owner.
 
 </details>
 
 ---
 
-## 뭔가 안 될 때
+## When something breaks
 
 ```bash
 fd doctor
 ```
 
-플랫폼 축을 **하나씩 이름으로** 낸다. `CLAUDE_CODE_SESSION_ID` 가 `✗` 면 세션 정체의 원천이 끊긴 것이고,
-그때 이 도구는 세션을 지어내지 않고 거절한다. 부재를 기본값으로 접으면 그 사실이 영영 안 보인다.
+It reports platform axes **one at a time, by name**. A `✗` on `CLAUDE_CODE_SESSION_ID` means the
+source of session identity is severed, and at that point this tool refuses rather than inventing a
+session. Fold an absence into a default and that fact becomes invisible forever.
 
-| 증상 | 볼 곳 |
+| Symptom | Where to look |
 |---|---|
-| 보드 ①이 비어 있다 | **먼저: 아무도 항목을 안 쥐고 있으면 그것이 정상이다.** ①은 선점을 든 카드만 낸다 — 화면이 "서버 장애가 아니다"와 접은 수를 함께 말한다. 그래도 이상하면 `fd doctor` 의 `FD_URL` · 서버 로그의 `기동` 줄 · 다른 세션이 같은 서버를 보나 |
-| 훅이 아무것도 안 한다 | `bin/fd` 를 직접 돌려 봐라. Go 가 없으면 안내가 나온다 |
-| 포트가 안 열린다 | 서버 로그의 `서버를 띄우지 못했다` 줄에 처방이 함께 있다 |
-| 도구가 안 보인다 | `.mcp.json` 의 `type` 이 `stdio` 인가 — 없으면 서버가 통째로 스킵된다 |
-| 보드에 `브랜치 ?(못 읽음)` | 서버 컨테이너에 저장소가 안 마운트됐다(`FD_REPOS`). `fd status` 의 `파생 git@` 이 진단이다 |
+| Board section ① is empty | **First: if nobody is holding an item, that is normal.** ① lists only cards holding a claim — the screen itself says "this is not a server failure" along with how many it folded. If it still looks wrong: `FD_URL` in `fd doctor`, the server log's startup line, whether other sessions point at the same server |
+| Hooks do nothing | Run `bin/fd` directly. Without Go it prints guidance |
+| The port will not open | The server log's "failed to start" line carries the remedy with it |
+| Tools do not appear | Is `type` in `.mcp.json` set to `stdio`? Without it the whole server is skipped |
+| Board shows `브랜치 ?(못 읽음)` | The repositories are not mounted into the server container (`FD_REPOS`). `파생 git@` in `fd status` is the diagnostic |
 
 ---
 
-## 설계 원칙 셋
+## Three design principles
 
-충돌하면 위가 이긴다.
+When they conflict, the higher one wins.
 
-1. **파생 가능한 사실에는 쓰기 API 파라미터를 만들지 않는다.** 검사가 아니라 **부재**로
-   강제한다. `--force` 도 `SKIP=1` 도 그 축에는 존재할 수 없다 — 우회할 필드가 없으므로.
-2. **세션이 외워야 할 개념 수를 늘리는 기능은 만들지 않는다.** 성공 지표는 세션당 쓰기 호출 수와
-   대체되는 규율 산문의 분량이다. 도구가 늘면 규율의 뒤쪽(핸드오프·후속 등록·해제)이 먼저 빠진다.
-3. **정합성 경로는 REST, MCP 는 그 위의 얇은 껍데기.** 둘 다 같은 순수 함수를 부른다. 두 벌이 아니다.
+1. **No write-API parameter for anything derivable.** Enforced by **absence**, not validation. Neither
+   `--force` nor `SKIP=1` can exist on that axis, because there is no field to bypass.
+2. **No feature that increases the number of concepts a session must memorize.** The success metrics
+   are writes per session and how much prose discipline gets replaced. Add tools and the tail of the
+   discipline (handoff, followup registration, release) is what drops first.
+3. **REST is the consistency path; MCP is a thin shell over it.** Both call the same pure functions.
+   They are not two implementations.
 
-### 안 만든 것
+### What was deliberately not built
 
-머지 큐·러너(Tier B) · 이벤트 소싱 · 표류 자동 탐지기 · RBAC · 선점의 오프라인 재생 ·
-**생존 판정 불리언**. 각각의 이유는 [`DESIGN.md`](DESIGN.md) §11 에 있다.
+A merge queue and runner (Tier B) · event sourcing · an automatic drift detector · RBAC · offline
+replay of claims · **a liveness boolean**. Each reason is in [`DESIGN.md`](DESIGN.md) §11.
 
-> Tier B 를 안 만든 흔적이 원장에 그대로 있다 — `job` 표는 **0행**이고,
-> `item.landed_ref` 는 1,073행이 **전부 NULL** 이다. 그 칸은 "러너가 실제로 fast-forward 한
-> sha"만 받는데 Tier A 에는 러너가 없다. 그래서 랜딩 수는 `landed_ref` 가 아니라
-> `landing_queue.left_kind='ok'` 로 센다.
+> The evidence for not building Tier B is in the ledger itself — the `job` table has **0 rows**, and
+> all 1,073 rows of `item.landed_ref` are **NULL**. That column only accepts "the sha a runner actually
+> fast-forwarded," and Tier A has no runner. So landings are counted from
+> `landing_queue.left_kind='ok'`, not from `landed_ref`.

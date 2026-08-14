@@ -1,13 +1,13 @@
 ---
 name: fd-update
-description: 서버·플러그인·DB 를 최신으로 올린다. "갱신" · "업데이트" · "최신인지 확인" · "새 버전 나왔다" · 보드가 낡았거나 브랜치를 못 읽을 때 쓴다.
+description: Bring the server, plugin, and DB up to date. "갱신" · "업데이트" · "최신인지 확인" · "새 버전 나왔다" · use when the board is stale or cannot read branches.
 ---
 
-# 갱신
+# Update
 
-낡음은 세 축이다 — **플러그인 · 서버 · DB**. 셋은 따로 낡고, 하나만 고치면 나머지는 그대로다.
+Staleness has three axes — **plugin · server · DB**. They go stale separately; fix one and the rest stay as they were.
 
-## 1. 무엇이 낡았는지 잰다
+## 1. Measure what is stale
 
 ```
 fd status | head -1
@@ -15,58 +15,60 @@ fd doctor
 claude plugin list
 ```
 
-`fd status` **첫 줄이 판정이다.** `파생 git@…` 이어야 서버가 git 을 읽고 있다.
-`파생 db@…` 나 `브랜치 ?(못 읽음)` 이면 **그 서버의 겹침·브랜치·발자국은 전부 못 믿는다** —
-갱신 대상이지 참고 자료가 아니다.
+**The first line of `fd status` is the verdict.** It must read `파생 git@…` for the server to be reading git.
+If it reads `파생 db@…` or `브랜치 ?(못 읽음)`, **that server's overlaps, branches, and footprints are all
+untrustworthy** — it is a target to update, not a source to consult.
 
-**`/healthz` 의 `ok=true` 를 최신 판정으로 쓰지 마라.** 몇 달 낡은 서버도, git 을 못 읽는
-서버도 똑같이 `ok` 를 낸다. 그것은 "떠 있다"만 말한다.
+**Do not use `ok=true` from `/healthz` as a freshness verdict.** A server months old and a server that cannot
+read git both return `ok` alike. It says only "it is up".
 
-## 2. 순서가 있다
+## 2. There is an order
 
-**푸시 → 마켓플레이스 → 플러그인 → 컨테이너.** 마켓플레이스가 git 원격이라,
-`plugin.json` 버전을 올려 **푸시하지 않으면 갱신이 아예 오지 않는다.** 순서를 건너뛰면
-옛 판을 다시 설치하고는 최신이라고 믿게 된다.
+**Push → marketplace → plugin → container.** The marketplace is a git remote, so if you bump the version in
+`plugin.json` and **do not push, the update never arrives at all.** Skip the order and you reinstall the old
+build and believe it is current.
 
-## 3. 바꾸기 전에 새 판에게 묻는다
+## 3. Ask the new build before you change anything
 
 ```
 fd selfcheck --db ~/.flightdeck/fd.db
 ```
 
-**재기동해도 되는가**에만 답한다 — 그 바이너리가 실행되는가, DB 증분 계획이 거절이 아닌가.
-**되돌릴 때도 이걸 먼저 물어라.** DB 버전이 그 판이 아는 것보다 높으면 거절이 나온다.
-(`모르는 명령: selfcheck` 가 나올 만큼 옛 판이면, 그 판의 `serve` 가 기동에서 같은 이유로 멈춘다.)
+It answers only **may this be restarted** — does that binary run, is the DB migration plan not a refusal.
+**Ask this first when rolling back too.** If the DB version is higher than that build knows, a refusal comes back.
+(If the build is old enough to print `모르는 명령: selfcheck`, that build's `serve` stops at startup for the same reason.)
 
-## 4. 갱신한다
+## 4. Update
 
 ```
-claude plugin marketplace update <마켓플레이스>
-claude plugin update flightdeck@<마켓플레이스>
+claude plugin marketplace update <marketplace>
+claude plugin update flightdeck@<marketplace>
 
-cd ~/.claude/plugins/cache/<마켓플레이스>/flightdeck/<새 버전>
+cd ~/.claude/plugins/cache/<marketplace>/flightdeck/<new version>
 FD_TOKEN="$(cat ~/.flightdeck/token)" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
 ```
 
-**설치된 캐시 자리에서 띄운다.** 개발 저장소에서 띄우면 설치된 판과 도는 판이 갈라진다.
-DB 증분은 서버가 열 때 스스로 얹고, 얹기 전에 백업을 뜬다 — 따로 할 일이 없다.
+**Bring it up from the installed cache directory.** Bring it up from the dev repo and the installed build and
+the running build diverge. The server applies DB migrations itself on open, and backs up before applying —
+there is nothing separate to do.
 
-## 5. 갱신됐다는 증거를 본다
+## 5. Look at the evidence that it updated
 
-`fd status | head -1` 이 `파생 git@<방금 시각>` 을 내는지, `claude plugin list` 가 새 버전을
-내는지 **둘 다** 본다. 하나만 보면 반쪽 갱신을 최신으로 착각한다.
+Check **both** that `fd status | head -1` prints `파생 git@` with a just-now timestamp, and that
+`claude plugin list` prints the new version. Look at only one and you mistake a half-update for current.
 
-## 6. 사람이 할 일을 반드시 전한다
+## 6. Always pass on what the human must do
 
-> **Claude Code 를 다시 시작해야 한다 — 창 하나가 아니라 열려 있는 세션마다.**
-> MCP 서버는 기동 시 설정을 한 번 읽고 끝이라, 안 띄운 창은 옛 토큰·옛 도구를 계속 쓴다.
-> 그때까지는 MCP 대신 CLI 를 써라(`fd pick` · `fd note` · `fd finish` 는 지금 된다).
+> **Claude Code has to be restarted — not one window, but every open session.**
+> An MCP server reads its config once at startup and that is that, so a window you did not relaunch keeps
+> using the old token and old tools. Until then use the CLI instead of MCP
+> (`fd pick` · `fd note` · `fd finish` work right now).
 
-이 말을 빼면 사용자는 "갱신했는데 안 된다"를 겪는다. 서버는 이미 새 판인데 화면만 옛 판이라
-원인이 안 보인다.
+Leave this out and the user hits "I updated it and it does not work". The server is already the new build
+while only the screen is the old one, so the cause is invisible.
 
-## 안 하는 것
+## Not doing
 
-버전을 안 올리고 수동 빌드로 우회하기(그 서버는 낡은 채로 계속 돈다) · `healthz` 만 보고
-최신이라 말하기 · 재시작 안내 빼먹기 · **다른 세션이 참조 중인 옛 플러그인 캐시 지우기**
-(그 세션들의 훅·MCP 가 그 자리에서 깨진다).
+Working around it with a manual build instead of bumping the version (that server keeps running stale) ·
+calling it current from `healthz` alone · omitting the restart notice · **deleting an old plugin cache that
+other sessions are referencing** (their hooks and MCP break in place).

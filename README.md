@@ -1,6 +1,17 @@
+**English** | [한국어](README.ko.md)
+
 # Claude Code Plugins
 
 Personal Claude Code plugins marketplace.
+
+> **Korean is the source of truth in this repository.** Documentation is edited in the `.ko.md` file
+> first and the English follows; commits, judgments and the design document are all Korean, so that
+> direction matches reality. GitHub does not pick a README by language — it renders only `README.md` —
+> so the link above does that job, and the filenames follow the de-facto ISO 639-1 convention.
+>
+> Note that flightdeck's **runtime output is Korean** (board, prescriptions, refusals). Its English
+> guide quotes that output verbatim and explains each quote, rather than translating it into something
+> you will not see on screen.
 
 ## Install
 

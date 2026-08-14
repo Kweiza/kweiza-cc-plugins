@@ -1,52 +1,59 @@
 ---
 name: fd-setup
-description: 이 머신을 셋업한다. 상태를 재고 서버/클라이언트를 정한 뒤 필요한 것만 설치·기동한다. "셋업" · "설치" · "처음 켰다" · "서버가 안 뜬다" · 플러그인을 새로 켠 머신에서 쓴다.
+description: Set up this machine. Measure the state, decide server vs client, then install and start only what is missing. "셋업" · "설치" · "처음 켰다" · "서버가 안 뜬다" · use on a machine where the plugin was just switched on.
 ---
 
-# 셋업
+# Setup
 
-판정은 `fd setup` 이 한다. 이 스킬이 하는 것은 **묻고 · 승인받고 · 실행하고 · 확인하기**다.
+`fd setup` makes the call. This skill only **asks · gets approval · runs · confirms**.
 
-## 1. 먼저 잰다
+## 1. Measure first
 
 ```
 fd setup
 ```
 
-역할(서버/클라이언트) · 주소와 **그 출처** · 도달 여부 · 없는 것 · 할 일이 온다.
-지어내지 마라 — 여기 안 나온 것은 이 도구가 모르는 것이다.
+It gives the role (server/client) · the address and **where it came from** · reachability ·
+what is missing · what to do. Do not invent — what is not printed here, this tool does not know.
 
-## 2. 이미 됐으면 묻고 끝낸다
+## 2. If it is already done, ask and stop
 
-`할 일 없음` 이면 셋업돼 있다. **구성을 바꿀지만 묻고, 아니면 아무것도 하지 마라.**
-멀쩡한 설정을 다시 쓰는 것이 이 스킬의 가장 흔한 사고다.
+`할 일 없음` ("nothing to do") means setup is in place. **Ask only whether to change the
+configuration; otherwise do nothing.** Overwriting a working config is this skill's most
+common accident.
 
-## 3. 아니면 역할을 묻는다
+## 3. Otherwise, ask for the role
 
-- **서버** — 이 머신이 조정 서버를 띄운다. 다른 세션이 여기 붙는다.
-- **클라이언트** — 이미 도는 서버에 붙는다. **주소를 함께 물어라**(`http://호스트:7420`).
+- **Server** — this machine runs the coordination server. Other sessions attach here.
+- **Client** — attach to a server already running. **Ask for the address too**
+  (`http://<host>:7420`).
 
-`fd setup` 이 `Windows 는 지원하지 않는다` 를 냈으면 **거기서 멈춘다.** WSL 안내만 하고,
-셋업을 성공한 것처럼 말하지 마라 — 훅도 MCP 도 안 뜬다.
+If `fd setup` printed `Windows 는 지원하지 않는다` (Windows is unsupported), **stop there.**
+Point to WSL and nothing more; never talk as if setup succeeded — neither hooks nor MCP come up.
 
-## 4. 명령은 보여주고 승인받아 실행한다
+## 4. Show the commands, get approval, then run
 
-계획의 명령을 **그대로 화면에 내고** 승인을 받은 뒤 실행해라. `[관리자 권한]` 이 붙은 것은
-그 사실을 함께 말해라. 사용자가 자기 머신에 무엇이 왜 들어가는지 모른 채 진행되면 안 된다.
+Put the plan's commands **on screen verbatim**, get approval, then run them. For anything
+marked `[관리자 권한]` (admin rights), say so as well. The user must never be walked through
+what goes onto their own machine, and why, without knowing it.
 
-계획에 없는 명령을 지어내지 마라. 배포판을 모른다고 아무 패키지 관리자나 찍어 보지 마라.
+Do not invent commands the plan does not have. Not knowing the distro is no reason to take
+shots at package managers.
 
-## 5. 저장하고 확인한다
+## 5. Save and confirm
 
 ```
-fd setup --url <주소> [--token <토큰>]
+fd setup --url <url> [--token <token>]
 fd doctor
 ```
 
-저장 뒤 **"Claude Code 를 다시 시작해야 훅·MCP 가 이 값을 본다"** 를 반드시 전해라.
-MCP 서버는 기동 시 환경을 한 번 읽고 끝이라, 이 말이 없으면 "설정했는데 안 된다"를 겪는다.
+After saving, you must relay **"Claude Code 를 다시 시작해야 훅·MCP 가 이 값을 본다"**
+(restart Claude Code so hooks and MCP see this value). The MCP server reads the environment
+once at startup and that is all — without this sentence, the user hits "I set it up and it
+does not work".
 
-## 안 하는 것
+## What it does not do
 
-승인 없는 설치 · 계획에 없는 명령 · Windows 에서 성공한 척 · 설정 파일 직접 쓰기
-(형식은 `fd setup` 이 소유한다) · 서버가 이미 도는데 또 띄우기.
+Installing without approval · commands not in the plan · pretending success on Windows ·
+writing config files directly (`fd setup` owns the format) · starting another server when
+one is already running.
