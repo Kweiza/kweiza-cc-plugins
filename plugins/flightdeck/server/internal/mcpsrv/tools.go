@@ -144,15 +144,19 @@ var tools = []Tool{
 		}, "counter_name"),
 	},
 	{
-		Name:        "land",
-		Description: "랜딩 줄에 서거나 내 차례를 본다. result 로 보고+반납, leave 로 이탈한다.",
+		Name: "land",
+		Description: "공유 자원 줄에 서거나 내 차례를 본다(자원을 안 주면 랜딩 레인). " +
+			"result 로 보고+반납, leave 로 이탈한다.",
 		InputSchema: obj(map[string]any{
 			"result": enumStr("보고 종류. 채우면 레인을 반납한다", "ok", "fail"),
 			"detail": str("보고 사유. result=fail 이면 필수"),
 			"leave":  str("채우면 이 값을 사유로 줄에서 빠진다"),
 			"release": str("레인을 회수하는 사유. **이 서버는 회수하지 않는다** — " +
 				"주면 사유와 함께 거절한다"),
-			"resources": strArr("줄을 설 자원들. 비면 landing. 경로 자원은 path:<경로>"),
+			"resources": strArr("줄을 설 자원들. 비면 landing. **자유 문자열이라 열거가 아니다** — " +
+				"파일을 안 고쳐서 경로 겹침이 못 보는 배타(스테이징·배포 대상·전용기)가 " +
+				"이 축의 자리다. fd 가 아는 이름은 landing 과 path:<경로> 둘뿐이고 " +
+				"나머지 <종류>:<이름> 은 프로젝트가 정한다(예: env:dell)"),
 		}),
 	},
 	{
