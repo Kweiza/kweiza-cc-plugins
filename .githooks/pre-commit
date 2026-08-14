@@ -1,0 +1,6 @@
+#!/bin/sh
+# 신원이 어긋난 커밋을 만들기 전에 막는다.
+# 막으려는 실사고: `git -c user.email=x@x commit` 로 만든 임시 커밋이
+# amend 를 거쳐 저자 x <x@x> 로 main 까지 실려 나간 일(2026-08-05, 699726a).
+. "$(dirname "$0")/_identity.sh"
+check_ident || exit 1

@@ -1,0 +1,36 @@
+#!/bin/sh
+# 마지막 관문. rebase·cherry-pick·filter-branch 로 만들어진 커밋은
+# pre-commit 도 commit-msg 도 안 탄다 — 그래서 밀어내기 직전에 범위를 통째로 훑는다.
+FD_EXPECT_IDENT="Junseong Park <kweizaa@gmail.com>"
+
+_is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+bad=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+	_is_zero "$local_sha" && continue # 브랜치 삭제 푸시
+	if _is_zero "$remote_sha"; then
+		range=$(git rev-list "$local_sha" --not --remotes=origin)
+	else
+		range=$(git rev-list "$remote_sha..$local_sha")
+	fi
+	for c in $range; do
+		ident=$(git log -1 --format='%an <%ae>' "$c")
+		cident=$(git log -1 --format='%cn <%ce>' "$c")
+		if [ "$ident" != "$FD_EXPECT_IDENT" ] || [ "$cident" != "$FD_EXPECT_IDENT" ]; then
+			echo "거부: $(git log -1 --format='%h %s' "$c")" >&2
+			echo "      author=$ident committer=$cident" >&2
+			bad=1
+		fi
+		if git log -1 --format='%B' "$c" | grep -qi '^co-authored-by:'; then
+			echo "거부: $(git log -1 --format='%h %s' "$c") — Co-Authored-By 트레일러가 남아 있다" >&2
+			bad=1
+		fi
+	done
+done
+
+if [ "$bad" = 1 ]; then
+	echo "" >&2
+	echo "기대 신원: $FD_EXPECT_IDENT · 트레일러 없음" >&2
+	echo "이미 만든 커밋을 고치려면: git rebase -i --exec 'git commit --amend --no-edit --reset-author' <base>" >&2
+fi
+exit $bad

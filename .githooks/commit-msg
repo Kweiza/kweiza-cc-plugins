@@ -1,0 +1,4 @@
+#!/bin/sh
+# Co-Authored-By 트레일러를 메시지에서 지운다.
+# 거부가 아니라 제거다 — 도구가 붙였든 사람이 적었든 커밋은 그냥 통과한다.
+exec perl -0777 -i -pe 's/^Co-[Aa]uthored-[Bb]y:[^\n]*\n//gmi; s/\n+\z/\n/' "$1"
