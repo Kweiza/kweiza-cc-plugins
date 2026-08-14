@@ -1,58 +1,58 @@
 ---
 name: fd-handoff
-description: 작업을 마무리해 넘긴다. 판단 저장 + 후속 등록 + 항목 종료 + 자원 반납을 한 호출로. "핸드오프" · "마무리" · "세션 넘긴다" · 작업이 끝났을 때 쓴다.
+description: Wrap up work and hand it off. Judgment saved + followups registered + item closed + resources released, in one call. "핸드오프" · "마무리" · "세션 넘긴다" · use when the work is done.
 ---
 
-# 마무리
+# Wrapping up
 
-도구는 `finish` 하나다. **넷이 한 트랜잭션**이라 순서를 지킬 것이 없다 —
-판단만 남고 항목이 안 닫히거나, 항목은 닫혔는데 후속이 안 들어간 상태가 만들어지지 않는다.
+The tool is `finish`, alone. **The four are one transaction**, so there is no order to keep —
+you cannot end up with a judgment but an open item, or a closed item whose followups never landed.
 
-## 한 번에 끝낸다
+## Do it in one call
 
 ```
 finish(
-  item_id: "<집었던 항목>",
-  outcome: "done",          // 또는 "dropped" — 그때는 close_reason 이 필수다
-  title:   "<한 줄>",
-  body:    "<아래 넷>",
-  followups: [ { id, title, body, paths } ]   // 새 후속. **이미 있는 항목(이 선점 뒤 내가 만든 열린 항목만)은 id 만** — 잇는다
+  item_id: "<the item you claimed>",
+  outcome: "done",          // or "dropped" — then close_reason is required
+  title:   "<one line>",
+  body:    "<the four below>",
+  followups: [ { id, title, body, paths } ]   // new followups. **An item that already exists (only open ones I made after this claim): id only** — it links
 )
 ```
 
-`body` 없이 부르면 무엇을 적어야 하는지를 **그 자리에서** 낸다.
+Call it without `body` and it tells you **right there** what to write.
 
-## body 에 적을 넷
+## The four for `body`
 
-1. **왜 그렇게 했나**
-2. **무엇을 기각했나**
-3. **일부러 안 한 것** — 범위 밖으로 뺀 것 · 참이라 안 고친 것
-4. **확인했으나 못 한 것** — 결과가 "문제 없음"이었던 조사도 여기다
+1. **Why you did it that way**
+2. **What you rejected**
+3. **What you left undone on purpose** — pushed out of scope · left as is because it was right
+4. **What you checked but could not do** — investigations that came back "no problem" belong here too
 
-git log 와 diff 가 이미 아는 것(무엇을 고쳤나)은 적지 마라.
-여기 적을 것은 **그 어디에도 안 남는 것** — 판단의 이유다.
+Do not write what git log and diff already know (what you changed).
+What goes here is **what is left nowhere else** — the reasons behind the judgment.
 
-## 후속은 같은 호출에 넣는다
+## Followups go in the same call
 
-`followups` 로 넣으면 판단과 후속이 판단 링크로 이어진다. 나중에 따로 넣으면 그 연결이 없다.
-다음 세션의 `pick` 이 그 판단을 항목과 함께 낸다.
+Passed as `followups`, judgment and followup are joined by a judgment link. Added separately later, that link is missing.
+The next session's `pick` serves that judgment along with the item.
 
-## 마지막에 세션을 닫는다
+## Close the session last
 
-`fd finish <항목> --body … --close` — 항목과 세션을 함께. 항목 없이 닫을 때는 `fd close`.
-안 닫아도 보드 ①에는 안 남는다(선점을 든 카드만 낸다). 다만 겹침 판정에는 창 내내 잡힌다.
-**선점이 남아 있으면 거절한다** — 닫힌 카드의 선점은 아무에게도 안 보이기 때문이다.
-되돌릴 수 있다: 다음 프롬프트·도구 호출이 오면 카드가 살아난다. 닫기는 판정이 아니라 관측이다.
+`fd finish <item> --body … --close` — item and session together. To close without an item, `fd close`.
+Left open it still does not sit on board ① (only cards holding a claim show). But overlap detection catches it all window.
+**It refuses while a claim is still held** — a closed card's claim is invisible to everyone.
+Reversible: the next prompt or tool call brings the card back. Closing is an observation, not a verdict.
 
-## 중간에 남기는 것
+## What to leave along the way
 
-- `note(kind: "ask")` — 남이 건드리면 곤란한 것. **커밋 전 의도를 나르는 유일한 축**
-- `note(kind: "blocked")` — 막힘. 사유가 본문이다
-- `note(kind: "decision")` — 되돌리기 비싼 결정과 근거
+- `note(kind: "ask")` — what others must not touch. **The only channel carrying intent before a commit**
+- `note(kind: "blocked")` — blocked. The reason is the body
+- `note(kind: "decision")` — decisions expensive to undo, and the grounds
 
-`note` 는 응답에 **받을 세션 수**를 낸다. 0 이면 지금 아무도 안 보고 있다는 뜻이다.
+`note` reports **how many sessions will receive it**. 0 means nobody is watching right now.
 
-## 안 하는 것
+## What not to do
 
-- 대시보드 손 편집 — 화면은 DB 의 뷰다
-- 랜딩 sha·검증 통과 줄 적기 — 잡 레코드에서 파생된다
+- Hand-editing the dashboard — the screen is a view of the DB
+- Writing landing sha or verification-passed lines — they are derived from job records

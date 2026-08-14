@@ -1,59 +1,59 @@
 ---
 name: fd-pickup
-description: 세션을 시작해 큐에서 작업 하나를 집는다. 보드 확인 → 추천 → 선점 → 연결된 판단 읽기 순서로. "작업 가져와" · "세션 시작" · "뭐 할까" · 새 작업에 착수할 때 쓴다.
+description: Start a session and claim one item from the queue. Order is board → recommend → claim → read the linked judgments. "작업 가져와" · "세션 시작" · "뭐 할까" · use when starting new work.
 ---
 
-# 작업 집기
+# Picking Up Work
 
-도구는 board·pick 둘, 순서가 전부다.
+Two tools, board and pick; the order is the whole thing.
 
-## 1. 남들을 먼저 본다
+## 1. Look at the others first
 
 ```
 board
 ```
 
-**잡혀 있는 작업**(선점을 든 카드만) · 활동 배지 · 마지막 신호와 나이 · 경로 · 미확인이 온다.
-"죽었다"는 표시는 없다. 나이만 있다 — 판정은 사람이 한다.
+You get **claimed work** (only cards holding a claim) · activity badges · last signal and its age · paths · unacknowledged items.
+There is no "dead" marker. Only age — the call is a human's.
 
-## 2. 무엇을 집을지 고른다
+## 2. Choose what to pick
 
 ```
 pick
 ```
 
-인자 없으면 **추천만**: 1순위+**왜**, 구성원마다 **왜 묶였는지**, **탈락 사유 전부**.
-묶을 게 없으면 "단독" — 없으면 서버가 이 축을 안 낸 것이다.
+With no arguments it **only recommends**: the top pick + **why**, **why each member was bundled**, **every rejection reason**.
+Nothing to bundle reads "단독" (solo) — if that is missing, the server did not emit this axis.
 
-## 3. 집는다
+## 3. Pick it
 
 ```
-pick(item_ids: ["<선두>", "<나머지>", …])
+pick(item_ids: ["<lead>", "<rest>", …])
 ```
 
-**첫째가 선두** — id 가 브랜치·워크트리 이름이 된다. 나머지는 같은 워크트리에 얹힌다.
-선두 실패면 전부 거절, 성공하면 나머지는 되는 대로+**못 집은 사유**. 단건은 `pick(item_id: "<id>")`.
-선점하면 본문 · **연결된 판단 전문**(아래) · 워크트리 준비 명령이 온다.
+**The first is the lead** — its id becomes the branch and worktree name. The rest ride in the same worktree.
+Lead fails, all are refused; lead succeeds, the rest go as far as they can + **why each missed one failed**. Single: `pick(item_id: "<id>")`.
+A claim returns the body · **the full linked judgments** (below) · the worktree setup commands.
 
-집고 보니 못 할 일이면 `pick(leave: "왜 안 하나")` 로 놓는다(`item_id` 를 함께 주면 그 하나만).
-항목이 **`open` 으로 살아** 돌아가 id·이력·`after` 가 산다 — **`finish(dropped)` 로 때우지 마라.**
-그건 닫는 것이라 id 가 바뀌어 이력이 끊기고, 일이 0인데 큐 수지에 마무리로 들어간다.
+If it turns out you cannot do it, put it down with `pick(leave: "why not")` (add `item_id` to leave only that one).
+The item returns **alive as `open`**, so its id, history, and `after` survive — **do not paper over it with `finish(dropped)`.**
+That closes it: the id changes, the history is severed, and zero work enters the queue balance as a completion.
 
-재선점 요청이면 거절 대신 **맥락 재출력**이다(컨텍스트 유실 후 복귀 경로).
-`큐 열림 N건` 줄은 **그대로 옮긴다** — 없어도("이 응답에 없다") 옮기고, 아예 없으면
-(회수 거절·오프라인·구 fd) 수를 지어내지 마라.
+A re-claim request is **a re-print of the context**, not a refusal (the return path after context loss).
+Carry the `큐 열림 N건` (queue open N) line **verbatim** — carry it even when it says it is absent ("이 응답에 없다"), and if it
+is missing entirely (steal refused · offline · old fd) do not invent a number.
 
-## 4. 계획을 세우기 전에 연결된 판단을 읽는다
+## 4. Read the linked judgments before you plan
 
-판단 절은 **본문의 대체재가 아니다** — 본문은 "무엇을", 판단은 **"왜 그렇게 했나"**:
-무엇을 검토하고 왜 안 했는지, 어떤 근거가 거짓으로 밝혀졌는지, 어디를 **일부러 안 고쳤는지**.
-안 읽으면 조사를 다시 하거나, **의도적으로 남긴 자리를 결함으로 보고 고치러 간다.**
+The judgment section **is no substitute for the body** — the body is "what", the judgments are **"why it was done that way"**:
+what was considered and why it was not done, which evidence turned out false, where something was **left unfixed on purpose**.
+Skip them and you redo the investigation, or **read a deliberately left seam as a defect and go fix it.**
 
-## 5. 겹침이 오면 조율한다
+## 5. Coordinate when an overlap comes back
 
-`pick` 은 경로 겹침을 **거르지 않고 알린다.** 겹치는 세션 있으면 `note(kind: "ask")` 로
-뭘 건드릴지 알린 뒤 시작해라.
+`pick` **does not filter path overlaps; it reports them.** If a session overlaps, announce what you will touch with
+`note(kind: "ask")` before you start.
 
-## 안 하는 것
+## What this does not do
 
-세션 등록(훅이 한다 — `session` 인자가 없다) · 브랜치·HEAD·sha 적기(서버가 git 에서 읽는다) · 락 획득(락이 없다) · 묶음 고르기(서버가 정한다, `item_ids` 는 덮어쓸 때만) · 남의 선점 회수(`steal_reason` 은 거절된다 — 사람의 표면이다).
+Register the session (a hook does it — there is no `session` argument) · write branch, HEAD, or sha (the server reads them from git) · take a lock (there are none) · choose the bundle (the server decides; `item_ids` is for overriding only) · steal someone's claim (`steal_reason` is refused — that is a human's surface).

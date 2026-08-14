@@ -953,9 +953,13 @@ func TestDocsCountTheSkillsThatActuallyExist(t *testing.T) {
 	// 생기면 연쇄가 정확히 돈다: 전수 검사가 "표에 없다"로 먼저 걸리고 → 표에 넣으면
 	// 이 시험이 문서의 수를 요구한다. 어느 한 자리만 고치고 지나가는 길이 없다.
 	want := len(skillLineCaps)
+	// ★ README 가 영문 기본 + `.ko.md` 짝으로 갈린 뒤(2026-08-14)에도 **세 자리 전부** 본다.
+	// 한글이 정본이고 영문이 번역본이라, 잠글 것이 늘었지 줄지 않았다 — 번역본만 낡는 것이
+	// 이 갈림이 새로 만든 실패 모양이고, 영문 패턴을 안 걸면 그 자리는 아무도 안 센다.
 	for _, doc := range []struct{ file, pattern string }{
 		{"DESIGN.md", `스킬은 (\d+)개`},
-		{"README.md", `스킬 (\d+)개`},
+		{"README.ko.md", `스킬 (\d+)개`},
+		{"README.md", `(\d+) skills`},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, doc.file))
 		if err != nil {
