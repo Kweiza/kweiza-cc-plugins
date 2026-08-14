@@ -838,9 +838,7 @@ func boardBriefFoot(v service.BoardView) []string {
 	} else {
 		out = append(out, "큐 열림 0건")
 	}
-	if len(v.Held) > 0 {
-		out = append(out, "자원 점유: "+heldLine(v.Held))
-	}
+	out = append(out, "자원 점유: "+heldOrNoneLine(v.Held))
 	return out
 }
 
@@ -854,11 +852,7 @@ func boardDetailFoot(v service.BoardView) []string {
 		}
 		out = append(out, line)
 	}
-	if len(v.Held) > 0 {
-		out = append(out, "자원 점유: "+heldLine(v.Held))
-	} else {
-		out = append(out, "자원 점유 없음")
-	}
+	out = append(out, "자원 점유: "+heldOrNoneLine(v.Held))
 
 	if len(v.Blocked) > 0 {
 		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
@@ -1099,6 +1093,26 @@ func resourceLaneHolderIsQueued(rl service.ResourceLane) bool {
 // 자원 상한이 이 값으로 "접지 않을 자원"을 고른다.
 func resourceLaneWarns(rl service.ResourceLane) bool {
 	return rl.Holder != nil && !resourceLaneHolderIsQueued(rl)
+}
+
+// heldOrNoneLine 은 자원 점유 줄이다. **0건일 때도 낸다.**
+//
+// ★ 예전에는 기본 보드가 점유 0건이면 이 줄을 통째로 뺐고, detail 만 「자원 점유 없음」을
+// 냈다. 그래서 이 축은 **쓰는 사람에게만 보이는 축**이었다 — 안 써 본 세션은 축의 존재
+// 자체를 모른다. 2026-08-14 에 스테이징을 점유한 세션이 `자원 점유 없음` 을 읽고
+// **「fd 에 스테이징 자원 축이 아예 없다」**로 결론낸 뒤 그 오독을 다른 프로젝트 원장에
+// 증거로 남겼다(판단 01KZYXQ4…). 실제로는 자원명이 자유 문자열이라
+// land(resources:["env:dell"]) 한 줄이면 그날 배타가 섰다.
+//
+// 그러니 0건은 **「아무도 안 쥐었다」와 「걸 자리가 없다」를 겸하면 안 된다.** 이 제품이
+// 반복해 맞은 실패가 「없는 축을 조용히 빼는 것」이고(web/query.go:18) 이 줄이 그 실패의
+// 실물 1건이다.
+func heldOrNoneLine(held []model.ResourceHold) string {
+	if len(held) == 0 {
+		return "0건 — 아무도 안 쥐었다는 뜻이지 걸 자리가 없다는 뜻이 아니다. " +
+			`자원명은 자유 문자열이다: land(resources:["env:dell"])`
+	}
+	return heldLine(held)
 }
 
 func heldLine(held []model.ResourceHold) string {
