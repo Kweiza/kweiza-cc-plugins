@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: "Use when wrapping up a work session, switching to a new conversation, or before a context reset — ensures progress, decisions, and next steps are preserved across sessions"
+description: Use when wrapping up a work session, switching to a new conversation, or before a context reset — ensures progress, decisions, and next steps are preserved across sessions. "인수인계" · "인수인계 문서 써줘" · "컨텍스트 리셋 전에 정리" · "/clear 전에 정리" — 대화 맥락을 파일로 남긴다(큐 항목을 닫고 자원을 반납하는 것은 flightdeck 의 fd-handoff 다).
 user-invocable: true
 argument-hint: "[optional: notes about what to focus on next]"
 ---
