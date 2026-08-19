@@ -258,6 +258,18 @@ type Judgment struct {
 type JudgmentLink struct {
 	TargetKind string // item | job | commit | session
 	TargetID   string
+
+	// TargetProject 는 이 링크가 가리키는 것이 **어느 프로젝트의** 것인가다.
+	//
+	// ★ 빈 값은 "모른다"가 아니라 **판단 자신의 프로젝트**다. 읽는 쪽이
+	// COALESCE(target_project, judgment.project) 로 해석하므로, 증분 이전에 쌓인
+	// 링크 4240건은 컬럼이 NULL 인 채로 지금까지와 똑같이 읽힌다 — 백필이 필요 없다.
+	// 그 무해함이 이 필드를 NOT NULL 로 안 만든 이유다.
+	//
+	// ★ 채워지는 것은 **교차 프로젝트 링크뿐**이다. A 프로젝트 세션이 B 프로젝트
+	// 항목에 판단을 걸면 여기에 B 가 실리고, 그래야 B 를 집는 세션이 그 판단을 본다.
+	// 이 필드가 없던 동안 그런 링크 10건이 원장에 들어갔고 한 번도 안 읽혔다.
+	TargetProject string
 }
 
 type Snapshot struct {

@@ -84,14 +84,15 @@ type finishReq struct {
 }
 
 type noteReq struct {
-	Project    string     `json:"project"`
-	SessionID  string     `json:"session_id"`
-	Kind       string     `json:"kind"`
-	Title      string     `json:"title,omitempty"`
-	Body       string     `json:"body"`
-	ItemID     string     `json:"item_id,omitempty"`
-	Supersedes string     `json:"supersedes,omitempty"`
-	Links      []linkWire `json:"links,omitempty"`
+	Project     string     `json:"project"`
+	SessionID   string     `json:"session_id"`
+	Kind        string     `json:"kind"`
+	Title       string     `json:"title,omitempty"`
+	Body        string     `json:"body"`
+	ItemID      string     `json:"item_id,omitempty"`
+	ItemProject string     `json:"item_project,omitempty"`
+	Supersedes  string     `json:"supersedes,omitempty"`
+	Links       []linkWire `json:"links,omitempty"`
 }
 
 type counterReq struct {

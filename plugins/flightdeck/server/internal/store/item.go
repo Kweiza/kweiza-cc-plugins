@@ -501,6 +501,38 @@ func (t *Tx) GetItem(project, itemID string) (model.Item, error) {
 	return getItem(t.ctx, t.tx, project, itemID)
 }
 
+// ItemProjects 는 이 id 를 가진 항목이 **어느 프로젝트들에** 있는지다(프로젝트 id 순).
+//
+// ★ 왜 필요한가. 항목 id 는 프로젝트마다 독립이라 같은 id 가 여러 프로젝트에 있을 수 있고,
+// 접두 없는 동명 id 가 이 원장에 실제로 여럿 있다. Note 가 "내 프로젝트에 없는 id" 를
+// 받았을 때 그것이 **오타**인지 **남의 항목**인지를 가르는 유일한 근거가 이 목록이다.
+// 그 판정 없이 링크를 붙이면 판단이 어디서도 안 읽히는 채로 원장에 박히고, 판단은
+// 추가 전용이라(judgment_no_delete) 되돌릴 수 없다.
+//
+// ★ 이 함수만 프로젝트 경계를 넘는다. 다른 항목 접근자는 전부 project 를 받는데, 여기는
+// **경계를 넘는 것이 목적**이라 안 받는다 — 읽기 전용이고 id 하나만 보므로 누수가 아니다.
+func (s *Store) ItemProjects(ctx context.Context, itemID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project FROM item WHERE id = ? ORDER BY project`, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("항목 소속 프로젝트 조회 실패(item=%q): %w", clip(itemID, 64), err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("항목 소속 프로젝트 행 해석 실패(item=%q): %w", clip(itemID, 64), err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("항목 소속 프로젝트 순회 실패(item=%q): %w", clip(itemID, 64), err)
+	}
+	return out, nil
+}
+
 // ListOpen 은 열린 항목을 오래된 순으로 낸다.
 //
 // ★ 큐의 정의(`state = 'open'`)는 여기와 CountOpen 두 곳에 있다. 한쪽만 고치지 마라 —

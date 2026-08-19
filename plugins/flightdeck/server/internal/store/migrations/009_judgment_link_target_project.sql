@@ -1,0 +1,26 @@
+-- 009 · 링크가 **어느 프로젝트의** 것을 가리키는지 싣는다 (schema_version 8 → 9)
+--
+-- 여기까지 target_kind/target_id 만 있었고, 읽는 쪽(JudgmentsForItem)은 **판단 자신의**
+-- project 로 잘랐다. 그래서 A 프로젝트 세션이 B 프로젝트 항목에 판단을 걸면 링크 행은
+-- 들어가고 응답은 성공인데 그 항목을 집는 세션에게는 영영 안 보였다. 판단은 추가 전용이라
+-- (judgment_no_delete) 되돌릴 수도 없다 — 복구 경로가 0인 조용한 실패다.
+-- 원장 전수 실측(2026-08-19): 죽은 item 링크 12행/고유 11개 중 10개가 정확히 이 모양.
+--
+-- ★ **백필이 없다.** 새 컬럼은 NULL 허용이고 읽는 쪽이 COALESCE(target_project,
+--   judgment.project) 로 해석한다 — 증분 이전의 링크 4240건은 NULL 인 채로 지금까지와
+--   **똑같이** 읽힌다. 그 무해함이 NOT NULL 로 안 만든 이유다. UPDATE 백필은 파괴적
+--   조작(opUpdateSet)이라 마이그레이션 가드에 걸리고(008 주석의 그 판정), 걸리기 전에
+--   근거가 없다 — 안 쓴 값을 나중에 손으로 채우는 것은 원장을 사후에 고쳐 쓰는 일이다.
+--
+-- ★ 이 증분은 **과거의 죽은 링크 10건을 안 고친다.** 고치려면 "이 id 가 다른 프로젝트에
+--   유일하게 실재한다"를 근거로 원장을 다시 써야 하고, 그 판정은 이 자리의 것이 아니다.
+--   여기의 범위는 **새 링크가 다시는 죽지 않게 하는 것**이다.
+--
+-- ★ PK 는 (judgment_id, target_kind, target_id) 그대로다. 한 판단이 같은 id 를 가진 두
+--   프로젝트의 항목을 동시에 가리키는 일은 없고, SQLite 에서 PK 를 넓히려면 표를 다시
+--   만들어야 하는데 그 관용구(RENAME·INSERT…SELECT·DROP)가 곧 파괴적 증분이다.
+--
+-- ★ judgment_link_by_target(target_kind, target_id) 인덱스는 그대로 쓴다. 조회는 여전히
+--   그 인덱스로 후보를 좁히고, 프로젝트 판정은 조인 뒤에 한다.
+
+ALTER TABLE judgment_link ADD COLUMN target_project TEXT;

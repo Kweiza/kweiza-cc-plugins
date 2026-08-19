@@ -16,14 +16,18 @@ import (
 // 표면이 다시 열어 주는 꼴이 된다.
 
 type noteRequest struct {
-	Project    string      `json:"project"`
-	SessionID  string      `json:"session_id"`
-	Kind       string      `json:"kind"`
-	Title      string      `json:"title"`
-	Body       string      `json:"body"`
-	ItemID     string      `json:"item_id"`
-	Supersedes string      `json:"supersedes"`
-	Links      []linkInput `json:"links"`
+	Project   string `json:"project"`
+	SessionID string `json:"session_id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	ItemID    string `json:"item_id"`
+	// ★ links 에는 대상 프로젝트를 안 연다. 그 경로는 resolveItemProject 의 검증을
+	//   안 타므로, 거기에 프로젝트를 실을 수 있게 하면 **거절 층을 우회하는 문**이 된다.
+	//   교차 링크는 item_id + item_project 로만 만든다.
+	ItemProject string      `json:"item_project"`
+	Supersedes  string      `json:"supersedes"`
+	Links       []linkInput `json:"links"`
 }
 
 // handleAddJudgment 은 판단 하나를 남긴다.
@@ -36,7 +40,8 @@ func (s *server) handleAddJudgment(w http.ResponseWriter, r *http.Request) {
 	res, err := s.svc.Note(r.Context(), service.NoteInput{
 		Project: req.Project, SessionID: req.SessionID, Kind: model.JudgmentKind(req.Kind),
 		Title: req.Title, Body: req.Body, ItemID: req.ItemID,
-		Supersedes: req.Supersedes, Links: toLinks(req.Links),
+		ItemProject: req.ItemProject,
+		Supersedes:  req.Supersedes, Links: toLinks(req.Links),
 	})
 	if err != nil {
 		s.fail(w, r, err)

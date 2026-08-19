@@ -36,6 +36,11 @@ type LedgerLink struct {
 	JudgmentID string `json:"judgment_id"`
 	TargetKind string `json:"target_kind"`
 	TargetID   string `json:"target_id"`
+	// ★ NULL 은 "판단 자신의 프로젝트"다 — 증분 009 이전의 링크가 전부 그 모양이라
+	//   *string 이어야 한다. string 으로 받으면 NULL 과 명시된 빈 값이 같아지고,
+	//   왕복 복원이 옛 행에 빈 문자열을 써 넣어 **어느 프로젝트와도 안 맞는 링크**로
+	//   바꿔 놓는다(교차 링크가 복구 경로에서 다시 죽는 자리).
+	TargetProject *string `json:"target_project"`
 }
 
 // LedgerSnapshot 은 snapshot 표 한 행의 원문이다.
@@ -107,7 +112,7 @@ type LedgerDump struct {
 
 // linkCols 는 judgment_link 표의 컬럼이다. 다른 다섯과 달리 이 표에는 조회 접근자가 없어
 // 상수가 없었고, 읽기와 쓰기가 각자 리터럴을 들고 있었다.
-const linkCols = `judgment_id, target_kind, target_id`
+const linkCols = `judgment_id, target_kind, target_id, target_project`
 
 // ledgerTables 는 판단 원장이 담는 FK 폐포 여섯 표다 — **표마다 컬럼 목록이 하나다.**
 //
@@ -252,7 +257,7 @@ func readLedgerLinks(ctx context.Context, q dbtx) ([]LedgerLink, error) {
 	var out []LedgerLink
 	for rows.Next() {
 		var l LedgerLink
-		if err := rows.Scan(&l.JudgmentID, &l.TargetKind, &l.TargetID); err != nil {
+		if err := rows.Scan(&l.JudgmentID, &l.TargetKind, &l.TargetID, &l.TargetProject); err != nil {
 			return nil, fmt.Errorf("원장 링크 행 해석 실패: %w", err)
 		}
 		out = append(out, l)
@@ -448,7 +453,7 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		linkStmt := ledgerInsert("judgment_link", linkCols)
 		for _, l := range d.Links {
 			if _, err := t.tx.ExecContext(t.ctx, linkStmt,
-				l.JudgmentID, l.TargetKind, l.TargetID); err != nil {
+				l.JudgmentID, l.TargetKind, l.TargetID, l.TargetProject); err != nil {
 				return fmt.Errorf("원장 링크 되쓰기 실패(judgment=%q target=%s/%s): %w",
 					clip(l.JudgmentID, 64), clip(l.TargetKind, 32), clip(l.TargetID, 64), err)
 			}

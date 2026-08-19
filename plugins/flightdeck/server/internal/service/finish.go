@@ -630,12 +630,28 @@ type NoteInput struct {
 	ItemID     string // 있으면 항목에 링크한다
 	Supersedes string // 정정은 새 행 + supersedes. **덮어쓰기는 없다**
 	Links      []model.JudgmentLink
+
+	// ItemProject 는 ItemID 가 **어느 프로젝트의** 것인지를 손으로 못박는 자리다.
+	//
+	// ★ 평소에는 비워 둔다 — 서버가 자기 프로젝트를 먼저 보고, 없으면 그 id 를 가진
+	// 프로젝트를 찾아 **정확히 하나일 때만** 그리로 건다. 이 인자가 필요한 경우는
+	// 그 id 가 여러 프로젝트에 있어 서버가 고를 근거가 없을 때뿐이고, 그때는 거절이
+	// 이 인자를 가리킨다. 접두 없는 동명 id 가 이 원장에 실제로 여럿 있다.
+	ItemProject string
 }
 
 // NoteResult 는 저장 확인과 이 노트를 받을 세션이다.
 type NoteResult struct {
 	Judgment   model.Judgment `json:"judgment"`
 	Recipients []string       `json:"recipients"` // 지금 살아 있는 다른 세션들
+
+	// CrossProject 는 이 판단이 **남의 프로젝트** 항목에 걸렸을 때 그 프로젝트다.
+	// 자기 프로젝트에 걸렸으면 빈 값이다.
+	//
+	// ★ 화면이 이것을 말해야 한다. 좌표를 안 말한 채 성공만 내는 것이 이 항목이
+	// 겨냥한 병이고, 같은 병의 선례가 add 에 있다(RenderAdd 주석: 항목 10건이 남의
+	// 프로젝트에 등록됐고 그중 하나는 id 가 영구히 죽었다).
+	CrossProject string `json:"cross_project,omitempty"`
 
 	// Derived 는 수신자 파생의 신선도다. **Recipients 가 비었을 때 이것이 뜻을 가른다** —
 	// recipients 축 실패가 있으면 "못 읽었다"이고, 없으면 정말 받을 세션이 없는 것이다.
@@ -675,6 +691,69 @@ func Recipients(cards []SessionCard, self string) []string {
 }
 
 // Note 는 판단 하나를 남긴다. **추가 전용이다** — 정정은 새 행 + Supersedes 다.
+// resolveItemProject 는 note 의 item_id 가 **어느 프로젝트의** 것인지를 정한다.
+//
+// 반환은 (링크에 실을 프로젝트, 교차 프로젝트, 오류)다. 첫째가 빈 값이면 자기 프로젝트이고
+// 링크는 지금까지와 똑같은 모양(target_project NULL)으로 들어간다 — 옛 링크 4240건이
+// 그 모양이라 그 대칭을 깨면 안 된다.
+//
+// ★ **여기서 거절하는 것이 이 항목의 처방이다.** 앞 판은 검증 없이 붙였고, 읽는 쪽은
+// 프로젝트로 자르므로 그 판단은 어디서도 안 읽혔다. 성공 응답까지 받은 채로. 판단은
+// 추가 전용이라 되돌릴 수 없어 **복구 경로가 0인 조용한 실패**였다.
+//
+// ★ 거절은 두 갈래뿐이다 — "어디에도 없다"(오타)와 "여럿에 있다"(모호). "남의 것 하나"는
+// 거절하지 않는다. 그것은 실제 요구이고, 원장 전수 실측(2026-08-19)에서 죽은 링크 10건이
+// 전부 그 모양이었다(실재처가 정확히 1곳). 그 10건을 막는 처방은 병보다 나쁘다.
+func (s *Service) resolveItemProject(ctx context.Context, project, itemID, explicit string) (target, cross string, err error) {
+	refuse := func(reason, guidance string) (string, string, error) {
+		return "", "", &RefusedError{What: "note", Reason: reason, Guidance: guidance}
+	}
+
+	// ① 손으로 못박았으면 그것만 본다 — 실재는 확인한다. 명시가 오타를 통과시키면
+	//    이 인자가 검증을 **우회하는 문**이 된다.
+	if explicit != "" {
+		if _, e := s.st.GetItem(ctx, explicit, itemID); e != nil {
+			if errors.Is(e, store.ErrNotFound) {
+				return refuse(
+					fmt.Sprintf("프로젝트 %s 에 항목 %s 가 없다", clip(explicit, 64), clip(itemID, 64)),
+					"item_project 를 지운 채 다시 불러라 — 서버가 그 id 를 가진 프로젝트를 찾는다.")
+			}
+			return "", "", e
+		}
+		if explicit == project {
+			return "", "", nil
+		}
+		return explicit, explicit, nil
+	}
+
+	// ② 내 프로젝트에 있으면 그것이다. 가장 흔한 길이라 먼저 본다.
+	if _, e := s.st.GetItem(ctx, project, itemID); e == nil {
+		return "", "", nil
+	} else if !errors.Is(e, store.ErrNotFound) {
+		return "", "", e
+	}
+
+	// ③ 내게 없다 — 그 id 를 가진 프로젝트를 찾는다.
+	projects, e := s.st.ItemProjects(ctx, itemID)
+	if e != nil {
+		return "", "", e
+	}
+	switch len(projects) {
+	case 0:
+		return refuse(
+			fmt.Sprintf("항목 %s 가 어느 프로젝트에도 없다", clip(itemID, 64)),
+			"id 를 확인해라. 이대로 저장하면 그 판단은 어느 항목에서도 안 읽히고, "+
+				"판단은 추가 전용이라 지울 수도 없다. 항목 없이 남길 판단이면 item_id 를 빼라 — 그것은 정식 경로다.")
+	case 1:
+		return projects[0], projects[0], nil
+	default:
+		return refuse(
+			fmt.Sprintf("항목 %s 가 프로젝트 %d곳에 있다(%s) — 서버가 고를 근거가 없다",
+				clip(itemID, 64), len(projects), strings.Join(projects, "·")),
+			"item_project 로 어느 것인지 못박아라. 항목 id 는 프로젝트마다 독립이라 동명이인이 생긴다.")
+	}
+}
+
 func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 	if err := ValidateNoteKind(in.Kind); err != nil {
 		return NoteResult{}, &RefusedError{What: "note", Reason: err.Error()}
@@ -687,8 +766,21 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 	now := s.now()
 
 	links := in.Links
+	var crossProject string
 	if strings.TrimSpace(in.ItemID) != "" {
-		links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: in.ItemID})
+		// ★ **tx 진입 전에** 판정한다. 거절이 tx 안에서 나면 함께 있던 판단이 롤백되고,
+		//   판단은 원리적으로 파생 불가한 자산이다(ValidateLink 가 순수 함수로 나와 있는
+		//   것과 같은 이유 — store/judgment.go 의 그 ★ 참고).
+		target, cross, rerr := s.resolveItemProject(ctx, in.Project, in.ItemID, in.ItemProject)
+		if rerr != nil {
+			s.logFail(ctx, "judgment.note", in.Project, in.SessionID, rerr,
+				failAbout{Item: in.ItemID, Mode: string(in.Kind)})
+			return NoteResult{}, rerr
+		}
+		crossProject = cross
+		links = append(links, model.JudgmentLink{
+			TargetKind: "item", TargetID: in.ItemID, TargetProject: target,
+		})
 	}
 	if strings.TrimSpace(in.SessionID) != "" {
 		links = append(links, model.JudgmentLink{TargetKind: "session", TargetID: in.SessionID})
@@ -762,7 +854,10 @@ func (s *Service) Note(ctx context.Context, in NoteInput) (NoteResult, error) {
 		"project", in.Project, "session_id", in.SessionID, "mode", string(in.Kind),
 		"count", len(recipients), "bytes", len(in.Body))
 
-	return NoteResult{Judgment: j, Recipients: recipients, Derived: d.result(now)}, nil
+	return NoteResult{
+		Judgment: j, Recipients: recipients,
+		CrossProject: crossProject, Derived: d.result(now),
+	}, nil
 }
 
 // Alloc 은 논리 카운터의 다음 번호를 발급한다.

@@ -220,6 +220,12 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	title := fs.String("title", "", "제목")
 	body := fs.String("body", "", bodyFlagHelp)
 	item := fs.String("item", "", "연결할 항목 id")
+	// ★ 이 플래그가 없으면 거절이 **막힌 길을 가리킨다**. 서버는 동명 항목이 여러
+	//   프로젝트에 있을 때 "item_project 로 못박아라"로 거절하는데, CLI 에 그 인자가
+	//   없으면 사용자는 그 말을 듣고도 할 수 있는 게 없다. 이 저장소의 프로젝트 좌표는
+	//   cwd 가 정하므로(a.proj.ID) 저쪽 저장소로 cd 하는 것이 유일한 우회로였고,
+	//   그 우회로는 저쪽 프로젝트에 세션 카드를 하나 연다.
+	itemProject := fs.String("item-project", "", "그 항목이 다른 프로젝트의 것일 때만 쓴다(평소엔 비운다)")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -234,7 +240,7 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, "note", "/api/v1/judgments", noteReq{
 		Project: a.proj.ID, SessionID: sess, Kind: *kind,
-		Title: *title, Body: text, ItemID: *item,
+		Title: *title, Body: text, ItemID: *item, ItemProject: *itemProject,
 	})
 	if err != nil {
 		fmt.Fprintf(out, "판단을 못 남겼다: %v\n", err)
