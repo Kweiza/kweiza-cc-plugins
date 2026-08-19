@@ -106,9 +106,12 @@ var tools = []Tool{
 				// model.JudgmentNow 상수와 검증 목록은 남는다: 레거시 임포터가 생산하고
 				// DB 에 이미 행이 있어, 지우면 그 행을 못 읽게 된다.
 				"handoff", "decision", "blocked", "ask", "rejected", "not-done", "verified", "draft"),
-			"body":       str("본문. 비면 거절한다"),
-			"title":      str("한 줄 제목"),
-			"item_id":    str("이 판단이 걸리는 큐 항목 id"),
+			"body":    str("본문. 비면 거절한다"),
+			"title":   str("한 줄 제목"),
+			"item_id": str("이 판단이 걸리는 큐 항목 id"),
+			"item_project": str("그 항목이 **다른 프로젝트**의 것일 때만 쓴다. " +
+				"평소엔 비워라 — 서버가 내 프로젝트를 먼저 보고, 없으면 그 id 를 가진 프로젝트를 찾는다. " +
+				"여러 곳에 있으면 거절하며 이 인자를 가리킨다"),
 			"supersedes": str("정정 대상 판단 id. 덮어쓰기는 없다 — 새 행이 옛 행을 가리킨다"),
 		}, "kind", "body"),
 	},
@@ -212,11 +215,12 @@ type pickArgs struct {
 }
 
 type noteArgs struct {
-	Kind       string `json:"kind"`
-	Body       string `json:"body"`
-	Title      string `json:"title"`
-	ItemID     string `json:"item_id"`
-	Supersedes string `json:"supersedes"`
+	Kind        string `json:"kind"`
+	Body        string `json:"body"`
+	Title       string `json:"title"`
+	ItemID      string `json:"item_id"`
+	ItemProject string `json:"item_project"`
+	Supersedes  string `json:"supersedes"`
 }
 
 type afterArgs struct {

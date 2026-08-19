@@ -853,7 +853,8 @@ func (s *Server) toolNote(ctx context.Context, sessionID string, raw json.RawMes
 		Project: s.id.ProjectID, SessionID: sessionID,
 		Kind:  model.JudgmentKind(strings.TrimSpace(a.Kind)),
 		Title: a.Title, Body: a.Body, ItemID: strings.TrimSpace(a.ItemID),
-		Supersedes: strings.TrimSpace(a.Supersedes),
+		ItemProject: strings.TrimSpace(a.ItemProject),
+		Supersedes:  strings.TrimSpace(a.Supersedes),
 	})
 	if err != nil {
 		if r, ok := s.degradedResult(ctx, "note", err); ok {

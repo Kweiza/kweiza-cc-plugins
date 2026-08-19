@@ -84,9 +84,13 @@ func (t *Tx) AddJudgment(j model.Judgment) (model.Judgment, error) {
 		if err := ValidateLink(l); err != nil {
 			return j, err
 		}
+		// ★ 빈 TargetProject 는 NULL 로 들어간다 — 빈 문자열과 NULL 이 갈리면
+		//   COALESCE 가 빈 문자열을 "값이 있다"로 읽어 어느 프로젝트와도 안 맞는
+		//   링크가 된다. 그게 정확히 이 컬럼이 없애려던 죽은 링크의 모양이다.
 		if _, err := t.tx.ExecContext(t.ctx,
-			`INSERT INTO judgment_link(judgment_id, target_kind, target_id) VALUES (?, ?, ?)`,
-			j.ID, l.TargetKind, l.TargetID); err != nil {
+			`INSERT INTO judgment_link(judgment_id, target_kind, target_id, target_project)
+			 VALUES (?, ?, ?, ?)`,
+			j.ID, l.TargetKind, l.TargetID, nullStr(l.TargetProject)); err != nil {
 			return j, writeErr(err, writeTarget{
 				Target: TargetJudgmentLink, Project: j.Project, ID: j.ID,
 				RefHint: fmt.Sprintf("판단 %s", clip(j.ID, 64)),
@@ -128,7 +132,8 @@ func scanJudgment(sc interface{ Scan(...any) error }) (model.Judgment, error) {
 
 func linksOf(ctx context.Context, q dbtx, judgmentID string) ([]model.JudgmentLink, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT target_kind, target_id FROM judgment_link WHERE judgment_id = ? ORDER BY target_kind, target_id`,
+		`SELECT target_kind, target_id, target_project FROM judgment_link
+		  WHERE judgment_id = ? ORDER BY target_kind, target_id`,
 		judgmentID)
 	if err != nil {
 		return nil, fmt.Errorf("판단 링크 조회 실패(judgment=%q): %w", clip(judgmentID, 64), err)
@@ -138,9 +143,11 @@ func linksOf(ctx context.Context, q dbtx, judgmentID string) ([]model.JudgmentLi
 	var out []model.JudgmentLink
 	for rows.Next() {
 		var l model.JudgmentLink
-		if err := rows.Scan(&l.TargetKind, &l.TargetID); err != nil {
+		var project sql.NullString
+		if err := rows.Scan(&l.TargetKind, &l.TargetID, &project); err != nil {
 			return nil, fmt.Errorf("판단 링크 행 해석 실패: %w", err)
 		}
+		l.TargetProject = str(project)
 		out = append(out, l)
 	}
 	if err := rows.Err(); err != nil {
@@ -437,7 +444,8 @@ func (s *Store) JudgmentsForItem(ctx context.Context, project, itemID string) ([
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+judgmentCols+`
 		   FROM judgment j JOIN judgment_link jl ON jl.judgment_id = j.id
-		  WHERE j.project = ? AND jl.target_kind = 'item' AND jl.target_id = ?
+		  WHERE COALESCE(jl.target_project, j.project) = ?
+		    AND jl.target_kind = 'item' AND jl.target_id = ?
 		  ORDER BY j.at DESC, j.id DESC`,
 		project, itemID)
 	if err != nil {

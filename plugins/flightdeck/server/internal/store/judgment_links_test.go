@@ -204,3 +204,103 @@ func TestJudgmentsForItemOrdersNewestFirstThenIDDescending(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 교차 프로젝트 링크 — target_project
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A 프로젝트 세션이 B 프로젝트 항목에 건 판단은 **B 를 집는 세션에게 보여야 한다.**
+//
+// 이것이 없던 동안 링크 행은 원장에 들어갔고 응답은 성공이었는데, 읽는 쪽이 판단의
+// project 로 잘랐으므로 그 항목에서는 영영 안 읽혔다. 판단은 추가 전용이라(judgment
+// _no_delete) 잘못 걸린 링크를 되돌릴 수도 없다 — 복구 경로가 0인 조용한 실패다.
+//
+// 원장 전수 실측(2026-08-19): 죽은 item 링크 12행/고유 11개 중 **10개가 정확히 이 모양**
+// 이었다(context-platform → kweiza-cc-plugins 9건, 역방향 1건). 1회성 사고가 아니다.
+func TestJudgmentsForItemFindsLinkTargetedAtAnotherProject(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "P")
+	seed(t, s, "Q")
+	mustItem(t, s, "Q", "cross")
+
+	// P 의 세션이 Q 의 항목에 판단을 건다.
+	j, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "P", Kind: model.JudgmentAsk, Body: "저쪽 항목에 거는 판단",
+		Links: []model.JudgmentLink{{TargetKind: "item", TargetID: "cross", TargetProject: "Q"}},
+	})
+	if err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	got, err := s.JudgmentsForItem(ctx, "Q", "cross")
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("교차 프로젝트 판단이 대상 프로젝트에서 안 읽힌다: %d건 %+v", len(got), got)
+	}
+	if got[0].ID != j.ID {
+		t.Fatalf("다른 판단이 나왔다: got=%s want=%s", got[0].ID, j.ID)
+	}
+}
+
+// 교차로 건 판단이 **거는 쪽** 프로젝트에서 같은 id 로 읽히면 안 된다.
+//
+// 이 축이 없으면 target_project 를 "덧붙이기만" 하는 구현이 통과한다 — 그러면 같은 id 를
+// 가진 두 프로젝트의 항목이 서로의 판단을 보게 되고, 그것이 본문이 B(프로젝트 필터 제거)를
+// 거절한 이유(동명이인)다. 이 저장소에 접두 없는 동명 id 가 실제로 여럿 있다.
+func TestJudgmentsForItemDoesNotLeakCrossProjectLinkBackToSourceProject(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "P")
+	seed(t, s, "Q")
+	mustItem(t, s, "P", "same-id")
+	mustItem(t, s, "Q", "same-id")
+
+	if _, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "P", Kind: model.JudgmentAsk, Body: "Q 의 항목에 건다",
+		Links: []model.JudgmentLink{{TargetKind: "item", TargetID: "same-id", TargetProject: "Q"}},
+	}); err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	got, err := s.JudgmentsForItem(ctx, "P", "same-id")
+	if err != nil {
+		t.Fatalf("조회 실패: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Q 로 건 판단이 P 에서 읽혔다 — 동명이인이 서로의 판단을 본다: %+v", got)
+	}
+}
+
+// 링크를 되읽으면 target_project 가 살아 있어야 한다.
+//
+// ★ 이 축이 따로 필요한 이유: JudgmentsForItem 이 SQL 안에서만 COALESCE 로 맞히고
+// linksOf 가 컬럼을 안 읽으면, 조회는 통과하는데 **원장 백업·pick 렌더가 그 값을 버린다.**
+// 백업이 버리면 왕복 복원에서 교차 링크가 전부 자기 프로젝트로 되돌아간다 — 같은 손실이
+// 복구 경로에서 다시 난다.
+func TestLinksRoundTripPreservesTargetProject(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	seed(t, s, "P")
+	seed(t, s, "Q")
+	mustItem(t, s, "Q", "cross")
+
+	j, err := s.AddJudgment(ctx, model.Judgment{
+		Project: "P", Kind: model.JudgmentAsk, Body: "본문",
+		Links: []model.JudgmentLink{{TargetKind: "item", TargetID: "cross", TargetProject: "Q"}},
+	})
+	if err != nil {
+		t.Fatalf("판단 저장 실패: %v", err)
+	}
+
+	back, err := s.GetJudgment(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("판단 되읽기 실패: %v", err)
+	}
+	want := []model.JudgmentLink{{TargetKind: "item", TargetID: "cross", TargetProject: "Q"}}
+	if !reflect.DeepEqual(back.Links, want) {
+		t.Fatalf("링크가 왕복에서 달라졌다: got=%+v want=%+v", back.Links, want)
+	}
+}

@@ -89,6 +89,8 @@ func dropNonIdempotentColumns(t *testing.T, exec func(string) (sql.Result, error
 		// 007 · project.pinned_at·archived_at
 		`ALTER TABLE project DROP COLUMN pinned_at`,
 		`ALTER TABLE project DROP COLUMN archived_at`,
+		// 009 · judgment_link.target_project
+		`ALTER TABLE judgment_link DROP COLUMN target_project`,
 	} {
 		if _, err := exec(q); err != nil {
 			t.Fatalf("비멱등 증분 컬럼 걷기 실패(%s): %v", q, err)

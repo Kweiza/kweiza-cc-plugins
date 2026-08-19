@@ -53,9 +53,12 @@ var migrationProjectViewAxis string
 //go:embed migrations/008_resource_queue.sql
 var migrationResourceQueue string
 
+//go:embed migrations/009_judgment_link_target_project.sql
+var migrationLinkTargetProject string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -84,6 +87,7 @@ var migrations = []Migration{
 	{To: 6, Name: "워크트리 접두 발자국을 지운다", SQL: migrationWorktreePrefixPurge},
 	{To: 7, Name: "프로젝트에 핀·보관 축", SQL: migrationProjectViewAxis},
 	{To: 8, Name: "줄 행이 자원 집합을 갖는다", SQL: migrationResourceQueue},
+	{To: 9, Name: "판단 링크가 대상 프로젝트를 싣는다", SQL: migrationLinkTargetProject},
 }
 
 // timeLayout 은 저장용 시각 표기다.
