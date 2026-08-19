@@ -1,6 +1,6 @@
 ---
 name: session-resume
-description: "Use at the start of a work session to reload a saved handoff from a previous session — restores progress, decisions, and next steps so you continue where the last session left off"
+description: Use at the start of a work session to reload a saved handoff from a previous session — restores progress, decisions, and next steps so you continue where the last session left off. "지난 세션 이어받기" · "인수인계 불러와" · "어디까지 했더라" — 저장된 인수인계 파일을 읽는다(큐에서 새 작업을 집는 것은 flightdeck 의 fd-pickup 이다).
 user-invocable: true
 argument-hint: "[optional: 'list', a date like 2026-06-19, or a topic keyword to pick which handoff]"
 ---
