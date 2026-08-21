@@ -962,6 +962,52 @@ func TestHandoffSkillCarriesTheTriageCriterion(t *testing.T) {
 	}
 }
 
+// fd-update 는 갱신 절차에서 **저장소 마운트를 잃지 않는다.**
+//
+// ★ 이 시험이 없어서 날 뻔한 일: `FD_REPOS` 는 compose 치환 시점에만 쓰이고 컨테이너 env 에도
+// 안 남아 흔적이 마운트뿐이다. 그래서 `up` 에 안 주면 **조용히 기본값으로 되돌아간다** —
+// 실측(다른 머신): 등록 7건 중 6건이 그렇게 파생 불능이었고 `healthz` 는 내내 ok 였다.
+// 한 번 고쳐도 갱신마다 풀리므로, 절차에서 이 구가 빠지면 같은 사고가 반복된다.
+// 스킬 문구는 잠그지 않으면 개정 셋을 살아남는다는 것이 이 저장소의 선례다.
+//
+// ★ down 도 함께 문다. compose 프로젝트 이름이 **버전 디렉토리**라 새 자리에서 바로 올리면
+// 컨테이너 이름이 충돌해 멈춘다(실측 — 2026-08-21 갱신에서 밟았다).
+//
+// ★ 잠그는 것은 **구가 있다는 사실**뿐이다. 명령 전문을 잠그면 절차를 고칠 때마다 시험이 깨져,
+// 절차 대신 시험을 고치는 쪽으로 사람을 민다.
+func TestUpdateSkillDoesNotLoseTheRepoMount(t *testing.T) {
+	root := pluginRoot(t)
+	for _, f := range []string{"SKILL.md", "SKILL.ko.md"} {
+		raw, err := os.ReadFile(filepath.Join(root, "skills", "fd-update", f))
+		if err != nil {
+			t.Fatalf("%s 를 못 읽었다: %v", f, err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "docker compose down") {
+			t.Fatalf("fd-update/%s 에 `docker compose down` 이 없다 —\n"+
+				"compose 프로젝트 이름이 버전 디렉토리라 새 자리에서 바로 올리면 이름이 충돌해 멈춘다", f)
+		}
+		// ★ **낱말 존재로는 부족하다.** 산문에 FD_REPOS 가 여러 번 나오므로, 명령줄에서 빠져도
+		// Contains 는 참이 된다(변이로 실증: 그 구를 지워도 초록이었다). 값이 실제로 넘어가는
+		// 자리는 `up` 명령줄 하나뿐이라 거기를 본다.
+		var upLine string
+		for _, ln := range strings.Split(body, "\n") {
+			if strings.Contains(ln, "docker compose up") {
+				upLine = ln
+				break
+			}
+		}
+		if upLine == "" {
+			t.Fatalf("fd-update/%s 에 `docker compose up` 줄이 없다 — 갱신 절차의 본체가 사라졌다", f)
+		}
+		if !strings.Contains(upLine, "FD_REPOS") {
+			t.Fatalf("fd-update/%s 의 up 명령줄에 FD_REPOS 가 없다:\n  %s\n"+
+				"안 주면 마운트가 조용히 기본값으로 되돌아간다 — 실측으로 등록 7건 중 6건이 파생 불능이었고\n"+
+				"healthz 는 내내 ok 였다. 산문에 낱말만 있는 것으로는 값이 안 넘어간다", f, strings.TrimSpace(upLine))
+		}
+	}
+}
+
 // 문서가 세는 MCP 도구 수와 실재하는 수가 어긋나면 여기서 걸린다.
 //
 // ★ 이 시험이 없어서 난 일: §1 머리줄은 스스로를 "수와 이름 목록의 진실 원천"이라
@@ -1078,4 +1124,17 @@ func TestContainerFilesKeepTheDesignedCoordinates(t *testing.T) {
 		"restart: unless-stopped",
 		"healthcheck:",
 	)
+	// ★ 저장소 마운트의 기본값은 **홈**이다(2026-08-22 개정).
+	//
+	// 앞선 판은 `${HOME}/cdo-dev` 였고 그것은 **한 머신의 관습**이었다. 다른 머신에는 그
+	// 디렉토리가 아예 없고 저장소를 홈 바로 아래 둔다 — 실측(NAS kweiza-server): 등록 7건 중
+	// **6건이 컨테이너에서 안 보였고** 파생 축(워크트리·ref·미커밋·경로 실재·조상 판정)이 전부
+	// 미판정이었다. 그동안 `healthz` 는 ok 였고, 사람이 리포트를 쓰기 전까지 아무도 몰랐다.
+	// 이 저장소 자신도 같은 결함을 갖고 있었다(`infra`·`aaron` 이 `~/cdo-dev` 밖이다).
+	mustContain(t, "compose.yaml", string(cf), "${FD_REPOS:-${HOME}}:${FD_REPOS:-${HOME}}:ro")
+	// 낡은 기본값이 되살아나는 것을 막는다 — 주석·산문에 사료로 남는 것은 한글로 적어라.
+	if strings.Contains(string(cf), "${HOME}/cdo-dev") {
+		t.Fatalf("compose.yaml 이 아직 `${HOME}/cdo-dev` 를 기본값으로 쓴다 —\n" +
+			"그것은 한 머신의 관습이고, 그 기본값 때문에 다른 머신에서 등록 7건 중 6건이 파생 불능이었다")
+	}
 }

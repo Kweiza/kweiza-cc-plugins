@@ -130,7 +130,29 @@ func (e *CommandError) Error() string {
 	if e.Err != nil {
 		msg += ": " + e.Err.Error()
 	}
+	if pathUnseen(e.Stderr) {
+		msg += " — 서버가 이 경로로 못 갔다. 컨테이너로 띄웠다면 FD_REPOS 마운트 밖일 수 있다" +
+			"(그 값은 갱신 때 안 주면 기본값으로 되돌아간다)"
+	}
 	return msg
+}
+
+// pathUnseen 은 "git 이 그 디렉토리로 못 갔다"를 가른다.
+//
+// ★ 이 힌트가 없어서 난 일: 다른 머신에서 등록 7건 중 **6건이 파생 불능**이었는데 화면에는
+// "미판정"과 git 원문만 나왔다. 원인은 컨테이너 마운트(FD_REPOS)가 한 디렉토리뿐이라 나머지
+// 저장소가 컨테이너 안에 아예 없던 것이고, healthz 는 내내 ok 였다 — 사람이 리포트를 쓰기
+// 전까지 아무도 몰랐다. 그리고 그 값은 갱신 때 안 주면 조용히 기본값으로 되돌아가므로
+// 한 번 고쳐도 재발한다. 그래서 증상을 만나는 자리에서 원인을 가리킨다.
+//
+// ★ **단정하지 않는다.** 이 프로세스는 자기가 컨테이너인지도, FD_REPOS 가 무엇인지도 모른다.
+// 아는 것은 git 이 그 디렉토리로 못 갔다는 것뿐이라, 거기까지만 말하고 조건부로 가리킨다.
+//
+// ★ 그리고 **이 갈래에만** 붙인다. "not a git repository" 는 경로는 보이는데 저장소가 아닌
+// 것이라 처방이 다르고, 아무 실패에나 붙이면 상시 점등이 되어 판별력이 0이 된다(§4).
+func pathUnseen(stderr string) bool {
+	low := strings.ToLower(stderr)
+	return strings.Contains(low, "cannot change to") && strings.Contains(low, "no such file or directory")
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
