@@ -1763,7 +1763,8 @@ func RenderFinish(r service.FinishResult) string {
 				fmt.Fprintf(&b, "  창작 후속 %d건 — 큐가 그만큼 늘었다. ", len(ids))
 			}
 			b.WriteString("**본문이 곧 패치**인 것이 있으면 pick(item_ids=[…]) 으로 지금 이어받아 " +
-				"이 세션에서 닫아라 — 후속은 \"지금 못 하는 이유\"가 있는 것만이다.\n")
+				"이 세션에서 닫아라. **물으면 정해지는 것도 후속이 아니다 — 지금 물어라.** " +
+				"후속은 \"지금 못 하는 이유\"가 있는 것만이다.\n")
 			if len(ids) >= 3 {
 				b.WriteString("  같은 검증 축인 것들은 한 항목으로 묶을 수 있었는지 보라.\n")
 			}
