@@ -301,7 +301,7 @@ Three things come from the environment:
 - **`FD_UID`/`FD_GID`** — the `~/.flightdeck` volume and the repositories belong to the host user.
   If yours is not the default 1000 (`id -u`), then without these the DB opens but cannot be written,
   and git becomes suspicious about ownership.
-- **`FD_REPOS`** — where the repositories live (default `~/cdo-dev`). **Everything derived comes from
+- **`FD_REPOS`** — where the repositories live (**default `$HOME`**). **Everything derived comes from
   here** — branch, sha, uncommitted footprints, path overlap. Without it the server looks healthy while
   writing only `브랜치 ?(못 읽음)` ("branch ? (unreadable)") on the board. The path must be **identical**
   on host and container, because a worktree's `.git` points at the main repository by absolute path.

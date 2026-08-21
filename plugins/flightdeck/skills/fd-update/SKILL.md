@@ -44,9 +44,17 @@ It answers only **may this be restarted** — does that binary run, is the DB mi
 claude plugin marketplace update <marketplace>
 claude plugin update flightdeck@<marketplace>
 
-cd ~/.claude/plugins/cache/<marketplace>/flightdeck/<new version>
-FD_TOKEN="$(cat ~/.flightdeck/token)" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
+# Read the repo mount BEFORE bringing it down — that value is recorded nowhere else
+REPOS="$(docker inspect flightdeck --format '{{range .Mounts}}{{if eq .Source .Destination}}{{.Source}}{{end}}{{end}}')"
+
+cd ~/.claude/plugins/cache/<marketplace>/flightdeck/<old version> && docker compose down
+cd ../<new version>
+FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null || sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' ~/.flightdeck/config.json)" FD_REPOS="$REPOS" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
 ```
+
+**Down the old directory first** — the compose project name is the version directory, so the new one collides
+on the container name. **Read `FD_REPOS` before that**: it lives only at substitution time, its one trace is the
+mount, and omitting it silently reverts to the default (measured: 7 projects, **6 underivable**, healthz ok).
 
 **Bring it up from the installed cache directory.** Bring it up from the dev repo and the installed build and
 the running build diverge. The server applies DB migrations itself on open, and backs up before applying —
@@ -54,8 +62,7 @@ there is nothing separate to do.
 
 ## 5. Look at the evidence that it updated
 
-Check **both** that `fd status | head -1` prints `파생 git@` with a just-now timestamp, and that
-`claude plugin list` prints the new version. Look at only one and you mistake a half-update for current.
+Check **both**: `fd status | head -1` prints `파생 git@` with a just-now stamp, **and** `claude plugin list` prints the new version. One alone mistakes a half-update for current.
 
 ## 6. Always pass on what the human must do
 
@@ -64,11 +71,9 @@ Check **both** that `fd status | head -1` prints `파생 git@` with a just-now t
 > using the old token and old tools. Until then use the CLI instead of MCP
 > (`fd pick` · `fd note` · `fd finish` work right now).
 
-Leave this out and the user hits "I updated it and it does not work". The server is already the new build
-while only the screen is the old one, so the cause is invisible.
+Leave this out and the user hits "I updated it and it does not work" — the server is already new, only the screen is old, so the cause is invisible.
 
 ## Not doing
 
-Working around it with a manual build instead of bumping the version (that server keeps running stale) ·
-calling it current from `healthz` alone · omitting the restart notice · **deleting an old plugin cache that
-other sessions are referencing** (their hooks and MCP break in place).
+Manual build instead of a version bump (that server keeps running stale) · calling it current from `healthz` alone ·
+omitting the restart notice · **deleting an old plugin cache other sessions reference** (their hooks and MCP break in place).
