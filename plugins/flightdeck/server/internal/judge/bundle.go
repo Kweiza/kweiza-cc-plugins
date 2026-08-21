@@ -211,6 +211,19 @@ type Bundle struct {
 	// "안 굶었다"가 같은 값으로 접히지만, 여기서는 그 접힘이 안전한 쪽이다
 	// (안 굶은 것으로 보면 기존 순서가 그대로 산다).
 	Starved bool
+	// AfterCleared 는 **이 묶음의 선두가 선행을 걸고 기다렸다가 풀린** 항목이라는 사실이다.
+	//
+	// 선두가 fit 에 들었다는 것이 곧 "그 선행이 전부 충족됐다"는 뜻이다 —
+	// 미충족이면 eligible.go 의 축 ④가 후보 집합에서 뺐다. 그래서 판정이 `len(After) > 0`
+	// 하나로 끝나고, AfterFacts 사본이 여기 하나 더 생기지 않는다.
+	//
+	// **구성원은 안 본다** — StarveOldest·CloseDeclared 와 같은 논법이다("주어는 브랜치를
+	// 받는 선두다"). 흡수된 구성원은 blockedOnlyBy 로 들어온 **미충족** 선행 보유자라,
+	// 구성원까지 세면 이 필드의 뜻이 정확히 뒤집힌다.
+	//
+	// zero(false)가 "선행을 안 기다렸다"이다. 이 필드를 안 찍는 호출부가 큐 순서를
+	// 뒤집지 않는 쪽이다(Starved·CloseDeclared 와 같은 방향).
+	AfterCleared bool
 	// Reason 은 네 키의 **실제 값**이다. 감추면 "왜 하필 이 브랜치 이름인가"에
 	// 답할 수 없고, 답 못 하는 자동 선택은 두 번째 세션부터 무시된다.
 	Reason string
@@ -459,6 +472,11 @@ func bundleAround(lead Candidate, fit []Candidate, absorbable map[string]Candida
 	if !IsTickler(lead.Item.Labels) {
 		b.StarveOldest = lead.Item.CreatedAt
 	}
+	// ★ 선두가 fit 에 들었다는 것이 곧 "그 선행이 전부 충족됐다"는 뜻이다 —
+	// 미충족이면 eligible.go 의 축 ④가 이미 후보에서 뺐다. 그래서 판정이 이 한 줄이고,
+	// AfterSatisfied 의 사본이 여기 하나 더 생기지 않는다(흡수 판정이 같은 이유로
+	// AfterFacts 를 안 받는다 — 아래 blockedOnlyBy 주석).
+	b.AfterCleared = len(lead.Item.After) > 0
 	add := func(c Candidate, l Link) {
 		b.Members = append(b.Members, c)
 		b.Links = append(b.Links, l)
@@ -537,6 +555,14 @@ func sortedCands(m map[string]Candidate) []Candidate {
 
 // lessBundle 은 추천 순서다. **이 함수 안에는** 조정할 상수가 없다 — 비교자는 필드만 읽는다.
 //
+// ★ ①‴(선행 해소, 2026-08-21)의 자리가 왜 여기인가. **기아를 안 덮는다** — 굶은 쪽이
+// 먼저라는 축(①′)은 그대로 위에 있다. 그런데 굶김 전용 갈래 **앞**이어야 한다:
+// 그 갈래는 무조건 return 하므로 뒤에 두면 굶은 묶음끼리는 이 축이 영영 안 읽힌다.
+// 실측(원장, 창 2026-08-11~08-20)이 그 배치를 정했다 — 해소됐는데 안 집힌 열린 항목 20건 중
+// **15건이 이미 기아 영역**이었고, 그 15건은 해소 뒤 pick_eval 에 12~103회 오르고도 전부
+// not-top 이었다. 즉 이 축이 겨냥한 인구의 다수가 정확히 그 갈래 안에 있다.
+// 종료 선언(①″) 뒤인 이유: 강등 축이 승격 축보다 먼저다 — 닫히다 만 항목을 승격시키면 안 된다.
+//
 // ★ 그러나 순서 전체가 무상수인 것은 아니다. 축 하나(Starved)는 바깥의 실측 상수
 // StarvationAge 가 정하고, 또 하나(CloseDeclared)는 원장 관측이 정한다. 이 문장을
 // "상수가 0"으로 읽으면 안 된다 — 앞선 판이 그렇게 적혀 있었고, 그 사이 상수가
@@ -545,6 +571,7 @@ func sortedCands(m map[string]Candidate) []Candidate {
 //	①  의존자 수 합 ↓ — 이걸 풀어야 남이 움직이는 정도
 //	①′ 기아          — 굶은 쪽이 먼저(임계는 StarvationAge 하나)
 //	①″ 종료 선언     — 닫히려다 롤백된 항목은 **뒤로**. 거르지는 않는다
+//	①‴ 선행 해소     — 선행을 걸고 기다렸다가 풀린 쪽이 **앞으로**(AfterCleared)
 //	②  묶음 크기   ↓ — 한 번에 더 많이 푸는 쪽이 이긴다
 //	③  최고령      ↑ — 오래 방치된 것을 먼저
 //	④  선두 id     사전순 — 동점 처리. 없으면 같은 입력에 다른 답이 나온다
@@ -618,6 +645,9 @@ func lessBundle(a, b Bundle) bool {
 	}
 	if a.CloseDeclared != b.CloseDeclared {
 		return !a.CloseDeclared
+	}
+	if a.AfterCleared != b.AfterCleared {
+		return a.AfterCleared
 	}
 	if a.Starved { // 둘 다 굶었다 — 묶음 크기를 건너뛰고 최고령순으로만 푼다
 		if !a.Oldest.Equal(b.Oldest) {

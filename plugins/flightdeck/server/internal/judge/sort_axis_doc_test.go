@@ -91,9 +91,14 @@ func TestDesignSortKeyParagraphNamesEveryLiveAxis(t *testing.T) {
 	para := sortKeyParagraph(t, designDoc(t))
 	bundleSrc := judgeSource(t, "bundle.go")
 
+	// ★ 이 표는 **손으로 유지한다** — 축을 더하고 여기 안 넣으면 이 시험은 안 빨개진다.
+	// 그것이 이 파일이 고발한 실패 모양 그대로다(위 머리말). 축을 더할 때 여기 한 줄을
+	// 같이 넣어라. 전수 자동화(구조체 필드 파싱)를 안 하는 이유는 Bundle 의 필드가 전부
+	// 정렬 축은 아니기 때문이다(Reason·Links·Members 는 축이 아니다) — 그 판정은 사람 몫이다.
 	axes := []struct{ evidence, name string }{
 		{"const StarvationAge", "기아"},
 		{"CloseDeclared ", "종료 선언"},
+		{"AfterCleared ", "선행"},
 	}
 	for _, a := range axes {
 		if !strings.Contains(bundleSrc, a.evidence) {
