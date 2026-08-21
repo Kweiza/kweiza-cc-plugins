@@ -930,6 +930,36 @@ func TestSkillsStayWithinTheContextBudget(t *testing.T) {
 	}
 }
 
+// fd-handoff 의 후속 절은 **거르는 기준을 함께** 낸다.
+//
+// ★ 이 시험이 없어서 난 일: 그 절은 후속을 **싣는 법**만 말했다(판단 링크가 끊긴다는
+// 손실 하나). 매 세션 마무리 판단이 실제로 일어나는 순간 로드되는 표면인데 거르는
+// 기준이 0줄이었고, 원장이 그 비대칭과 같은 모양을 냈다 — 창 2026-08-11~08-21 의
+// 창작 후속 338건 중 done 141건의 57%(81건)를 만든 세션이 중앙값 20.7분 뒤 다시 집어
+// 닫았고(원장 왕복), open 무집힘 185건 중 163건은 대기 사유가 원장에 없다.
+//
+// ★ 잠그는 것은 **기준이 있다는 사실**뿐이다. 문장 전문을 잠그면 개정할 때마다
+// 시험이 깨져서, 기준을 고치는 대신 시험을 고치는 쪽으로 사람을 민다.
+// 한글(SKILL.ko.md)이 정본이고 영문이 번역본이라 **둘 다** 본다 — 번역본만 낡는 것이
+// 2026-08-14 의 언어 갈림이 새로 만든 실패 모양이다.
+func TestHandoffSkillCarriesTheTriageCriterion(t *testing.T) {
+	root := pluginRoot(t)
+	for _, c := range []struct{ file, want string }{
+		{"SKILL.md", "body is already the patch"},
+		{"SKILL.ko.md", "본문이 곧 패치"},
+	} {
+		path := filepath.Join(root, "skills", "fd-handoff", c.file)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s 를 못 읽었다: %v", c.file, err)
+		}
+		if !strings.Contains(string(raw), c.want) {
+			t.Fatalf("fd-handoff/%s 의 후속 절에 거르는 기준이 없다 — %q 를 찾았다.\n"+
+				"싣는 법만 있고 거르는 기준이 없으면, 이 표면은 유입만 민다", c.file, c.want)
+		}
+	}
+}
+
 // 문서가 세는 스킬 수와 실재하는 수가 어긋나면 여기서 걸린다.
 //
 // ★ 이 시험이 없어서 난 일이 이 항목이다: `cdce59d` 가 넷째를 만들었고 README 는 넷으로
