@@ -279,7 +279,7 @@ func (s *Service) LeaveClaim(ctx context.Context, in LeaveInput) (ClaimLeaveResu
 		}
 		j, err := t.AddJudgment(model.Judgment{
 			Project: project, SessionID: sessionID, Kind: model.JudgmentNotDone, At: now,
-			Title: "선점 반납: " + clip(strings.Join(targets, ", "), 120), Body: body,
+			Title: leaveTitle(targets), Body: body,
 			Links: links,
 		})
 		if err != nil {
@@ -297,4 +297,22 @@ func (s *Service) LeaveClaim(ctx context.Context, in LeaveInput) (ClaimLeaveResu
 	s.log.InfoContext(ctx, "선점 반납",
 		"project", clip(project, 64), "session", clip(sessionID, 64), "items", len(out.Items))
 	return out, nil
+}
+
+// leaveTitle 은 반납 판단의 제목이다 — **개수를 앞에 둔다.**
+//
+// ★ 실물 관측이 만든 자리다(2026-08-21, 항목 `fd-leave-bundle-n2-observation-…`).
+// 원장의 `claim.leave` 48건 중 n>=2 는 8건이고 그중 셋이 제목 128자에서 잘렸다
+// (n=7 · n=7 · n=4). 잘린 제목은 앞 서넛만 보여서 **몇 개를 놓았는지가 사라진다** —
+// 보드와 pick 의 「연결된 판단」은 이 한 줄만 보므로, 읽는 사람은 하나가 더 있는지 넷이
+// 더 있는지를 못 가른다. 목록은 잘려도 되지만 수는 안 된다. 그래서 수가 clip 의
+// **바깥**, 그것도 앞에 선다.
+//
+// ★ 단건은 모양을 안 바꾼다. 원장에 쌓인 41건과 갈리고, 하나뿐이라는 것은 목록이 이미 말한다.
+func leaveTitle(targets []string) string {
+	head := "선점 반납: "
+	if len(targets) > 1 {
+		head = fmt.Sprintf("선점 반납 %d건: ", len(targets))
+	}
+	return head + clip(strings.Join(targets, ", "), 120)
 }

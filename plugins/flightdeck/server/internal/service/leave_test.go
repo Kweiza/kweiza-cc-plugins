@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
@@ -31,6 +33,13 @@ func leaveFixture(t *testing.T) (*Service, *store.Store, model.Session) {
 // (newSvcWithClock)는 Service 를 자기가 짓기 때문에 씨앗을 따로 부를 자리가 필요하다.
 func seedLeaveClaims(t *testing.T, st *store.Store) model.Session {
 	t.Helper()
+	return seedLeaveClaimIDs(t, st, []string{"x", "y"})
+}
+
+// seedLeaveClaimIDs 는 씨앗의 id 를 부르는 쪽이 정한다 — 묶음 제목의 절단은 **id 길이**가
+// 만드는 현상이라, 짧은 x·y 로는 그 자리에 변이가 안 닿는다.
+func seedLeaveClaimIDs(t *testing.T, st *store.Store, ids []string) model.Session {
+	t.Helper()
 	ctx := context.Background()
 	if err := st.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"}); err != nil {
 		t.Fatal(err)
@@ -42,7 +51,7 @@ func seedLeaveClaims(t *testing.T, st *store.Store) model.Session {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"x", "y"} {
+	for _, id := range ids {
 		if err := st.AddItem(ctx, model.Item{Project: "p", ID: id, Title: "t", Body: "b", CreatedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
@@ -283,5 +292,118 @@ func TestLeaveClaimRollsBackTheFirstReleaseWhenALaterTargetIsGone(t *testing.T) 
 		t.Fatal(err)
 	} else if len(js) != 0 {
 		t.Fatalf("실패한 반납이 판단을 남겼다: %d건", len(js))
+	}
+}
+
+// 묶음 반납의 판단 **제목이 개수를 나른다** — 잘려도 살아남는 자리에 둔다.
+//
+// ★ 이 시험은 산 원장의 실물 관측에서 나왔다(2026-08-21, 항목
+// `fd-leave-bundle-n2-observation-on-2026-08-19-or-10-leaves`). `claim.leave` 48건 중
+// n>=2 는 8건이고, 그중 **셋이 제목 128자에서 잘렸다**(n=7 · n=7 · n=4). 아래 id 일곱은
+// 그 첫 7건 묶음(2026-08-17T13:43:47)의 실물 id 를 그대로 옮긴 것이다.
+//
+// ★ 잘린 제목은 앞 서넛만 보이고 **몇 개를 놓았는지가 사라진다.** 보드와 pick 의
+// 「연결된 판단」이 보는 것이 그 한 줄인데, 읽는 사람은 하나가 더 있는지 넷이 더 있는지를
+// 못 가른다 — 이 항목이 관측하려던 축이 정확히 그 수다. 그래서 수를 **접두**로 옮긴다:
+// 뒤는 잘려도 앞은 안 잘린다.
+//
+// ★ 진실 자체는 잃은 적이 없다 — 판단 **본문**은 목록을 안 자르고, `judgment_link` 도
+// n개 그대로 달린다(실물 8건 전수 확인: 링크 수 = n 이 8건 모두 일치). 그래서 고칠 자리는
+// 제목 하나뿐이고, 아래에서 그 둘을 함께 잠가 **다음에 본문이나 링크가 잘리면 여기가 운다.**
+//
+// ★ 항목 본문의 예측 하나는 **빗나갔고 그것도 잠근다.** 본문은 "항목 id 가 긴 이
+// 프로젝트에서 둘만 묶여도 120자가 넘는다"고 했는데, 실물 n=2 넷은 62~78자로 하나도 안
+// 잘렸다. 자기 항목 id(46자)로 일반화한 예측이었고 실제 묶음은 30~47자 id 였다. 그래서 이
+// 시험이 잠그는 것은 "n>=2 면 잘린다"가 **아니라** 「잘릴 때 수가 남는가」다.
+func TestLeaveBundleJudgmentTitleCarriesTheCountEvenWhenClipped(t *testing.T) {
+	svc, st := newSvc(t)
+	ids := []string{
+		"contracts-corpus-cutover-major",
+		"cutover-e2e-harness-corpus-axis-rewrite",
+		"cutover-e2e-silent-green-three",
+		"cutover-lost-nets-dlq-stage-and-update-by-query",
+		"data-api-spec-corpus-axis-restatement",
+		"remodel-ddl-clean-slate",
+		"slate-smoke-postgres-successor",
+	}
+	sess := seedLeaveClaimIDs(t, st, ids)
+	ctx := context.Background()
+
+	res, err := svc.LeaveClaim(ctx, LeaveInput{Project: "p", SessionID: sess.ID, Reason: "묶음 통째로 놓는다"})
+	if err != nil {
+		t.Fatalf("반납이 실패했다: %v", err)
+	}
+	if len(res.Items) != len(ids) {
+		t.Fatalf("%d건을 놓았어야 하는데 %v", len(ids), res.Items)
+	}
+	j, err := st.GetJudgment(ctx, res.JudgmentID)
+	if err != nil {
+		t.Fatalf("판단을 못 읽었다: %v", err)
+	}
+
+	// ★ 먼저 **여기가 잘리는 자리인지**부터 확인한다. 안 잘리는 입력으로 아래 단정을 돌리면
+	//   그 단정은 통과하되 아무것도 안 문다 — 이 시험의 전제가 절단이다.
+	//
+	// ★ 전제를 **입력 길이**로 잰다(제목 모양이 아니라). 앞선 판은 `HasSuffix(제목,"…")`
+	//   였는데, 그러면 제목 뒤에 무엇을 덧붙이는 구현이 「id 를 더 길게 써라」라는 엉뚱한
+	//   말로 죽는다 — 실제로 변이 실측에서 그 오귀속이 났다(개수를 clip 뒤로 옮긴 변이가
+	//   개수 단정이 아니라 이 가드에 잡혔다). 잘림의 정본은 입력이 상한을 넘는다는 사실이고,
+	//   제목이 실제로 잘렸다는 것은 **마지막 id 가 안 보인다**로 확인한다.
+	if n := utf8.RuneCountInString(strings.Join(ids, ", ")); n <= 120 {
+		t.Fatalf("목록이 %d자라 안 잘린다 — 이 시험의 전제가 무너졌다. id 를 더 긴 것으로 바꿔라", n)
+	}
+	if last := ids[len(ids)-1]; strings.Contains(j.Title, last) {
+		t.Fatalf("제목에 마지막 id %q 가 그대로 있다 — 잘리지 않았다:\n  %q", last, j.Title)
+	}
+	// ★ 잠그는 것은 **자리**이지 문구가 아니다 — 수가 목록보다 **앞**에 있는가만 문다.
+	//   문구를 잠그면 개정할 때마다 시험이 깨져서, 규율을 고치는 대신 시험을 고치는 쪽으로
+	//   사람을 민다(`TestHandoffSkillCarriesTheTriageCriterion` 의 주석과 같은 규율).
+	//   뒤에 붙여도 clip **밖**이면 오늘은 살아남는다 — 대시보드의 `Clip(제목, 200)`
+	//   (web/page.go)은 제목이 「머리 + clip(120) + …」로 130자 안쪽에 묶여 있어 아직
+	//   원리적으로 안 문다. 그래도 앞에 두는 이유는 그 두 상한이 서로를 모른다는 것이다:
+	//   안쪽 120이나 바깥 200 중 하나만 움직여도 꼬리가 먼저 사라지고, **머리는 어느
+	//   쪽이 움직여도 안 사라진다.** 잘림에 안 기대는 자리가 앞이다.
+	head, _, ok := strings.Cut(j.Title, ids[0])
+	if !ok {
+		t.Fatalf("제목에 첫 항목 %q 가 없다 — 목록이 통째로 사라졌다:\n  %q", ids[0], j.Title)
+	}
+	if n := strconv.Itoa(len(ids)); !strings.Contains(head, n) {
+		t.Fatalf("잘린 제목의 목록 **앞**에 개수 %s 가 없다:\n  머리=%q\n  제목=%q\n"+
+			"보드와 pick 의 「연결된 판단」은 이 한 줄만 본다 — 수가 목록 뒤에 있으면\n"+
+			"몇 개를 놓았는지가 잘림과 함께 사라진다", n, head, j.Title)
+	}
+
+	// 본문과 링크는 자르지 않는다 — 제목이 요약이고 진실은 이 둘이다.
+	for _, id := range ids {
+		if !strings.Contains(j.Body, id) {
+			t.Fatalf("판단 본문에 %q 가 없다 — 본문까지 자르면 되짚을 자리가 0이 된다", id)
+		}
+	}
+	if len(j.Links) != len(ids) {
+		t.Fatalf("judgment_link 가 %d개다 — %d개여야 한다: %v", len(j.Links), len(ids), j.Links)
+	}
+}
+
+// 단건 반납의 제목은 안 바뀐다 — 개수 접두는 **묶음일 때만** 붙는다.
+// 하나뿐인데 "1건"을 달면 원장에 쌓인 41건과 모양이 갈리고, 그 수는 제목이 없어도 자명하다.
+func TestLeaveSingleJudgmentTitleKeepsItsShape(t *testing.T) {
+	svc, st, sess := leaveFixture(t)
+	ctx := context.Background()
+
+	res, err := svc.LeaveClaim(ctx, LeaveInput{Project: "p", SessionID: sess.ID, ItemID: "x", Reason: "하나만 놓는다"})
+	if err != nil {
+		t.Fatalf("반납이 실패했다: %v", err)
+	}
+	j, err := st.GetJudgment(ctx, res.JudgmentID)
+	if err != nil {
+		t.Fatalf("판단을 못 읽었다: %v", err)
+	}
+	head, _, ok := strings.Cut(j.Title, "x")
+	if !ok {
+		t.Fatalf("제목에 항목 id 가 없다: %q", j.Title)
+	}
+	if strings.ContainsAny(head, "0123456789") {
+		t.Fatalf("단건 제목의 머리에 수가 붙었다: %q\n"+
+			"하나뿐이라는 것은 목록이 이미 말한다 — 원장에 쌓인 단건 41건과 모양만 갈린다", j.Title)
 	}
 }
