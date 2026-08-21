@@ -348,12 +348,43 @@ func (r *Reader) Ancestry(ctx context.Context, sha, tip string) (judge.AncestryR
 			"exit_code", ce.ExitCode, "reason", v.Reason, "error", err.Error())
 		return judge.AncestryUnknown, fmt.Errorf("조상 판정 실패(%s → %s): %s: %w", sha, tip, v.Reason, err)
 	}
+	// ★ rc=1 을 한 겹 더 가른다(2026-08-21). 이 저장소의 랜딩은 커밋을 **재생하므로**,
+	// 원래 sha 는 내용이 들어간 뒤에도 영원히 조상이 아니다 — 그것을 "아직"으로 내면
+	// 그 sha 를 선행으로 건 항목이 영구히 굶는다(실측: 열린 항목 셋, 전부 티클러였다).
+	// ★ rc=1 로 좁힌 것은 **정확성이 아니라 git 호출 절약이다** — 변이로 확인했고 조건을
+	// 없애도 시험이 안 깨진다(빼도 초록이다). 조상인 커밋은 그 브랜치가 반드시
+	// `--contains` 로 잡으므로 "rc=0 인데 브랜치가 없다"는 성립할 수 없고, rc=128 갈래는
+	// `--contains` 도 실패해 헬퍼가 false 를 낸다. 그래도 좁혀 두는 이유는 조상 판정이
+	// 후보마다 도는 자리라 호출 하나가 그대로 곱해지기 때문이다.
+	// 판정에 실패하면 **AncestryNo 를 그대로 둔다** — 안전한 쪽이 "기다리면 풀린다"이고,
+	// 여기서 틀리면 정상 대기가 "영영 안 풀린다"로 오진되어 사람이 선행을 끊어 버린다.
+	if v.Result == judge.AncestryNo && r.shaHasNoBranch(ctx, sha) {
+		return judge.AncestryOrphan, nil
+	}
 	if v.Result == judge.AncestryBadRef {
 		// 오류는 아니지만 대개 오타다. 알리지 않으면 그 항목이 왜 안 도는지 아무도 모른다.
 		r.log.WarnContext(ctx, "조상 판정: 그런 ref 가 없다", "sha", sha, "tip", tip,
 			"exit_code", ce.ExitCode, "reason", v.Reason)
 	}
 	return v.Result, nil
+}
+
+// shaHasNoBranch 는 이 커밋을 품은 브랜치가 **로컬·원격 통틀어 하나도 없는지** 본다.
+//
+// 랜딩이 커밋을 재생하면 원래 sha 가 정확히 이 상태가 된다 — 객체는 남고(그래서 rc=128 이
+// 아니다) 어떤 ref 도 안 가리킨다. 아직 안 랜딩된 브랜치 위의 커밋과 갈리는 자리가 여기다.
+//
+// **원격도 본다(-a).** 로컬만 보면 push 만 되고 아직 안 받은 브랜치의 커밋이 고아로 오진된다.
+// 오류·의심스러운 출력이면 **false** 를 낸다 — 호출부가 AncestryNo(기다리면 풀린다)를 그대로
+// 쓰게 하는 쪽이고, 그 방향이 안전하다.
+func (r *Reader) shaHasNoBranch(ctx context.Context, sha string) bool {
+	out, err := r.run(ctx, "", "branch", "-a", "--contains", sha)
+	if err != nil {
+		r.log.WarnContext(ctx, "브랜치 포함 조회 실패 — 조상 판정을 '아직'으로 둔다",
+			"sha", sha, "error", err.Error())
+		return false
+	}
+	return strings.TrimSpace(string(out)) == ""
 }
 
 // Worktrees 는 이 저장소에 딸린 워크트리 전부를 낸다(주 워크트리 포함).

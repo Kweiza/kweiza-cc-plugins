@@ -118,8 +118,16 @@ func TestRemoveAfterDropsEveryDuplicateRowAndKeepsTheIndexInStep(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("선행 두 번 등록 실패: %v", err)
 	}
-	if n, _ := s.Dependents(ctx, "p", "dep"); n != 2 {
-		t.Fatalf("대조 전제가 깨졌다 — 역인덱스가 %d 다. 2 여야 이 시험이 성립한다", n)
+	// ★ 대조 전제는 **행 수**로 잡는다(2026-08-21). Dependents 가 역인덱스에서 파생으로
+	// 바뀌면서 `COUNT(DISTINCT item_id)` 가 됐다 — 같은 항목이 두 번 걸어도 **기다리는
+	// 항목은 하나**라 이제 1을 낸다. 그 수를 전제로 쓰면 이 시험이 재는 것(중복 행을 전부
+	// 지우는가)과 다른 축을 재게 된다. 원장 실측(2026-08-21): 중복 (item,dep) 쌍 0건이라
+	// 이 전환의 실물 영향은 0이다.
+	if n := countIn(t, s, "item_after", "p", "waiter"); n != 2 {
+		t.Fatalf("대조 전제가 깨졌다 — item_after 에 %d행이다. 2 여야 이 시험이 성립한다", n)
+	}
+	if n, _ := s.Dependents(ctx, "p", "dep"); n != 1 {
+		t.Fatalf("중복 행이 종속 수를 %d 로 부풀렸다 — 기대는 **항목**은 waiter 하나다", n)
 	}
 
 	if err := s.RemoveAfter(ctx, "p", "waiter", model.After{Item: "dep"}, ""); err != nil {
@@ -130,7 +138,7 @@ func TestRemoveAfterDropsEveryDuplicateRowAndKeepsTheIndexInStep(t *testing.T) {
 		t.Errorf("item_after 에 %d행 남았다 — 한 행만 지웠다", n)
 	}
 	if n, _ := s.Dependents(ctx, "p", "dep"); n != 0 {
-		t.Errorf("역인덱스가 %d 다 — 행은 다 지우고 수는 덜 줄였다. 조용한 거짓이다", n)
+		t.Errorf("종속 수가 %d 다 — 행은 다 지웠는데 수가 남았다. 조용한 거짓이다", n)
 	}
 }
 

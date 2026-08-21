@@ -318,16 +318,32 @@ func (t *Tx) bumpDependents(project, depItem string, delta int) error {
 	return nil
 }
 
-// Dependents 는 이 항목에 기대는 항목 수다. 없으면 0.
+// Dependents 는 이 항목에 기대는 **아직 살아 있는** 항목 수다. 없으면 0.
+//
+// ★ **파생이다 — item_dependents 역인덱스를 안 읽는다(2026-08-21 개정).**
+// 앞선 판은 그 표의 n 을 그대로 냈는데, 그 수는 addAfter(+1) · RemoveAfter(-n) ·
+// DeleteItem(-1) 에서만 움직이고 **기대던 항목이 done·dropped 로 닫혀도 안 줬다.**
+// 그래서 아무도 안 기다리는 항목이 영영 "남이 기다린다"로 pick 순위의 1축
+// (judge.lessBundle 의 첫 비교)에서 이겼다. 실측(원장, 열린 항목 중 n>0 인 14건):
+// 3건 불일치 — contracts-inbox-surface n=3 / 살아있는 0 · repo-hostname-leak-sweep 1/0 ·
+// docs-r208-connector-asset-owning-corpus 2/1. 그리고 그 틀림은 오류를 안 낸다.
+//
+// 닫을 때 -1 을 치는 길 대신 파생을 고른 이유(설계 §5): 그 길은 이미 부푼 기존 행에
+// 마이그레이션이 필요하고, 다음에 상태 전이를 늘리는 사람이 같은 함정을 다시 밟는다.
+// 여기서는 **DependentItems 와 같은 살아있음 정의**(open·claimed)를 쓴다 — 수와 이름이
+// 갈리면 관문 문구와 순위가 서로 다른 세상을 본다.
+//
+// ★ 이 개정으로 item_dependents 는 **읽는 곳이 없어졌다**(쓰기 셋만 남았다).
+// 표와 그 쓰기를 걷어내는 것은 마이그레이션이라 이 판에서 안 한다 — 후속이 진다.
 func (s *Store) Dependents(ctx context.Context, project, itemID string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT n FROM item_dependents WHERE project = ? AND item_id = ?`, project, itemID).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil // 행이 없다 = 기대는 항목이 0건. 부재와 0이 같은 뜻인 유일한 자리다
-	}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT a.item_id) FROM item_after a
+		JOIN item i ON i.project = a.project AND i.id = a.item_id
+		WHERE a.project = ? AND a.dep_item = ? AND i.state IN ('open', 'claimed')`,
+		project, itemID).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("역인덱스 조회 실패(project=%q item=%q): %w",
+		return 0, fmt.Errorf("종속 수 조회 실패(project=%q item=%q): %w",
 			clip(project, 64), clip(itemID, 64), err)
 	}
 	return n, nil

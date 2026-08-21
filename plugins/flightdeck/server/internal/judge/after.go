@@ -19,6 +19,10 @@ const (
 	AncestryYes                           // 조상이다 (git rc=0)
 	AncestryNo                            // 아직 조상이 아니다 (git rc=1) — 기다리면 풀린다
 	AncestryBadRef                        // 그런 ref 가 없다 (git rc=128) — 기다려도 안 풀린다
+	// AncestryOrphan 은 커밋은 있는데 **어느 브랜치에도 없다**(rc=1 + `branch --contains` 가 빔).
+	// 랜딩이 커밋을 재생하면 원래 sha 가 이 상태가 된다 — 내용은 들어갔는데 조상 판정은
+	// 영원히 rc=1 이다. AncestryNo 로 접으면 "기다리면 풀린다"가 되어 항목이 영구히 굶는다.
+	AncestryOrphan
 )
 
 func (a AncestryResult) String() string {
@@ -31,6 +35,8 @@ func (a AncestryResult) String() string {
 		return "no"
 	case AncestryBadRef:
 		return "bad-ref"
+	case AncestryOrphan:
+		return "orphan"
 	default:
 		// 열거 밖 값도 침묵하지 않는다. 숫자 그대로 실어야 어디서 샜는지 보인다.
 		return fmt.Sprintf("ancestry(%d)", int(a))
@@ -58,6 +64,7 @@ const (
 	AfterFailedJob  = "after-failed-job"  // 선행 잡이 실패·정지했다 — 재실행 없이는 안 풀린다
 	AfterUnmetSHA   = "after-unmet-sha"   // 아직 조상이 아니다(rc=1) — 기다리면 풀린다
 	AfterBadRef     = "after-bad-ref"     // 그런 ref 가 없다(rc=128) — **오타이거나 지워졌다**
+	AfterOrphanSHA  = "after-orphan-sha"  // 커밋은 있는데 어느 브랜치에도 없다 — 재생됐다. **영영 안 풀린다**
 	AfterUnknown    = "after-unknown"     // 조회하지 않았다 — 판정 자체를 못 했다
 	AfterMalformed  = "after-malformed"   // 셋 중 정확히 하나가 아니다 — 스키마 CHECK 를 우회해 들어왔다
 	AfterBadState   = "after-bad-state"   // 열거에 없는 상태 문자열 — 스키마와 코드가 어긋났다
@@ -140,6 +147,14 @@ func afterOneReason(a model.After, f AfterFacts) string {
 		case AncestryBadRef:
 			return fmt.Sprintf("%s: dep_sha=%s 라는 ref 가 없다(git rc=128) — 오타이거나 지워진 커밋이다. 기다려도 안 풀린다",
 				AfterBadRef, a.SHA)
+		case AncestryOrphan:
+			// 기다림의 끝이 없다 — AfterDroppedDep 와 같은 부류다. 그리고 여기서는 **집행 동사를
+			// 함께 낸다**: 실측된 세 건이 전부 "내용은 이미 main 에 있는데 sha 만 재생됐다"였고,
+			// 그때 할 일은 기다리기가 아니라 끊기다.
+			return fmt.Sprintf("%s: dep_sha=%s 은(는) 커밋은 있는데 어느 브랜치에도 없다 — "+
+				"랜딩이 재생했거나 브랜치가 버려졌다. 기다려도 안 풀린다. "+
+				"내용이 이미 들어갔으면 `fd after cut <이 항목> --sha %s` 로 끊어라",
+				AfterOrphanSHA, a.SHA, a.SHA)
 		case AncestryUnknown:
 			return fmt.Sprintf("%s: dep_sha=%s 의 조상 여부를 조회하지 않았다", AfterUnknown, a.SHA)
 		default:

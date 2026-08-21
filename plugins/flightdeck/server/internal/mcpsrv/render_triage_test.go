@@ -43,7 +43,10 @@ func finishWithCreated(n int) service.FinishResult {
 func TestRenderFinishTriageReachesEveryCreatedFollowup(t *testing.T) {
 	for _, n := range []int{1, 2, 3} {
 		out := RenderFinish(finishWithCreated(n))
-		for _, want := range []string{"본문이 곧 패치", "pick(item_ids"} {
+		// "물으면" — 판정 대기 부류(2026-08-21). 실측: 물으면 끝나는 14건은 나이 중앙 6.3일로
+		// 굶는데, 답이 온 5건은 전부 1시간 안에 코드 0줄로 닫혔다. TriageGuidance 에도 같은
+		// 기준이 있지만 그쪽 도달률이 1/338 이라, 실제로 닿는 자리는 이 줄이다.
+		for _, want := range []string{"본문이 곧 패치", "pick(item_ids", "물으면"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("창작 %d건 응답에 %q 가 없다 — 거르는 기준이 이 구간에 안 닿으면\n"+
 					"세션이 보는 것은 등록 칭찬 한 줄뿐이다:\n%s", n, want, out)
