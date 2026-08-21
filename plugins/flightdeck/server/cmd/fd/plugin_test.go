@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/kweiza/flightdeck/internal/mcpsrv"
 )
 
 // 플러그인 배선 시험 — **파일을 실제로 파싱해 단정한다.**
@@ -956,6 +958,46 @@ func TestHandoffSkillCarriesTheTriageCriterion(t *testing.T) {
 		if !strings.Contains(string(raw), c.want) {
 			t.Fatalf("fd-handoff/%s 의 후속 절에 거르는 기준이 없다 — %q 를 찾았다.\n"+
 				"싣는 법만 있고 거르는 기준이 없으면, 이 표면은 유입만 민다", c.file, c.want)
+		}
+	}
+}
+
+// 문서가 세는 MCP 도구 수와 실재하는 수가 어긋나면 여기서 걸린다.
+//
+// ★ 이 시험이 없어서 난 일: §1 머리줄은 스스로를 "수와 이름 목록의 진실 원천"이라
+// 선언해 놓고(2026-08-06 개정 문단이 그 선언이다) `label` 이 들어온 2026-08-12 이후로
+// **도구를 7개라 적은 채 남았다.** 바로 아래 스킬 축에는 이 관문이 있고 도구 축에는
+// 없었으므로, §1 이 스스로 고발한 실패 모양("넷째가 목록에서 빠진 채 아무도 안 세었다")이
+// 옆 축에서 그대로 재발한 것이다. 같은 문서 안에서 §6 머리줄은 8개라 적고 있었다 —
+// **한 문서가 자기와 어긋난 채 아홉 날을 갔다.**
+//
+// ★ 잠그는 것은 수뿐이고, **모든 출현**을 본다(아래 스킬 시험과 같은 이유 — 이 저장소는
+// 옛 문단을 안 지우고 개정 블록을 얹는 습관이 있어 낡은 수가 남기 쉽다).
+// 진실 원천은 문서가 아니라 `mcpsrv.ToolNames()` 다 — 도구 표 자체가 세는 대상이다.
+func TestDocsCountTheToolsThatActuallyExist(t *testing.T) {
+	root := pluginRoot(t)
+	want := len(mcpsrv.ToolNames())
+	for _, doc := range []struct{ file, pattern string }{
+		{"DESIGN.md", `MCP 도구는? (\d+)개`},
+		{"README.ko.md", `MCP 도구 (\d+)개`},
+		{"README.md", `(\d+) MCP tools`},
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, doc.file))
+		if err != nil {
+			t.Fatalf("%s 를 못 읽었다: %v", doc.file, err)
+		}
+		hits := regexp.MustCompile(doc.pattern).FindAllStringSubmatch(string(raw), -1)
+		if len(hits) == 0 {
+			t.Fatalf("%s 가 MCP 도구 수를 아예 안 말한다(정규식 %q) — 실재하는 도구는 %d개다.\n"+
+				"수를 고칠 때는 그 수의 **근거**를 대는 문단이 같이 거짓이 되는지 보고,\n"+
+				"거짓이 되면 근거부터 다시 써라", doc.file, doc.pattern, want)
+		}
+		for _, h := range hits {
+			if h[1] != fmt.Sprintf("%d", want) {
+				t.Fatalf("%s 가 %q 라고 말한다 — 실재하는 도구는 %d개다(mcpsrv.ToolNames()).\n"+
+					"출현 %d건 중 하나라도 어긋나면 실패다. 사료로 남길 것은 한글로 적어라",
+					doc.file, h[0], want, len(hits))
+			}
 		}
 	}
 }
