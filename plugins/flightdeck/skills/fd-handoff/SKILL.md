@@ -32,8 +32,9 @@ Call it without `body` and it tells you **right there** what to write.
 Do not write what git log and diff already know (what you changed).
 What goes here is **what is left nowhere else** — the reasons behind the judgment.
 
-## Followups go in the same call
+## Triage first, then followups go in the same call
 
+**A followup whose body is already the patch is not a followup — it is this session's work.** Do it now, delay the finish.
 Passed as `followups`, judgment and followup are joined by a judgment link. Added separately later, that link is missing.
 The next session's `pick` serves that judgment along with the item.
 
