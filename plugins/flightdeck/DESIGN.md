@@ -834,7 +834,7 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 
 | 이벤트 | matcher | 하는 일 |
 |---|---|---|
-| `SessionStart` | `startup\|resume\|clear\|compact` | `fd session open` → `additionalContext` 에 보드 요약 + 내 선점 + 미확인 결과 + **서버 상태 배너** |
+| `SessionStart` | `startup\|resume\|clear\|compact\|fork` | `fd session open` → `additionalContext` 에 보드 요약 + 내 선점 + 미확인 결과 + **서버 상태 배너** |
 | `UserPromptSubmit` | — | `fd beat --kind prompt` (2초 타임아웃) + 미확인 알림 주입 |
 | `PostToolUse` | `Edit\|Write` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
 | `PreCompact` | — | `async` `fd note --draft` — 압축으로 판단이 날아가는 것만 막는다 |
@@ -860,8 +860,59 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 그래서 이 훅의 쓰임은 **하나뿐**이다: /clear 로 떠나는 대화의 카드를 닫는 것. 그 판정은 되돌릴 수
 있다(§4). **matcher 를 넓히면 안 된다** — 안 쏘는 사유를 넣으면 "잡고 있다"는 착각만 생기고,
 `resume` 은 **`/fork` 도 같은 사유로 오므로** 원본 카드를 닫는 것이 옳은지 별도 판단이 필요하다.
+(2.1.240 에서도 `SessionEnd` 의 `reason` 열거는 **다섯 그대로**이고 `fork` 가 없다 — 아래 문단이
+`SessionStart` 에 더한 그 값과 **다른 축**이다. 이 훅의 폭은 여전히 `clear` 하나다.)
 `cmd/fd/plugin_test.go` 의 `TestHooksJSONIsWiredAsDesigned` 가 그 폭을 붙들고 있고,
 `hookSessionEnd` 가 `reason` 을 코드에서 한 번 더 본다(matcher 가 바뀌는 날의 이중 방어).
+
+**`SessionStart` 의 `fork` 는 2.1.240 에서 들어왔다 — 이 표가 한 판 낡아 있었다.**
+**2.1.240 바이너리 실측**: `hook_event_name:Ht("SessionStart")` 옆의 `source:Dr([…])` 와
+이벤트 메타의 `matcherMetadata:{fieldToMatch:"source",values:[…]}` 가 **둘 다 같은 다섯**을 낸다 —
+`startup`·`resume`·`clear`·`compact`·**`fork`**. 위 SessionEnd 문단이 뜯은 2.1.221·2.1.222 에는
+이 값이 없었고, 그래서 이 표의 matcher 도 넷이었다.
+
+`/fork` 가 무엇인지도 같은 판에서 쟀다: 세션 전환 사유는 여덟
+(`clear`·`resume`·`fork`·`remote_attach`·`cd`·`spare_claim`·`hydrate`·`startup_custom_id`)이고,
+그 중 `fork` 는 **같은 프로세스·같은 창에서 sid 만 갈아타는 전환**이다(`clear`·`resume` 과 같은
+구독을 탄다). 즉 §4 의 비콘이 창을 찾는 축(머신·조상 pid·시작 시각)에 그대로 걸린다.
+
+**그래서 빠뜨린 대가는 카드 갈림이었다.** `fork` 가 matcher 에 없으면 그 갈래에서 이 훅이 안 돌고,
+rekey(§4)를 못 탄 채 MCP 가 새 cc 로 카드를 또 만든다 — 이 설계가 가장 아파하는 그 모양이다.
+넓히는 것이 위험한 `SessionEnd` 와 방향이 반대인 이유는, **이 훅이 `source` 를 안 읽기 때문**이다
+(`cmd/fd/hook.go` 의 `HookPayload.Source` 는 파싱만 되고 아무도 안 본다). 갈래를 가릴 근거가
+코드에 없으면 빠진 값은 의도가 아니라 표류다.
+
+### 저장소의 다른 플러그인 훅 — grafik-bar 의 계약은 여기 적는다
+
+`plugins/grafik-bar` 도 `SessionStart` 훅을 하나 갖는다(상태줄을 자기 자신으로 설치한다).
+그 플러그인에는 DESIGN 이 없고 Go 코드도 없다 — **그래서 계약을 이 문서에 얹는다.**
+따로 문서를 만들지 않는 이유는 그것을 무는 관문이 또 없기 때문이다: 이 저장소에 Go 모듈은
+하나뿐이고, 저장소 축의 관문은 이미 `cmd/fd/` 에 산다(`repo_skills_test.go` 가 같은 선례다).
+
+잠그는 것과 그 근거:
+
+| 축 | 근거가 어디서 오나 |
+|---|---|
+| `SessionStart` 훅이 있다 | `plugin.json` 의 description 이 "auto-installs via a SessionStart hook" 라고 **선언한다** |
+| matcher 가 플랫폼 값 다섯 **전부** | 이 훅도 갈래를 안 가린다(설치가 멱등이다) — 빠진 값은 그 갈래에서 상태줄이 없는 것 |
+| `${CLAUDE_PLUGIN_ROOT}` 절대경로 | §13 ② — 플러그인 경로에 **버전이 들어간다** |
+| 부르는 스크립트가 실재하고 파싱된다 | 훅은 오류가 아니라 **부재**로 죽는다 |
+| `setup-statusline.sh` → `statusline.sh` **두 번째 홉** | 그 이름은 JSON 밖이라 훅 관문의 시야에 없다. 밀리면 훅은 0 으로 끝나고 상태줄만 사라진다 |
+| `timeout` 이 **있다**(값은 안 잠근다) | 아래 문단 |
+
+**`timeout` 은 존재만 문다.** flightdeck 의 예산(2s·3s·10s)은 이 문서가 정한 수지만
+grafik-bar 에는 그 근거가 없다 — 근거가 안 따라오는 수를 관문에 들이면 관문이 아니라 장식이다
+(§1 이 고발한 표류와 같은 모양이고, `skillLineCaps` 를 저장소 밖으로 안 가져온 것과 같은 규율).
+**존재는 근거가 따라온다**: `timeout` 은 플랫폼 스키마에서 optional 이라 안 적으면 기본값이
+쓰이는데, **그 기본값을 이 저장소가 모른다**(§13 「아직 아님」 8). 모르는 예산에 세션 시작을
+맡기지 않는다. 지금 값은 `5`(실측 0.01s · 네트워크 왕복 없음 · flightdeck 의 같은 자리 10s 의
+절반)이고 **성능 목표가 아니라 폭주 방지선**이다 — 여기 걸리는 날 할 일은 상한을 올리는 것이
+아니라 왜 500배가 걸렸는지 재는 것이다.
+
+관문은 `cmd/fd/repo_hooks_test.go` 다. `plugin_test.go` 의 `TestHooksJSONIsWiredAsDesigned` 는
+flightdeck 안쪽(이벤트 여섯의 async·이름·SessionEnd 의 폭)을 계속 붙들고, 저장소 축(플러그인별
+이벤트 집합의 양방향 표 · 이벤트 이름이 플랫폼의 31종인가 · matcher 완전성 · 경로 실재 · 셸 문법 ·
+두 번째 홉)은 새 파일이 문다. **둘은 겹치는 것이 아니라 시야가 다르다.**
 
 **부트스트랩 훅과 배너 훅을 분리한다.** 컨테이너 기동 훅이 실패해도 배너 훅이 `/healthz` 를 쳐 그 사실을 알린다.
 부트스트랩이 자기 실패를 스스로 알리는 순환을 만들지 않는다.
@@ -2609,6 +2660,15 @@ main tip)이었고 `vcs.modified` 는 **부모 트리의** 더러움을 반영�
    방지선으로만 서도록 자(rune)로 세고 현행 최대(295자)의 다섯 배 위에 뒀지만 —
    **이 줄을 재는 사람은 그 상수도 함께 고쳐라.** 안 고치면 측정값과 관문이 갈리고,
    갈린 쪽이 조용하다.
+8. **`command` 훅의 기본 `timeout` 이 몇 초인가 — 스키마가 optional 이라는 것만 쟀다.**
+   **2.1.240 실측**으로 훅 항목 스키마는 떴다(`timeout:Xe().positive().optional()`, 그리고
+   `type` 은 `command`·`prompt`·`mcp_tool` 셋). `prompt` 훅 30초·에이전트 훅 60초 같은 **다른**
+   기본값은 번들에서 보이는데, `command` 훅이 값을 안 줬을 때 쓰는 예산은 Bun 런타임 코드에
+   묻혀 **못 떴다.** 그래서 이 저장소의 훅은 전부 `timeout` 을 명시하고, `cmd/fd/repo_hooks_test.go`
+   의 `TestEveryHookHasATimeout` 이 그 **존재**를 문다(값은 안 문다 — §6 의 그 문단).
+   재는 법: `timeout` 없는 훅에 `sleep` 을 태워 몇 초에 끊기는지 본다(판 번호를 함께 적는다).
+   **이 줄이 채워지는 날 §6 의 `5` 가 근거를 얻거나 잃는다.**
+
 7. **NFS 에서 `flock` 이 실제로 거는가 — 아웃박스 잠금 전체가 그 위에 서 있다**(§7).
    POSIX 는 보장하지 않는다. 그리고 **안 걸릴 때 조용하다** — `withQueueLock` 이 "잡았다"로
    답하므로 그 환경에서는 잠금이 통째로 없는 것과 같고, **`fd doctor` 의 「잠금 없이 지나간
@@ -2627,6 +2687,13 @@ main tip)이었고 `vcs.modified` 는 **부모 트리의** 더러움을 반영�
 세션 식별 하나만 봐도 이 판(2.1.220)에는 `CLAUDE_CODE_SESSION_ID` 가 직접 오는데,
 불과 몇 판 전에는 그 변수가 없고 다른 환경변수의 **경로 안에** UUID 가 들어 있었다.
 즉 이 축은 이미 한 번 바뀌었고, 옛 방식으로 뽑는 코드는 지금 **조용히 빈 값을 돌려준다.**
+
+**둘째 실례가 훅 matcher 다.** `SessionStart` 의 `source` 는 2.1.221·2.1.222 에서 넷이었고
+2.1.240 에서 다섯이 됐다(`fork` 추가, §6). 이쪽은 앞의 것보다 더 조용하다 — **빠진 값은 오류를
+안 낸다.** 그 갈래에서 훅이 통째로 안 돌 뿐이고, 화면에는 아무것도 안 뜬다. 그래서 이 축은
+`fd doctor` 가 아니라 **관문**에 뒀다: `cmd/fd/repo_hooks_test.go` 의 `platformMatcherValues` 가
+실측한 열거값을 들고 있고, 이 저장소의 훅이 그것을 **전부** 받는지까지 문다(그 완전성이 옳은
+이벤트에 한해서다 — `SessionEnd` 는 반대로 좁아야 하고 그 이유는 §6 에 있다).
 
 그래서 이 설계는 플랫폼 탐지를 **한 파일에 모으고, 못 찾으면 조용히 넘어가지 않는다** —
 `fd doctor` 가 각 축을 실제로 재서 무엇이 관측됐고 무엇이 안 됐는지 이름으로 낸다.

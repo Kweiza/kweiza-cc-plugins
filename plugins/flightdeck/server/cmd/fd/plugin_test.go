@@ -62,7 +62,10 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 		matcher string
 		async   bool
 	}{
-		"SessionStart":     {"startup|resume|clear|compact", false},
+		// ★ `fork` 는 2.1.240 실측으로 들어왔다 — 그 전 판(2.1.221·2.1.222)에는 이 값이 없었고,
+		//   빠진 채로는 /fork 로 갈라진 대화에서 이 훅이 안 돌아 **카드가 갈린다**(rekey 를 못 탄다).
+		//   저장소 축의 완전성은 repo_hooks_test.go 의 platformMatcherValues 가 따로 문다.
+		"SessionStart":     {"startup|resume|clear|compact|fork", false},
 		"UserPromptSubmit": {"", false},
 		"PostToolUse":      {"Edit|Write", true},
 		"PreCompact":       {"", true},
