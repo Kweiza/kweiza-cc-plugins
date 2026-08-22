@@ -451,6 +451,26 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}
 	}
 
+	// 인자 삼킴 관문 — 도구 호출 계층이 인자 하나를 옆 인자에 통째로 삼켜 보낸 것을 막는다.
+	// 근거 전문(원장 39건의 실측과 계층 셋을 가른 재현)은 arg_swallow.go 에 있다.
+	//
+	// ★ **도구별 핸들러가 아니라 여기다.** 판정의 축이 인자 **이름**이라 도구를 안 가리고,
+	//   실제로 두 도구(finish 의 close_reason · note 의 body)에서 같은 모양으로 관측됐다.
+	//   핸들러마다 놓으면 아홉째 도구가 생길 때 조용히 빠진다 — 이 저장소가 이미 한 번
+	//   당한 부류다(관문을 스킬 축에만 걸어 옆 축에서 재발, c38e273).
+	//
+	// ★★ **신호보다는 뒤, 디스패치보다는 앞이다.** 뒤인 이유: 거절당한 호출도 **살아 있는
+	//   세션이 낸 것**이라 mcp 신호는 참이다. 여기서 앞당기면 마크업을 못 고치는 세션이
+	//   보드에서 침묵하고 사람이 죽었다고 읽는다. GateTool 이 신호보다 앞인 것은 규율이
+	//   아니라 강제다 — 그쪽은 정체가 반쪽이라 귀속할 세션 자체가 없다(canAttribute).
+	//   앞인 이유: 되돌릴 수 없는 쪽(finish 는 한 트랜잭션, note 는 판단 행)보다 뒤에 서면
+	//   관문이 아니라 사후 보고가 된다.
+	if ok, reason := judgeArgSwallowed(args); !ok {
+		s.log.WarnContext(ctx, "인자 삼킴 거절",
+			"mode", name, "session_id", clip(sessionID, 64), "project", s.id.ProjectID)
+		return textResult(s.withTail(ctx, RenderRefusal(name, reason, ""), tailOpts{}), true)
+	}
+
 	var res toolResult
 	switch name {
 	case "board":
