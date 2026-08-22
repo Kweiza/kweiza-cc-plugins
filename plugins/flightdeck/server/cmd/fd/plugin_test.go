@@ -1000,10 +1000,30 @@ func TestUpdateSkillDoesNotLoseTheRepoMount(t *testing.T) {
 		if upLine == "" {
 			t.Fatalf("fd-update/%s 에 `docker compose up` 줄이 없다 — 갱신 절차의 본체가 사라졌다", f)
 		}
-		if !strings.Contains(upLine, "FD_REPOS") {
-			t.Fatalf("fd-update/%s 의 up 명령줄에 FD_REPOS 가 없다:\n  %s\n"+
-				"안 주면 마운트가 조용히 기본값으로 되돌아간다 — 실측으로 등록 7건 중 6건이 파생 불능이었고\n"+
-				"healthz 는 내내 ok 였다. 산문에 낱말만 있는 것으로는 값이 안 넘어간다", f, strings.TrimSpace(upLine))
+		// ★ 읽는 쪽이 **여러 개를 갈라야 한다.** 마운트가 하나였을 때는 구분자 없는 format 으로도
+		// 무해했지만, 슬롯이 넷이 된 뒤로는 갈라 읽지 않으면 경로들이 한 줄로 **붙어서** 첫 슬롯에
+		// 통째로 들어간다 — 그러면 그 마운트는 존재하지 않는 경로가 되고, 조용히 아무것도 안 붙는다.
+		// (변이로 실증: `println` 을 빼도 위 슬롯 단정만으로는 초록이었다.)
+		var readLine string
+		for _, ln := range strings.Split(body, "\n") {
+			if strings.Contains(ln, "docker inspect") && strings.Contains(ln, ".Source") {
+				readLine = ln
+				break
+			}
+		}
+		if !strings.Contains(readLine, "println") {
+			t.Fatalf("fd-update/%s 의 마운트 읽기가 줄 단위로 안 가른다:\n  %s\n"+
+				"슬롯이 넷이라 갈라 읽지 않으면 경로들이 붙어 첫 슬롯에 통째로 들어간다", f, strings.TrimSpace(readLine))
+		}
+		// 슬롯 **전부**를 본다. 하나라도 빠지면 그 마운트만 조용히 기본값으로 접힌다 —
+		// 그리고 접힌 자리는 화면에 안 나온다(그 침묵이 이 축이 이미 두 번 낸 결함이다).
+		for _, v := range []string{"FD_REPOS", "FD_REPOS2", "FD_REPOS3", "FD_REPOS4"} {
+			if !strings.Contains(upLine, v+"=") {
+				t.Fatalf("fd-update/%s 의 up 명령줄이 %s 를 안 넘긴다:\n  %s\n"+
+					"안 주면 그 마운트가 조용히 기본값으로 되돌아간다 — 실측으로 등록 7건 중 6건이\n"+
+					"파생 불능이었고 healthz 는 내내 ok 였다. 산문에 낱말만 있는 것으로는 값이 안 넘어간다",
+					f, v, strings.TrimSpace(upLine))
+			}
 		}
 	}
 }
@@ -1132,6 +1152,18 @@ func TestContainerFilesKeepTheDesignedCoordinates(t *testing.T) {
 	// 미판정이었다. 그동안 `healthz` 는 ok 였고, 사람이 리포트를 쓰기 전까지 아무도 몰랐다.
 	// 이 저장소 자신도 같은 결함을 갖고 있었다(`infra`·`aaron` 이 `~/cdo-dev` 밖이다).
 	mustContain(t, "compose.yaml", string(cf), "${FD_REPOS:-${HOME}}:${FD_REPOS:-${HOME}}:ro")
+	// ★ 슬롯 넷(2026-08-22). 루트가 하나뿐이면 저장소가 여러 트리에 흩어진 머신은 공통 조상(=홈)을
+	// 통째로 붙이는 것 말고 선택지가 없고, 그러면 `.ssh`·`.claude` 까지 컨테이너에 보인다.
+	// compose 는 **같은 경로의 중복 마운트를 자동으로 접으므로**(실측) 안 쓰는 슬롯이 첫 슬롯으로
+	// 접히게 두면 가변 개수가 필요 없다. 콜론 구분은 안 된다 — 한 항목이 한 경로다.
+	// 실기동 검증: FD_REPOS·FD_REPOS2 로 두 경로가 붙고 `.ssh` 는 안 보였으며 빈 슬롯은 에러가 없었다.
+	for _, n := range []string{"2", "3", "4"} {
+		slot := "${FD_REPOS" + n + ":-${FD_REPOS:-${HOME}}}"
+		if !strings.Contains(string(cf), slot+":"+slot+":ro") {
+			t.Fatalf("compose.yaml 에 저장소 슬롯 %s 가 없다 — 루트를 하나밖에 못 주면\n"+
+				"좁히려는 머신은 홈을 통째로 붙이게 된다", "FD_REPOS"+n)
+		}
+	}
 	// 낡은 기본값이 되살아나는 것을 막는다 — 주석·산문에 사료로 남는 것은 한글로 적어라.
 	if strings.Contains(string(cf), "${HOME}/cdo-dev") {
 		t.Fatalf("compose.yaml 이 아직 `${HOME}/cdo-dev` 를 기본값으로 쓴다 —\n" +

@@ -44,17 +44,17 @@ It answers only **may this be restarted** — does that binary run, is the DB mi
 claude plugin marketplace update <marketplace>
 claude plugin update flightdeck@<marketplace>
 
-# Read the repo mount BEFORE bringing it down — that value is recorded nowhere else
-REPOS="$(docker inspect flightdeck --format '{{range .Mounts}}{{if eq .Source .Destination}}{{.Source}}{{end}}{{end}}')"
+# Read EVERY repo mount BEFORE bringing it down — those values are recorded nowhere else
+readarray -t R < <(docker inspect flightdeck --format '{{range .Mounts}}{{if eq .Source .Destination}}{{println .Source}}{{end}}{{end}}')
 
 cd ~/.claude/plugins/cache/<marketplace>/flightdeck/<old version> && docker compose down
 cd ../<new version>
-FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null || sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' ~/.flightdeck/config.json)" FD_REPOS="$REPOS" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
+FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null || sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' ~/.flightdeck/config.json)" FD_REPOS="${R[0]}" FD_REPOS2="${R[1]:-}" FD_REPOS3="${R[2]:-}" FD_REPOS4="${R[3]:-}" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
 ```
 
-**Down the old directory first** — the compose project name is the version directory, so the new one collides
-on the container name. **Read `FD_REPOS` before that**: it lives only at substitution time, its one trace is the
-mount, and omitting it silently reverts to the default (measured: 7 projects, **6 underivable**, healthz ok).
+**Down the old directory first** (compose project name = version directory, or the container name collides).
+**Read every repo mount before that** — four slots `FD_REPOS`..`FD_REPOS4`, alive only at substitution time with
+the mount as their one trace; drop one and it silently reverts (measured: 7 projects, **6 underivable**).
 
 **Bring it up from the installed cache directory.** Bring it up from the dev repo and the installed build and
 the running build diverge. The server applies DB migrations itself on open, and backs up before applying —

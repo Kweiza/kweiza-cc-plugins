@@ -47,18 +47,19 @@ fd selfcheck --db ~/.flightdeck/fd.db
 claude plugin marketplace update <마켓플레이스>
 claude plugin update flightdeck@<마켓플레이스>
 
-# 내리기 전에 저장소 마운트를 읽는다 — 이 값은 어디에도 안 남는다
-REPOS="$(docker inspect flightdeck --format '{{range .Mounts}}{{if eq .Source .Destination}}{{.Source}}{{end}}{{end}}')"
+# 내리기 전에 저장소 마운트를 **전부** 읽는다 — 이 값들은 어디에도 안 남는다
+readarray -t R < <(docker inspect flightdeck --format '{{range .Mounts}}{{if eq .Source .Destination}}{{println .Source}}{{end}}{{end}}')
 
 cd ~/.claude/plugins/cache/<마켓플레이스>/flightdeck/<옛 버전> && docker compose down
 cd ../<새 버전>
-FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null || sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' ~/.flightdeck/config.json)" FD_REPOS="$REPOS" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
+FD_TOKEN="$(cat ~/.flightdeck/token 2>/dev/null || sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' ~/.flightdeck/config.json)" FD_REPOS="${R[0]}" FD_REPOS2="${R[1]:-}" FD_REPOS3="${R[2]:-}" FD_REPOS4="${R[3]:-}" FD_UID=$(id -u) FD_GID=$(id -g) docker compose up -d --build
 ```
 
 **옛 자리에서 먼저 내린다.** compose 프로젝트 이름이 **버전 디렉토리**라, 새 자리에서 바로 올리면
 컨테이너 이름이 충돌해 멈춘다. 토큰 파일이 없는 머신도 있어 위 명령이 `config.json` 으로 흘러간다.
 
-**`FD_REPOS` 를 안 주면 조용히 기본값(홈)으로 되돌아간다.** 그 값은 compose 치환 시점에만 쓰이고
+**저장소 마운트는 슬롯 넷이다(`FD_REPOS`~`FD_REPOS4`). 하나라도 빠뜨리면 조용히 기본값(홈)으로 되돌아간다.**
+빈 슬롯은 첫 슬롯으로 접히도록 설계돼 있으니 그대로 넘겨도 된다. 그 값은 compose 치환 시점에만 쓰이고
 컨테이너 env 에도 안 남아 흔적이 **마운트뿐**이라, 내린 뒤에는 못 읽는다. 좁혀 둔 머신에서 이걸
 빠뜨리면 갱신마다 풀린다 — 실측(NAS): 등록 7건 중 **6건이 파생 불능**이었고 `healthz` 는 ok 였다.
 

@@ -301,6 +301,11 @@ Three things come from the environment:
 - **`FD_UID`/`FD_GID`** — the `~/.flightdeck` volume and the repositories belong to the host user.
   If yours is not the default 1000 (`id -u`), then without these the DB opens but cannot be written,
   and git becomes suspicious about ownership.
+- **`FD_REPOS2`/`FD_REPOS3`/`FD_REPOS4`** — extra slots (max four) when repositories live in several trees.
+  Mount just the roots you need instead of the whole home, and `.ssh`/`.claude` stay invisible. Unused slots
+  fold onto the first — compose merges duplicate mounts of the same path. Colon-separated paths do **not**
+  work (`FD_REPOS=/a:/b`): one entry is one path. Need a fifth? Add a slot — passing one that does not exist
+  binds nothing, silently.
 - **`FD_REPOS`** — where the repositories live (**default `$HOME`**). **Everything derived comes from
   here** — branch, sha, uncommitted footprints, path overlap. Without it the server looks healthy while
   writing only `브랜치 ?(못 읽음)` ("branch ? (unreadable)") on the board. The path must be **identical**
