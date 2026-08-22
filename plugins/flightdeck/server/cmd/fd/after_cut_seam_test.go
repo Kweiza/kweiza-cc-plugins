@@ -52,9 +52,9 @@ func TestAfterCutCLISeamActuallyDetachesTheDep(t *testing.T) {
 	if len(it.After) != 0 {
 		t.Errorf("선행이 %d건 남았다 — 이음매가 빈 값을 보냈다: %+v", len(it.After), it.After)
 	}
-	// 역인덱스도 같이 줄어야 한다. 이 축이 어긋나면 pick 추천이 조용히 틀린다.
+	// 종속 수도 같이 줄어야 한다(item_after 파생). 이 축이 어긋나면 pick 추천이 조용히 틀린다.
 	if n, _ := h.st.Dependents(ctx, h.project, dep); n != 0 {
-		t.Errorf("역인덱스가 %d 다 — 행은 끊겼는데 순위 축이 안 따라왔다", n)
+		t.Errorf("종속 수가 %d 다 — 행은 끊겼는데 순위 축이 안 따라왔다", n)
 	}
 	if !strings.Contains(out, dep) {
 		t.Errorf("무엇을 끊었는지 출력에 없다:\n%s", out)

@@ -11,7 +11,7 @@ import (
 
 // 큐 표면 — Q 계층.
 //
-// 사람이 주는 것은 title·body·paths·after 뿐이다. 상태·랜딩 sha·역인덱스·
+// 사람이 주는 것은 title·body·paths·after 뿐이다. 상태·랜딩 sha·종속 수·
 // 탈락 사유는 전부 서버가 채운다(설계 §3 의 쓰기 권한).
 
 // afterInput 은 선행 조건 하나다. **브랜치 이름을 담을 필드가 없다** —

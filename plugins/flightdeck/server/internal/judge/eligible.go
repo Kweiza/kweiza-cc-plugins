@@ -31,7 +31,9 @@ const (
 type Candidate struct {
 	Item       model.Item
 	ClaimedBy  string // 선점한 세션 id. 빈 문자열이면 미선점
-	Dependents int    // item_dependents 의 역인덱스 값. 많을수록 이걸 풀어야 남이 움직인다
+	Dependents int    // 이 항목에 기대는 **살아 있는** 항목 수(store.Dependents 파생).
+	// 많을수록 이걸 풀어야 남이 움직인다. 옛 item_dependents 표에서 온 값이 아니다 —
+	// 그 표는 죽었고(2026-08-22) 세던 것도 이것이 아니라 간선 수였다.
 
 	// Needs 는 이 항목을 하려면 잡아야 하는 자원이다(.flightdeck.yaml 의 resources).
 	// model.Item 에 이 축이 없어 여기에 둔다 — labels 로 대신할 수 없다.

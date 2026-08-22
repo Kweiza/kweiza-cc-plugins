@@ -19,12 +19,17 @@ import (
 // 어느 것도 item_after 행을 못 지운다. 처방이 있는데 수단이 없으면 항목은 영구히 굶고,
 // 출력에는 "고쳐라"만 계속 뜬다.
 //
-// ★ 여기서 지키는 진짜 축은 **역인덱스 정합**이다. item_dependents 는 pick 순위의 1축이라
-// (judge.Eligible 의 Dependents), 행만 지우고 n 을 안 줄이면 아무도 안 기대는 항목이
-// 영영 "남이 기다린다"로 상위에 뜬다. 그리고 그 틀림은 **오류를 안 낸다** — 조용하다.
+// ★ 여기서 지키는 진짜 축은 **행을 전부 지우는가**다. 종속 수(judge.Eligible 의 Dependents,
+// = pick 순위의 1축)는 이제 item_after 에서 **파생으로** 세므로(2026-08-21) 맞출 두 번째
+// 값이 없다 — 대신 행이 하나라도 남으면 그 항목은 그대로 미충족으로 읽힌다.
+// 그리고 그 틀림은 **오류를 안 낸다** — 조용하다.
+//
+// (2026-08-22 정정: 옛 판은 이 축을 "역인덱스 정합"이라 불렀다. 그 표 item_dependents 는
+//  읽는 곳도 쓰는 곳도 0이 됐고 증분 010 이 값을 비웠다 — 아래 단정들이 부르는 s.Dependents
+//  는 전부 파생 질의다. store/dependents_retired_test.go 가 그 부재를 지킨다.)
 
-// 선행 하나를 끊으면 행이 사라지고 역인덱스가 그만큼 준다.
-func TestRemoveAfterDropsTheRowAndDecrementsTheReverseIndex(t *testing.T) {
+// 선행 하나를 끊으면 행이 사라지고 종속 수가 그만큼 준다.
+func TestRemoveAfterDropsTheRowAndTheDependentCount(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	seed(t, s, "p")
@@ -38,7 +43,7 @@ func TestRemoveAfterDropsTheRowAndDecrementsTheReverseIndex(t *testing.T) {
 	}
 	// ── 대조 전제: 끊기 전에 정말 걸려 있는가. 없으면 이 시험은 "안 깨졌다"가 아니라 아무것도 안 본 것이다.
 	if n, err := s.Dependents(ctx, "p", "dep"); err != nil || n != 1 {
-		t.Fatalf("대조 전제가 깨졌다 — 역인덱스가 %d 다(err=%v). 1 이어야 본다", n, err)
+		t.Fatalf("대조 전제가 깨졌다 — 종속 수가 %d 다(err=%v). 1 이어야 본다", n, err)
 	}
 
 	if err := s.RemoveAfter(ctx, "p", "waiter", model.After{Item: "dep"}, ""); err != nil {
@@ -50,10 +55,10 @@ func TestRemoveAfterDropsTheRowAndDecrementsTheReverseIndex(t *testing.T) {
 	}
 	n, err := s.Dependents(ctx, "p", "dep")
 	if err != nil {
-		t.Fatalf("역인덱스 조회 실패: %v", err)
+		t.Fatalf("종속 수 조회 실패: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("역인덱스가 %d 다 — 이제 아무도 안 기대는데 pick 은 %d명이 기다린다고 읽는다", n, n)
+		t.Errorf("종속 수가 %d 다 — 이제 아무도 안 기대는데 pick 은 %d명이 기다린다고 읽는다", n, n)
 	}
 }
 
@@ -94,16 +99,16 @@ func TestRemoveAfterRefusesWhenNoSuchDependencyIsAttached(t *testing.T) {
 		t.Errorf("거절했는데 item_after 가 %d행이다 — 엉뚱한 행을 건드렸다", n)
 	}
 	if n, _ := s.Dependents(ctx, "p", "dep"); n != 1 {
-		t.Errorf("거절했는데 역인덱스가 %d 다 — 못 찾은 채로 감소시켰다", n)
+		t.Errorf("거절했는데 종속 수가 %d 다 — 못 찾은 채로 행을 지웠다", n)
 	}
 }
 
-// 같은 선행이 여러 행이면 **전부** 끊고 역인덱스를 그만큼 줄인다.
+// 같은 선행이 여러 행이면 **전부** 끊는다.
 //
 // item_after 에는 UNIQUE 가 없다 — 같은 (item, dep) 이 두 번 들어갈 수 있고 AddAfter 가 안 막는다.
-// 그때 행은 다 지우면서 n 은 1만 줄이면 역인덱스에 **거짓이 남는데 오류가 없다.**
-// 그것이 pick 순위의 1축이라, 조용히 틀린 추천이 계속 나간다.
-func TestRemoveAfterDropsEveryDuplicateRowAndKeepsTheIndexInStep(t *testing.T) {
+// 그때 한 행만 지우면 남은 행이 그대로 미충족으로 읽혀 **거짓이 남는데 오류가 없다.**
+// 그것이 pick 자격을 가르는 축이라, 조용히 굶는 항목이 생긴다.
+func TestRemoveAfterDropsEveryDuplicateRow(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	seed(t, s, "p")
@@ -118,7 +123,7 @@ func TestRemoveAfterDropsEveryDuplicateRowAndKeepsTheIndexInStep(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("선행 두 번 등록 실패: %v", err)
 	}
-	// ★ 대조 전제는 **행 수**로 잡는다(2026-08-21). Dependents 가 역인덱스에서 파생으로
+	// ★ 대조 전제는 **행 수**로 잡는다(2026-08-21). Dependents 가 표에서 파생으로
 	// 바뀌면서 `COUNT(DISTINCT item_id)` 가 됐다 — 같은 항목이 두 번 걸어도 **기다리는
 	// 항목은 하나**라 이제 1을 낸다. 그 수를 전제로 쓰면 이 시험이 재는 것(중복 행을 전부
 	// 지우는가)과 다른 축을 재게 된다. 원장 실측(2026-08-21): 중복 (item,dep) 쌍 0건이라
@@ -142,10 +147,10 @@ func TestRemoveAfterDropsEveryDuplicateRowAndKeepsTheIndexInStep(t *testing.T) {
 	}
 }
 
-// sha 선행도 끊긴다 — 그리고 역인덱스는 **안 건드린다.**
+// sha 선행도 끊긴다 — 그리고 항목 축의 종속 수는 **안 건드린다.**
 //
 // after-bad-ref(rc=128, 오타이거나 지워진 커밋)도 기다려서 안 풀리는 축이라 같은 동사가 필요하다.
-// 역인덱스는 dep_item 축에만 있으므로 sha 를 끊고 n 을 줄이면 **엉뚱한 항목의 순위**가 내려간다.
+// 종속 수는 dep_item 축에서만 나오므로, sha 를 끊고 엉뚱한 항목의 행을 건드리면 그 항목의 순위가 내려간다.
 func TestRemoveAfterCutsAShaDepAndLeavesTheReverseIndexAlone(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
@@ -174,14 +179,14 @@ func TestRemoveAfterCutsAShaDepAndLeavesTheReverseIndexAlone(t *testing.T) {
 		t.Errorf("남은 선행이 %+v 다 — item 축 하나만 남아야 한다", it.After)
 	}
 	if n, _ := s.Dependents(ctx, "p", "dep"); n != 1 {
-		t.Errorf("역인덱스가 %d 다 — sha 를 끊었는데 항목 축 수를 건드렸다", n)
+		t.Errorf("종속 수가 %d 다 — sha 를 끊었는데 항목 축 수를 건드렸다", n)
 	}
 }
 
 // 같은 선행을 든 **다른 항목**은 안 건드린다.
 //
 // WHERE 에서 item_id 가 빠지면 dep 하나를 끊는 명령이 그 dep 을 기다리던 모두를 푼다.
-// 역인덱스는 지운 행 수만큼 줄어 겉보기 정합이 맞으므로, 이 시험이 없으면 아무 데서도 안 걸린다.
+// 지운 행 수만큼 수가 줄어 겉보기 정합은 맞으므로, 이 시험이 없으면 아무 데서도 안 걸린다.
 func TestRemoveAfterLeavesTheSameDepOnOtherItemsIntact(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
@@ -207,7 +212,7 @@ func TestRemoveAfterLeavesTheSameDepOnOtherItemsIntact(t *testing.T) {
 		t.Errorf("waiter-b 의 선행이 %d행이다 — 남의 대기까지 풀렸다", n)
 	}
 	if n, _ := s.Dependents(ctx, "p", "dep"); n != 1 {
-		t.Errorf("역인덱스가 %d 다 — waiter-b 가 아직 기대는데 1 이 아니다", n)
+		t.Errorf("종속 수가 %d 다 — waiter-b 가 아직 기대는데 1 이 아니다", n)
 	}
 }
 

@@ -181,8 +181,18 @@ CREATE TABLE item_after (
 
 CREATE INDEX item_after_by_item ON item_after(project, item_id);
 
--- 삽입·삭제 시 유지되는 역인덱스. 기존 도구는 적격 항목마다 전체를 grep 해
--- 첫 명령이 51.7초 걸렸다(O(n²)).
+-- ★ **죽은 표다(2026-08-22). 읽는 문도 쓰는 문도 0이고, 증분 010 이 값을 비웠다.**
+--   원래는 "나에게 기대는 항목이 몇이나 되나"의 역인덱스였다(전수 grep 51.7초를 O(1) 로).
+--   그런데 이 n 이 실제로 센 것은 **살아 있는 종속이 아니라 item_after 의 간선 수**였다 —
+--   기대던 항목이 done·dropped 로 닫혀도 안 줄었다. 2026-08-21 개정이 Store.Dependents 를
+--   item_after 파생 질의로 바꾸면서 읽는 문이 0이 됐고, 그 다음 판이 쓰기 셋을 걷었다.
+--
+--   **여기에 다시 쓰지 마라.** 이 표를 유지하는 코드가 생기면 그 값은 곧 파생 질의와 갈리고,
+--   갈린 값은 오류를 안 낸다 — 그것이 이 표를 죽인 이유 자체다.
+--   그 부재는 store/dependents_retired_test.go 의 TestItemDependentsStaysRetired 가 지킨다.
+--
+--   표가 아직 남아 있는 이유는 DROP TABLE 이 migrate_guard_test.go 의 neverExempt 여서다 —
+--   구조를 지우려면 `fd migrate [--to N]` / `--rollback` 을 먼저 지어야 한다(설계 §7).
 CREATE TABLE item_dependents (
   project TEXT NOT NULL,
   item_id TEXT NOT NULL,

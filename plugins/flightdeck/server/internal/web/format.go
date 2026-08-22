@@ -431,7 +431,7 @@ func Clip(s string, n int) string {
 // ★ 빈 문자열과 **반드시 갈라야 한다.** 빈 문자열은 "원장을 읽었고 선언이 0건이다"이고
 // 이것은 "원장을 아예 못 읽었다"다. 둘을 한 값으로 접으면 조회가 죽은 화면이 그 항목을
 // "깨끗하다"고 말하게 되고, 그 거짓말이 정확히 이 축이 막으려는 사고다.
-// 같은 층의 선례가 ItemRow.Dependents 의 -1 이다(page.go 의 역인덱스 조회 실패 갈래).
+// 같은 층의 선례가 ItemRow.Dependents 의 -1 이다(page.go 의 종속 수 조회 실패 갈래).
 const CloseDeclUnread = "?"
 
 // CloseDeclaredLabel 은 항목 한 줄의 종료 선언 표기다. 순수 함수다.
