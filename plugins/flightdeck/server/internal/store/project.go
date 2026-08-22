@@ -226,6 +226,9 @@ func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived 
 //
 // ★ 뒤의 둘(item_dependents · pick_eval)은 FK 가 아니라 컬럼으로만 묶인다. FK 가 안 우니
 // 안 지워도 삭제는 성공하고, 그래서 더 위험하다 — 조용히 고아 행이 남는다.
+// (item_dependents 는 죽은 표라 지금은 늘 0행이지만 목록에서 빼지 않는다 — 이 목록은
+// 아래 ★ 가 말하듯 살아 있는 스키마와 기계 대조되고, 그 대조의 기준은 project 컬럼의
+// 유무이지 표의 생사가 아니다.)
 //
 // ★ judgment 는 여기 있지만 **지우지 않는다**. judgment_no_delete 트리거가 원리적으로
 // 막는다(schema.sql). 그래서 RemoveProject 는 판단이 하나라도 있으면 거절한다.

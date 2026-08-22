@@ -786,7 +786,7 @@ func TestFinishReleasesClaimAtomically(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 항목 · 의존 역인덱스
+// 항목 · 의존 종속 수
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestItemAfterAndDependents(t *testing.T) {
@@ -816,13 +816,13 @@ func TestItemAfterAndDependents(t *testing.T) {
 	if n != 2 {
 		t.Errorf("base 에 기대는 항목 수 = %d, want 2", n)
 	}
-	// sha 의존은 역인덱스에 안 들어간다(항목이 아니다).
+	// sha 의존은 종속 수에 안 들어간다(항목이 아니다).
 	if n, _ := s.Dependents(ctx, "p", "c8206a9"); n != 0 {
-		t.Errorf("sha 의존이 역인덱스에 들어갔다: %d", n)
+		t.Errorf("sha 의존이 종속 수에 들어갔다: %d", n)
 	}
-	// 없는 항목의 역인덱스는 0이다(오류가 아니다).
+	// 없는 항목의 종속 수는 0이다(오류가 아니다).
 	if n, err := s.Dependents(ctx, "p", "없음"); err != nil || n != 0 {
-		t.Errorf("없는 항목의 역인덱스 = %d, err=%v", n, err)
+		t.Errorf("없는 항목의 종속 수 = %d, err=%v", n, err)
 	}
 
 	got, err := s.GetItem(ctx, "p", "dep1")
@@ -833,12 +833,12 @@ func TestItemAfterAndDependents(t *testing.T) {
 		t.Fatalf("선행 조건 2건을 기대했는데 %d건: %+v", len(got.After), got.After)
 	}
 
-	// 삭제하면 역인덱스가 되돌아온다. 안 되돌리면 base 가 영영 "누가 기대고 있다"로 남는다.
+	// 삭제하면 종속 수가 되돌아온다 — item_after 가 CASCADE 로 사라지므로 파생이 저절로 맞는다.
 	if err := s.DeleteItem(ctx, "p", "dep1"); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := s.Dependents(ctx, "p", "base"); n != 1 {
-		t.Errorf("삭제 후 역인덱스 = %d, want 1", n)
+		t.Errorf("삭제 후 종속 수 = %d, want 1", n)
 	}
 	if _, err := s.GetItem(ctx, "p", "dep1"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("삭제된 항목이 조회된다: %v", err)

@@ -932,7 +932,7 @@ func (h *handler) closeDeclarations(ctx context.Context, st *store.Store,
 	d, err := st.CloseDeclarationsByItem(ctx, project)
 	if err != nil {
 		// 삼키지 않는다. 다만 이 한 축 때문에 큐 표를 통째로 버리지도 않는다 —
-		// 역인덱스 실패가 항목 줄을 안 버리는 것과 같은 자리다.
+		// 종속 수 조회 실패가 항목 줄을 안 버리는 것과 같은 자리다.
 		h.log.WarnContext(ctx, "종료 선언 축 조회 실패",
 			"project", Clip(project, 64), "error", err.Error())
 		return nil, false
@@ -960,7 +960,7 @@ func (h *handler) itemRow(ctx context.Context, st *store.Store, it model.Item,
 	n, err := st.Dependents(ctx, it.Project, it.ID)
 	if err != nil {
 		// 삼키지 않는다. 다만 이 한 축 때문에 항목 줄을 통째로 버리지도 않는다.
-		h.log.WarnContext(ctx, "역인덱스 조회 실패",
+		h.log.WarnContext(ctx, "종속 수 조회 실패",
 			"project", it.Project, "item", Clip(it.ID, 64), "error", err.Error())
 		r.Dependents = -1
 	} else {

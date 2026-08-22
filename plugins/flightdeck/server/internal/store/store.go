@@ -56,9 +56,12 @@ var migrationResourceQueue string
 //go:embed migrations/009_judgment_link_target_project.sql
 var migrationLinkTargetProject string
 
+//go:embed migrations/010_retire_item_dependents.sql
+var migrationRetireItemDependents string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -88,6 +91,7 @@ var migrations = []Migration{
 	{To: 7, Name: "프로젝트에 핀·보관 축", SQL: migrationProjectViewAxis},
 	{To: 8, Name: "줄 행이 자원 집합을 갖는다", SQL: migrationResourceQueue},
 	{To: 9, Name: "판단 링크가 대상 프로젝트를 싣는다", SQL: migrationLinkTargetProject},
+	{To: 10, Name: "죽은 역인덱스의 값을 비운다", SQL: migrationRetireItemDependents},
 }
 
 // timeLayout 은 저장용 시각 표기다.
@@ -474,11 +478,20 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 //     "서버가 안 뜬다"로 나타나고, 그때 고칠 수단도 같은 바이너리를 다시 띄우는 것뿐이다.
 //   - ③이 없다: 되돌리는 서브명령이 없다. 되돌릴 길은 백업 파일 손 복사뿐이다.
 //
-// **지금 이 구조를 유지하기로 한 판단과 근거**(2026-08-03):
-// 증분은 이제 **네 단**(002·003·004·005)이고, 005 에서 **순수 가산이 아니게 됐다** —
-// 절대경로 발자국을 지운다. 그래도 적용을 기동에 남기는 판단은 유지한다: 적용을 떼면
-// **모든 명령**(fail-open 훅 4종 포함)이 "스키마가 아직 안 올라간 DB" 를 만나는 새 경로가 생기고,
-// 훅은 정의상 조용히 죽으므로 그 경로의 실패가 침묵한다. 제거하는 위험보다 새로 만드는 위험이 크다.
+// **지금 이 구조를 유지하기로 한 판단과 근거**(2026-08-03, 2026-08-22 갱신):
+// 증분은 이제 **아홉 단**(002~010)이고, 그중 넷이 순수 가산이 아니다 —
+// 005·006(발자국 삭제) · 008(백필) · 010(죽은 역인덱스 비우기). 그래도 적용을 기동에
+// 남기는 판단은 유지한다: 적용을 떼면 **모든 명령**(fail-open 훅 4종 포함)이 "스키마가 아직
+// 안 올라간 DB" 를 만나는 새 경로가 생기고, 훅은 정의상 조용히 죽으므로 그 경로의 실패가
+// 침묵한다. 제거하는 위험보다 새로 만드는 위험이 크다.
+//
+// ★ 010 이 그 판단을 다시 시험했고 통과했다(2026-08-22). 항목
+// fd-item-dependents-table-has-no-readers 는 item_dependents 를 **DROP TABLE** 하려 했는데,
+// 그것은 neverExempt 라 예외로 못 열고 유일한 길이 위 ①(`fd migrate`) 신설이다.
+// 표를 지우는 대신 **값만 비웠다** — 구조가 남으므로 조작이 DELETE FROM 이고,
+// 되돌리기는 item_after 에서 재계산하는 질의 한 줄이다(010 머리말 ⒝).
+// 즉 이 증분은 ①을 요구하지 않는다. 표 자체의 제거는 별도 항목이 지고, 그 항목이
+// 착수되는 날 이 절의 ①·③ 이 먼저 지어져야 한다.
 //
 // ★ 그래서 파괴적 증분은 무조건 막는 대신 **근거를 요구하는 예외**로 통과시킨다.
 // migrate_guard_test.go 의 destructiveExempt 가 증분 번호마다 (허용 조작, 사유) 를 담고,

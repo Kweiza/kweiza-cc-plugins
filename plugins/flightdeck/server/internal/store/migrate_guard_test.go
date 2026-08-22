@@ -166,6 +166,27 @@ var destructiveExempt = map[int]exemption{
 			"landing_queue_resource 한 줄로 이 증분 이전 상태와 동일해진다. 판올림 전 " +
 			"VACUUM INTO 백업도 자동으로 뜬다. 근거 전문은 008 머리말에 있다.",
 	},
+	// 010 · 죽은 역인덱스 item_dependents 를 비운다(DELETE FROM).
+	//
+	// ★ 005·006 의 사유("읽는 쪽이 이미 배제/오염된 행")를 복사하면 안 된다. 저쪽은 한 표
+	//   안에서 지울 행과 살릴 행을 갈랐지만 여기는 **표 전체가 죽었다** — 읽는 문이 0이라
+	//   배제할 읽는 쪽 자체가 없다. 그래서 근거의 축이 "안 읽힌다"가 아니라 **"재구성된다"** 다.
+	10: {
+		ops: []op{opDeleteFrom},
+		why: "item_dependents 는 읽는 문이 0이고(2026-08-21 개정으로 Store.Dependents 가 파생이 됐다) " +
+			"쓰는 문도 같은 커밋에서 0이 된다(bumpDependents 와 호출 셋 제거) — 그 부재는 " +
+			"TestItemDependentsStaysRetired 가 쓰기 경로 넷을 실제로 태워 지킨다. **구조는 안 " +
+			"건드린다**: 표도 인덱스도 남고 조작은 DELETE FROM 하나뿐이라, 구조가 사라지는 " +
+			"neverExempt 셋에 안 걸린다(표 자체의 제거는 별도 항목이 지고 그때는 fd migrate 가 " +
+			"먼저다). 지우는 값은 **100% 재구성된다** — 전수 실측(2026-08-22, 143행, 예외 0)으로 " +
+			"n 이 item_after 의 dep_item 간선 수와 전부 일치했고 이 증분은 item_after 를 한 행도 " +
+			"안 건드리므로, `INSERT INTO item_dependents SELECT project, dep_item, COUNT(*) FROM " +
+			"item_after WHERE dep_item IS NOT NULL GROUP BY 1,2` 한 줄이 되돌리기다(중복 간선 0건이라 " +
+			"COUNT(*) 와 COUNT(DISTINCT item_id) 가 같은 값을 낸다). **복원되는 것은 행 집합이 아니라 " +
+			"함수다**: 운영 사본 예행에서 143행 중 141행이 값까지 살아났고 못 살아난 둘은 n=0 인 행이라 " +
+			"되살릴 값 자체가 없다(읽는 쪽에게 '행 없음'과 'n=0' 은 같은 값이었다). 판올림 전 " +
+			"VACUUM INTO 백업도 자동으로 뜬다. 근거 전문과 삭제 분포는 010 머리말에 있다.",
+	},
 }
 
 // neverExempt 는 예외로도 못 여는 조작이다. 데이터가 아니라 **구조**가 사라지는 것들이다.

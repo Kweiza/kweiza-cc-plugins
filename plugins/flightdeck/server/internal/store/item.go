@@ -129,10 +129,12 @@ func (e *ItemClosedError) Error() string {
 // item
 // ─────────────────────────────────────────────────────────────────────────────
 
-// AddItem 은 항목을 만들고 선행 조건과 역인덱스를 함께 유지한다.
+// AddItem 은 항목을 만들고 선행 조건을 함께 넣는다.
 //
-// item_dependents 는 "나에게 기대는 항목이 몇이나 되나"의 역인덱스다.
-// 기존 도구는 이 질문에 답하려고 적격 항목마다 큐 전체를 grep 해 첫 명령이 51.7초 걸렸다.
+// ★ **역인덱스는 이제 없다.** "나에게 기대는 항목이 몇이나 되나"는 Store.Dependents 가
+// item_after 에서 파생으로 답한다(그 함수 머리말). 옛 item_dependents 표는 그 질문이 아니라
+// **간선 수**를 세고 있었고 — 실측 143행 전수에서 그랬다 — 읽는 곳이 0이 된 뒤로는
+// 아무에게도 안 쓰였다. 쓰기 셋은 2026-08-22 에 걷었고 증분 010 이 남은 값을 비웠다.
 func (t *Tx) AddItem(it model.Item) error {
 	if it.Project == "" || it.ID == "" {
 		return fmt.Errorf("항목의 project 와 id 는 필수다(project=%q id=%q)",
@@ -216,11 +218,6 @@ func (t *Tx) addAfter(project, itemID string, a model.After) error {
 			RefHint: fmt.Sprintf("항목 %s/%s", clip(project, 64), clip(itemID, 64)),
 		}, "선행 조건 등록 실패(project=%q item=%q)", clip(project, 64), clip(itemID, 64))
 	}
-	if a.Item != "" {
-		if err := t.bumpDependents(project, a.Item, +1); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -234,10 +231,11 @@ func (t *Tx) AddAfter(project, itemID string, a model.After) error {
 // judge.AfterSatisfied 가 내는 영구 미충족(after-dropped-dep · after-bad-ref)의 처방은
 // "선행을 고쳐라"인데, 그 명령을 집행할 쓰기가 여기 말고는 없다.
 //
-// ★ 역인덱스 감소를 **같은 트랜잭션에** 묶는다. item_dependents 는 pick 순위의 1축이라
-// 행만 지우고 n 을 남기면 아무도 안 기대는 항목이 영영 상위에 뜨고, 그 틀림은 오류를 안 낸다.
-// 지운 행 수만큼 줄인다 — item_after 에 UNIQUE 가 없어 같은 선행이 여러 행일 수 있고,
-// 그때 1만 줄이면 남은 차이가 그대로 역인덱스의 거짓이 된다.
+// ★ **역인덱스를 함께 줄이던 자리였다. 이제 없다** — Dependents 가 item_after 에서
+// 파생으로 세므로 이 DELETE 하나가 곧 수의 갱신이고, 따로 맞출 두 번째 값이 없다.
+// 그 대신 남는 계약은 **행을 전부 지운다**는 것이다: item_after 에 UNIQUE 가 없어 같은
+// 선행이 여러 행일 수 있고, 하나만 지우면 남은 행이 그대로 미충족으로 읽힌다.
+// LIMIT 없는 DELETE 가 그 계약이고, item_after_cut_test.go 가 행 수로 그것을 잰다.
 func (t *Tx) RemoveAfter(project, itemID string, a model.After, sessionID string) error {
 	if err := ValidateAfter(a); err != nil {
 		return err
@@ -261,17 +259,6 @@ func (t *Tx) RemoveAfter(project, itemID string, a model.After, sessionID string
 		return notFoundNote(NFItemAfter, fmt.Sprintf("항목 %s/%s 의 item=%q job=%q sha=%q 에 해당하는",
 			clip(project, 64), clip(itemID, 64), clip(a.Item, 64), clip(a.Job, 64), clip(a.SHA, 40)))
 	}
-	// 역인덱스는 dep_item 축에만 있다. job·sha 를 끊고 여기를 지나면 엉뚱한 수를 만진다.
-	//
-	// ★ 이 가드는 지금 **시험으로 못 잡는다** — 빼도 초록이다. bumpDependents 의 감소 경로가
-	// UPDATE 뿐이라 빈 id 로는 0행이 되어 결과가 같기 때문이다. 그것은 우연이지 계약이 아니다:
-	// 같은 함수의 증가 경로는 INSERT … ON CONFLICT 라, 계약이 한 번만 바뀌면 빈 item_id 행이
-	// 조용히 생긴다. 그래서 의도를 코드에 남긴다.
-	if a.Item != "" {
-		if err := t.bumpDependents(project, a.Item, -int(n)); err != nil {
-			return err
-		}
-	}
 	// ★ 원장에 남긴다. 이 쓰기는 되돌리는 코드가 없고, 항목 본문은 만들어진 시점의 사진이라
 	// **무엇이 걸려 있었는지가 끊는 순간 사라진다.** 안 남기면 "이 항목이 왜 지금 적격인가"에
 	// 답할 자리가 어디에도 없다 — 그리고 그것이 원래 이 결함을 만든 공백과 같은 모양이다.
@@ -294,30 +281,6 @@ func (s *Store) RemoveAfter(ctx context.Context, project, itemID string, a model
 	return s.Tx(ctx, func(t *Tx) error { return t.RemoveAfter(project, itemID, a, sessionID) })
 }
 
-// bumpDependents 는 역인덱스를 delta 만큼 움직인다.
-// 감소는 0 아래로 안 내려간다 — 음수 카운트는 조용히 "의존 없음"으로 읽혀 잘못된 통과를 만든다.
-func (t *Tx) bumpDependents(project, depItem string, delta int) error {
-	if delta >= 0 {
-		_, err := t.tx.ExecContext(t.ctx, `
-			INSERT INTO item_dependents(project, item_id, n) VALUES (?, ?, ?)
-			ON CONFLICT(project, item_id) DO UPDATE SET n = n + ?`,
-			project, depItem, delta, delta)
-		if err != nil {
-			return fmt.Errorf("역인덱스 증가 실패(project=%q dep=%q): %w",
-				clip(project, 64), clip(depItem, 64), err)
-		}
-		return nil
-	}
-	_, err := t.tx.ExecContext(t.ctx, `
-		UPDATE item_dependents SET n = MAX(0, n + ?) WHERE project = ? AND item_id = ?`,
-		delta, project, depItem)
-	if err != nil {
-		return fmt.Errorf("역인덱스 감소 실패(project=%q dep=%q): %w",
-			clip(project, 64), clip(depItem, 64), err)
-	}
-	return nil
-}
-
 // Dependents 는 이 항목에 기대는 **아직 살아 있는** 항목 수다. 없으면 0.
 //
 // ★ **파생이다 — item_dependents 역인덱스를 안 읽는다(2026-08-21 개정).**
@@ -333,8 +296,11 @@ func (t *Tx) bumpDependents(project, depItem string, delta int) error {
 // 여기서는 **DependentItems 와 같은 살아있음 정의**(open·claimed)를 쓴다 — 수와 이름이
 // 갈리면 관문 문구와 순위가 서로 다른 세상을 본다.
 //
-// ★ 이 개정으로 item_dependents 는 **읽는 곳이 없어졌다**(쓰기 셋만 남았다).
-// 표와 그 쓰기를 걷어내는 것은 마이그레이션이라 이 판에서 안 한다 — 후속이 진다.
+// ★ 그 개정으로 item_dependents 는 읽는 곳이 없어졌고, **2026-08-22 에 쓰는 곳도 없앴다** —
+// bumpDependents 와 그 호출 셋을 걷고 증분 010 이 남은 143행을 비웠다. 표는 **빈 채로 남아
+// 있다**: DROP TABLE 은 migrate_guard_test.go 의 neverExempt 라 사유 예외로 못 열고,
+// 그 길은 `fd migrate [--to N]` / `--rollback` 신설이 먼저다(store.go 마이그레이션 절).
+// 그 표가 다시 채워지지 않는지는 TestItemDependentsStaysRetired 가 쓰기 경로를 태워 지킨다.
 func (s *Store) Dependents(ctx context.Context, project, itemID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
@@ -387,16 +353,15 @@ func (s *Store) DependentItems(ctx context.Context, project, itemID string) ([]s
 	return out, nil
 }
 
-// DeleteItem 은 항목을 지우고 역인덱스를 되돌린다.
+// DeleteItem 은 항목을 지운다.
 //
 // 일반 경로는 이걸 안 쓴다 — 끝난 항목은 state=done, 버린 항목은 state=dropped 다(사유 필수).
-// 이 함수는 잘못 넣은 항목을 되무르는 자리이고, 그때 역인덱스가 안 줄면
-// 선행 항목이 영영 "누가 기대고 있다"로 남는다.
+// 이 함수는 잘못 넣은 항목을 되무르는 자리다.
+//
+// ★ **역인덱스를 손으로 되돌리던 자리였다. 이제 없다** — 항목이 사라지면 그 항목의
+// item_after 행이 FK CASCADE 로 함께 사라지고, Dependents 는 그 표에서 파생으로 세므로
+// 수가 저절로 맞는다. 맞출 두 번째 값이 없다는 것이 이 삭제의 요점이다.
 func (t *Tx) DeleteItem(project, itemID string) error {
-	afters, err := afterOf(t.ctx, t.tx, project, itemID)
-	if err != nil {
-		return err
-	}
 	res, err := t.tx.ExecContext(t.ctx,
 		`DELETE FROM item WHERE project = ? AND id = ?`, project, itemID)
 	if err != nil {
@@ -411,21 +376,9 @@ func (t *Tx) DeleteItem(project, itemID string) error {
 	if n == 0 {
 		return notFound(NFItem, project, itemID)
 	}
-	// item_after 는 FK ON DELETE CASCADE 로 함께 사라진다. 역인덱스는 FK 가 없으므로 손으로 되돌린다.
-	for _, a := range afters {
-		if a.Item == "" {
-			continue
-		}
-		if err := t.bumpDependents(project, a.Item, -1); err != nil {
-			return err
-		}
-	}
-	// 자기 자신을 가리키던 역인덱스 행도 지운다(이제 존재하지 않는 항목이다).
-	if _, err := t.tx.ExecContext(t.ctx,
-		`DELETE FROM item_dependents WHERE project = ? AND item_id = ?`, project, itemID); err != nil {
-		return fmt.Errorf("역인덱스 정리 실패(project=%q id=%q): %w",
-			clip(project, 64), clip(itemID, 64), err)
-	}
+	// item_after 는 FK ON DELETE CASCADE 로 함께 사라진다 — 이 항목이 **걸고 있던** 선행도,
+	// 이 항목을 가리키던 남의 선행도 아니다(후자는 남의 행이라 안 지운다. 그 관계는
+	// DependentItems 가 살아 있는 항목만 세므로 이 항목이 사라진 순간 저절로 빠진다).
 	return nil
 }
 
