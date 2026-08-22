@@ -1232,6 +1232,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		b.WriteString(renderCloseDeclared(r.CloseDeclared, ""))
 		if len(it.After) > 0 {
 			fmt.Fprintf(&b, "선행: %s\n", formatAfter(it.After))
+			b.WriteString(renderAfterCheck(r.AfterCheck, ""))
 		}
 		if strings.TrimSpace(it.Body) != "" {
 			fmt.Fprintf(&b, "본문:\n%s\n", indent(clip(it.Body, 4000), "  "))
@@ -1465,6 +1466,10 @@ func renderBundle(bi *service.BundleInfo) string {
 		// 같은 사실을 말하게 되고, 그 변이는 전체 문자열 Contains 로는 안 죽는다
 		// (경로 축이 실제로 그렇게 죽어 있었다 — render_test.go:1326-1333).
 		b.WriteString(renderCloseDeclared(m.CloseDeclared, "    "))
+		if len(m.Item.After) > 0 {
+			fmt.Fprintf(&b, "    선행: %s\n", formatAfter(m.Item.After))
+			b.WriteString(renderAfterCheck(m.AfterCheck, "    "))
+		}
 		if m.Rejection != nil {
 			fmt.Fprintf(&b, "    못 집었다: %-16s %s\n",
 				m.Rejection.Reason, clip(m.Rejection.Detail, 160))
@@ -1533,6 +1538,42 @@ func indent(s, pad string) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderAfterCheck 는 선행 충족 축이다. 순수 함수다.
+//
+// ★ **어느 갈래에서도 침묵하지 않는다** — renderPathCheck 과 같은 규율이다. 침묵하면
+// "충족됐다"와 "이 축을 안 봤다"가 같은 화면이 되고, 그러면 이 줄이 막으려는 바로 그
+// 사고(막힌 항목을 조용히 집는 것)를 화면이 다시 만든다.
+//
+// ★ **거절 문구가 아니다.** 이 서버는 명시 선점을 안 막는다(PickResult.AfterCheck 의
+// 머리말에 실측 근거가 있다). 그래서 문장이 "집지 마라"가 아니라 "이것이 아직 안 풀렸다,
+// 알고 집는 거냐"여야 한다 — 처방까지 함께 낸다: 기다릴 것인지, 선행을 고칠 것인지.
+//
+// ★ 호출부가 `len(After) > 0` 을 이미 확인하고 부른다. 선행이 없는 항목에까지 이 줄을
+// 찍으면 화면 대부분이 "선행 충족: 없다"로 덮이고, 그렇게 잡음이 된 줄은 정작 참인 날
+// 아무도 안 읽는다(doctor 의 「0건」 줄을 안 찍는 것과 같은 판단이다).
+func renderAfterCheck(v *service.AfterVerdict, pad string) string {
+	if v == nil {
+		return pad + "선행 충족: **이 응답에 없다** — 구서버이거나 이 축이 생기기 전에 굳은 캐시다. " +
+			"충족 여부를 직접 확인해라\n"
+	}
+	if v.Satisfied {
+		return pad + "선행 충족: 전부 충족됐다\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s선행 **미충족** %d건: %s\n", pad, len(v.Reasons), strings.Join(v.Reasons, " · "))
+	if len(v.WithInCall) > 0 {
+		fmt.Fprintf(&b, "%s  그중 %d건은 **이 호출이 함께 집는다**(%s) — 정상 경로다. "+
+			"같은 워크트리에서 선행부터 순서대로 해라.\n",
+			pad, len(v.WithInCall), strings.Join(v.WithInCall, " · "))
+	}
+	if len(v.WithInCall) < len(v.Reasons) {
+		fmt.Fprintf(&b, "%s  **막지 않는다 — 명시 선점은 사람의 선택이고 이 서버는 그것을 안 덮는다.** "+
+			"기다려서 풀리는 축이면 기다리고, 선행이 폐기됐거나 틀렸으면 "+
+			"`fd after cut` 으로 끊어라(그 처방을 집행할 쓰기는 그것 하나뿐이다).\n", pad)
+	}
+	return b.String()
 }
 
 // renderPathCheck 는 경로 실재 축 한 줄이다. 순수 함수다.

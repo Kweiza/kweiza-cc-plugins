@@ -41,6 +41,21 @@ type PickInput struct {
 }
 
 // PickResult 는 pick 한 번의 결과다.
+// AfterVerdict 는 선행 충족 판정 하나다. 판정 자체는 judge.AfterSatisfied 가 한다 —
+// 여기는 그 답과 **이 호출의 맥락**을 함께 담는 자리다.
+type AfterVerdict struct {
+	Satisfied bool `json:"satisfied"`
+	// Reasons 는 judge.AfterSatisfied 의 미충족 사유 **전부**다(사유 코드 포함).
+	// 첫 사유에서 끊지 않는 이유는 그 함수의 머리말과 같다 — 하나 풀면 또 하나가 나온다.
+	Reasons []string `json:"reasons,omitempty"`
+	// WithInCall 은 미충족 선행 중 **이 호출이 함께 집는** 항목 id 다.
+	//
+	// ★ 이 칸이 없으면 알림이 잡음이 된다. 실측 53건 중 27건(51%)이 바로 이 모양이고,
+	// 정상 경로에서 절반 넘게 뜨는 경고는 결국 아무도 안 읽는다. 같은 함정을
+	// migrate_guard_test.go 가 DROP INDEX 를 파괴 목록에서 뺀 이유로 적어 뒀다.
+	WithInCall []string `json:"with_in_call,omitempty"`
+}
+
 type PickResult struct {
 	Mode     PickMode        `json:"mode"`
 	Reason   string          `json:"reason"` // 왜 이것인가 · 왜 못 골랐나. **항상 채운다**
@@ -80,6 +95,29 @@ type PickResult struct {
 	//
 	// 적격 0건(PickNone)에도 nil 이다 — 항목이 없으면 관측할 대상이 없다.
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
+
+	// AfterCheck 는 **이 항목의 선행이 지금 충족됐는가**다.
+	//
+	// ★ 이것은 거절이 아니라 **알림**이다. 명시 경로(pick(item_id=…))에는 선행 판정이
+	// 아예 없었고, 그래서 막힌 항목을 **조용히** 집을 수 있었다 — render 가 `선행:` 목록을
+	// 찍긴 했지만 충족 여부는 안 찍었다. 그 침묵을 이 필드가 끝낸다.
+	//
+	// ★ **왜 막지 않나.** 원장 전수 실측(2026-08-22, item.claim 1053건을 호출 단위로 복원):
+	// 해소 전 선점 53건 중 **27건이 그 선행을 같은 호출에서 함께 집은 정상 경로**였다
+	// (judge/bundle.go 의 blockedOnlyBy 가 의도적으로 그렇게 한다 — 선행과 같은 워크트리에서
+	// 순서대로 하는 경우다). 나머지 26건도 24건이 done 으로 끝났고 되돌린 흔적이 없다
+	// (item.resume 1건 = 3.8%, 대조군 910항목의 2.5% 와 구분되지 않는다). 게다가 그중 셋은
+	// **선행이 이미 폐기된** 항목이라 거절했으면 영영 못 집었을 것이고, 그 처방(RemoveAfter)은
+	// 원장 전체에서 열 번밖에 안 쓰였다. 즉 막으면 정상 경로가 죽고, 안 막아서 생긴 손해는
+	// 실측되지 않았다. 그래서 거절이 아니라 이 줄이다 — steal_reason·release 를 거절하는 것과
+	// 같은 결로, 이 서버는 사람의 명시 선택을 안 덮는다.
+	//
+	// ★ **포인터다.** PathCheck·CloseDeclared 과 같은 이유다 — nil 은 "이 응답은 그 축을
+	// 안 읽었다"이고, 구서버 응답과 이 필드 이전에 굳은 오프라인 캐시가 실제로 그 상태다.
+	// 그래서 **선점 세 갈래와 추천 갈래 전부에서 채운다** — 한 갈래라도 비우면 화면이
+	// 신선한 온라인 응답에 "이 축을 안 읽었다"는 거짓 원인을 붙인다(CloseDeclared 가
+	// 정확히 그 사고를 한 번 냈고 그 주석이 바로 아래에 있다).
+	AfterCheck *AfterVerdict `json:"after_check,omitempty"`
 
 	// CloseDeclared 는 이 항목을 닫으려다 **롤백된** 선언이다(원장의 item.finish 인데
 	// 항목은 done/dropped 이 아니다).
@@ -156,6 +194,15 @@ type BundleMember struct {
 	Item      model.Item             `json:"item"`
 	Link      judge.Link             `json:"link"` // 왜 선두와 묶였나
 	PathCheck *judge.ItemPathVerdict `json:"path_check,omitempty"`
+
+	// AfterCheck 는 이 구성원의 선행 충족이다. PathCheck·CloseDeclared 과 **같은 계약**이다 —
+	// 여기서 안 나르면 저 둘은 실리는데 이 축만 조용히 사라진다(pickBundle 의 그 주석이
+	// 같은 사고를 이미 한 번 적어 뒀다).
+	//
+	// ★ 이 자리가 실측이 가리킨 바로 그 구멍이다: 해소 전 선점 53건 중 12건이
+	// **묶음 구성원인데 그 선행은 같은 호출에 없던** 경우였다. 선두에만 찍으면 그 12건이
+	// 계속 침묵한다.
+	AfterCheck *AfterVerdict `json:"after_check,omitempty"`
 	// CloseDeclared 는 이 구성원을 닫으려다 롤백된 선언이다. 계약은 PickResult 쪽과
 	// 글자 그대로 같다(nil = 그 축을 안 읽었다 · non-nil 0건 = 읽었고 없다).
 	//
@@ -296,7 +343,7 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 	case len(in.ItemIDs) > 0:
 		res, err = s.pickBundle(ctx, proj, in, live, selfCC, d, now)
 	case strings.TrimSpace(in.ItemID) != "":
-		res, err = s.pickExplicit(ctx, proj, in, live, selfCC, d, now)
+		res, err = s.pickExplicit(ctx, proj, in, live, selfCC, d, now, nil)
 	default:
 		res, err = s.pickRecommend(ctx, proj, in, live, selfCC, d, now)
 	}
@@ -338,8 +385,11 @@ func (s *Service) fillQueueOpen(ctx context.Context, project string, res *PickRe
 }
 
 // pickExplicit 은 지정된 항목을 선점한다(또는 재개 맥락을 낸다).
+// inCall 은 **이 호출이 함께 집는 항목 id 전부**다(자기 자신 포함). 단독 호출이면 nil 이다.
+// 선행 알림이 정상적인 묶음 흡수에서 잡음이 되지 않게 하는 유일한 입력이라 인자로 받는다 —
+// pickExplicit 은 자기 항목 하나만 알고, 그 맥락은 pickBundle 에만 있다.
 func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickInput,
-	live []judge.LiveSession, selfCC string, d *derive, now time.Time) (PickResult, error) {
+	live []judge.LiveSession, selfCC string, d *derive, now time.Time, inCall []string) (PickResult, error) {
 
 	item, err := s.st.GetItem(ctx, proj.ID, in.ItemID)
 	if err != nil {
@@ -375,6 +425,9 @@ func (s *Service) pickExplicit(ctx context.Context, proj model.Project, in PickI
 	res.Overlaps = judge.OverlapsWithLive(item.Paths, live, in.SessionID, selfCC)
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 선행 판정을 **집기 전에** 낸다. 이 경로에는 이 판정이 아예 없었다(after 는 추천
+	// 경로 전용 관문이었다). 막지는 않는다 — 근거는 PickResult.AfterCheck 의 머리말이다.
+	res.AfterCheck = s.afterVerdict(ctx, proj, item, inCall, d)
 	// ★ 종료 선언 축 — 위 Bundle 주석이 이미 적어 둔 그 실패를 여기서도 반복하지
 	// 않는다. closeDeclarations 는 후보 슬라이스를 받아 앵커(생성 시각 이후·동시각
 	// 제외 — pick.go:805 부근의 그 함수 자신의 doc)를 건다. 그 규칙을 여기서
@@ -560,7 +613,7 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 	// ① 선두 — 기존 단독 경로를 그대로 탄다. 실패하면 여기서 즉시 반환한다:
 	// 트랜잭션을 하나도 안 열었으니 되돌릴 것도 없다(원자성이 공짜로 나온다).
 	res, err := s.pickExplicit(ctx, proj,
-		PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: lead}, live, selfCC, d, now)
+		PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: lead}, live, selfCC, d, now, ids)
 	if err != nil {
 		return PickResult{}, err
 	}
@@ -582,7 +635,7 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 	for _, id := range rest {
 		m := BundleMember{Link: judge.Link{Item: id, Detail: "세션이 함께 지정했다"}}
 		sub, serr := s.pickExplicit(ctx, proj,
-			PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: id}, live, selfCC, d, now)
+			PickInput{Project: in.Project, SessionID: in.SessionID, ItemID: id}, live, selfCC, d, now, ids)
 		if serr != nil {
 			m.Rejection = rejectionOf(id, serr)
 			// pickExplicit 이 실패로 던진 PickResult 는 비어 있다(Item 도 포함해서) —
@@ -612,6 +665,12 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 			// 원장 자체를 못 읽으면 closeRead=false 라 nil 이 그대로 남는다.
 			closed, closeRead := s.closeDeclarations(ctx, proj.ID, cands)
 			m.CloseDeclared = closeDeclaredOf(closed, id, closeRead)
+			// ★ 못 집었어도 선행 축은 말한다 — 다음 세션이 이 구성원을 다시 집으러 올 때
+			// 읽을 유일한 줄이다. 위 재조회가 실패한 갈래(큐에 없는 id)에서는 판정 **대상**이
+			// 없으므로 nil 이고, 그것이 이 축의 계약 그대로다("이 응답은 그 축을 안 읽었다").
+			// CloseDeclared 와 달리 0값으로 접지 않는 이유: 이 축의 0값은 "충족됐다"라서,
+			// 못 읽은 항목에 대해 **관측한 적 없는 통과**를 단정하게 된다.
+			m.AfterCheck = s.afterVerdictOf(ctx, proj, cands, ids, d)
 			s.log.WarnContext(ctx, "묶음 구성원 선점 실패 — 나머지를 진행한다",
 				"project", proj.ID, "session_id", in.SessionID, "item", clip(id, 64),
 				"error", serr.Error())
@@ -630,6 +689,7 @@ func (s *Service) pickBundle(ctx context.Context, proj model.Project, in PickInp
 		// 구성원 자기 것으로 채워 왔다. 여기서 안 나르면 PathCheck 은 실리는데
 		// 이 축만 조용히 사라진다.
 		m.CloseDeclared = sub.CloseDeclared
+		m.AfterCheck = sub.AfterCheck
 		heldMembers++
 		if sub.Mode == PickClaimed {
 			newMembers++
@@ -984,6 +1044,11 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	res.Overlaps = best.Lead.Overlaps
 	res.Setup = SetupCommands(proj.Path, proj.DefaultBranch, item.ID)
 	res.PathCheck = s.checkItemPaths(ctx, proj, item.Paths)
+	// ★ 추천 갈래도 이 축을 낸다. 여기 선두는 정의상 선행이 충족된 항목이지만, 그렇다고
+	// **비워 두면 안 된다** — RenderPick 은 갈래를 구분하지 않으므로 nil 이 그대로 화면의
+	// "이 응답은 그 축을 안 읽었다"가 되고, 신선한 온라인 응답에 거짓 원인이 붙는다.
+	// 이미 모은 facts 를 그대로 쓴다(순수 함수라 조회가 늘지 않는다).
+	res.AfterCheck = afterVerdictFrom(item, facts, nil)
 	// ★ 선두에도 싣는다. renderBundle 은 Members(선두 제외)만 받아 선두를 모르므로,
 	// 구성원 자리에만 심으면 이 사고를 낳은 그 항목에 대해 응답이 통째로 침묵한다.
 	res.CloseDeclared = closeDeclaredOf(closed, item.ID, closeRead)
@@ -1007,6 +1072,10 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 			// 화면이 엉뚱한 항목을 "이미 닫히려 했다"고 지목한다 — PathCheck 을 항목
 			// 단위로 가른 것과 같은 이유다(둘 다 항목 단위 사실이다).
 			CloseDeclared: closeDeclaredOf(closed, m.Item.ID, closeRead),
+			// ★ 선행 축도 구성원마다 자기 것을 싣는다. 추천 구성원은 blockedOnlyBy 로
+			// **선두가 풀어 주는 것을 전제로** 들어온 항목일 수 있어서, 이 자리가 그
+			// 전제를 화면에 드러내는 유일한 줄이다. facts 는 이미 모아 뒀다(순수 계산).
+			AfterCheck: afterVerdictFrom(m.Item, facts, nil),
 			// Notes 는 안 싣는다 — 추천은 아직 안 집은 것이라
 			// 후보마다 전문을 실으면 컨텍스트를 태운다(설계 §6).
 		})
@@ -1118,6 +1187,60 @@ func (s *Service) candidates(ctx context.Context, proj model.Project, live []jud
 	// sessionCards 가 끼어들어 인접한 두 줄이 다른 수를 찍을 수 있고, 나중에 이 함수의
 	// 술어가 바뀌면 두 줄이 영구히 갈린다.
 	return cands, scope, len(open), nil
+}
+
+// afterVerdict 는 항목 하나의 선행 충족을 판정한다 — 사실을 모아 afterVerdictFrom 에 넘긴다.
+//
+// ★ 선행이 없으면 충족이다 — judge.AfterSatisfied 와 같은 계약이라 여기서 다시 정의하지
+// 않는다. 다만 조회를 건너뛴다: 없는 선행에 afterFacts 를 돌리면 git 을 공짜로 한 번 친다.
+func (s *Service) afterVerdict(ctx context.Context, proj model.Project, item model.Item,
+	inCall []string, d *derive) *AfterVerdict {
+	if len(item.After) == 0 {
+		return &AfterVerdict{Satisfied: true}
+	}
+	return afterVerdictFrom(item, s.afterFacts(ctx, proj, []judge.Candidate{{Item: item}}, d), inCall)
+}
+
+// afterVerdictOf 는 후보 0~1건에 대한 선행 판정이다. 후보가 없으면 **nil** 이다 —
+// 판정할 대상이 없다는 뜻이고, 이 축의 0값(Satisfied:true)으로 접으면 못 읽은 항목에
+// 대해 "선행이 충족됐다"를 단정하게 된다.
+func (s *Service) afterVerdictOf(ctx context.Context, proj model.Project,
+	cands []judge.Candidate, inCall []string, d *derive) *AfterVerdict {
+	if len(cands) == 0 {
+		return nil
+	}
+	return s.afterVerdict(ctx, proj, cands[0].Item, inCall, d)
+}
+
+// afterVerdictFrom 은 **순수 함수**다. 사실을 이미 들고 있는 호출부(추천 경로)가
+// 조회를 되풀이하지 않고 같은 답을 얻는 자리다 — 판정을 두 벌로 베끼면 두 갈래가 표류한다.
+func afterVerdictFrom(item model.Item, facts judge.AfterFacts, inCall []string) *AfterVerdict {
+	ok, reasons := judge.AfterSatisfied(item.After, facts)
+	v := &AfterVerdict{Satisfied: ok, Reasons: reasons}
+	if ok {
+		return v
+	}
+	// 미충족 선행 중 이 호출이 함께 집는 것을 가려낸다.
+	//
+	// ★ **자기 자신은 뺀다.** inCall 에는 이 항목도 들어 있고, 안 빼면 자기를 선행으로
+	// 가리키는 항목(스키마가 막지 않는다)이 "함께 집는다"로 접힌다.
+	// ★ 그리고 **미충족인 축만** 싣는다. 충족된 선행이 우연히 같은 호출에 있어도 그것은
+	// 이 줄이 말하려는 사실이 아니다.
+	sibling := make(map[string]bool, len(inCall))
+	for _, id := range inCall {
+		if id != item.ID {
+			sibling[id] = true
+		}
+	}
+	for _, a := range item.After {
+		if a.Item == "" || !sibling[a.Item] {
+			continue
+		}
+		if st, known := facts.ItemStates[a.Item]; !known || st != model.ItemDone {
+			v.WithInCall = append(v.WithInCall, a.Item)
+		}
+	}
+	return v
 }
 
 // afterFacts 는 선행 조건 판정에 필요한 **사실**을 모은다. 판정은 judge 가 한다.

@@ -234,6 +234,9 @@ var pickResultAxisWaivers = map[string]string{
 		"PathCheck 과 같은 이유이고 같은 주석이 계약을 적어 뒀다",
 	"pickRecommend/PickNone|Bundle": "선두가 없으면 방사형으로 붙일 이웃도 없다 — " +
 		"PickResult.Bundle 주석의 '적격 0건에도 nil 이다' 그대로다",
+	"pickRecommend/PickNone|AfterCheck": "항목이 없으면 판정할 선행이 없다 — PathCheck·" +
+		"CloseDeclared 와 같은 이유다. 게다가 이 축의 0값은 '충족됐다' 라서, 채우면 " +
+		"없는 항목에 대해 관측한 적 없는 통과를 단정하게 된다",
 	"pickRecommend/PickRecommended|Claim": "추천은 선점이 아니다 — 여기서 Claim 을 채우면 " +
 		"아직 안 집은 항목을 집었다고 말하게 된다(PickRecommended 의 정의 자체다)",
 }
