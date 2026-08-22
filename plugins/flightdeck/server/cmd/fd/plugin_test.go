@@ -67,8 +67,13 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 		//   저장소 축의 완전성은 repo_hooks_test.go 의 platformMatcherValues 가 따로 문다.
 		"SessionStart":     {"startup|resume|clear|compact|fork", false},
 		"UserPromptSubmit": {"", false},
-		"PostToolUse":      {"Edit|Write", true},
-		"PreCompact":       {"", true},
+		// ★ `NotebookEdit` 는 2.1.240 실측으로 들어왔다 — 플랫폼이 파일 편집 도구를 셋으로
+		//   정의하는데(`S3S=["Edit","Write","NotebookEdit"]` 과 그것을 쓰는 판별 함수) 이
+		//   matcher 는 둘에 머물러 있었다. 빠진 도구로 고친 파일은 **발자국이 안 남는다** —
+		//   경로 추출(hook.go 의 EditedPaths)은 이미 notebook_path 를 보는데 훅이 안 불려
+		//   그 코드가 죽어 있었다. 표의 표류는 repo_hooks_test.go 가 따로 문다.
+		"PostToolUse": {"Edit|Write|NotebookEdit", true},
+		"PreCompact":  {"", true},
 		// ★ Stop 은 async 면 안 된다 — 이 훅의 출력이 곧 처방 배달이고, async 는
 		//   그 출력의 운명을 안 정해 준다(설계 §6).
 		"Stop": {"", false},

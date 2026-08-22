@@ -482,7 +482,7 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 | kind | 발생 | 뜻 |
 |---|---|---|
 | `prompt` | `UserPromptSubmit` | 사람이 지금 몰고 있다 — 가장 강한 신호 |
-| `tool` | `PostToolUse(Edit\|Write)` | 에이전트가 일하고 있다(사람이 자리를 비워도) |
+| `tool` | `PostToolUse(Edit\|Write\|NotebookEdit)` | 에이전트가 일하고 있다(사람이 자리를 비워도) |
 | `mcp` | MCP 도구 호출 | 세션이 살아 있다 — 일하고 있다는 뜻은 아니다 |
 | `commit`·`push` | 서버의 git 리더가 직접 관측 | **클라이언트를 안 믿는 유일한 신호** |
 
@@ -836,7 +836,7 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 |---|---|---|
 | `SessionStart` | `startup\|resume\|clear\|compact\|fork` | `fd session open` → `additionalContext` 에 보드 요약 + 내 선점 + 미확인 결과 + **서버 상태 배너** |
 | `UserPromptSubmit` | — | `fd beat --kind prompt` (2초 타임아웃) + 미확인 알림 주입 |
-| `PostToolUse` | `Edit\|Write` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
+| `PostToolUse` | `Edit\|Write\|NotebookEdit` | `async` `fd beat --kind tool --path <file>` — **미커밋 발자국의 유일한 원천** |
 | `PreCompact` | — | `async` `fd note --draft` — 압축으로 판단이 날아가는 것만 막는다 |
 | `Stop` | — | `fd hook stop` → 처방(발화 5조건, 전이 1회) 주입 + 라이프사이클 단계면 decision:block(대화 단위 판정 · 방벽은 stop_hook_active). **fail-open, 3초** |
 | `SessionEnd` | `clear` | `async` `fd hook session-end` → 떠나는 대화의 카드를 닫는다. **선점이 있으면 안 닫는다** |
@@ -882,6 +882,34 @@ rekey(§4)를 못 탄 채 MCP 가 새 cc 로 카드를 또 만든다 — 이 설
 (`cmd/fd/hook.go` 의 `HookPayload.Source` 는 파싱만 되고 아무도 안 본다). 갈래를 가릴 근거가
 코드에 없으면 빠진 값은 의도가 아니라 표류다.
 
+**`PostToolUse` 의 `NotebookEdit` 도 2.1.240 에서 들어왔다 — 같은 모양의 표류가 둘이었다.**
+위 `fork` 를 잡은 관문이 서자마자 옆에서 이것이 나왔다. `matcher` 가 `Edit|Write` 에 머무는 동안
+**`NotebookEdit` 으로 고친 파일은 발자국이 안 남았다.** 이 훅이 미커밋 발자국의 **유일한 원천**이라
+(착수 직후 구간은 브랜치 diff 가 정의상 비어 있다) 노트북을 만지는 세션의 겹침 판정과 발자국이
+통째로 조용했다.
+
+**2.1.240 바이너리 실측**으로 플랫폼이 "파일을 편집하는 도구"를 어디서 정의하는지 찾았고,
+자리 셋이 같은 셋을 낸다 — `Edit`·`Write`·`NotebookEdit`:
+
+- 판별 함수 자체: `S3S=["Edit","Write","NotebookEdit"]` 과 `function Usl(e){return S3S.includes(e)}`.
+  그 옆이 권한 판정에서 `getPath` 로 편집 대상 경로를 뽑는 코드다
+- 지표 설명: `claude_code.code_edit_tool.decision` 이 "for Edit, Write, and NotebookEdit tools"
+- 내장 도구 목록: `BUILTIN_TOOL_NAMES` 22종 중 파일을 쓰는 것은 그 셋뿐이다
+
+**★ `MultiEdit` 은 도구로 존재하지 않는다.** 이름 상수 정의가 0건이고 `BUILTIN_TOOL_NAMES` 에도
+없다 — 유일한 등장이 권한 규칙 문자열을 `Edit` 로 접는 레거시 비교 하나다. 앞선 판에서 이 이름이
+`cmd/fd/hook.go` 의 `EditedPaths` 주석에 근거로 적혀 있었는데, 그 근거는 **틀렸다**(같은 실측으로
+`file_paths` 키를 쓰는 도구도 0건이다 — 그 가지는 지금 아무것도 안 잡는 예방이고, 주석이 그렇게 적는다).
+
+**matcher 를 비워 전 도구를 받는 길은 안 갔다.** 표류에는 강하지만 `Read`·`Grep`·`Bash` 까지 매
+호출마다 훅 프로세스가 뜨는데, 이 훅의 예산은 **편집마다 도는 것만으로 이미 횟수 쪽에서 걸리는
+자리**다(§7 이 아웃박스 축에서 다룬 그 예산). 그리고 `tool` 신호의 뜻이 "편집"에서 "아무 도구나"로
+바뀌어 §4 의 신호 표가 재는 것이 달라진다. 대신 **저장소가 표를 든다**:
+`cmd/fd/repo_hooks_test.go` 의 `platformFileWritingTools` 가 실측한 셋을 들고, 이 저장소의
+`PostToolUse` matcher 가 그것과 **정확히 같은지**를 양방향으로 문다 — 빠지면 발자국이 사라지고,
+없는 도구를 적으면 잡는 것도 없이 덮여 있다고 말한다. `platformMatcherValues` 와 시야가 다르다:
+그쪽은 "플랫폼이 쏘는 값인가", 이쪽은 "이 훅이 하는 일에 필요한 값 전부인가"다.
+
 ### 저장소의 다른 플러그인 훅 — grafik-bar 의 계약은 여기 적는다
 
 `plugins/grafik-bar` 도 `SessionStart` 훅을 하나 갖는다(상태줄을 자기 자신으로 설치한다).
@@ -898,6 +926,7 @@ rekey(§4)를 못 탄 채 MCP 가 새 cc 로 카드를 또 만든다 — 이 설
 | `${CLAUDE_PLUGIN_ROOT}` 절대경로 | §13 ② — 플러그인 경로에 **버전이 들어간다** |
 | 부르는 스크립트가 실재하고 파싱된다 | 훅은 오류가 아니라 **부재**로 죽는다 |
 | `setup-statusline.sh` → `statusline.sh` **두 번째 홉** | 그 이름은 JSON 밖이라 훅 관문의 시야에 없다. 밀리면 훅은 0 으로 끝나고 상태줄만 사라진다 |
+| `statusline.sh` 가 **실제로 렌더한다** | 아래 문단 — 이 플러그인의 거의 전부가 그 스크립트다 |
 | `timeout` 이 **있다**(값은 안 잠근다) | 아래 문단 |
 
 **`timeout` 은 존재만 문다.** flightdeck 의 예산(2s·3s·10s)은 이 문서가 정한 수지만
@@ -909,10 +938,40 @@ grafik-bar 에는 그 근거가 없다 — 근거가 안 따라오는 수를 관
 절반)이고 **성능 목표가 아니라 폭주 방지선**이다 — 여기 걸리는 날 할 일은 상한을 올리는 것이
 아니라 왜 500배가 걸렸는지 재는 것이다.
 
+**렌더는 문법이 아니라 실행으로 잰다.** 앞선 판까지 이 9.6KB 를 무는 관문은 `bash -n`(파싱)
+하나였다 — **그 스크립트가 이 플러그인의 거의 전부**인데 파싱만 통과하면 초록이었다.
+상태줄은 죽는 모양이 훅과 같다: **오류가 아니라 부재**다. `statusLine.command` 가 0 아닌 코드로
+끝나든 빈 줄을 내든 화면에서는 똑같이 줄이 사라지고, stderr 는 아무 데도 안 뜬다.
+
+그래서 `cmd/fd/repo_hooks_test.go` 가 스크립트를 **봉인해서 실제로 돌린다**. 봉인이 절반이다 —
+이 스크립트는 켜 두면 밖으로 나간다(`claude auth status` 로 인증을 조회하고 `curl` 로
+api.anthropic.com 을 친다). 시험이 그것을 타면 머신마다 다른 답을 내고, 그런 관문은 빨간 날
+원인이 코드인지 네트워크인지 못 가른다. `HOME`·`TMPDIR` 은 빈 임시 디렉토리이고, 사용량 캐시를
+갓 만들어 심어 fetch 경로를 건너뛰게 하며, `PATH` 앞에 스텁을 세워 `claude` 를 실패시키고
+**`curl` 이 불린 사실을 파일로 남긴다**(캐시 로직이 무너져도 화면은 똑같으므로 그 회귀는 조용하다).
+`tput`·`stty` 도 실패시켜 폭 폴백 경로가 시험 머신의 tty 유무와 무관해진다.
+
+무는 것은 넷이다: **종료 코드가 0** · **무언가를 낸다** · **입력이 출력에 도달한다**(stdin 의
+`model.display_name` 이 화면에 나타난다) · **한 줄이다**. 셋째가 없으면 껍데기가 초록으로
+지나간다 — 실측에서 jq 를 빼자 이 스크립트는 52바이트짜리 껍데기를 내고도 렌더를 마쳤다.
+열화 입력(빈 stdin·JSON 아님·빈 객체·null 필드)과 **jq 불능**도 같은 축으로 잰다.
+
+그 관문이 서자마자 결함 셋이 빨개졌고 셋 다 고쳤다:
+
+- **폭 폴백이 죽어 있었다.** `tput cols || stty size | awk … || echo 120` 에서 마지막 `|| echo 120`
+  은 **영영 안 탄다** — 파이프라인의 종료 코드는 `awk` 의 것이고 `awk` 는 빈 입력에도 성공한다.
+  그래서 `cols` 가 빈 문자열이 되고 **tty 가 없는 환경(훅 러너·IDE·원격)은 전부 최협 레이아웃**으로
+  떨어졌다. 사람 눈에는 영영 안 보이는 부류다(사람이 보는 화면에는 tty 가 있다). 값으로 검사한다.
+- **종료 코드가 내용에 따라 갈렸다.** 각 레이아웃 분기가 `[ -n "$x" ] && printf …` 로 끝나서,
+  마지막 조각이 비면 멀쩡한 렌더에도 exit 1 이었다. 끝에 `exit 0` 을 못박았다.
+- **jq 가 없으면 말없이 껍데기를 냈다.** `command -v jq` 로는 부족하다 — 있는데 못 도는 jq
+  (깨진 설치·아키텍처 불일치·실행 권한 없음)가 같은 자리에 떨어진다. 그래서 **돌려 보고**,
+  실패하면 stdout 에 원인을 한 줄 적고 0 으로 끝난다. stdout 은 상태줄이 가진 유일한 채널이다.
+
 관문은 `cmd/fd/repo_hooks_test.go` 다. `plugin_test.go` 의 `TestHooksJSONIsWiredAsDesigned` 는
 flightdeck 안쪽(이벤트 여섯의 async·이름·SessionEnd 의 폭)을 계속 붙들고, 저장소 축(플러그인별
 이벤트 집합의 양방향 표 · 이벤트 이름이 플랫폼의 31종인가 · matcher 완전성 · 경로 실재 · 셸 문법 ·
-두 번째 홉)은 새 파일이 문다. **둘은 겹치는 것이 아니라 시야가 다르다.**
+두 번째 홉 · **상태줄 실행과 출력 계약**)은 새 파일이 문다. **둘은 겹치는 것이 아니라 시야가 다르다.**
 
 **부트스트랩 훅과 배너 훅을 분리한다.** 컨테이너 기동 훅이 실패해도 배너 훅이 `/healthz` 를 쳐 그 사실을 알린다.
 부트스트랩이 자기 실패를 스스로 알리는 순환을 만들지 않는다.
@@ -2694,6 +2753,16 @@ main tip)이었고 `vcs.modified` 는 **부모 트리의** 더러움을 반영�
 `fd doctor` 가 아니라 **관문**에 뒀다: `cmd/fd/repo_hooks_test.go` 의 `platformMatcherValues` 가
 실측한 열거값을 들고 있고, 이 저장소의 훅이 그것을 **전부** 받는지까지 문다(그 완전성이 옳은
 이벤트에 한해서다 — `SessionEnd` 는 반대로 좁아야 하고 그 이유는 §6 에 있다).
+
+**셋째 실례가 `PostToolUse` 의 도구 이름이다 — 그리고 이쪽은 열거가 아니라서 더 나쁘다.**
+`SessionStart` 의 `source` 는 플랫폼이 열거값을 들고 있어 실측하면 표가 나오는데,
+`PostToolUse` 의 matcher 는 도구 **이름**이라 닫힌 열거가 아니다(이벤트 메타의
+`matcherMetadata.values` 가 `[]` 로 비어 온다). **잠글 근거를 플랫폼이 안 준다.**
+그래서 `platformMatcherValues` 는 이 이벤트를 일부러 안 물고, 대신 **저장소가 표를 든다**
+(`platformFileWritingTools`). 그 표의 근거는 열거가 아니라 플랫폼의 **판별 함수**에서 왔다 —
+§6 의 그 문단이 자리 셋을 적어 뒀다. 표류가 실제로 났고(`NotebookEdit` 이 생겼는데 matcher 가
+안 따라왔다) 그 대가가 **발자국의 조용한 부재**였다. 이 표가 낡는 날 할 일도 같다: 지우지 말고
+**새 이름을 재고 적어라.**
 
 그래서 이 설계는 플랫폼 탐지를 **한 파일에 모으고, 못 찾으면 조용히 넘어가지 않는다** —
 `fd doctor` 가 각 축을 실제로 재서 무엇이 관측됐고 무엇이 안 됐는지 이름으로 낸다.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -475,5 +477,368 @@ func TestGrafikBarSetupReachesAWorkingStatusLine(t *testing.T) {
 	// 상태줄은 셸이 파싱에 실패해도 화면에 오류를 안 낸다: 그냥 줄이 사라진다.
 	if canLintShell(t) {
 		lintShell(t, target, "상태줄 스크립트 "+m[1])
+	}
+}
+
+// platformFileWritingTools 는 플랫폼이 **파일을 편집하는 도구**로 치는 것 전부다(2.1.240 실측).
+//
+// 뽑은 자리 셋이 서로 맞물린다:
+//
+//	① 판별 함수 자체 — `S3S=["Edit","Write","NotebookEdit"]` 과 `function Usl(e){return S3S.includes(e)}`.
+//	   그 옆이 권한 판정에서 `getPath` 로 편집 대상 경로를 뽑는 코드다.
+//	② 지표 설명 — `claude_code.code_edit_tool.decision` 이 "for Edit, Write, and NotebookEdit tools".
+//	③ 내장 도구 목록 — `BUILTIN_TOOL_NAMES` 22종. 그 중 파일을 쓰는 것은 위 셋뿐이다.
+//
+// ★ `MultiEdit` 은 **여기 없다.** 도구 이름 상수 정의가 0건이고 `BUILTIN_TOOL_NAMES` 에도 없다 —
+// 유일한 등장이 권한 규칙 문자열을 `Edit` 로 접는 비교 하나다(레거시 호환 문자열이다).
+// 넣으면 이 관문이 빨개지는 것이 옳다: 없는 도구를 잡는 척하는 matcher 는 잡는 것도 없이
+// 다음 사람에게 "덮여 있다"고 말한다.
+//
+// ★★ **이 표는 표류하는 값이다.** 플랫폼이 파일 쓰는 도구를 늘리는 날 여기가 낡는데, 그때
+// 할 일은 표를 지우는 것이 아니라 **새 이름을 재고 적는 것**이다. 이 관문이 태어난 경로가
+// 정확히 그것이다 — `NotebookEdit` 이 생겼는데 matcher 가 안 따라왔고, 아무도 그것을 못 봤다.
+var platformFileWritingTools = []string{"Edit", "NotebookEdit", "Write"}
+
+// TestPostToolUseCatchesEveryFileWritingTool 은 **미커밋 발자국의 유일한 원천**에 구멍이 없는지 본다.
+//
+// ★★ `PostToolUse` 의 matcher 는 도구 **이름**이라 닫힌 열거가 아니다(실측에서 `values:[]` 로
+// 비어 온다) — 그래서 위 `platformMatcherValues` 는 이 이벤트를 일부러 안 문다. 대신
+// **저장소가 표를 든다.** 여기서 무는 것은 "플랫폼이 쏘는 값인가"가 아니라
+// **"이 훅이 하는 일에 필요한 값 전부인가"** 다. 근거가 다르므로 관문도 따로 산다.
+//
+// ★ 양방향이다. 빠지면 그 도구로 고친 파일이 화면에서 통째로 사라지고(설계 §6: 착수 직후
+// 구간은 브랜치 diff 가 정의상 비어 있어 이 훅 말고는 원천이 없다), 더하면 발자국을 안 남기는
+// 도구에 훅이 돌면서 훅 호출만 늘고 "잡고 있다"는 착각이 생긴다.
+func TestPostToolUseCatchesEveryFileWritingTool(t *testing.T) {
+	root := repoRootFromCmdFd(t)
+	want := map[string]bool{}
+	for _, tool := range platformFileWritingTools {
+		want[tool] = true
+	}
+	seen := 0
+	for _, h := range hookRefs(t, root) {
+		hf := readHooksFile(t, h)
+		groups, ok := hf.Hooks["PostToolUse"]
+		if !ok {
+			continue
+		}
+		got := map[string]bool{}
+		for _, g := range groups {
+			// ★ 빈 matcher 는 "전 도구"다. 그것은 이 계약이 아니다 — Read·Grep·Bash 까지
+			// 매 호출마다 훅 프로세스가 뜨는데, 그 예산은 이 훅이 **편집마다** 도는 것만으로
+			// 이미 횟수 쪽에서 걸리는 자리다(hook.go 의 hookBudget 주석). 표류에 강하다는
+			// 이유로 비우려면 그 예산을 먼저 재고 설계 문서에 적어라 — 지금 근거는 반대다.
+			if strings.TrimSpace(g.Matcher) == "" {
+				t.Fatalf("%s 의 PostToolUse matcher 가 비었다 — 그것은 **전 도구**다.\n"+
+					"이 훅은 파일을 쓰는 도구 %v 만 받아야 한다: 나머지는 발자국을 안 남기는데\n"+
+					"훅 프로세스만 매 호출 뜬다", h.plugin, platformFileWritingTools)
+			}
+			for _, part := range strings.Split(g.Matcher, "|") {
+				part = strings.TrimSpace(part)
+				if !want[part] {
+					t.Fatalf("%s 의 PostToolUse matcher 가 %q 를 쓴다 — 파일을 쓰는 도구는 %v 다.\n"+
+						"파일을 안 쓰는 도구를 받으면 경로 없는 발자국이 쌓이고, **없는 도구**를 적으면\n"+
+						"(MultiEdit 이 그렇다) 잡는 것도 없이 덮여 있다고 말한다",
+						h.plugin, part, platformFileWritingTools)
+				}
+				got[part] = true
+				seen++
+			}
+		}
+		var missing []string
+		for _, tool := range platformFileWritingTools {
+			if !got[tool] {
+				missing = append(missing, tool)
+			}
+		}
+		if len(missing) > 0 {
+			t.Fatalf("%s 의 PostToolUse matcher 가 %v 를 빠뜨렸다 — 파일을 쓰는 도구는 %v 다.\n"+
+				"빠진 도구로 고친 파일은 **발자국이 안 남는다**: 이 훅이 미커밋 발자국의 유일한\n"+
+				"원천이라(설계 §6) 그 세션의 겹침 판정과 발자국이 통째로 조용해진다.\n"+
+				"경로 추출(cmd/fd/hook.go 의 EditedPaths)은 이미 그 도구들의 키를 전부 본다 —\n"+
+				"여기만 안 따라오면 그 코드가 **불리지 않아** 죽는다", h.plugin, missing, platformFileWritingTools)
+		}
+	}
+	if seen == 0 {
+		t.Fatalf("PostToolUse matcher 를 하나도 안 봤다 — 훑기가 눈이 먼 것이지 통과가 아니다")
+	}
+}
+
+// grafikStatusLinePayload 는 상태줄 stdin 의 **실물 모양**이다.
+//
+// 이 저장소가 파싱하는 것이 아니라 `statusline.sh` 가 jq 로 읽는 필드들이라, 여기 적힌 것은
+// 계약이 아니라 **표본**이다. 필드가 하나 사라지면 그 조각이 빠질 뿐 줄은 떠야 한다 —
+// 아래 시험이 무는 것이 그 성질이다(빈 stdin·깨진 JSON 도 같은 축이다).
+const grafikStatusLinePayload = `{"model":{"display_name":"Opus 5"},` +
+	`"effort":{"level":"high"},"context_window":{"used_percentage":42.5},` +
+	`"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":9999999999},` +
+	`"seven_day":{"used_percentage":20,"resets_at":9999999999}},` +
+	`"workspace":{"project_dir":"/tmp/proj","current_dir":"/tmp/proj"},` +
+	`"cost":{"total_cost_usd":1.234,"total_lines_added":10,"total_lines_removed":3,` +
+	`"total_duration_ms":65000}}`
+
+// statusLineRun 은 상태줄을 **격리해서 실제로 돌린 결과**다.
+type statusLineRun struct {
+	code       int
+	stdout     string
+	stderr     string
+	curlCalled bool
+}
+
+// runStatusLine 은 `statusline.sh` 를 봉인된 환경에서 돌린다.
+//
+// ★★ **봉인이 이 시험의 절반이다.** 이 스크립트는 켜 두면 밖으로 나간다 —
+// `claude auth status` 로 인증을 조회하고, `curl` 로 api.anthropic.com 을 친다.
+// 시험이 그것을 타면 느려지는 정도가 아니라 **머신마다 다른 답**을 내고, 그런 관문은
+// 빨간 날 원인이 코드인지 네트워크인지 못 가른다. 그래서:
+//
+//	· HOME  — 빈 디렉토리. ~/.claude/settings.json·.credentials.json 이 없는 상태다
+//	· TMPDIR — 갓 만든 사용량 캐시를 심는다. 나이가 TTL 안이라 스크립트가 fetch 를 건너뛴다
+//	· PATH  — 스텁이 앞에 선다. claude 는 실패하고, curl 은 **불린 사실을 파일로 남긴다**
+//	· tput·stty — 둘 다 실패시킨다. 그래야 폭 폴백 경로가 시험 머신의 tty 유무와 무관해진다
+//
+// curl 이 불렸는지를 시험이 직접 재는 이유는 그것이 **조용한 회귀**이기 때문이다:
+// 캐시 로직이 무너져도 화면은 똑같고 상태줄만 매 렌더 네트워크를 친다.
+// statusLineOpts 는 봉인을 부분적으로 여는 손잡이다.
+type statusLineOpts struct {
+	// stubs 는 PATH 앞에 세울 추가 스텁이다(이름 → 스크립트 본문).
+	stubs map[string]string
+	// env 는 봉인된 환경에 더할 변수다.
+	//
+	// ★ 폭 분기를 태우는 **유일한** 손잡이가 `COLUMNS` 다. `/dev/tty` 는 자식 프로세스에
+	// 넘길 수 없어서 `tput cols </dev/tty` 는 리다이렉션 단계에서 실패한다 — 스텁 tput 은
+	// 불리지도 않는다. 그래서 폭을 바꾸려면 스크립트가 환경을 보게 하는 수밖에 없다.
+	env map[string]string
+}
+
+func runStatusLine(t *testing.T, stdin string, o statusLineOpts) statusLineRun {
+	t.Helper()
+	root := repoRootFromCmdFd(t)
+	script := filepath.Join(root, "plugins", "grafik-bar", "scripts", "statusline.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("statusline.sh 가 없다: %v", err)
+	}
+
+	home := t.TempDir()
+	tmp := t.TempDir()
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "curl-was-called")
+
+	// ★★ 가짜 자격증명을 심는다. 없으면 `fetch_usage` 가 토큰을 못 읽고 **curl 앞에서**
+	// 되돌아가, 아래 `curlCalled` 단정이 영영 안 닿는다 — 변이 M11 이 그 사각을 드러냈다.
+	// (캐시 키를 밀어도 초록이었다: 봉인이 너무 강해 그 축이 도달 불가였다.)
+	// 밖으로 나갈 위험은 없다 — `curl` 은 PATH 앞의 스텁이고 그 스텁은 호출 사실만 남긴다.
+	credDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(credDir, 0o755); err != nil {
+		t.Fatalf("자격증명 디렉토리를 못 만들었다: %v", err)
+	}
+	cred := `{"claudeAiOauth":{"accessToken":"not-a-real-token"}}`
+	if err := os.WriteFile(filepath.Join(credDir, ".credentials.json"), []byte(cred), 0o600); err != nil {
+		t.Fatalf("가짜 자격증명을 못 심었다: %v", err)
+	}
+
+	// 사용량 캐시를 **신선하게** 심는다 — 이것이 없으면 스크립트가 curl 을 부른다.
+	cache := filepath.Join(tmp, fmt.Sprintf("grafik-bar-usage-%d.json", os.Getuid()))
+	if err := os.WriteFile(cache, []byte(`{"limits":[]}`), 0o600); err != nil {
+		t.Fatalf("사용량 캐시를 못 심었다: %v", err)
+	}
+
+	stubs := map[string]string{
+		"claude": "#!/bin/sh\nexit 1\n",
+		"curl":   "#!/bin/sh\necho called >> " + marker + "\nexit 1\n",
+		"tput":   "#!/bin/sh\nexit 1\n",
+		"stty":   "#!/bin/sh\nexit 1\n",
+	}
+	for name, body := range o.stubs {
+		stubs[name] = body
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("스텁 %s 를 못 만들었다: %v", name, err)
+		}
+	}
+
+	cmd := exec.Command("/bin/bash", script)
+	cmd.Stdin = strings.NewReader(stdin)
+	var out, errb strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	cmd.Env = []string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + home,
+		"TMPDIR=" + tmp,
+	}
+	for k, v := range o.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("statusline.sh 를 못 돌렸다: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	_, statErr := os.Stat(marker)
+	return statusLineRun{code: code, stdout: out.String(), stderr: errb.String(), curlCalled: statErr == nil}
+}
+
+// canRunStatusLine 은 이 머신에서 상태줄을 실제로 돌릴 수 있는지 본다.
+//
+// ★ 못 돌리면 **밝히며** 건너뛴다. 조용히 공허해지는 것이 이 레포가 두 번 밟은 자리다
+// (`canLintShell` 과 같은 규율). jq 는 이 스크립트의 전제라 없으면 정상 경로 축이 성립하지
+// 않는다 — 그 자체가 결함이 아니라 **잴 수 없음**이고, 둘을 화면에서 가른다.
+func canRunStatusLine(t *testing.T) bool {
+	t.Helper()
+	if !canLintShell(t) {
+		return false
+	}
+	if err := exec.Command("jq", "--version").Run(); err != nil {
+		t.Logf("이 머신에 jq 가 없다(%v) — 상태줄 실행 축을 건너뛴다. 렌더는 전적으로 jq 에 달려 있다", err)
+		return false
+	}
+	return true
+}
+
+// renderedLines 는 상태줄이 **화면에서 먹는 줄 수**다.
+//
+// ★ `TrimRight` 로 끝의 개행을 털고 세면 안 된다 — 그러면 `…jq\n\n` 같은 **끝의 빈 줄**이
+// 한 줄로 세어져 화면을 먹는 변이가 초록으로 지나간다(변이 M13 에서 실제로 그랬다).
+// 개행 하나가 줄 하나를 끝내고, 개행 없이 끝나면 그 조각도 한 줄이다.
+func renderedLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
+}
+
+// TestGrafikBarStatusLineActuallyRenders 는 상태줄이 **실제로 도는지** 본다.
+//
+// ★★ 이 항목의 뿌리다. 지금까지 이 9.6KB 를 재는 관문은 `bash -n`(파싱) 하나였다 —
+// 파싱은 되는데 렌더가 죽는 경우를 아무도 안 봤다. 상태줄은 **오류를 화면에 못 낸다**:
+// 죽으면 줄이 그냥 사라진다. 그래서 재는 것이 셋이다.
+//
+//	① 종료 코드가 0 이다 — 상태줄은 비정상 종료를 사용자에게 못 알린다
+//	② 무언가를 낸다 — 초록인 채로 빈 줄을 내는 것은 통과가 아니다
+//	③ **입력이 출력에 도달한다** — stdin 의 model.display_name 이 화면에 나타난다.
+//	   ②만 재면 jq 가 전부 실패해도 껍데기(52바이트)를 내고 초록이다. 실측으로 봤다.
+//
+// ★ 줄 수도 문다. tput·stty 를 둘 다 실패시켰으니 폭은 **폴백 값**으로 정해지는데,
+// 그 폴백이 죽어 있으면(빈 문자열) 스크립트는 최협 레이아웃으로 떨어져 줄이 여럿이 된다.
+// 폭 분기 자체를 재는 것이 아니라 **폴백이 살아 있는가**를 재는 것이다 — 이 결함은
+// tty 없는 환경(IDE·원격·웹)에서만 나타나 사람 눈에는 영영 안 보인다.
+func TestGrafikBarStatusLineActuallyRenders(t *testing.T) {
+	if !canRunStatusLine(t) {
+		return
+	}
+	r := runStatusLine(t, grafikStatusLinePayload, statusLineOpts{})
+	if r.code != 0 {
+		t.Fatalf("상태줄이 %d 로 끝났다 — 0 이어야 한다.\nstdout=%q\nstderr=%s\n"+
+			"상태줄은 실패를 화면에 못 낸다: 줄이 그냥 사라지고 사용자는 원인을 모른다",
+			r.code, r.stdout, r.stderr)
+	}
+	if strings.TrimSpace(r.stdout) == "" {
+		t.Fatalf("상태줄이 아무것도 안 냈다 — 초록인 채로 빈 줄은 통과가 아니다.\nstderr=%s", r.stderr)
+	}
+	if !strings.Contains(r.stdout, "Opus 5") {
+		t.Fatalf("stdin 의 model.display_name(\"Opus 5\")이 출력에 없다.\nstdout=%q\n"+
+			"파싱이 통째로 실패해도 이 스크립트는 껍데기를 내고 0 으로 끝난다(실측) —\n"+
+			"**입력이 출력에 도달하는가**를 안 물으면 그 껍데기가 초록으로 지나간다", r.stdout)
+	}
+	if r.curlCalled {
+		t.Fatalf("사용량 캐시가 신선한데 curl 이 불렸다 — 렌더가 매번 네트워크를 친다.\n" +
+			"화면은 똑같아서 이 회귀는 조용하다")
+	}
+	if n := renderedLines(r.stdout); n != 1 {
+		t.Fatalf("상태줄이 %d줄이다 — 폭 폴백이 죽었다.\nstdout=%q\n"+
+			"tput·stty 를 둘 다 실패시켰으므로 폭은 폴백 값이어야 하고, 그 값이면 한 줄이다.\n"+
+			"폴백이 빈 문자열이면 최협 레이아웃으로 떨어진다 — tty 가 없는 환경에서만 나타나\n"+
+			"사람 눈에는 영영 안 보이는 부류다", n, r.stdout)
+	}
+}
+
+// TestGrafikBarStatusLineSurvivesDegradedInput 은 **열화 경로**를 문다.
+//
+// ★ 상태줄은 매 렌더마다 도는 것이라 나쁜 입력 하나가 곧 줄의 영구 부재다.
+// 셋 다 실제로 오는 모양이다: 파이프가 빈 채로 오는 판, 스키마가 바뀌는 날,
+// 그리고 **jq 가 사라진 머신**(setup 은 jq 가 없으면 설치를 안 하지만, 이미 설치된 뒤
+// jq 가 사라지면 이 스크립트만 남는다).
+func TestGrafikBarStatusLineSurvivesDegradedInput(t *testing.T) {
+	if !canRunStatusLine(t) {
+		return
+	}
+	for _, c := range []struct {
+		name  string
+		stdin string
+		env   map[string]string
+		// minLines 는 그 폭에서 **최소 몇 줄이 나와야 하는가**다. 0 이면 안 문다.
+		//
+		// ★★ 이 축이 없으면 `COLUMNS` 폴백을 지우는 변경이 **초록으로 지나간다**(변이 M16).
+		// 그러면 아래 폭 케이스들이 전부 기본 폭으로 떨어지고, 기본 폭 분기는 `printf` 로
+		// 끝나 늘 0 이라 **종료 코드 축이 조용히 도달 불가**가 된다. 손잡이가 사라지는 것
+		// 자체를 물어야 관문이 스스로 공허해지는 길을 막는다.
+		minLines int
+	}{
+		{"빈 stdin", "", nil, 0},
+		{"JSON 이 아니다", "not json at all", nil, 0},
+		{"빈 객체", "{}", nil, 0},
+		{"필드가 null 이다", `{"model":null,"cost":null,"workspace":null}`, nil, 0},
+		// ★★ 좁은·중간 폭. 이것이 없으면 **종료 코드 축이 안 닿는다** — 변이 M7 이 그것을
+		// 드러냈다(끝의 `exit 0` 을 지워도 초록이었다). 넓은 분기는 `printf` 로 끝나 늘 0 인데,
+		// 좁은·중간 분기는 `[ -n "$x" ] && printf …` 로 끝나서 **마지막 조각이 비면 exit 1** 이다.
+		// 그래서 통계·한도가 없는 페이로드를 그 분기에 태워야 이 축이 산다.
+		{"좁은 폭, 통계 없음", `{"model":{"display_name":"Opus 5"}}`, map[string]string{"COLUMNS": "60"}, 2},
+		{"중간 폭, 한도 없음", `{"model":{"display_name":"Opus 5"}}`, map[string]string{"COLUMNS": "100"}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := runStatusLine(t, c.stdin, statusLineOpts{env: c.env})
+			if r.code != 0 {
+				t.Fatalf("%s 에 %d 로 끝났다 — 0 이어야 한다.\nstdout=%q\nstderr=%s\n"+
+					"열화 입력에 죽으면 그 세션의 상태줄이 통째로 사라진다", c.name, r.code, r.stdout, r.stderr)
+			}
+			if n := renderedLines(r.stdout); c.minLines > 0 && n < c.minLines {
+				t.Fatalf("%s 에서 %d줄이 나왔다 — 최소 %d줄이어야 한다.\nstdout=%q\n"+
+					"이 케이스는 COLUMNS 로 좁은 레이아웃을 태워 **종료 코드 축**을 재는 것이다.\n"+
+					"줄 수가 모자라면 그 폭이 안 먹은 것이고, 그러면 위 단정이 기본 폭 분기를\n"+
+					"재고 있다 — 그 분기는 printf 로 끝나 늘 0 이라 **아무것도 안 문다**",
+					c.name, n, c.minLines, r.stdout)
+			}
+		})
+	}
+}
+
+// TestGrafikBarStatusLineSaysSoWhenJQIsGone 은 jq 가 없을 때 **말을 하는지** 본다.
+//
+// ★★ 실측: jq 를 빼면 이 스크립트는 52바이트짜리 껍데기를 내고 stderr 로
+// `jq: command not found` 를 열댓 줄 쏟았다. 종료 코드는 0 이 아니었다.
+// 사용자에게는 **깨진 줄**로 보이고 원인은 어디에도 안 적힌다.
+//
+// 그래서 무는 것은 "죽지 않는다"가 아니라 **"원인을 화면에 적는다"** 다.
+// 상태줄에서 stdout 은 유일하게 사람이 보는 채널이다 — stderr 는 아무 데도 안 뜬다.
+func TestGrafikBarStatusLineSaysSoWhenJQIsGone(t *testing.T) {
+	if !canRunStatusLine(t) {
+		return
+	}
+	// ★ `command -v jq` 로는 이 상황을 못 만든다 — 스텁이 PATH 에 있으면 찾아지기 때문이다.
+	// 그래서 스크립트도 **실행해 보고** 판정해야 하고, 이 스텁이 그 계약을 문다:
+	// jq 라는 이름은 있는데 돌리면 실패하는 머신(깨진 설치·권한·아키텍처 불일치)도 같은 자리다.
+	r := runStatusLine(t, grafikStatusLinePayload, statusLineOpts{
+		stubs: map[string]string{"jq": "#!/bin/sh\nexit 127\n"},
+	})
+	if r.code != 0 {
+		t.Fatalf("jq 가 없을 때 %d 로 끝났다 — 0 이어야 한다.\nstdout=%q", r.code, r.stdout)
+	}
+	if !strings.Contains(r.stdout, "jq") {
+		t.Fatalf("jq 가 없는데 출력이 그 사실을 안 적는다: %q\n"+
+			"stdout 은 상태줄에서 사람이 보는 유일한 채널이다 — 여기 안 적으면\n"+
+			"사용자는 깨진 줄만 보고 원인을 영영 모른다", r.stdout)
+	}
+	if n := renderedLines(r.stdout); n != 1 {
+		t.Fatalf("jq 진단이 %d줄이다 — 한 줄이어야 한다.\nstdout=%q\n"+
+			"상태줄이 여러 줄을 먹으면 그 자체가 화면 파괴다", n, r.stdout)
 	}
 }

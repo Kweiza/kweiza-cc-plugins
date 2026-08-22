@@ -3,8 +3,30 @@
 
 input=$(cat)
 
+# Every field below is read with jq. Without a working one this renders as an
+# empty shell and floods stderr with "command not found" — the user sees a broken
+# line and no stated cause, because stderr goes nowhere. `command -v jq` is not
+# enough: a jq that exists but cannot run (broken install, wrong arch, no execute
+# bit) lands in exactly the same place. So run it, and say so on stdout, which is
+# the only channel a status line has.
+if ! printf '{}' | jq -e . >/dev/null 2>&1; then
+  printf ' grafik-bar: jq not found — the status line needs jq\n'
+  exit 0
+fi
+
 # --- Terminal width ---
-cols=$(tput cols </dev/tty 2>/dev/null || stty size </dev/tty 2>/dev/null | awk '{print $2}' || echo 120)
+# Both probes need a controlling tty, and there is none under a hook runner, an
+# IDE, or a remote session. The `|| echo 120` that used to close this pipeline
+# never ran: a pipeline's status is awk's, and awk succeeds on empty input. So
+# cols came out EMPTY and every tty-less environment silently fell through to the
+# narrowest layout. Check the value, not the exit status.
+cols=$(tput cols </dev/tty 2>/dev/null)
+[ -z "$cols" ] && cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+# Neither probe can work without a controlling tty, so honour COLUMNS when the
+# caller sets it. That is also the only handle a test has on the layout branches:
+# /dev/tty cannot be handed to a child process, so a stub tput is never even run.
+[ -z "$cols" ] && cols="${COLUMNS:-}"
+case "$cols" in ''|*[!0-9]*) cols=120 ;; esac
 
 # --- Extract fields ---
 model=$(echo "$input" | jq -r '.model.display_name // "Unknown Model"')
@@ -266,3 +288,8 @@ else
   [ -n "$limits" ] && printf '%b\n' " ${limits}"
   [ -n "$seg_stats" ] && printf '%b\n' " ${seg_stats}"
 fi
+
+# Each layout branch ends in `[ -n "$x" ] && printf …`, so with an empty trailing
+# segment the script's status was the failed test's — exit 1 on a perfectly good
+# render. A status line has no way to report a failure, so pin the status here.
+exit 0

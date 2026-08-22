@@ -341,6 +341,11 @@ func TestEditedPathsReadsEveryToolShape(t *testing.T) {
 		// ★ 표 밖: 값이 문자열이 아닌 경우(플랫폼이 형식을 바꾼 날). 죽지 않고 0건이어야 한다.
 		{"file_path 가 숫자", map[string]any{"file_path": 42}, nil},
 		{"file_path 가 빈 문자열", map[string]any{"file_path": "  "}, nil},
+		// ★ 배열형 키. 2.1.240 에 이 키를 쓰는 도구는 0건이라 지금은 예방인데, 시험이
+		//   없으면 그 가지는 다음 리팩터링에 조용히 사라진다 — 그리고 플랫폼이 배열형을
+		//   내기 시작한 날 아무도 그것을 모른다.
+		{"배열형 키", map[string]any{"file_paths": []any{"/a/x.go", "/a/y.go"}},
+			[]string{"/a/x.go", "/a/y.go"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
