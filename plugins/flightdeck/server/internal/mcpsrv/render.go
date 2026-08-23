@@ -784,6 +784,70 @@ func queueAgeClause(v service.BoardView) string {
 	return s + ")"
 }
 
+// ticklerMark 는 티클러 표식이다 — `티클러` · `티클러(08-26 발화)` ·
+// `티클러(08-26 발화·지났다)`. 티클러가 아니면 빈 문자열이다.
+//
+// ★ board 줄(queueItemAge)과 pick 줄(renderTicklerLine)이 **이 하나를 공유한다.**
+// 같은 사실에 두 번째 표기를 붙이면 읽는 쪽이 두 지표로 읽고, 두 수가 갈려도
+// "다른 값이겠지"로 넘어가 불일치가 조용히 정상으로 등록된다 — RenderPick 이 큐 열림
+// 줄에 대해 이미 적어 둔 경고와 같은 이유다.
+//
+// ★ **표시뿐이다.** 기한이 지나도 승격시키지 않고 아무것도 안 막는다(judge/tickler.go
+// 의 ★ 둘 · 설계 §5·§8). 이 함수를 판정에 쓰면 표시-전용 규약이 조용히 넓어진다.
+func ticklerMark(at time.Time, labels []string) string {
+	if !judge.IsTickler(labels) {
+		return ""
+	}
+	out := "티클러"
+	if on, ok := judge.FiresOn(labels); ok {
+		out += "(" + on.Format("01-02") + " 발화"
+		if ticklerDue(at, on) {
+			out += "·지났다"
+		}
+		out += ")"
+	}
+	return out
+}
+
+// ticklerDue 는 기한이 왔는가다. 기준 시각을 모르면(zero) **단정하지 않는다** —
+// 모르는 것을 "지났다"로 메우면 부재를 값으로 접는 것이고, 그 방향의 오답이 더 비싸다
+// (기한 전 항목을 열게 만든다).
+func ticklerDue(at, on time.Time) bool {
+	return !at.IsZero() && !at.Before(on)
+}
+
+// renderTicklerLine 은 pick 응답의 티클러 줄이다. 티클러가 아니면 빈 문자열이다 —
+// 상시 점등된 줄은 판별력이 0이 된다(§4).
+//
+// ★ 왜 pick 에도 있어야 하나. 2026-08-23 에 한 세션이 통째로 헛일했다. 08-21 세션이
+// 한 항목에 `tickler` 를 달아 굶김 축에서 뺐는데, 이틀 뒤 pick 이 그것을 후보 7건 중
+// 1순위로 추천하면서 티클러라는 말을 한 마디도 안 했다. 그 세션은 집어서 같은 SQL 을
+// 돌리고 같은 미충족을 봤다 — `judge.FiresOn` 이 막으려고 만들어진 2026-08-12 사건
+// (세 시간 반에 네 세션이 같은 재측)의 재연이다. 축을 만들어 놓고 **픽업 경로에
+// 안 꽂았던 것**이다: 유일한 발화처인 queueItemAge 는 boardDetailFoot 에서만 불리는데
+// 픽업 절차는 `board`(기본) → `pick` 이라 그 화면을 지나지 않는다.
+//
+// ★ 기한 **없는** 티클러가 그 사고의 실물이라, 그 경우에 침묵하지 않는다. 없는 날짜를
+// 지어내지는 않되 없다는 사실은 말한다 — 침묵하면 화면에서 티클러가 아닌 것과 구별되지
+// 않고, 그것이 바로 08-23 에 일어난 일이다.
+func renderTicklerLine(at time.Time, labels []string, indent string) string {
+	mark := ticklerMark(at, labels)
+	if mark == "" {
+		return ""
+	}
+	on, dated := judge.FiresOn(labels)
+	switch {
+	case !dated:
+		return indent + mark + " — 발화일(`fires:`)이 없다. 언제 여는지가 화면에 없으면 " +
+			"볼 때마다 원장을 다시 재게 된다 — 걸린 판단을 읽고 `label` 로 기한을 박아라\n"
+	case ticklerDue(at, on):
+		return indent + mark + " — 열 때가 됐다\n"
+	default:
+		return indent + mark + " — 아직 기한 전이다. 굶김 축에서 빠져 있어 " +
+			"나이가 길어도 잊힌 항목이 아니다\n"
+	}
+}
+
 // queueItemAge 는 detail 줄 앞머리의 항목 나이다. 임계를 넘긴 것은 ★ 를 단다.
 //
 // 못 재면 "나이?" 를 낸다 — 0 이나 빈 문자열로 접으면 "방금 생겼다"로 읽힌다.
@@ -803,16 +867,8 @@ func queueItemAge(at time.Time, it model.Item) string {
 	//
 	// 여기는 **표시뿐이다.** 기한이 지나도 승격시키지 않고 아무것도 안 막는다
 	// (judge.FiresOn 의 ★ 참조).
-	if judge.IsTickler(it.Labels) {
-		out := FormatAge(age) + "·티클러"
-		if on, ok := judge.FiresOn(it.Labels); ok {
-			out += "(" + on.Format("01-02") + " 발화"
-			if !at.Before(on) {
-				out += "·지났다"
-			}
-			out += ")"
-		}
-		return out
+	if mark := ticklerMark(at, it.Labels); mark != "" {
+		return FormatAge(age) + "·" + mark
 	}
 	if age >= judge.StarvationAge {
 		return "★" + FormatAge(age)
@@ -1219,6 +1275,11 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	if r.Item != nil {
 		it := *r.Item
 		fmt.Fprintf(&b, "\n▸ %s — %s [%s]\n", it.ID, it.Title, it.State)
+		// ★ 티클러 줄은 **머리줄 바로 뒤**다 — 경로보다도 앞이다. "지금 이걸 집어야
+		// 하나"가 "무슨 경로를 건드리나"보다 먼저 오는 질문이기 때문이다. 본문 4000자와
+		// 묶음 절 뒤로 밀면 집기 전에 읽는 세션에게 사실상 안 보인다(종료 선언 축이
+		// 같은 이유로 이 자리를 잡았다).
+		b.WriteString(renderTicklerLine(now, it.Labels, ""))
 		if len(it.Paths) > 0 {
 			fmt.Fprintf(&b, "경로: %s\n", strings.Join(it.Paths, ", "))
 		}
@@ -1241,7 +1302,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 
 	// 묶음 절. renderBundle 이 세 갈래(부재·단독·구성원 목록)를 전부 말한다 —
 	// 이 위치는 항목 블록 뒤·브랜치 줄 앞이다.
-	b.WriteString(renderBundle(r.Bundle))
+	b.WriteString(renderBundle(r.Bundle, now))
 	// 꼬리의 "겹침:" 줄이 **어떤 경로 집합**을 보고 나온 값인지 말한다. RenderTail 은
 	// 모든 도구가 쓰고 묶음을 모르므로 이 자리가 유일한 발화처다.
 	//
@@ -1406,7 +1467,10 @@ const (
 // 침묵하면 "묶을 게 없다"와 "이 축을 안 봤다"가 같은 화면이 되고,
 // 그러면 판정이 통째로 실패한 날에도 pick 은 평소와 똑같아 보인다.
 // renderPathCheck 이 같은 이유로 이상이 없어도 한 줄을 찍는다.
-func renderBundle(bi *service.BundleInfo) string {
+// bundleAt 은 구성원의 티클러 기한을 재는 기준 시각이다 — 선두와 **같은 시각**을
+// 쓴다. 한 응답 안에서 두 시각을 쓰면 같은 발화일이 선두에선 지났고 구성원에선
+// 안 지난 것으로 보일 수 있다.
+func renderBundle(bi *service.BundleInfo, bundleAt time.Time) string {
 	if bi == nil {
 		// ★ 이 문장은 이제 **정말로 축을 안 읽은 응답에만** 붙는다. 서비스의 세 갈래
 		// (추천 · item_id 선점/재개 · 묶음)가 전부 non-nil 을 내므로, nil 이 남는 길은
@@ -1457,6 +1521,11 @@ func renderBundle(bi *service.BundleInfo) string {
 			mark = markRejected
 		}
 		fmt.Fprintf(&b, "\n  %s %s — %s [%s]\n", mark, m.Item.ID, m.Item.Title, m.Item.State)
+		// ★ 구성원의 티클러도 낸다. 선두에만 심으면 구성원에 대해 응답이 정확히
+		// 침묵한다 — 바로 아래 종료 선언 주석이 적어 둔 그 실패의 반대편이다.
+		// 자리는 못 집은 갈래의 continue 보다 **위**다: 못 집은 구성원이야말로 다음
+		// 세션이 다시 집으러 오는 항목이고, 그것이 티클러면 다시 오는 것 자체가 헛걸음이다.
+		b.WriteString(renderTicklerLine(bundleAt, m.Item.Labels, "    "))
 		// ★ 종료 선언은 **머리줄 바로 밑**에 찍는다. 아래 못 집은 갈래는 continue 로 절을
 		// 끊으므로 이 줄을 그 뒤에 두면 못 집은 구성원에게 영영 안 나온다 — 그런데
 		// "이미 닫으려던 항목"과 "지금 못 집었다"는 겹쳐서 나는 사실이고, 못 집은 구성원이야말로
