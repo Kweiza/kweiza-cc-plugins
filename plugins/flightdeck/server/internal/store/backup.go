@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -547,4 +551,77 @@ func OpenLedger(ctx context.Context, path string, log *slog.Logger) (*Store, err
 		return nil, err
 	}
 	return s, nil
+}
+
+// Rollback 은 판올림 전 백업 중 **가장 최근 것**으로 DB 를 되돌린다.
+// 되돌린 백업 경로를 낸다. `fd migrate --rollback` 의 본체다.
+//
+// ★ 절차는 RollbackHint 가 사람에게 내던 것과 **글자 그대로 같다**: 백업을 원본 위에 덮고
+// -wal·-shm 을 지운다. 백업은 VACUUM INTO 로 뜬 일관 사본이라 WAL 이 없는데, 옛 -wal 을
+// 남기면 되돌린 파일 위에 반쯤 적용된 상태가 되살아난다. 손으로 하던 절차에서 정확히 그
+// 단계가 빠지기 쉬웠고, 그것이 이 명령이 존재하는 이유다.
+//
+// ★ **서버가 멈춰 있어야 한다.** 이 함수는 그것을 강제하지 못한다 — 파일을 쥔 프로세스를
+// 이 자리에서 알 방법이 없다. 도는 서버 밑에서 파일을 갈면 그 프로세스는 옛 페이지 캐시
+// 위에서 계속 돌고, 그 상태는 어디에도 안 나타난다.
+func Rollback(ctx context.Context, path string, log *slog.Logger) (string, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	backups, err := filepath.Glob(path + ".bak-*")
+	if err != nil {
+		return "", fmt.Errorf("백업을 찾지 못했다(path=%q): %w", clip(path, 200), err)
+	}
+	if len(backups) == 0 {
+		return "", fmt.Errorf("되돌릴 백업이 없다 — %s.bak-* 이 하나도 없다. "+
+			"백업은 판올림이 기존 데이터 위에 증분을 얹을 때만 뜬다(빈 DB 를 새로 세운 경우는 안 뜬다)",
+			clip(path, 200))
+	}
+	// 파일명의 스탬프는 폭이 고정된 UTC 라 사전순이 곧 시간순이다(timeLayout 과 같은 규율).
+	sort.Strings(backups)
+	src := backups[len(backups)-1]
+
+	if err := copyFileAtomic(src, path); err != nil {
+		return "", fmt.Errorf("백업을 되돌리지 못했다(%q → %q): %w", clip(src, 200), clip(path, 200), err)
+	}
+	// ★ 순서가 중요하다. 원본을 먼저 갈고 저널을 지운다 — 반대로 하면 지운 뒤 복사 전에
+	//   죽었을 때 옛 DB 가 저널 없이 남아 더 나쁜 상태가 된다.
+	for _, side := range []string{path + "-wal", path + "-shm"} {
+		if err := os.Remove(side); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("저널을 지우지 못했다(%q): %w — "+
+				"이 상태로 열면 반쯤 적용된 것이 되살아난다", clip(side, 200), err)
+		}
+	}
+	log.Info("백업으로 되돌렸다", "path", path, "backup", src)
+	return src, nil
+}
+
+// copyFileAtomic 은 같은 디렉토리의 임시 파일에 쓴 뒤 rename 한다.
+//
+// ★ 직접 덮어쓰면 복사 도중 죽었을 때 **원본도 백업도 아닌 파일**이 남는다. 되돌리기는
+// 이미 무언가 잘못된 상황에서 부르는 명령이라, 그 자리에서 한 번 더 잃으면 남는 것이 없다.
+func copyFileAtomic(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".restore-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
 }

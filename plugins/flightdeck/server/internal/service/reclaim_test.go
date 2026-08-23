@@ -180,7 +180,12 @@ func TestReclaimClaimWithoutLiveClaimIsNotFound(t *testing.T) {
 // 고친 바로 그 결함 부류다.
 func TestReclaimClaimJudgmentUsesInjectedClock(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
+	dbp1 := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp1, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	st, err := store.OpenWithLogger(dbp1, log)
 	if err != nil {
 		t.Fatal(err)
 	}

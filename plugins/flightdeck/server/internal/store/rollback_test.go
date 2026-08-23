@@ -33,10 +33,12 @@ func TestRollbackHint(t *testing.T) {
 			t.Errorf("절차에 %q 가 없다: %s", want, got)
 		}
 	}
-	// 설계와 어긋난 사실 자체를 문구가 말한다 — 다음 세션이 "설계대로 돼 있다"고 믿는 것이
-	// 지금의 진짜 위험이다.
-	if !strings.Contains(got, "§7") {
-		t.Errorf("설계 대비 미구현이라는 사실이 문구에 없다: %s", got)
+	// ★ 2026-08-23 에 이 단정이 뒤집혔다. 그전까지 이 문구는 "설계 §7 대비 미구현"이라는
+	// 사실을 말해야 했고 시험도 "§7" 을 요구했다. 이제 그 처방이 지어졌으므로 문구가
+	// 말해야 할 것은 미구현이 아니라 **다음에 칠 명령**이다 — 절차가 실패한 그 자리에
+	// 수단이 있어야 한다는 규율은 그대로이고, 가리키는 곳만 바뀌었다.
+	if !strings.Contains(got, "fd migrate --rollback") {
+		t.Errorf("되돌리는 명령을 문구가 안 낸다 — 손 복사 절차만 남으면 -wal 지우기를 빠뜨린다: %s", got)
 	}
 
 	// 백업이 없으면 **없다고 말한다.** 있는 척하면 그 순간 되돌릴 수 있다는 거짓이 생긴다.
@@ -59,6 +61,7 @@ func TestFailedUpgradeNamesTheBackup(t *testing.T) {
 	ctx := context.Background()
 
 	// 정상 DB 를 한 번 만든다.
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, testLogger())
 	if err != nil {
 		t.Fatalf("첫 열기 실패: %v", err)
@@ -101,9 +104,12 @@ func TestFailedUpgradeNamesTheBackup(t *testing.T) {
 	}
 	migrations = stub
 
-	_, err = OpenWithLogger(path, testLogger())
+	// ★ 적용이 기동에서 분리된 뒤로 이 실패는 Migrate 의 것이다(설계 §7 ①).
+	//   여기에 mustMigrate 를 쓰면 안 된다 — 그것은 실패를 t.Fatal 로 삼켜서
+	//   이 시험이 보려는 오류 문구가 영영 안 온다.
+	err = Migrate(ctx, path, testLogger())
 	if err == nil {
-		t.Fatal("깨진 증분으로 DB 가 열렸다 — 열리면 모르는 스키마 위에서 돈다")
+		t.Fatal("깨진 증분으로 적용이 성공했다 — 모르는 스키마 위에서 돌게 된다")
 	}
 
 	after := backupsOf(t, path)

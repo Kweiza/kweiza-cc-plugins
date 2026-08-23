@@ -14,7 +14,9 @@ import (
 // 갈리면 pick 과 board 가 같은 이름(`큐 열림 N건`)으로 다른 수를 내고,
 // 그 어긋남은 두 화면을 나란히 놓기 전에는 안 보인다.
 func TestCountOpenIsTheSamePredicateAsListOpen(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	if err := s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"}); err != nil {
@@ -71,7 +73,9 @@ func TestCountOpenIsTheSamePredicateAsListOpen(t *testing.T) {
 // TestCountOpenIsScopedToItsProject 는 남의 프로젝트를 안 센다는 것이다.
 // 이 서버는 한 DB 에 여러 프로젝트를 담는다 — 스코프가 새면 pick 이 남의 큐를 자기 것으로 센다.
 func TestCountOpenIsScopedToItsProject(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	for _, id := range []string{"p", "q"} {

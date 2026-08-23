@@ -62,7 +62,12 @@ func newRepo(t *testing.T) string {
 
 func newSvc(t *testing.T) (*service.Service, *store.Store) {
 	t.Helper()
-	st, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), discard())
+	dbp1 := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp1, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	st, err := store.OpenWithLogger(dbp1, discard())
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)
 	}

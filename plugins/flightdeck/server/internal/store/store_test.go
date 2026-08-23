@@ -25,7 +25,10 @@ func newStore(t *testing.T) *Store {
 	t.Helper()
 	// 로그를 버린다 — 마이그레이션 INFO 가 시험 출력을 덮는다.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s, err := OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	mustMigrate(t, dbp)
+	s, err := OpenWithLogger(dbp, log)
 	if err != nil {
 		t.Fatalf("Open 실패: %v", err)
 	}
@@ -83,7 +86,16 @@ func mustItem(t *testing.T, s *Store, project, id string) {
 //
 // exec 는 `*sql.DB.Exec`·`*sql.Tx.Exec` 를 감싼 것이다 — 두 타입 다 variadic 이라
 // `func(string) (sql.Result, error)` 에 그대로 안 맞으므로 호출부가 감싼다.
-func dropNonIdempotentColumns(t *testing.T, exec func(string) (sql.Result, error)) {
+// ★ 이름이 2026-08-23 에 바뀌었다(dropNonIdempotentColumns → undoNonIdempotentMigrations).
+// 증분 011 이 **표를 지우는** 첫 증분이라, v1 로 되돌리기가 더는 "걷기"만이 아니다 —
+// 지워진 것은 **다시 만들어야** 하고, 안 만들면 증분 010 이 없는 표에 DELETE 를 걸어
+// v1 판올림 경로가 통째로 죽는다. 이름을 그대로 뒀으면 다음 사람이 CREATE 를 여기 둘
+// 생각을 못 한다.
+//
+// ★ 새 증분을 더할 때마다 그 **짝**을 여기 더해야 한다. 안 더하면 재판올림이
+// "table already exists" 나 "no such table" 로 죽는데, 그 실패는 마이그레이션 결함처럼
+// 보이지만 실제로는 이 목록의 누락이다.
+func undoNonIdempotentMigrations(t *testing.T, exec func(string) (sql.Result, error)) {
 	t.Helper()
 	for _, q := range []string{
 		// 007 · project.pinned_at·archived_at
@@ -91,9 +103,16 @@ func dropNonIdempotentColumns(t *testing.T, exec func(string) (sql.Result, error
 		`ALTER TABLE project DROP COLUMN archived_at`,
 		// 009 · judgment_link.target_project
 		`ALTER TABLE judgment_link DROP COLUMN target_project`,
+		// 011 · item_dependents 를 **되살린다**(schema.sql 의 v1 정의 그대로).
+		`CREATE TABLE IF NOT EXISTS item_dependents (
+  project TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  n       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project, item_id)
+)`,
 	} {
 		if _, err := exec(q); err != nil {
-			t.Fatalf("비멱등 증분 컬럼 걷기 실패(%s): %v", q, err)
+			t.Fatalf("비멱등 증분 되돌리기 실패(%s): %v", q, err)
 		}
 	}
 }
@@ -151,6 +170,7 @@ func TestOpenAppliesSchemaAndPragmas(t *testing.T) {
 func TestOpenIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fd.db")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mustMigrate(t, path)
 	s1, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("첫 Open 실패: %v", err)
@@ -158,6 +178,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 	seed(t, s1, "p")
 	s1.Close()
 
+	mustMigrate(t, path)
 	s2, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("두 번째 Open 실패: %v", err)
@@ -181,6 +202,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 func TestOpenRejectsFutureSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fd.db")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("첫 Open 실패: %v", err)
@@ -268,6 +290,7 @@ func TestMigrationBacksUpBeforeApplying(t *testing.T) {
 	}
 	raw.Close()
 
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("재적용 Open 실패: %v", err)
@@ -312,6 +335,7 @@ func TestMigrationRefusesToReapplyOverExistingObjects(t *testing.T) {
 	path := filepath.Join(dir, "fd.db")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("첫 Open 실패: %v", err)
@@ -1475,7 +1499,10 @@ func TestEventLedgerIsAppendOnly(t *testing.T) {
 func TestLogEventNeverPanicsAndWarnsOnFailure(t *testing.T) {
 	var buf strings.Builder
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	s, err := OpenWithLogger(filepath.Join(t.TempDir(), "fd.db"), log)
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	mustMigrate(t, dbp)
+	s, err := OpenWithLogger(dbp, log)
 	if err != nil {
 		t.Fatal(err)
 	}

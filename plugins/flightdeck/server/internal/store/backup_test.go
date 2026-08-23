@@ -285,6 +285,7 @@ func journalHeaderOf(t *testing.T, path string) [2]byte {
 // <db>.bak-* 산출물이 정확히 이 모드로 나온다(실측: 이 머신의 fd.db.bak-* 헤더가 1/1).
 func makeRollbackJournalDB(t *testing.T, path string, downgradeTo int) {
 	t.Helper()
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, testLogger())
 	if err != nil {
 		t.Fatalf("픽스처 초기 Open 실패: %v", err)
@@ -388,6 +389,7 @@ func TestOpenLedgerDoesNotMigrateOrBackup(t *testing.T) {
 
 	// 먼저 정상 Open 으로 스키마를 올린다.
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, quiet)
 	if err != nil {
 		t.Fatalf("초기 Open 실패: %v", err)

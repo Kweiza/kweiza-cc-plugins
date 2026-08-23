@@ -155,6 +155,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runSetup(ctx, args[1:], stdout)
 	case "doctor":
 		return app.runDoctor(ctx, args[1:], stdout)
+	case "migrate":
+		return app.runMigrate(ctx, args[1:], stdout)
 	case "import":
 		return app.runImport(ctx, args[1:], stdout)
 	case "export":

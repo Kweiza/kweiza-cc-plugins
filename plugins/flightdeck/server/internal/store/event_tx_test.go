@@ -14,7 +14,9 @@ import (
 // 그 경로를 타는 시험이 하나도 없어서 계측이 구조적으로 항상 0이 되는 것을 못 봤다.
 
 func TestTxLogEventDoesNotDeadlockAndSurvivesRollback(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, err := Open(dbp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,9 @@ func TestTxLogEventDoesNotDeadlockAndSurvivesRollback(t *testing.T) {
 func TestStoreLogEventInsideTxIsTheTrapThisReplaces(t *testing.T) {
 	// 이 시험은 함정이 실재함을 못박는다. Tx.LogEvent 가 없으면 사람은 s.LogEvent 를 부르고,
 	// 그러면 busy_timeout 만큼 멈춘 뒤 조용히 아무것도 안 남긴다.
-	s, err := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, err := Open(dbp)
 	if err != nil {
 		t.Fatal(err)
 	}

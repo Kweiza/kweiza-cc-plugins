@@ -27,6 +27,10 @@ func TestLedgerSurvivesFullRoundTrip(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	srcPath := filepath.Join(t.TempDir(), "src.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), srcPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	src, err := store.OpenWithLogger(srcPath, quiet)
 	if err != nil {
 		t.Fatalf("원본 DB 열기 실패: %v", err)
@@ -82,6 +86,10 @@ func TestLedgerSurvivesFullRoundTrip(t *testing.T) {
 	//   machine·project·session 까지 원장이 다 갖고 와야 한다. 미리 심어 줘야 통과한다면
 	//   그것은 폐포가 안 닫힌 것이고, 이 시험의 존재 이유가 바로 그것을 잡는 것이다.
 	dstPath := filepath.Join(t.TempDir(), "dst.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dstPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	dst, err := store.OpenWithLogger(dstPath, quiet)
 	if err != nil {
 		t.Fatalf("복원 DB 열기 실패: %v", err)
@@ -108,7 +116,12 @@ func TestRestoredDBHasWorkingFullTextSearch(t *testing.T) {
 	ctx := context.Background()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	src, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "src.db"), quiet)
+	dbp1 := filepath.Join(t.TempDir(), "src.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp1, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	src, err := store.OpenWithLogger(dbp1, quiet)
 	if err != nil {
 		t.Fatalf("원본 열기 실패: %v", err)
 	}
@@ -119,7 +132,12 @@ func TestRestoredDBHasWorkingFullTextSearch(t *testing.T) {
 	}
 	src.Close()
 
-	dst, err := store.OpenWithLogger(filepath.Join(t.TempDir(), "dst.db"), quiet)
+	dbp2 := filepath.Join(t.TempDir(), "dst.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp2, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	dst, err := store.OpenWithLogger(dbp2, quiet)
 	if err != nil {
 		t.Fatalf("복원 DB 열기 실패: %v", err)
 	}
@@ -326,6 +344,10 @@ func TestRoundTripFixtureExercisesEveryNullableColumn(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	srcPath := filepath.Join(t.TempDir(), "src.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), srcPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	src, err := store.OpenWithLogger(srcPath, quiet)
 	if err != nil {
 		t.Fatalf("원본 DB 열기 실패: %v", err)

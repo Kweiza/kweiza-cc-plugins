@@ -59,9 +59,12 @@ var migrationLinkTargetProject string
 //go:embed migrations/010_retire_item_dependents.sql
 var migrationRetireItemDependents string
 
+//go:embed migrations/011_drop_item_dependents.sql
+var migrationDropItemDependents string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 10
+const SchemaVersion = 11
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -92,6 +95,7 @@ var migrations = []Migration{
 	{To: 8, Name: "줄 행이 자원 집합을 갖는다", SQL: migrationResourceQueue},
 	{To: 9, Name: "판단 링크가 대상 프로젝트를 싣는다", SQL: migrationLinkTargetProject},
 	{To: 10, Name: "죽은 역인덱스의 값을 비운다", SQL: migrationRetireItemDependents},
+	{To: 11, Name: "죽은 표 item_dependents 를 걷는다", SQL: migrationDropItemDependents},
 }
 
 // timeLayout 은 저장용 시각 표기다.
@@ -181,13 +185,43 @@ func (t *Tx) LogEvent(kind, project, sessionID string, payload any) {
 	t.deferred = append(t.deferred, pendingEvent{kind, project, sessionID, payload})
 }
 
-// Open 은 DB 를 열고 필요하면 마이그레이션을 적용한다.
+// Open 은 DB 를 연다. **마이그레이션을 적용하지 않는다**(설계 §7 처방 ①).
+//
+// 스키마가 이 바이너리와 안 맞으면 거절하고 `fd migrate` 를 가리킨다. 적용은 그 명령의 일이다.
 func Open(path string) (*Store, error) {
 	return OpenWithLogger(path, slog.Default())
 }
 
 // OpenWithLogger 는 Open 에 로거를 주입한다.
 func OpenWithLogger(path string, log *slog.Logger) (*Store, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	// ★ **재기가 sql.Open 보다 앞에 선다.** sql.Open 은 없는 파일을 **만들기** 때문에,
+	//   뒤에 두면 빈 DB 를 하나 만들어 놓고 "빈 DB 다" 라고 거절하게 되고 그 파일이 다음
+	//   재기에는 "있는 DB" 로 보인다. ProbeMigration 머리말이 같은 함정을 적어 뒀다.
+	//
+	// ★ 여기서 적용하지 않는 근거는 store.go 마이그레이션 절에 있다 — 옛 판단("적용을 떼면
+	//   fail-open 훅이 안 올라간 DB 를 만난다")의 전제가 전수 실측에서 거짓이었다.
+	plan, perr := ProbeMigration(context.Background(), path)
+	if perr != nil {
+		return nil, fmt.Errorf("DB 상태를 재지 못했다(path=%q): %w — %s", clip(path, 200), perr, migrateHint(path))
+	}
+	if plan.Action != MigrateNone {
+		return nil, openRefusal(plan, path)
+	}
+
+	return openRaw(path, log)
+}
+
+// openRaw 는 재기 없이 DB 를 연다. **Open 과 Migrate 가 나눠 쓰는 본체다.**
+//
+// ★ 이것이 따로 있어야 하는 이유: Migrate 는 정의상 "스키마가 안 맞는 DB" 를 열어야 하는데,
+// Open 은 바로 그것을 거절한다. 한 함수로 두면 적용 경로가 자기 관문에 막힌다.
+//
+// ★ **패키지 밖으로 내보내지 않는다.** 이 문은 관문을 지나지 않으므로, 밖에서 부를 수 있으면
+// 적용을 기동에서 분리한 의미가 없어진다 — 누구든 이것으로 열고 스키마를 만질 수 있다.
+func openRaw(path string, log *slog.Logger) (*Store, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -215,12 +249,28 @@ func OpenWithLogger(path string, log *slog.Logger) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-
-	if err := s.migrate(context.Background()); err != nil {
-		db.Close()
-		return nil, err
-	}
 	return s, nil
+}
+
+// migrateHint 는 적용이 기동에서 분리됐다는 사실과 **다음에 칠 것**을 낸다. 순수 함수다.
+//
+// ★ RollbackHint 와 같은 규율이다: 절차가 실패한 그 자리에 다음 수가 있어야 한다.
+// 이 문구가 없으면 거절은 "안 뜬다" 로만 보이고, 그 상태에서 운영자가 할 수 있는 것은
+// 같은 바이너리를 다시 띄우는 것뿐이다 — 그것이 §7 이 크래시루프라 부른 모양이다.
+func migrateHint(path string) string {
+	return fmt.Sprintf("적용은 기동에서 분리돼 있다(설계 §7 ①) — `fd migrate --db %s` 를 먼저 돌려라", clip(path, 200))
+}
+
+// openRefusal 은 Open 이 적용 없이 거절할 때의 사유다. 순수 함수다.
+//
+// ★ MigrateReject 를 가르는 이유: 그 갈래는 `fd migrate` 로 못 고친다(DB 가 이 바이너리보다
+// 높거나 flightdeck 의 DB 가 아니다). 거기에 같은 처방을 붙이면 운영자가 고칠 수 없는 것을
+// 고치려 들고, 그 시도가 다음 판올림 대상을 한 번 더 만진다.
+func openRefusal(plan MigrationPlan, path string) error {
+	if plan.Action == MigrateReject {
+		return fmt.Errorf("이 바이너리는 이 DB 를 아예 열지 않는다(스키마도 안 바꾼다): %s", plan.Reason)
+	}
+	return fmt.Errorf("스키마가 이 바이너리와 안 맞는다(%s): %s — %s", plan.Action, plan.Reason, migrateHint(path))
 }
 
 // dsn 은 접속 문자열을 만든다.
@@ -464,34 +514,37 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 // 마이그레이션 — 판정은 순수 함수, 실행만 여기
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// ⚠ **설계 §7 과 어긋난 자리다. 다음 세션이 "설계대로 돼 있다"고 믿지 않게 여기 적는다.**
+// ★ **설계 §7 과 맞춰진 자리다(2026-08-23).** 2026-08-03 부터 이 자리에는 "§7 과 어긋난다,
+// 다음 세션이 '설계대로 돼 있다'고 믿지 않게 적는다"는 경고가 서 있었다. 그 경고가 무엇을
+// 했는지 남긴다 — 없는 처방에 **미리 이름이 붙어 있던 덕에**, 지을 때가 왔을 때 무엇을
+// 지어야 하는지를 다시 발견할 필요가 없었다.
 //
-// §7 의 "나쁜 스키마 변경으로 크래시루프" 행은 처방을 셋으로 적었다:
+// §7 의 "나쁜 스키마 변경으로 크래시루프" 행은 처방을 셋으로 적었고, 이제 **셋 다 있다**:
 //
-//	① 마이그레이션을 **별도 one-shot 컨테이너로 분리**
-//	② 기동 전 DB 백업
-//	③ 롤백 명령
+//	① 마이그레이션을 **별도 one-shot 으로 분리** — compose.yaml 의 migrate 서비스가
+//	   `fd migrate` 를 돌고, 서버는 service_completed_successfully 로 그것이 성공으로
+//	   끝난 뒤에만 뜬다. 이 파일의 Open 은 **어떤 적용도 하지 않는다.**
+//	② 기동 전 DB 백업 — PlanMigration 이 판정하고 VACUUM INTO 로 뜬다.
+//	③ 롤백 명령 — `fd migrate --rollback` 이 <db>.bak-* 중 최신으로 되돌린다.
 //
-// 지금 구현이 만족하는 것은 **②뿐이다.**
+// **적용을 기동에 남겼던 옛 판단과 그것이 뒤집힌 경위.** 근거는 한 문장이었다: "적용을 떼면
+// 모든 명령(fail-open 훅 4종 포함)이 '스키마가 아직 안 올라간 DB' 를 만나는 새 경로가 생기고,
+// 훅은 정의상 조용히 죽으므로 그 실패가 침묵한다."
 //
-//   - ①이 없다: 적용이 Open() 안에 있고 Open() 은 `fd serve` 기동 경로다. 그래서 나쁜 증분은
-//     "서버가 안 뜬다"로 나타나고, 그때 고칠 수단도 같은 바이너리를 다시 띄우는 것뿐이다.
-//   - ③이 없다: 되돌리는 서브명령이 없다. 되돌릴 길은 백업 파일 손 복사뿐이다.
+// 그 전제가 전수 실측에서 **거짓**이었다(2026-08-23). cmd/ 에서 DB 를 여는 문은 셋뿐이고
+// (serve · 이관용 openDB · OpenLedger), **훅 여섯은 하나도 DB 를 열지 않는다** — beatFromHook 은
+// a.cli.Write 로 REST 를 치고 실패하면 아웃박스로 흐른다. failopen_test.go 의 "fail-open" 은
+// **큐 잠금** 축이지 DB 스키마 축이 아니다. 그리고 셋 중 OpenLedger 는 이미 ProbeMigration →
+// 거절 패턴이었다. 새로 발명한 것이 아니라 남은 둘에 같은 것을 두른 일이다.
 //
-// **지금 이 구조를 유지하기로 한 판단과 근거**(2026-08-03, 2026-08-22 갱신):
-// 증분은 이제 **아홉 단**(002~010)이고, 그중 넷이 순수 가산이 아니다 —
-// 005·006(발자국 삭제) · 008(백필) · 010(죽은 역인덱스 비우기). 그래도 적용을 기동에
-// 남기는 판단은 유지한다: 적용을 떼면 **모든 명령**(fail-open 훅 4종 포함)이 "스키마가 아직
-// 안 올라간 DB" 를 만나는 새 경로가 생기고, 훅은 정의상 조용히 죽으므로 그 경로의 실패가
-// 침묵한다. 제거하는 위험보다 새로 만드는 위험이 크다.
+// ★ **절반만 뗄 수는 없었다.** MigrateApply(빈 DB 신규 설치) 갈래도 applyUpgrades 를 부르므로
+// (아래 그 자리의 주석), 업그레이드만 분리하면 크래시루프 경로가 절반 남는다. 그리고
+// neverExempt 가 DROP TABLE 을 여는 근거가 "적용이 기동 밖에 있다" 인데, 신규 설치에서
+// 여전히 안이면 그 조작이 기동 경로에서 돌아 근거 자체가 안 선다.
 //
-// ★ 010 이 그 판단을 다시 시험했고 통과했다(2026-08-22). 항목
-// fd-item-dependents-table-has-no-readers 는 item_dependents 를 **DROP TABLE** 하려 했는데,
-// 그것은 neverExempt 라 예외로 못 열고 유일한 길이 위 ①(`fd migrate`) 신설이다.
-// 표를 지우는 대신 **값만 비웠다** — 구조가 남으므로 조작이 DELETE FROM 이고,
-// 되돌리기는 item_after 에서 재계산하는 질의 한 줄이다(010 머리말 ⒝).
-// 즉 이 증분은 ①을 요구하지 않는다. 표 자체의 제거는 별도 항목이 지고, 그 항목이
-// 착수되는 날 이 절의 ①·③ 이 먼저 지어져야 한다.
+// ★ 그 위에서 증분 011 이 item_dependents 를 **DROP TABLE** 했다(항목
+// fd-drop-item-dependents-needs-fd-migrate-first). 010 이 값을 비우고 011 이 구조를 걷는
+// 두 단계였고, 011 이 가능해진 것은 이 절의 ①·③ 이 먼저 지어졌기 때문이다.
 //
 // ★ 그래서 파괴적 증분은 무조건 막는 대신 **근거를 요구하는 예외**로 통과시킨다.
 // migrate_guard_test.go 의 destructiveExempt 가 증분 번호마다 (허용 조작, 사유) 를 담고,
@@ -499,15 +552,36 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 // neverExempt 라 그 예외로도 못 연다 — 그 셋을 "다른 시험이 본다" 고 적어 뒀던 것이
 // 실측으로 거짓이었기 때문이다(지목된 두 시험이 DROP TABLE 을 둘 다 통과시켰다).
 //
-// **이 판단이 뒤집히는 조건**: 증분이 파괴적(컬럼 삭제·타입 변경·데이터 이행)이 되는 순간.
-// 그때는 `fd migrate [--to N]` / `fd migrate --rollback` 으로 적용을 기동에서 분리한다.
-// 그 전까지 ③의 자리는 RollbackHint 가 **문구로** 메운다 — 명령이 없다면 적어도
-// 절차가 실패한 그 자리에 있어야 한다.
+// **그 조건은 2026-08-23 에 충족됐고 처방이 이행됐다.** RollbackHint 는 이제 문구로 자리를
+// 메우는 것이 아니라 **실제 명령을 가리킨다** — 절차가 실패한 그 자리에 수단이 있어야
+// 한다는 규율은 그대로이고, 가리키는 곳만 바뀌었다.
 //
 // ★ **그 조건은 이제 시험이 지킨다** — TestBundledMigrationsAreAdditive(migrate_guard_test.go).
 // 만료 조건이 문서와 주석에만 있으면 아무도 그 순간을 안 본다. 파괴적 증분이 들어오는 날
 // 이 판단은 근거를 잃는데, 그 사실이 어디에도 안 뜨면 **만료된 판단 위에서 계속 돌게 된다** —
 // 이 절이 없애려던 위험("설계대로 돼 있다고 믿는 것")이 정확히 그 모양이다.
+
+// Migrate 는 DB 를 이 바이너리가 아는 스키마 버전까지 올린다. **`fd migrate` 의 본체다.**
+//
+// ★ 이 함수가 존재하는 것이 설계 §7 처방 ①(적용을 기동에서 분리)의 이행이다. 그 전까지
+// 적용은 Open() 안에 있었고, 그래서 나쁜 증분은 "서버가 안 뜬다" 로 나타났으며 고칠 수단도
+// 같은 바이너리를 다시 띄우는 것뿐이었다 — §7 이 크래시루프라 부른 모양이다.
+//
+// ★ **판정과 백업은 그대로 s.migrate 가 진다.** 여기서 다시 판정하면 판정이 두 벌이 되고,
+// 두 벌은 반드시 표류한다. 이 함수가 더하는 것은 "누가 언제 부르는가" 하나다.
+func Migrate(ctx context.Context, path string, log *slog.Logger) error {
+	return MigrateTo(ctx, path, SchemaVersion, log)
+}
+
+// MigrateTo 는 target 까지만 올린다. `fd migrate --to N` 의 본체다.
+func MigrateTo(ctx context.Context, path string, target int, log *slog.Logger) error {
+	s, err := openRaw(path, log)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.migrateTo(ctx, target)
+}
 
 // RollbackHint 는 마이그레이션이 깨졌을 때 되돌리는 절차를 낸다. 순수 함수다.
 //
@@ -522,14 +596,14 @@ func (t *Tx) Ctx() context.Context { return t.ctx }
 // 되살려 얹고, 그러면 되돌렸다고 믿는 순간 반쯤 적용된 상태가 부활한다.
 func RollbackHint(dbPath, backupPath string) string {
 	if strings.TrimSpace(backupPath) == "" {
-		return "이번 기동은 백업을 뜨지 않았다(빈 DB 이거나 메모리 DB 다) — 되돌릴 파일이 없다. " +
-			"옛 백업은 " + clip(dbPath, 200) + ".bak-* 에 있다."
+		return "이번 적용은 백업을 뜨지 않았다(빈 DB 이거나 메모리 DB 다) — 되돌릴 파일이 없다. " +
+			"옛 백업은 " + clip(dbPath, 200) + ".bak-* 에 있고 `fd migrate --rollback` 이 그중 최신을 쓴다."
 	}
 	db := clip(dbPath, 200)
 	return fmt.Sprintf("되돌리려면 서버를 멈추고: cp -f %q %q && rm -f %q %q "+
 		"(백업은 VACUUM INTO 로 뜬 일관 사본이라 WAL 이 없다 — 옛 -wal 을 남기면 "+
 		"반쯤 적용된 상태가 되살아난다). "+
-		"적용을 기동에서 떼는 별도 one-shot 단계와 되돌리기 서브명령은 아직 없다(설계 §7 대비 미구현).",
+		"이 절차는 `fd migrate --rollback` 이 그대로 수행한다.",
 		clip(backupPath, 200), db, db+"-wal", db+"-shm")
 }
 
@@ -657,11 +731,11 @@ func UpgradeSteps(from, to int, avail []Migration) ([]Migration, error) {
 // applyUpgrades 는 증분을 순서대로 얹는다. **한 단이 한 트랜잭션이다** —
 // 중간에 끊겨도 얹힌 단까지는 버전 기록과 실제 스키마가 일치하고,
 // 그러면 다음 기동이 남은 단부터 이어서 얹는다.
-func (s *Store) applyUpgrades(ctx context.Context, from int) error {
-	steps, err := UpgradeSteps(from, SchemaVersion, migrations)
+func (s *Store) applyUpgrades(ctx context.Context, from, target int) error {
+	steps, err := UpgradeSteps(from, target, migrations)
 	if err != nil {
 		s.log.Error("업그레이드 경로가 없어 DB 를 열지 않는다",
-			"path", s.path, "db_version", from, "code_version", SchemaVersion, "error", err.Error())
+			"path", s.path, "db_version", from, "code_version", target, "error", err.Error())
 		return fmt.Errorf("스키마 거절: %w", err)
 	}
 	for _, m := range steps {
@@ -696,13 +770,20 @@ func (s *Store) applyUpgrades(ctx context.Context, from int) error {
 	return nil
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) migrate(ctx context.Context) error { return s.migrateTo(ctx, SchemaVersion) }
+
+// migrateTo 는 target 까지만 올린다.
+//
+// ★ target 을 인자로 받는 것이 `fd migrate --to N` 의 실질이다. 나쁜 증분이 N 단에 있으면
+// N-1 까지만 올려 두고 옛 바이너리로 계속 돌 수 있다 — 그 선택지가 없으면 판올림은
+// 전부 아니면 전무이고, 그것이 설계 §7 이 크래시루프라 부른 상태의 절반이다.
+func (s *Store) migrateTo(ctx context.Context, target int) error {
 	hasTable, dbVersion, objects, err := readMigrationState(ctx, s.db)
 	if err != nil {
 		return err
 	}
 
-	plan := PlanMigration(hasTable, dbVersion, objects, SchemaVersion)
+	plan := PlanMigration(hasTable, dbVersion, objects, target)
 
 	switch plan.Action {
 	case MigrateNone:
@@ -712,13 +793,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	case MigrateReject:
 		// 열지 못한 사유는 원인 전문으로 남긴다. 이 오류가 곧 운영자가 볼 유일한 단서다.
 		s.log.Error("스키마 버전 불일치로 DB 를 열지 않는다",
-			"path", s.path, "db_version", dbVersion, "code_version", SchemaVersion, "reason", plan.Reason)
+			"path", s.path, "db_version", dbVersion, "code_version", target, "reason", plan.Reason)
 		return fmt.Errorf("스키마 거절: %s", plan.Reason)
 
 	case MigrateApply:
 		start := time.Now()
 		s.log.Info("마이그레이션 시작",
-			"path", s.path, "from", dbVersion, "to", SchemaVersion, "backup", plan.Backup, "reason", plan.Reason)
+			"path", s.path, "from", dbVersion, "to", target, "backup", plan.Backup, "reason", plan.Reason)
 
 		var backupPath string
 		if plan.Backup {
@@ -746,17 +827,17 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		// ★ 신규 DB 도 증분을 그대로 탄다. 신규용으로 schema.sql 에 같은 표를 또 적으면
 		//   정의가 두 벌이 되고, 신규 설치와 업그레이드가 다른 모양의 DB 를 갖게 된다.
-		if err := s.applyUpgrades(ctx, BaseSchemaVersion); err != nil {
+		if err := s.applyUpgrades(ctx, BaseSchemaVersion, target); err != nil {
 			return s.rollbackable(err, backupPath)
 		}
 		s.log.Info("마이그레이션 완료",
-			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())
+			"path", s.path, "version", target, "duration", time.Since(start).Seconds())
 		return nil
 
 	case MigrateUpgrade:
 		start := time.Now()
 		s.log.Info("마이그레이션 시작",
-			"path", s.path, "from", dbVersion, "to", SchemaVersion, "backup", plan.Backup, "reason", plan.Reason)
+			"path", s.path, "from", dbVersion, "to", target, "backup", plan.Backup, "reason", plan.Reason)
 		// ★ backupPath 를 블록 밖에 둔다. 앞선 판은 이 자리에서 `:=` 로 선언해 **버렸고**,
 		//   그래서 아래 실패가 어디로 되돌리는지 말하지 못했다 —
 		//   정확히 설계 §7 이 겨냥한 상황에서 유일한 탈출구의 좌표가 사라진 것이다.
@@ -768,11 +849,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 			s.log.Info("마이그레이션 전 백업 완료", "path", s.path, "backup", backupPath)
 		}
-		if err := s.applyUpgrades(ctx, dbVersion); err != nil {
+		if err := s.applyUpgrades(ctx, dbVersion, target); err != nil {
 			return s.rollbackable(err, backupPath)
 		}
 		s.log.Info("마이그레이션 완료",
-			"path", s.path, "version", SchemaVersion, "duration", time.Since(start).Seconds())
+			"path", s.path, "version", target, "duration", time.Since(start).Seconds())
 		return nil
 
 	default:

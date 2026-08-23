@@ -25,9 +25,13 @@ func TestMigration010EmptiesItemDependentsAndKeepsItemAfter(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 
-	s, err := OpenWithLogger(path, log)
+	// ★ 9판에서 출발한다 — 11판에는 item_dependents 가 없다(증분 011). 그리고 9판 DB 는
+	//   Open 이 거절하므로(적용 분리 뒤의 규약) 관문 없는 openRaw 로 연다. 이 시험의 목적이
+	//   **중간 판을 보는 것**이라 관문이 목적에 맞지 않는다.
+	mustMigrateTo(t, path, 9)
+	s, err := openRaw(path, log)
 	if err != nil {
-		t.Fatalf("Open 실패: %v", err)
+		t.Fatalf("열기 실패: %v", err)
 	}
 	seed(t, s, "P")
 	mustItem(t, s, "P", "dep")
@@ -110,7 +114,13 @@ func TestMigration010EmptiesItemDependentsAndKeepsItemAfter(t *testing.T) {
 	}
 
 	// ── 증분을 태운다 ──
-	s2, err := OpenWithLogger(path, log)
+	//
+	// ★ **10판에서 멈춘다.** 증분 011 이 item_dependents 를 표째 걷었으므로, 최신까지 올리면
+	//   010 이 무엇을 했는지 볼 자리 자체가 사라진다. 그리고 10판 DB 는 Open 이 거절하므로
+	//   (적용이 기동에서 분리된 뒤의 규약) 관문 없는 openRaw 로 연다 — 중간 판을 보는 것이
+	//   이 시험의 목적이고, 그 목적에는 관문이 맞지 않는다.
+	mustMigrateTo(t, path, 10)
+	s2, err := openRaw(path, log)
 	if err != nil {
 		t.Fatalf("재열기(마이그레이션) 실패: %v", err)
 	}
@@ -191,6 +201,36 @@ func dumpItemAfter(t *testing.T, s *Store) [][5]string {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("item_after 순회 실패: %v", err)
+	}
+	return out
+}
+
+// itemDependentsAll 은 표 전체를 (project, item_id, n) 로 낸다.
+//
+// ★ 이 헬퍼는 2026-08-23 에 dependents_retired_test.go 에서 옮겨 왔다. 그 파일은 "표가
+// 되살아나지 않는지"를 지켰는데, 증분 011 이 표를 걷으면서 지킬 대상이 사라져 함께 걷었다
+// (그 파일이 스스로 "표를 DROP 했다면 이 시험도 함께 걷어라"고 적어 뒀다). 읽는 헬퍼만
+// 이 파일로 남는다 — 10판 시점을 보는 이 시험이 유일한 사용처다.
+func itemDependentsAll(t *testing.T, s *Store) map[[2]string]int {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT project, item_id, n FROM item_dependents ORDER BY project, item_id`)
+	if err != nil {
+		t.Fatalf("item_dependents 를 못 읽었다: %v\n"+
+			"이 시험은 **10판 시점**을 본다 — 11판에는 이 표가 없다(증분 011).", err)
+	}
+	defer rows.Close()
+	out := map[[2]string]int{}
+	for rows.Next() {
+		var p, id string
+		var n int
+		if err := rows.Scan(&p, &id, &n); err != nil {
+			t.Fatalf("item_dependents 행 해석 실패: %v", err)
+		}
+		out[[2]string{p, id}] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("item_dependents 순회 실패: %v", err)
 	}
 	return out
 }

@@ -10,7 +10,9 @@ import (
 )
 
 func TestMissingItemIsNotSilentSuccess(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, err := Open(dbp)
 	if err != nil {
 		t.Fatal(err)
 	}

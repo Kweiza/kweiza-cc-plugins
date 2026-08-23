@@ -86,6 +86,11 @@ func TestBundledMigrationsReachSchemaVersion(t *testing.T) {
 func makeV1DB(t *testing.T, path string) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// ★ 적용은 이제 Open 이 아니라 Migrate 의 일이다(설계 §7 ①).
+	if err := Migrate(context.Background(), path, log); err != nil {
+		t.Fatalf("v1 DB 구성 실패(적용): %v", err)
+	}
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("v1 DB 구성 실패(첫 Open): %v", err)
@@ -105,7 +110,7 @@ func makeV1DB(t *testing.T, path string) {
 	// 007 증분이 project 에 더한 컬럼 둘도 걷는다(dropNonIdempotentColumns 참고) — 이
 	// 함수는 첫 Open 에서 이미 SchemaVersion(지금은 7)까지 물리적으로 올라간 뒤 버전
 	// 기록만 1로 되돌리므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
-	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	undoNonIdempotentMigrations(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	for _, q := range []string{
 		`DROP INDEX IF EXISTS idempotency_by_at`,
 		`DROP TABLE IF EXISTS idempotency`,
@@ -141,7 +146,7 @@ func hasTableIn(t *testing.T, db *sql.DB, name string) bool {
 }
 
 // ★ v1 DB 를 v2 바이너리로 열면 **데이터를 유지한 채** 올라간다.
-func TestOpenUpgradesVersion1Database(t *testing.T) {
+func TestMigrateUpgradesVersion1Database(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fd.db")
 	makeV1DB(t, path)
@@ -167,9 +172,10 @@ func TestOpenUpgradesVersion1Database(t *testing.T) {
 
 	// ── 본 판정 ──
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
-		t.Fatalf("v1 DB 를 열지 못했다 — 이미 쓰던 서버가 안 뜬다: %v", err)
+		t.Fatalf("판올림한 v1 DB 를 열지 못했다 — 이미 쓰던 서버가 안 뜬다: %v", err)
 	}
 	defer s.Close()
 
@@ -201,6 +207,7 @@ func TestOpenUpgradesVersion1Database(t *testing.T) {
 	}
 
 	// 다시 열면 아무것도 안 한다(멱등).
+	mustMigrate(t, path)
 	s2, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("업그레이드된 DB 재열기 실패: %v", err)
@@ -216,6 +223,7 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("Open 실패: %v", err)
@@ -233,7 +241,7 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 	// 007 증분(project.pinned_at·archived_at)이 prev(3) 뒤에 온다(dropNonIdempotentColumns
 	// 참고) — 위의 첫 Open 이 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로 만들어
 	// 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
-	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	undoNonIdempotentMigrations(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	for _, q := range []string{
 		`INSERT INTO pick_eval(project, session_id, at, picked, rejected)
 		   VALUES ('P','S1','2026-08-01T00:00:00.000000Z','old-lead','[]')`,
@@ -268,6 +276,7 @@ func TestUpgradeAddsPickedWithAndKeepsOldRows(t *testing.T) {
 	raw.Close()
 
 	// ── 판올림 ──
+	mustMigrate(t, path)
 	s2, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("판올림 Open 실패: %v", err)
@@ -297,6 +306,7 @@ func TestFreshInstallAndUpgradeProduceTheSameSchema(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	freshPath := filepath.Join(t.TempDir(), "fresh.db")
+	mustMigrate(t, freshPath)
 	fresh, err := OpenWithLogger(freshPath, log)
 	if err != nil {
 		t.Fatalf("신규 설치 실패: %v", err)
@@ -305,6 +315,7 @@ func TestFreshInstallAndUpgradeProduceTheSameSchema(t *testing.T) {
 
 	upPath := filepath.Join(t.TempDir(), "up.db")
 	makeV1DB(t, upPath)
+	mustMigrate(t, upPath)
 	upgraded, err := OpenWithLogger(upPath, log)
 	if err != nil {
 		t.Fatalf("업그레이드 실패: %v", err)

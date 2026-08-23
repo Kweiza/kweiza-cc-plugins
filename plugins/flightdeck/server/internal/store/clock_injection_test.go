@@ -25,7 +25,9 @@ import (
 // 그래서 주입하는 시각에 **나노초를 일부러 담는다**(…, 123456789). atStamp 를 빼면
 // ②만 빨개지고 ①은 초록이다 — 두 단정이 서로를 대신하지 못한다.
 func TestStorePairCarriesTheInjectedTimeAndItSurvivesAReRead(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	if err := s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"}); err != nil {
@@ -88,7 +90,9 @@ func TestStorePairCarriesTheInjectedTimeAndItSurvivesAReRead(t *testing.T) {
 
 // 영값은 **지금**이다. Beat·Touch 와 같은 문법이고, 시험 호출부 대부분이 이 갈래를 탄다.
 func TestZeroTimeStillMeansNow(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	if err := s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"}); err != nil {

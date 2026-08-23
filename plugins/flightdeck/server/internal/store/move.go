@@ -72,20 +72,11 @@ func (e *MoveRefusedError) Error() string {
 // MoveItem 은 항목과 **그 항목을 (project, item_id) 로 가리키는 모든 행**을 함께 옮긴다.
 //
 // ★ 항목 행만 옮기면 안 된다. item_after·claim 은 item(project, id) 에 복합 FK 를 걸고
-// (ON UPDATE 는 NO ACTION 이다) item_dependents·job 은 FK 없이 같은 두 칼럼을 들고 있다.
+// (ON UPDATE 는 NO ACTION 이다) job 은 FK 없이 같은 두 칼럼을 들고 있다.
 //
-// ★ item_dependents 는 **죽은 표**다(2026-08-22, 증분 010 이 비웠다). 그래도 목록에 남긴다 —
-// 이 목록의 기준은 표가 살아 있는지가 아니라 **(project, item_id) 를 들고 있는지**이고,
-// 같은 기준의 projectRefTables 는 살아 있는 DB 스키마와 기계 대조된다
-// (project_ref_counts_test.go). 둘이 같은 표를 두고 갈리면 한쪽이 틀린 것이다.
-// 이 문이 죽은 행을 되살리지 않는다는 것은 store/dependents_retired_test.go 가 본다.
-// 앞의 둘은 UPDATE 자체가 거부되고, 뒤의 둘은 **조용히 옛 프로젝트에 남아 고아가 된다** —
-// 후자가 더 나쁘다. 오류가 없으므로 아무도 눈치채지 못한다.
-//
-// FK 검사를 커밋 시점으로 미루는 이유: 부모와 자식을 동시에 옮길 방법이 없다.
-// 부모를 먼저 옮기면 자식이 없는 부모를 가리키고, 자식을 먼저 옮겨도 마찬가지다.
-// defer_foreign_keys 는 **이 트랜잭션에만** 걸리고 커밋 때 전부 검사되므로,
-// 어긋난 채로 커밋되는 경로가 없다.
+// ★ item_dependents 는 2026-08-23 에 증분 011 이 **표째 걷었다**. 앞 회차에는 값만 비우고
+// 목록에 남겼는데(그때는 표가 살아 있어 빼면 대조 시험이 빨개졌다), 이제는 반대로 남기면
+// 빨개진다 — 그 대조가 살아 있는 스키마를 본다.
 func (t *Tx) MoveItem(project, itemID, toProject, sessionID string) error {
 	if _, err := t.tx.ExecContext(t.ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 		return fmt.Errorf("FK 검사 지연 설정 실패: %w", err)
@@ -101,7 +92,7 @@ func (t *Tx) MoveItem(project, itemID, toProject, sessionID string) error {
 	}
 	// 딸린 표 넷. 이름을 여기 한 자리에 모아 둔다 — 표가 늘면 이 목록도 늘려야 하고,
 	// 흩어 놓으면 늘리는 사람이 전부를 못 찾는다.
-	for _, tbl := range []string{"item_after", "item_dependents", "claim", "job"} {
+	for _, tbl := range []string{"item_after", "claim", "job"} {
 		if _, err := t.tx.ExecContext(t.ctx,
 			fmt.Sprintf(`UPDATE %s SET project = ? WHERE project = ? AND item_id = ?`, tbl),
 			toProject, project, itemID); err != nil {

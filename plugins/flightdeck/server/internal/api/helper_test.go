@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -102,6 +103,10 @@ func newEnv(t *testing.T, tune func(*Options)) *env {
 
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	st, err := store.OpenWithLogger(dbPath, log)
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)
