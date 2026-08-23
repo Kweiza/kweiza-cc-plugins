@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -693,12 +694,19 @@ func canRunStatusLine(t *testing.T) bool {
 	if !canLintShell(t) {
 		return false
 	}
-	if err := exec.Command("jq", "--version").Run(); err != nil {
+	if err := workingJQ(); err != nil {
 		t.Logf("이 머신에 jq 가 없다(%v) — 상태줄 실행 축을 건너뛴다. 렌더는 전적으로 jq 에 달려 있다", err)
 		return false
 	}
 	return true
 }
+
+// workingJQ 는 jq 가 **도는지** 본다 — 있는지가 아니라.
+//
+// ★ `command -v` 로는 부족한 자리가 이 레포에 둘이다(상태줄·설치 스크립트). 이름은 있는데
+// 못 도는 jq(깨진 설치·아키텍처 불일치·실행 권한 없음)가 같은 자리인데, 그 둘은 화면에
+// 아주 다른 것을 낸다. 그래서 판정 하나를 둘이 나눠 쓴다.
+func workingJQ() error { return exec.Command("jq", "--version").Run() }
 
 // renderedLines 는 상태줄이 **화면에서 먹는 줄 수**다.
 //
@@ -840,5 +848,573 @@ func TestGrafikBarStatusLineSaysSoWhenJQIsGone(t *testing.T) {
 	if n := renderedLines(r.stdout); n != 1 {
 		t.Fatalf("jq 진단이 %d줄이다 — 한 줄이어야 한다.\nstdout=%q\n"+
 			"상태줄이 여러 줄을 먹으면 그 자체가 화면 파괴다", n, r.stdout)
+	}
+}
+
+// ── setup-statusline.sh — **설치 경로**를 실행으로 잰다 ────────────────────────
+//
+// ★★ 위 상태줄 관문이 잠근 것은 렌더다. 그 앞에 **쓰기**가 있다:
+// `setup-statusline.sh` 는 `~/.claude/settings.json` — 사용자의 실제 설정 파일 — 을 고친다.
+// 그리고 이 스크립트가 **이 플러그인의 설치 경로 전부**다. 실패하면 상태줄이 안 뜨는 것으로만
+// 나타나고, 최악은 사용자 설정을 망가뜨리는 것이다. 그러면 상태줄만 죽는 게 아니다.
+//
+// ★ **경계를 먼저 정했다** — 이 시험이 재는 것은 jq 가 아니라 스크립트다. 그래서:
+//
+//	· 결과 파일은 **Go 로 판다**(`readSettings`). jq 로 다시 읽으면 관문이 재는 것이
+//	  스크립트인지 jq 인지 흐려지고, jq 의 출력 형식(들여쓰기·키 순서)에 시험이 묶인다
+//	· jq 의 **동작**은 안 문다. 무는 것은 **jq 가 망가졌을 때 스크립트가 무엇을 하는가**다
+//	· 관측 대상은 stdout 이 아니라 **파일에 남은 것**이다 — 이 스크립트의 산출물이 그것이다
+//
+// ★ 위 `runStatusLine` 을 **안 쓴다.** 그 봉인(사용량 캐시·가짜 자격증명·curl·tput·stty)은
+// 렌더의 세계이고 설치 스크립트는 그 중 어느 것도 안 본다. 대신 이쪽이 필요한 것은 반대 모양이다:
+// HOME 이 **빈 디렉토리가 아니라 준비된 상태**여야 한다. 공유하는 것은 jq 판정 하나뿐이다.
+
+// setupRun 은 setup-statusline.sh 를 격리된 HOME 에서 **실제로 돌린 결과**다.
+type setupRun struct {
+	code   int
+	stdout string
+	stderr string
+	// settings 는 스크립트가 겨눈 경로다($HOME/.claude/settings.json).
+	settings string
+	// target 은 **내용이 실제로 가야 할 곳**이다. 심링크가 아니면 settings 와 같다.
+	target string
+	// claudeDir 은 $HOME/.claude — 임시 파일 잔해를 여기서 센다.
+	claudeDir string
+	// before 는 keepBefore 일 때 **돌리기 전** target 의 파일 정보다.
+	before os.FileInfo
+}
+
+// setupOpts 는 돌리기 전의 세계를 정한다.
+type setupOpts struct {
+	// seed 는 settings.json 에 심을 내용이다. nil 이면 **파일을 안 만든다**(첫 설치).
+	// 빈 문자열을 가리키면 0바이트 파일을 만든다 — 그 둘은 스크립트에서 다른 갈래다.
+	seed *string
+	// seedMode 는 심은 파일의 모드다. 0 이면 0600.
+	seedMode os.FileMode
+	// symlink 는 settings.json 을 $HOME/dotfiles/settings.json 을 가리키는 **링크**로 만든다.
+	// dotfiles 저장소로 설정을 관리하는 사람의 모양이다. "absolute" 나 "relative" —
+	// **둘 다 실물이다**: `ln -s ~/dotfiles/…` 와 `ln -s ../dotfiles/…` 는 스크립트에서
+	// 다른 갈래를 탄다(상대 링크는 링크가 있는 디렉토리 기준으로 풀어야 한다).
+	symlink string
+	// stubs 는 PATH 앞에 세울 스텁이다(이름 → 본문).
+	stubs map[string]string
+	// noJQ 는 PATH 에서 jq 를 **통째로** 없앤다. 스텁으로는 못 만드는 상황이다.
+	noJQ bool
+	// keepBefore 는 돌리기 **전**의 파일 정보를 `setupRun.before` 에 담아 온다
+	// (원자적 교체를 `os.SameFile` 로 재려면 전후 둘 다 필요하다).
+	keepBefore bool
+}
+
+func seedJSON(s string) *string { return &s }
+
+// sealedPATHWithoutJQ 는 jq 가 **없는** PATH 를 만든다.
+//
+// ★ 스텁으로는 이 상황을 못 만든다 — PATH 앞에 `jq` 라는 이름이 있으면 `command -v` 가
+// 찾아낸다. 그래서 PATH 자체를 갈고, 스크립트가 실제로 쓰는 외부 도구만 심링크로 넣는다.
+func sealedPATHWithoutJQ(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, tool := range []string{"mkdir", "mktemp", "mv", "rm", "readlink", "dirname"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("이 머신에 %s 가 없다 — jq 부재 축을 만들 수 없다(잴 수 없음이지 결함이 아니다)", tool)
+		}
+		if err := os.Symlink(p, filepath.Join(dir, tool)); err != nil {
+			t.Fatalf("%s 심링크를 못 만들었다: %v", tool, err)
+		}
+	}
+	return dir
+}
+
+// canRunSetup 은 이 머신에서 설치 스크립트의 **정상 경로**를 잴 수 있는지 본다.
+//
+// ★ 못 재면 밝히며 건너뛴다 — 조용히 공허해지는 것이 이 레포가 두 번 밟은 자리다.
+// jq 부재·고장 축은 이 판정에 안 걸린다: 그쪽은 jq 가 없는 것이 **전제**다.
+func canRunSetup(t *testing.T) bool {
+	t.Helper()
+	if !canLintShell(t) {
+		return false
+	}
+	if err := workingJQ(); err != nil {
+		t.Logf("이 머신에 도는 jq 가 없다(%v) — 설치의 정상 경로 축을 건너뛴다. 이 스크립트의 전제가 jq 다", err)
+		return false
+	}
+	return true
+}
+
+func runSetup(t *testing.T, o setupOpts) setupRun {
+	t.Helper()
+	root := repoRootFromCmdFd(t)
+	proot := filepath.Join(root, "plugins", "grafik-bar")
+	script := filepath.Join(proot, "scripts", "setup-statusline.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("setup-statusline.sh 가 없다: %v", err)
+	}
+
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("$HOME/.claude 를 못 만들었다: %v", err)
+	}
+	settings := filepath.Join(claudeDir, "settings.json")
+	target := settings
+
+	if o.symlink != "" {
+		dots := filepath.Join(home, "dotfiles")
+		if err := os.MkdirAll(dots, 0o755); err != nil {
+			t.Fatalf("dotfiles 디렉토리를 못 만들었다: %v", err)
+		}
+		target = filepath.Join(dots, "settings.json")
+		link := target
+		switch o.symlink {
+		case "absolute":
+		case "relative":
+			link = filepath.Join("..", "dotfiles", "settings.json")
+		default:
+			t.Fatalf("symlink 값이 %q 다 — \"absolute\" 나 \"relative\" 여야 한다", o.symlink)
+		}
+		if err := os.Symlink(link, settings); err != nil {
+			t.Fatalf("settings.json 심링크를 못 만들었다: %v", err)
+		}
+	}
+	if o.seed != nil {
+		mode := o.seedMode
+		if mode == 0 {
+			mode = 0o600
+		}
+		if err := os.WriteFile(target, []byte(*o.seed), mode); err != nil {
+			t.Fatalf("settings.json 을 못 심었다: %v", err)
+		}
+	}
+
+	var before os.FileInfo
+	if o.keepBefore {
+		fi, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("돌리기 전 파일을 못 봤다: %v", err)
+		}
+		before = fi
+	}
+
+	bin := t.TempDir()
+	for name, body := range o.stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("스텁 %s 를 못 만들었다: %v", name, err)
+		}
+	}
+	path := bin + string(os.PathListSeparator)
+	if o.noJQ {
+		path += sealedPATHWithoutJQ(t)
+	} else {
+		path += os.Getenv("PATH")
+	}
+
+	cmd := exec.Command("/bin/bash", script)
+	var out, errb strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	// ★ CLAUDE_PLUGIN_ROOT 를 준다 — 훅이 주는 것이 그것이고, 그러면 스크립트가 겨누는
+	// statusline.sh 가 **이 저장소의 것**이 되어 결과를 이름으로 확인할 수 있다.
+	cmd.Env = []string{
+		"PATH=" + path,
+		"HOME=" + home,
+		"CLAUDE_PLUGIN_ROOT=" + proot,
+	}
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("setup-statusline.sh 를 못 돌렸다: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	return setupRun{
+		code: code, stdout: out.String(), stderr: errb.String(),
+		settings: settings, target: target, claudeDir: claudeDir, before: before,
+	}
+}
+
+// readSettings 는 돌린 뒤의 settings.json 을 **Go 로** 판다(jq 로 다시 읽지 않는다).
+func readSettings(t *testing.T, r setupRun) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(r.target)
+	if err != nil {
+		t.Fatalf("돌린 뒤 settings.json 을 못 읽었다: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("돌린 뒤 settings.json 이 JSON 이 아니다: %v\n%s", err, raw)
+	}
+	return m
+}
+
+// statusLineCommand 는 결과에서 `.statusLine.command` 를 뽑는다. 없으면 "" 다.
+func statusLineCommand(m map[string]any) string {
+	sl, ok := m["statusLine"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	cmd, _ := sl["command"].(string)
+	return cmd
+}
+
+// tempLeftovers 는 $HOME/.claude 에 남은 **임시 파일** 이름들이다.
+//
+// ★ 되감기가 반쪽이면 사용자의 설정 디렉토리에 `settings.json.a1B2c3` 이 매 세션 하나씩
+// 쌓인다. 화면에는 아무것도 안 뜬다.
+func tempLeftovers(t *testing.T, r setupRun) []string {
+	t.Helper()
+	ents, err := os.ReadDir(r.claudeDir)
+	if err != nil {
+		t.Fatalf("$HOME/.claude 를 못 읽었다: %v", err)
+	}
+	var left []string
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "settings.json.") {
+			left = append(left, e.Name())
+		}
+	}
+	sort.Strings(left)
+	return left
+}
+
+// TestGrafikBarSetupKeepsEverythingElse 는 **기존 키 보존**을 문다.
+//
+// ★★ 이 파일은 grafik-bar 만의 것이 아니다 — 사용자의 권한 규칙·모델·환경변수가 같이 산다.
+// `.statusLine` 하나를 바꾸면서 나머지를 날리면 그것은 상태줄 결함이 아니라 **설정 파괴**다.
+// 스크립트 머리말이 "touches ONLY the statusLine key, preserves everything else" 라고
+// 약속한 자리이고, 지금까지 그 약속을 재는 것이 하나도 없었다.
+func TestGrafikBarSetupKeepsEverythingElse(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	before := `{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":[]},` +
+		`"env":{"FOO":"1"},"statusLine":{"type":"command","command":"bash /old/elsewhere.sh"}}`
+	r := runSetup(t, setupOpts{seed: seedJSON(before)})
+	if r.code != 0 {
+		t.Fatalf("설치가 %d 로 끝났다 — 0 이어야 한다.\nstdout=%q\nstderr=%s", r.code, r.stdout, r.stderr)
+	}
+	after := readSettings(t, r)
+
+	var want map[string]any
+	if err := json.Unmarshal([]byte(before), &want); err != nil {
+		t.Fatalf("심을 JSON 이 JSON 이 아니다: %v", err)
+	}
+	for _, key := range []string{"model", "permissions", "env"} {
+		if !reflect.DeepEqual(after[key], want[key]) {
+			t.Fatalf("설치가 %q 를 바꿨다 — `.statusLine` 만 만져야 한다.\n전: %#v\n후: %#v\n"+
+				"이 파일에는 사용자의 권한 규칙과 환경변수가 같이 산다. 여기가 무너지면\n"+
+				"상태줄이 아니라 **설정이** 깨지는 것이고, 그 피해는 이 플러그인 밖으로 나간다",
+				key, want[key], after[key])
+		}
+	}
+	if got := statusLineCommand(after); !strings.Contains(got, filepath.Join("grafik-bar", "scripts", "statusline.sh")) {
+		t.Fatalf("`.statusLine.command` 가 이 플러그인을 안 가리킨다: %q\n"+
+			"낡은 값(플러그인 갱신으로 경로가 밀린 뒤)을 못 고치면 상태줄은 조용히 안 뜬다", got)
+	}
+	if left := tempLeftovers(t, r); len(left) > 0 {
+		t.Fatalf("성공한 갱신이 임시 파일을 남겼다: %v", left)
+	}
+}
+
+// TestGrafikBarSetupDoesNothingWhenAlreadyPointedHere 는 **멱등성**을 문다.
+//
+// ★★ 이것이 SessionStart 예산(hooks.json 의 timeout 5초)의 근거다 — 매 세션 시작마다
+// 도는 훅이라, 이미 맞을 때 아무것도 안 하는 것이 계약이다. 그리고 **매번 쓰면** 사용자의
+// settings.json 이 매 세션 새 inode 가 되어, 그 파일을 보는 다른 것들(에디터·dotfiles
+// 동기화·파일 감시자)이 매번 깨어난다.
+//
+// ★ `desired` 문자열을 시험이 손으로 만들지 않는다 — 그러면 스크립트의 형식을 복제하게 되고,
+// 형식이 밀리는 날 시험이 **틀린 채로 초록**이 된다. 대신 **두 번 돌린다**: 첫 회가 정답을 쓴다.
+func TestGrafikBarSetupDoesNothingWhenAlreadyPointedHere(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	first := runSetup(t, setupOpts{seed: seedJSON(`{"model":"opus"}`)})
+	if first.code != 0 {
+		t.Fatalf("첫 설치가 %d 로 끝났다.\nstderr=%s", first.code, first.stderr)
+	}
+	configured, err := os.ReadFile(first.target)
+	if err != nil {
+		t.Fatalf("첫 설치 결과를 못 읽었다: %v", err)
+	}
+
+	// 첫 회가 쓴 그대로를 다시 심고 두 번째를 돌린다.
+	second := runSetup(t, setupOpts{seed: seedJSON(string(configured))})
+	if second.code != 0 {
+		t.Fatalf("두 번째 설치가 %d 로 끝났다.\nstderr=%s", second.code, second.stderr)
+	}
+	if second.stdout != "" || second.stderr != "" {
+		t.Fatalf("이미 맞는데 말을 했다 — 조용해야 한다.\nstdout=%q\nstderr=%q\n"+
+			"매 세션 시작마다 도는 훅이다. 여기서 한 줄이 나오면 그 줄이 매 세션 나온다",
+			second.stdout, second.stderr)
+	}
+	again, err := os.ReadFile(second.target)
+	if err != nil {
+		t.Fatalf("두 번째 설치 결과를 못 읽었다: %v", err)
+	}
+	if string(again) != string(configured) {
+		t.Fatalf("이미 맞는데 파일이 바뀌었다.\n전:\n%s\n후:\n%s\n"+
+			"멱등이 아니면 5초 예산의 근거가 없고, 이 파일을 보는 것들이 매 세션 깨어난다",
+			configured, again)
+	}
+}
+
+// TestGrafikBarSetupRefusesToTouchInvalidJSON 은 **깨진 JSON 거부**를 문다.
+//
+// ★ 사용자가 settings.json 을 손으로 고치다 만 상태가 이것이다. 그때 이 스크립트가
+// 덮어쓰면 사용자는 **고치던 내용을 통째로** 잃는다 — 복구 경로가 없다.
+func TestGrafikBarSetupRefusesToTouchInvalidJSON(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	broken := "{\n  \"model\": \"opus\",\n  // 여기서 편집이 멈췄다\n"
+	r := runSetup(t, setupOpts{seed: seedJSON(broken)})
+	if r.code != 0 {
+		t.Fatalf("깨진 JSON 에 %d 로 끝났다 — 0 이어야 한다(훅은 세션을 방해하면 안 된다).\nstderr=%s", r.code, r.stderr)
+	}
+	after, err := os.ReadFile(r.target)
+	if err != nil {
+		t.Fatalf("돌린 뒤 파일을 못 읽었다: %v", err)
+	}
+	if string(after) != broken {
+		t.Fatalf("깨진 JSON 을 건드렸다.\n전:\n%s\n후:\n%s\n"+
+			"이 상태는 대개 **편집 중**이다. 덮어쓰면 사용자가 쓰던 것이 사라지고 되돌릴 길이 없다",
+			broken, after)
+	}
+	// ★★ 여기서 무는 것은 **원인을 적는가**이지 "무언가 적는가"가 아니다. 검증 관문을 통째로
+	// 떼도 변환 jq 가 대신 실패해 파일은 그대로 남고 "could not update settings.json" 이
+	// 나온다 — 위 두 단정만으로는 그것이 **초록으로 지나갔다**(변이 M8). 그러면 사용자는
+	// 자기 파일이 깨졌다는 사실을 못 듣고, 상태줄이 왜 안 뜨는지도 모른다.
+	//
+	// 이 문장은 **바로 위 시험(깨진 jq)과 한 쌍**이다: 저쪽은 이 문장이 나오면 안 되고,
+	// 여기는 나와야 한다. 둘이 같이 있어야 진단이 옳은 쪽을 가리킨다.
+	if !strings.Contains(r.stderr, "not valid JSON") {
+		t.Fatalf("건드리진 않았는데 **원인을 안 적었다**: stderr=%q\n"+
+			"파일이 깨졌다는 것을 여기서 안 말하면 사용자는 상태줄이 안 뜨는 이유를 영영 모르고,\n"+
+			"자기 settings.json 이 깨진 채로 남아 있다는 것도 모른다", r.stderr)
+	}
+}
+
+// TestGrafikBarSetupRollsBackAFailedWrite 는 **원자적 쓰기**를 문다.
+//
+// ★ 변환이 도중에 죽는 판(디스크·메모리·jq 자신)에서 원본이 반쪽으로 남으면 안 된다.
+// 스텁은 `jq -e .`(검증)는 통과시키고 `--arg`(변환)만 죽인다 — 그것이 **쓰는 순간의 실패**다.
+func TestGrafikBarSetupRollsBackAFailedWrite(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	real, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("jq 경로를 못 찾았다: %v", err)
+	}
+	// `jq -e .`(검증)는 통과시키고 `--arg`(변환)만 죽인다 — 그것이 **쓰는 순간의 실패**다.
+	dyingJQ := map[string]string{"jq": "#!/bin/sh\n" +
+		"for a in \"$@\"; do case \"$a\" in --arg) exit 5;; esac; done\n" +
+		"exec " + real + " \"$@\"\n"}
+	before := `{"model":"opus","permissions":{"allow":["Bash(ls:*)"]}}`
+
+	t.Run("설정이 있었다", func(t *testing.T) {
+		r := runSetup(t, setupOpts{seed: seedJSON(before), stubs: dyingJQ})
+		if r.code != 0 {
+			t.Fatalf("변환 실패에 %d 로 끝났다 — 0 이어야 한다.\nstderr=%s", r.code, r.stderr)
+		}
+		after, err := os.ReadFile(r.target)
+		if err != nil {
+			t.Fatalf("돌린 뒤 파일을 못 읽었다: %v", err)
+		}
+		if string(after) != before {
+			t.Fatalf("변환이 죽었는데 원본이 바뀌었다.\n전:\n%s\n후:\n%s\n"+
+				"쓰기 도중 실패는 **전부 아니면 전무**여야 한다 — 반쪽 settings.json 은 세션을 못 뜨게 한다",
+				before, after)
+		}
+		if left := tempLeftovers(t, r); len(left) > 0 {
+			t.Fatalf("되감기가 임시 파일을 남겼다: %v\n"+
+				"매 세션 시작마다 도는 훅이라 이것은 사용자의 설정 디렉토리에 **쌓인다**", left)
+		}
+	})
+
+	// ★★ 설정 파일이 **없던** 판. 여기가 없으면 "쓸 수 있는지 알기 전에 파일부터 만드는"
+	// 옛 순서가 초록으로 지나간다(변이 M4) — 그 순서는 만들어 놓고 "left unchanged" 라고
+	// 적었다. 위 깨진-jq 시험은 이 변이를 못 잡는다: 탐침에서 먼저 나가버려 여기까지 안 온다.
+	t.Run("설정이 없었다", func(t *testing.T) {
+		r := runSetup(t, setupOpts{stubs: dyingJQ})
+		if r.code != 0 {
+			t.Fatalf("변환 실패에 %d 로 끝났다 — 0 이어야 한다.\nstderr=%s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(r.target); err == nil {
+			raw, _ := os.ReadFile(r.target)
+			t.Fatalf("설치를 못 했는데 settings.json 을 만들어 놨다: %q\n"+
+				"stderr 는 \"left unchanged\" 라고 적는다 — 그 문장이 거짓이다.\n"+
+				"실패한 실행은 파일 시스템을 **찾은 그대로** 두고 나가야 한다", raw)
+		}
+		if left := tempLeftovers(t, r); len(left) > 0 {
+			t.Fatalf("되감기가 임시 파일을 남겼다: %v", left)
+		}
+	})
+}
+
+// TestGrafikBarSetupSwapsTheFileInsteadOfOverwritingIt 은 **원자적 쓰기**를 성공 경로에서 문다.
+//
+// ★★ 위 되감기 시험은 실패 경로만 본다. 성공 경로에서 `mv` 가 `cp` 로 바뀌면 —
+//
+//	· 사용자의 파일이 **제자리에서 잘렸다 다시 채워진다**. 그 사이에 세션이 시작하면
+//	  반쪽 JSON 을 읽고, 그 창은 설정 없이 뜬다
+//	· 임시 파일이 `~/.claude/settings.json.a1B2c3` 로 **매 갱신마다 쌓인다**
+//
+// 둘 다 화면에 안 뜬다. 변이 M10 이 그 사각을 드러냈다 — 그때는 아무 시험도 안 물었다.
+//
+// ★ 무는 방법은 **파일이 바뀌었는가**다: rename 은 새 파일을 그 이름에 앉히므로 inode 가
+// 갈리고, 제자리 덮어쓰기는 안 갈린다. `os.SameFile` 이 그것을 이식 가능하게 답한다
+// (syscall.Stat_t 를 직접 뒤지면 GOOS=windows vet 이 깨진다).
+func TestGrafikBarSetupSwapsTheFileInsteadOfOverwritingIt(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	r := runSetup(t, setupOpts{seed: seedJSON(`{"model":"opus"}`), keepBefore: true})
+	if r.code != 0 {
+		t.Fatalf("%d 로 끝났다.\nstderr=%s", r.code, r.stderr)
+	}
+	after, err := os.Stat(r.target)
+	if err != nil {
+		t.Fatalf("돌린 뒤 파일을 못 봤다: %v", err)
+	}
+	if os.SameFile(r.before, after) {
+		t.Fatalf("갱신이 **제자리 덮어쓰기**였다 — 원자적 교체여야 한다.\n" +
+			"제자리로 쓰면 그 순간에 시작한 세션이 반쪽 JSON 을 읽고, 그 창은 설정 없이 뜬다.\n" +
+			"임시 파일에 쓰고 `mv` 로 앉혀라")
+	}
+	if left := tempLeftovers(t, r); len(left) > 0 {
+		t.Fatalf("갱신이 임시 파일을 남겼다: %v\n"+
+			"매 세션 시작마다 도는 훅이라 사용자의 설정 디렉토리에 **쌓인다**", left)
+	}
+}
+
+// TestGrafikBarSetupNeverBlamesSettingsForABrokenJQ 는 jq 가 못 돌 때 **무고하지 않는지** 본다.
+//
+// ★★ 이것이 이 항목의 뿌리다. `command -v jq` 는 **이름만** 본다. 이름은 있는데 못 도는
+// jq(깨진 설치·아키텍처 불일치·실행 권한 없음)를 만나면 스크립트는 검증 단계로 들어가고,
+// 거기서 `jq -e . settings.json` 이 실패한다 — 그리고 그 실패를 **사용자 파일의 죄로 적는다**:
+// "~/.claude/settings.json is not valid JSON". 파일은 멀쩡하다.
+//
+// ★ 이 오진이 나쁜 이유는 화면에 남는 문장이 **사용자에게 행동을 지시하기 때문**이다.
+// 멀쩡한 settings.json 을 의심하게 만들고, 그 다음 수순은 그것을 지우거나 새로 쓰는 것이다.
+// 그러면 이 스크립트가 **직접 건드리지 않고** 설정을 파괴한 것이 된다.
+//
+// 옆 스크립트(`statusline.sh`)는 같은 자리를 이미 `printf '{}' | jq -e .` 로 넘겼다.
+// 이 관문이 그 규율을 설치 경로에도 잠근다.
+func TestGrafikBarSetupNeverBlamesSettingsForABrokenJQ(t *testing.T) {
+	if !canLintShell(t) {
+		return
+	}
+	before := `{"model":"opus","permissions":{"allow":["Bash(ls:*)"]}}`
+	for _, c := range []struct {
+		name string
+		opts setupOpts
+	}{
+		{"jq 가 PATH 에 없다", setupOpts{seed: seedJSON(before), noJQ: true}},
+		{"jq 는 있는데 못 돈다", setupOpts{seed: seedJSON(before),
+			stubs: map[string]string{"jq": "#!/bin/sh\nexit 127\n"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := runSetup(t, c.opts)
+			if r.code != 0 {
+				t.Fatalf("%s 에 %d 로 끝났다 — 0 이어야 한다.\nstderr=%s", c.name, r.code, r.stderr)
+			}
+			if strings.Contains(r.stderr, "not valid JSON") || strings.Contains(r.stdout, "not valid JSON") {
+				t.Fatalf("%s 인데 **사용자 파일을 무고했다**.\nstdout=%q\nstderr=%q\n"+
+					"파일은 멀쩡하고 못 도는 것은 jq 다. 이 문장은 사용자에게 멀쩡한 설정을\n"+
+					"의심하고 손대라고 지시한다 — 스크립트가 직접 안 건드리고 설정을 파괴하는 경로다.\n"+
+					"`command -v jq` 대신 **돌려 보고** 판정해라(statusline.sh 가 이미 그렇게 한다)",
+					c.name, r.stdout, r.stderr)
+			}
+			after, err := os.ReadFile(r.target)
+			if err != nil {
+				t.Fatalf("돌린 뒤 파일을 못 읽었다: %v", err)
+			}
+			if string(after) != before {
+				t.Fatalf("%s 인데 파일이 바뀌었다.\n전:\n%s\n후:\n%s", c.name, before, after)
+			}
+		})
+	}
+	// jq 가 못 도는데 settings.json 이 아예 없던 판. 스크립트는 아무것도 안 만들어야 한다.
+	t.Run("jq 가 못 도는데 설정 파일이 없다", func(t *testing.T) {
+		r := runSetup(t, setupOpts{stubs: map[string]string{"jq": "#!/bin/sh\nexit 127\n"}})
+		if r.code != 0 {
+			t.Fatalf("%d 로 끝났다 — 0 이어야 한다.\nstderr=%s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(r.target); err == nil {
+			raw, _ := os.ReadFile(r.target)
+			t.Fatalf("설치를 못 하면서 settings.json 을 만들어 놨다: %q\n"+
+				"stderr 는 \"left unchanged\" 라고 적는다 — 그 문장이 거짓이다.\n"+
+				"쓸 수 있는지 **먼저** 확인하고, 못 하면 파일 시스템을 안 건드려야 한다", raw)
+		}
+	})
+}
+
+// TestGrafikBarSetupWritesThroughASymlink 는 **심링크를 안 끊는지** 본다.
+//
+// ★★ dotfiles 로 설정을 관리하면 `~/.claude/settings.json` 이 저장소 안 파일을 가리키는
+// **링크**다. `mv tmp settings` 는 그 링크를 **정규 파일로 갈아치운다** — 링크가 사라지고,
+// 저장소의 진짜 파일은 옛 내용 그대로 남는다.
+//
+// 그 다음이 이 결함의 실물이다: 사용자는 상태줄이 뜨니 잘 된 줄 알고, dotfiles 저장소는
+// 그날부터 이 파일의 변경을 **하나도 못 받는다**. 다음 머신에서 설정을 복원하면 그 사이의
+// 모든 변경이 없다. 화면에는 아무것도 안 뜬다 — 이 레포가 계속 쫓는 그 부류다.
+func TestGrafikBarSetupWritesThroughASymlink(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	// ★ 절대·상대 **둘 다** 돈다. 상대 링크(`ln -s ../dotfiles/settings.json`)는 링크가
+	// 있는 디렉토리 기준으로 풀어야 하는데, 그것을 안 하면 `$PWD` 기준으로 풀려 엉뚱한
+	// 곳에 쓰거나 아무것도 못 찾는다 — 절대 링크만 재면 그 갈래가 **안 닿는다**.
+	for _, kind := range []string{"absolute", "relative"} {
+		t.Run(kind, func(t *testing.T) {
+			r := runSetup(t, setupOpts{symlink: kind, seed: seedJSON(`{"model":"opus"}`)})
+			if r.code != 0 {
+				t.Fatalf("%d 로 끝났다 — 0 이어야 한다.\nstderr=%s", r.code, r.stderr)
+			}
+			fi, err := os.Lstat(r.settings)
+			if err != nil {
+				t.Fatalf("돌린 뒤 settings.json 을 못 봤다: %v", err)
+			}
+			if fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s 링크가 **정규 파일로 갈렸다**.\n"+
+					"dotfiles 저장소의 진짜 파일(%s)은 옛 내용 그대로 남고, 그날부터 이 파일의\n"+
+					"변경을 하나도 못 받는다. 상태줄은 떠서 사용자는 잘 된 줄 안다 —\n"+
+					"쓰기 전에 링크를 따라가라", kind, r.target)
+			}
+			after := readSettings(t, r)
+			if got := statusLineCommand(after); !strings.Contains(got, filepath.Join("grafik-bar", "scripts", "statusline.sh")) {
+				t.Fatalf("%s 링크 대상에 설정이 안 들어갔다: %q", kind, got)
+			}
+			if m, ok := after["model"].(string); !ok || m != "opus" {
+				t.Fatalf("%s 링크 대상의 기존 키가 사라졌다: %#v", kind, after["model"])
+			}
+		})
+	}
+}
+
+// TestGrafikBarSetupLeavesSettingsUnwritableByOthers 는 쓰고 난 뒤의 **모드**를 문다.
+//
+// ★ 이 파일은 `~/.claude/.credentials.json` 옆에 산다. 여기 무는 것은 "모드를 보존하는가"가
+// 아니라 — 그것은 이식 가능한 한 줄이 없어서 **일부러 안 한다**(판단 본문 참고) —
+// **남이 쓸 수 있게 열리지 않는가**다. 값이 아니라 불변식을 무는 자리다.
+func TestGrafikBarSetupLeavesSettingsUnwritableByOthers(t *testing.T) {
+	if !canRunSetup(t) {
+		return
+	}
+	r := runSetup(t, setupOpts{seed: seedJSON(`{"model":"opus"}`), seedMode: 0o644})
+	if r.code != 0 {
+		t.Fatalf("%d 로 끝났다.\nstderr=%s", r.code, r.stderr)
+	}
+	fi, err := os.Stat(r.target)
+	if err != nil {
+		t.Fatalf("돌린 뒤 파일을 못 봤다: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		t.Fatalf("설치가 settings.json 을 %04o 로 남겼다 — 그룹·타인 쓰기가 열렸다.\n"+
+			"이 파일은 .credentials.json 옆에 살고, 여기 쓸 수 있으면 statusLine 의\n"+
+			"`command` 로 임의 명령이 매 렌더 돈다", perm)
 	}
 }
