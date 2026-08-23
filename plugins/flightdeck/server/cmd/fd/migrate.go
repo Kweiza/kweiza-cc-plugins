@@ -27,16 +27,35 @@ import (
 // ★ **원본에는 한 바이트도 쓰지 않는다.** 두 레포에서 살아 있는 병렬 세션이 일하고 있고,
 // 원본을 안 건드리는 것이 위 되돌리기가 성립하는 유일한 근거다.
 
-// openDB 는 이관용으로 DB 를 연다. serve 와 같은 자리를 고른다.
-func openDB(env func(string) (string, bool), log *slog.Logger, dbFlag string) (*store.Store, string, error) {
+// resolveDBPath 는 --db 플래그와 환경에서 DB 자리를 정한다. serve 와 같은 규칙이다.
+//
+// ★ openDB 와 runMigrate 가 나눠 쓴다. 두 벌로 두면 `fd migrate` 가 올린 DB 와 이관이 여는
+// DB 가 갈리는데, 그 어긋남은 "적용했다는데 서버가 못 연다" 로만 나타나고 원인이 안 보인다.
+func resolveDBPath(env func(string) (string, bool), dbFlag string) string {
 	path := strings.TrimSpace(dbFlag)
 	if path == "" {
 		home, _ := os.UserHomeDir()
 		_, derr := os.Stat("/data")
 		path = DefaultDBPath(env, home, derr == nil)
 	}
+	return path
+}
+
+// openDB 는 이관용으로 DB 를 연다. serve 와 같은 자리를 고른다.
+//
+// ★ migrate 인자로 **적용 여부를 부르는 쪽이 고른다.** 적용이 기동에서 분리된 뒤(설계 §7 ①)
+// Open 은 스키마가 안 맞는 DB 를 거절하는데, 이관은 갓 만든 **빈 파일**을 대상으로 하는 일이
+// 많아서 그대로 두면 되쓰기가 영영 못 들어간다. 반대로 내보내기는 **읽는 명령**이라 여기서
+// 적용하면 읽기가 스키마를 바꾸는 셈이 된다 — 그 둘을 한 값으로 접으면 한쪽이 반드시 틀린다.
+func openDB(env func(string) (string, bool), log *slog.Logger, dbFlag string, migrate bool) (*store.Store, string, error) {
+	path := resolveDBPath(env, dbFlag)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, path, fmt.Errorf("DB 디렉토리를 만들지 못했다(%q): %w", path, err)
+	}
+	if migrate {
+		if err := store.Migrate(context.Background(), path, log); err != nil {
+			return nil, path, fmt.Errorf("DB 적용에 실패했다(%q): %w", path, err)
+		}
 	}
 	st, err := store.OpenWithLogger(path, log)
 	if err != nil {
@@ -129,7 +148,7 @@ func (a *App) runImport(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 
-	st, path, err := openDB(a.env, a.log, *dbPath)
+	st, path, err := openDB(a.env, a.log, *dbPath, true)
 	if err != nil {
 		a.log.Error("이관용 DB 를 열지 못했다", "error", err.Error())
 		fmt.Fprintf(out, "%s\n", err)
@@ -253,7 +272,7 @@ func (a *App) runExport(ctx context.Context, args []string, out io.Writer) int {
 		return a.exportJudgments(ctx, *dbPath, *outDir, out)
 	}
 
-	st, path, err := openDB(a.env, a.log, *dbPath)
+	st, path, err := openDB(a.env, a.log, *dbPath, false)
 	if err != nil {
 		a.log.Error("되쓰기용 DB 를 열지 못했다", "error", err.Error())
 		fmt.Fprintf(out, "%s\n", err)
@@ -403,7 +422,7 @@ func (a *App) importJudgments(ctx context.Context, dbFlag, fromDir string, apply
 		return 0
 	}
 
-	st, path, err := openDB(a.env, a.log, dbFlag)
+	st, path, err := openDB(a.env, a.log, dbFlag, true)
 	if err != nil {
 		a.log.Error("되쓰기용 DB 를 열지 못했다", "error", err.Error())
 		fmt.Fprintf(out, "%s\n", err)

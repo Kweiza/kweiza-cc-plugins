@@ -1,7 +1,10 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -151,6 +154,23 @@ var destructiveExempt = map[int]exemption{
 			"Beat 하나뿐이라 그것으로 0이 된다. 판올림 전 VACUUM INTO 백업이 자동으로 뜬다. " +
 			"근거 전문은 006 머리말에 있다.",
 	},
+	// 011 · 죽은 표 item_dependents 를 걷는다(DROP TABLE).
+	//
+	// ★ 005·006·008·010 의 사유를 복사하면 안 된다 — 저쪽은 전부 **데이터**가 사라지는 조작이고
+	// 근거도 "그 값이 재구성된다"였다. 여기는 **구조**가 사라지고, 그래서 근거의 축이 다르다:
+	// 값은 이미 010 이 비워서 지울 것이 없고, 이 예외가 서는 자리는 "실패해도 되돌아온다"다.
+	11: {
+		ops: []op{opDropTable},
+		why: "지우는 것은 **빈 표 하나**다 — 010 이 값을 비웠고(143행→0행) 읽는 문·쓰는 문이 " +
+			"모두 0이라, 이 DROP 이 없애는 것은 데이터가 아니라 구조뿐이다. 그리고 이 회차에 " +
+			"설계 §7 처방 ⒜ 가 이행돼 **적용이 기동에서 분리됐다**: store.Open 은 어떤 적용도 " +
+			"하지 않고 스키마가 안 맞으면 거절하며, 적용 실패는 `fd migrate` 한 명령 안에서 끝나고 " +
+			"`fd migrate --rollback` 이 판올림 전 백업으로 되돌린다. 즉 이 조작이 실패해도 서버가 " +
+			"크래시루프에 빠지지 않는다 — neverExempt 가 opDropTable 을 막던 상황이 구조적으로 " +
+			"성립하지 않는다. 값이 다시 필요하면 item_after 에서 재계산된다(011 머리말 ⒝, " +
+			"복원되는 것은 행 집합이 아니라 함수다). 그 전제는 " +
+			"TestMigrationApplyIsSeparatedFromStartup 이 지킨다.",
+	},
 	// 008 · landing_queue_resource 백필(INSERT … SELECT).
 	//
 	// ★ 005·006 의 사유(읽는 쪽이 이미 배제/오염된 행)를 복사하면 안 된다 — 이 이행은
@@ -197,7 +217,25 @@ var destructiveExempt = map[int]exemption{
 // 전자는 신규 설치와 판올림이 양쪽 다 그 증분을 돌아 스키마가 똑같이 줄기 때문이고,
 // 후자는 증분 텍스트의 CREATE TABLE 만 세기 때문이다. 즉 그 안전망은 없었다.
 // 없는 안전망을 믿는 대신 여기서 막는다.
-var neverExempt = []op{opDropTable, opDropColumn, opRename}
+//
+// ★ **opDropTable 은 2026-08-23 에 이 목록에서 빠졌다.** 그것을 막던 진짜 근거는 조작의
+// 이름이 아니라 **그 조작이 도는 자리**였다 — 적용이 store.Open() 안에 있었고 그것이
+// `fd serve` 기동 경로라, 나쁜 DROP 은 "서버가 안 뜬다"로 나타나고 고칠 수단도 같은
+// 바이너리를 다시 띄우는 것뿐이었다(설계 §7 이 크래시루프라 부른 모양).
+//
+// 이 회차에 §7 처방 ⒜ 가 이행되면서 그 전제가 사라졌다: store.Open 은 **어떤 적용도 하지
+// 않고**, 적용은 `fd migrate` 안에서만 일어나며 실패는 그 한 명령 안에서 끝난다. 그리고
+// `fd migrate --rollback` 이 판올림 전 백업으로 되돌린다. 구조가 사라지는 조작이 위험한 것은
+// 되돌릴 수 없어서인데, 이제 되돌리는 명령이 있다.
+//
+// ★ **그 전제는 이 파일이 지킨다** — TestMigrationApplyIsSeparatedFromStartup.
+// 누가 적용을 store.Open 으로 되돌리면 그 시험이 빨개지고, 그것이 곧 여기서 opDropTable 을
+// 뺀 근거가 무너졌다는 통지다. 근거가 주석에만 있으면 아무도 그 순간을 안 본다 —
+// 이 파일이 이미 한 번 그 방식으로 틀렸다(위 문단의 "다른 시험이 본다").
+//
+// ★ opDropColumn·opRename 은 **그대로 남는다.** 이 회차가 산 근거는 "되돌릴 수 있다" 하나이고,
+// 그것을 실제로 보인 것은 표 하나뿐이다. 목록은 근거가 선 만큼만 준다.
+var neverExempt = []op{opDropColumn, opRename}
 
 // exemptReason 은 증분 to 가 조작 o 를 써도 되는지와 그 사유를 낸다. 순수 함수다.
 //
@@ -362,7 +400,7 @@ func TestBundledMigrationsAreAdditive(t *testing.T) {
 				"였다. 파괴적 증분이 들어온 지금 그 근거가 사라졌다.\n\n"+
 				"둘 중 하나를 하고 그 근거를 §7 과 store.go 주석에 함께 적어라:\n"+
 				"  (a) 적용을 기동에서 분리한다 — fd migrate [--to N] / fd migrate --rollback.\n"+
-				"      §7 이 이 순간을 위해 미리 이름 붙여 둔 처방이다. 그 명령은 아직 없다.\n"+
+				"      §7 이 이 순간을 위해 미리 이름 붙여 둔 처방이고, 2026-08-23 에 지어졌다.\n"+
 				"  (b) 이 증분이 왜 되돌릴 수 있는지를 destructiveExempt 에 **사유와 함께** 올린다.\n"+
 				"      사유가 비면 예외로 안 쳐 준다. neverExempt 에 오른 조작은 (b) 로도 못 연다.\n\n"+
 				"어느 쪽이든 **문서와 코드를 갈린 채로 두지 마라.**",
@@ -401,9 +439,15 @@ func TestExemptionMechanism(t *testing.T) {
 		{"사유가 공백뿐이어도 예외가 아니다",
 			map[int]exemption{5: {ops: []op{opDeleteFrom}, why: "   \n\t"}}, 5, opDeleteFrom, false},
 
+		// ★ DROP TABLE 은 2026-08-23 에 **열렸다.** neverExempt 에서 빠졌으므로 사유가 있으면
+		//   통과한다 — 그 근거는 적용이 기동에서 분리됐다는 것이고,
+		//   TestMigrationApplyIsSeparatedFromStartup 이 그 전제를 지킨다.
+		{"DROP TABLE 은 사유가 있으면 통과한다",
+			map[int]exemption{5: {ops: []op{opDropTable}, why: "사유는 있다"}}, 5, opDropTable, true},
+		{"DROP TABLE 도 사유가 없으면 거절한다",
+			map[int]exemption{5: {ops: []op{opDropTable}, why: "   "}}, 5, opDropTable, false},
+
 		// ★ 예외로도 못 여는 것들. 데이터가 아니라 **구조**가 사라지는 조작이다.
-		{"DROP TABLE 은 예외에 올려도 거절한다",
-			map[int]exemption{5: {ops: []op{opDropTable}, why: "사유는 있다"}}, 5, opDropTable, false},
 		{"DROP COLUMN 은 예외에 올려도 거절한다",
 			map[int]exemption{5: {ops: []op{opDropColumn}, why: "사유는 있다"}}, 5, opDropColumn, false},
 		{"RENAME 은 예외에 올려도 거절한다",
@@ -456,5 +500,63 @@ func TestNeverExemptOpsAreActuallyDetected(t *testing.T) {
 				"(찾은 것: %v) — op↔정규식 대응이 어긋나 금지 목록이 없는 조작을 막고 있을 수 있다",
 				banned, sql, found)
 		}
+	}
+}
+
+// TestMigrationApplyIsSeparatedFromStartup 은 neverExempt 에서 opDropTable 을 뺀 **근거**를 지킨다.
+//
+// ★ 이 시험이 여기 있는 이유. 같은 사실을 open_refuses_migration_test.go 도 보지만, 그 파일은
+// "Open 의 행동"을 시험하는 자리이고 여기는 **"예외 목록의 근거"** 를 시험하는 자리다. 근거와
+// 그 근거가 여는 문이 다른 파일에 있으면, 근거가 무너질 때 무엇이 함께 무너지는지가 안 보인다.
+// 이 파일의 옛 주석이 정확히 그 방식으로 틀렸다 — "다른 시험이 본다"고 적어 뒀는데 안 봤다.
+//
+// 빨개졌다면 고칠 것은 이 시험이 아니다. 적용이 기동 경로로 돌아간 것이고, 그러면
+// destructiveExempt[11] 의 DROP TABLE 예외가 근거를 잃는다.
+func TestMigrationApplyIsSeparatedFromStartup(t *testing.T) {
+	log := testLogger()
+
+	// ① 빈 자리에 DB 를 만들지 않는다.
+	fresh := filepath.Join(t.TempDir(), "fd.db")
+	if s, err := OpenWithLogger(fresh, log); err == nil {
+		s.Close()
+		t.Error("Open 이 빈 자리에 DB 를 만들었다 — 신규 설치 경로가 기동 안에 있다. " +
+			"neverExempt 에서 opDropTable 을 뺀 근거가 무너진다")
+	}
+
+	// ② 판올림이 필요한 DB 를 적용하지 않는다.
+	//    ★ 여기가 진짜 축이다. ①만 보면 "빈 파일을 안 만든다"까지만 지켜지고,
+	//      기존 DB 에 증분을 얹는 경로는 그대로 열어 둔 채로도 초록이 된다.
+	//
+	//    ★ **진짜 1판 DB 를 만든다.** 앞선 판은 최신까지 올린 뒤 schema_version 만 지웠는데,
+	//      그러면 객체는 최신 모양인 채 버전만 1이라 판정이 MigrateUpgrade 가 아니라
+	//      MigrateReject(재적용 거절)로 빠진다 — 적용을 기동에 되돌리는 변이를 심어도
+	//      **다른 이유로** 거절돼서 이 시험이 초록이었다(2026-08-23 변이로 확인).
+	//      그 함정을 피하는 수단이 이 회차에 생긴 --to 다.
+	old := filepath.Join(t.TempDir(), "old.db")
+	mustMigrateTo(t, old, BaseSchemaVersion)
+
+	// ── 대조가 성립했는지 먼저 단정한다 ──
+	// 이 DB 의 판정이 정말 "증분을 얹어야 한다"여야 아래 단정이 무언가를 지킨다.
+	hasTable, dbVersion, objects, perr := func() (bool, int, int, error) {
+		raw, err := sql.Open("sqlite", dsn(old))
+		if err != nil {
+			return false, 0, 0, err
+		}
+		defer raw.Close()
+		return readMigrationState(context.Background(), raw)
+	}()
+	if perr != nil {
+		t.Fatalf("전제 확인 실패: %v", perr)
+	}
+	if plan := PlanMigration(hasTable, dbVersion, objects, SchemaVersion); plan.Action != MigrateUpgrade {
+		t.Fatalf("전제가 깨졌다 — 이 DB 의 판정이 %q 다(기대 upgrade): %s\n"+
+			"이 상태가 아니면 아래 단정은 '적용을 안 한다'가 아니라 다른 거절을 볼 뿐이다",
+			plan.Action, plan.Reason)
+	}
+
+	if s, err := OpenWithLogger(old, log); err == nil {
+		s.Close()
+		t.Error("Open 이 판올림이 필요한 DB 를 열었다 — 적용이 기동 경로에 남아 있다. " +
+			"neverExempt 에서 opDropTable 을 뺀 근거가 무너진다")
 	}
 }

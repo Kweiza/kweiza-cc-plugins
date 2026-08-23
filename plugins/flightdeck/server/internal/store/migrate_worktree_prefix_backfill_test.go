@@ -22,6 +22,7 @@ func TestMigration006DeletesWorktreePrefixedFootprints(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	mustMigrate(t, path)
 	s, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("Open 실패: %v", err)
@@ -69,7 +70,7 @@ func TestMigration006DeletesWorktreePrefixedFootprints(t *testing.T) {
 	// 007 증분(project.pinned_at·archived_at)이 prev(5) 뒤에 온다(dropNonIdempotentColumns
 	// 참고) — 위의 첫 OpenWithLogger 가 이미 SchemaVersion 까지 올려 그 컬럼을 물리적으로
 	// 만들어 뒀으므로, 안 걷으면 재열기가 007 을 다시 돌려다 죽는다.
-	dropNonIdempotentColumns(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
+	undoNonIdempotentMigrations(t, func(q string) (sql.Result, error) { return s.db.Exec(q) })
 	// 008 증분(landing_queue_resource)이 prev(5) 뒤에 온다 — 위의 첫 OpenWithLogger 가
 	// 이미 SchemaVersion 까지 올려 그 표를 물리적으로 만들어 뒀으므로, 안 걷으면 재열기가
 	// 008 을 다시 돌려다 "table already exists" 로 죽는다.
@@ -111,6 +112,7 @@ func TestMigration006DeletesWorktreePrefixedFootprints(t *testing.T) {
 	}
 
 	// ── 판올림 ──
+	mustMigrate(t, path)
 	s2, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("판올림 Open 실패: %v", err)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -108,6 +109,10 @@ func TestServiceNameIsNotDuplicatedAcrossLayers(t *testing.T) {
 		With("service.name", "flightdeck")
 
 	dir := t.TempDir()
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dir+"/fd.db", nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	st, err := store.OpenWithLogger(dir+"/fd.db", log)
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)

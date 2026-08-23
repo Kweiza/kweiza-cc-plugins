@@ -224,25 +224,8 @@ func (s *Store) SetProjectView(ctx context.Context, id string, pinned, archived 
 // session 을 안 본다 — item 삭제 CASCADE 하나로 충분하고, claim 과 달리 session 삭제
 // 순서에 안 걸린다.
 //
-// ★ 뒤의 둘(item_dependents · pick_eval)은 FK 가 아니라 컬럼으로만 묶인다. FK 가 안 우니
+// ★ 뒤의 것(pick_eval)은 FK 가 아니라 컬럼으로만 묶인다. FK 가 안 우니
 // 안 지워도 삭제는 성공하고, 그래서 더 위험하다 — 조용히 고아 행이 남는다.
-// (item_dependents 는 죽은 표라 지금은 늘 0행이지만 목록에서 빼지 않는다 — 이 목록은
-// 아래 ★ 가 말하듯 살아 있는 스키마와 기계 대조되고, 그 대조의 기준은 project 컬럼의
-// 유무이지 표의 생사가 아니다.)
-//
-// ★ judgment 는 여기 있지만 **지우지 않는다**. judgment_no_delete 트리거가 원리적으로
-// 막는다(schema.sql). 그래서 RemoveProject 는 판단이 하나라도 있으면 거절한다.
-//
-// ★ event 는 여기 없다. event.project 는 FK 가 아니라 그냥 컬럼이고(schema.sql 의 그 자리),
-// 프로젝트가 사라져도 남는다 — 그것이 옳다. "이런 프로젝트가 있었고 언제 지워졌다"가
-// 원장에 남는 유일한 길이다. (ProjectRefCounts 는 이 표를 별도 질의로 여전히 센다 —
-// 안 세는 것이 아니라 삭제 순서 목록에 안 둘 뿐이다.)
-//
-// ★ 이 목록이 project 컬럼을 가진 표 전부를 실제로 덮는지는 사람이 손으로 대조하지
-// 않는다 — TestProjectRefTablesCoverEveryProjectColumn(project_ref_counts_test.go)이
-// 살아 있는 DB 의 스키마(sqlite_master + PRAGMA table_info)를 읽어 기계로 대조한다.
-// landing_queue 가 이 목록에서 처음에 빠졌던 것도 schema.sql 을 정규식으로 읽는 방식으로는
-// 못 잡았을 결함이다(그 표는 증분에만 있다) — 그 시험이 실제 DB 를 보는 이유가 그것이다.
 var projectRefTables = []string{
 	"session_workspace",
 	"landing_queue",
@@ -256,7 +239,6 @@ var projectRefTables = []string{
 	"judgment",
 	"snapshot",
 	"counter",
-	"item_dependents",
 	"pick_eval",
 }
 

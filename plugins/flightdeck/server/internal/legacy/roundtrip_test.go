@@ -19,7 +19,12 @@ import (
 
 func applyFixture(t *testing.T) (*store.Store, ImportPlan) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp1 := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp1, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	st, err := store.Open(dbp1)
 	if err != nil {
 		t.Fatalf("DB 를 열지 못했다: %v", err)
 	}

@@ -48,6 +48,10 @@ func TestServeSkipsDeployNoteWhenBindFails(t *testing.T) {
 	// 증거를 하나 더 단정한다 — serve.go 의 Listen 실패 갈래에서만 남기는
 	// "서버를 띄우지 못했다" 로그 레코드다. 그 갈래는 api.Serve 도 ledgerJob.Run 도 안 뜨는
 	// 단일 고루틴이라 버퍼 동기화가 필요 없다.
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — runServe 가 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	var logs bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logs, nil))
 

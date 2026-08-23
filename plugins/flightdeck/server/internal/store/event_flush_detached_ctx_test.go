@@ -22,7 +22,9 @@ import (
 // 즉 **끊긴 시도일수록 원장에 안 남았다** — 남겨야 할 이유가 가장 큰 것이 정확히 그것이다.
 
 func TestFlushDeferredSurvivesCancelledTxCtx(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, err := Open(dbp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +114,9 @@ func TestDeferredFlushBudgetExceedsBusyTimeout(t *testing.T) {
 // 그래서 종료 선언 수를 쓰는 표면의 "하한이다" 단서는 이 수정 뒤에도 못 뗀다.
 // 이 시험이 그 사실을 추론이 아니라 관측으로 둔다.
 func TestTxBeginFailureLeavesNothingReserved(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, err := Open(dbp)
 	if err != nil {
 		t.Fatal(err)
 	}

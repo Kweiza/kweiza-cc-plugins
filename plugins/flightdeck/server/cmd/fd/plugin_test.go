@@ -1178,3 +1178,28 @@ func TestContainerFilesKeepTheDesignedCoordinates(t *testing.T) {
 			"그것은 한 머신의 관습이고, 그 기본값 때문에 다른 머신에서 등록 7건 중 6건이 파생 불능이었다")
 	}
 }
+
+// 적용이 기동에서 분리된 뒤(설계 §7 ①) **컨테이너는 두 단계다.**
+//
+// ★ 이 시험이 없으면 갱신이 조용히 깨진다. store.Open 이 더는 적용하지 않으므로, one-shot
+// 단계가 빠진 compose 는 `up -d --build` 뒤에 서버가 "스키마가 안 맞는다" 로 죽고 restart
+// 정책이 그것을 무한히 되풀이한다 — §7 이 크래시루프라 부른 바로 그 모양이 **다른 이유로**
+// 되살아난다. 적용을 뗀 회차가 이 자리를 함께 안 고치면 그렇게 된다.
+func TestComposeAppliesMigrationsInASeparateStepBeforeServing(t *testing.T) {
+	root := pluginRoot(t)
+	cf, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatalf("compose.yaml 이 없다: %v", err)
+	}
+	// ★ **낱말이 아니라 설정을 본다.** 처음 판은 "service_completed_successfully" 라는
+	//   문자열만 찾았는데, 이 파일은 그 낱말을 주석에서도 쓴다 — 변이로 확인했다(2026-08-23):
+	//   설정을 service_started 로 바꿔도 주석이 시험을 통과시켰다. 약한 시험과 안 닿은 시험은
+	//   똑같이 초록이다.
+	mustContain(t, "compose.yaml", string(cf),
+		// one-shot 이 실제로 그 명령을 돈다.
+		`command: ["/usr/local/bin/fd", "migrate"`,
+		// 서버는 그것이 **성공으로 끝난 뒤에만** 뜬다. 단순 depends_on 은 "시작됐다"까지만
+		// 보므로, 적용이 실패해도 서버가 뜬다 — 그러면 이 단계를 둔 의미가 없다.
+		"condition: service_completed_successfully",
+	)
+}

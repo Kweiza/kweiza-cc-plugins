@@ -19,7 +19,12 @@ import (
 // 적어야 한다. 시험 바이너리도 실행 파일이므로 이 경로가 그대로 돈다.
 func TestNoteBuildObservesRealBinaryOnce(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp1 := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbp1, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
+	st, err := store.Open(dbp1)
 	if err != nil {
 		t.Fatalf("DB 를 못 열었다: %v", err)
 	}

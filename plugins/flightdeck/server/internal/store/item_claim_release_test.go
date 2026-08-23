@@ -11,7 +11,9 @@ import (
 )
 
 func TestClosingAnItemReleasesItsClaim(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	_ = s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"})
@@ -41,7 +43,9 @@ func TestClosingAnItemReleasesItsClaim(t *testing.T) {
 // LiveClaim 은 살아 있는 선점만 낸다 — GetClaim(이력도 냄)과 갈리는 지점이 정체 확정의
 // 전부다: 반납된 행을 살아 있다고 내면 회수가 옛 점유자를 정체로 적는다.
 func TestLiveClaimDistinguishesLiveFromReleasedAndMissing(t *testing.T) {
-	s, _ := Open(filepath.Join(t.TempDir(), "fd.db"))
+	dbp := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, dbp)
+	s, _ := Open(dbp)
 	defer s.Close()
 	ctx := context.Background()
 	_ = s.UpsertProject(ctx, model.Project{ID: "p", Path: "/p", DefaultBranch: "main"})

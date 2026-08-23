@@ -95,6 +95,10 @@ func TestLedgerDataUnchangedIgnoresManifest(t *testing.T) {
 func TestLedgerBackupOnceWritesThenSkipsThenWrites(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	st, err := store.OpenWithLogger(dbPath, quietLog())
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)
@@ -188,6 +192,10 @@ func TestLedgerBackupStatusOfDoesNotFoldNeverRanIntoEpoch(t *testing.T) {
 func TestLedgerBackupJobRemembersItsLastTick(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	st, err := store.OpenWithLogger(dbPath, quietLog())
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)
@@ -339,6 +347,10 @@ func TestCommitLedgerGenerationOnlyOnRealChange(t *testing.T) {
 func TestLedgerBackupJobPushesToJournalEvenWhenFilesUnchanged(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "fd.db")
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("DB 적용 실패: %v", err)
+	}
 	st, err := store.OpenWithLogger(dbPath, quietLog())
 	if err != nil {
 		t.Fatalf("DB 열기 실패: %v", err)

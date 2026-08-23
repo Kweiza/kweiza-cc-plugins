@@ -108,7 +108,8 @@ func TestMoveItemCarriesEveryRowKeyedByProject(t *testing.T) {
 		t.Error("원 프로젝트에 항목이 그대로 남아 있다")
 	}
 	// 딸린 행 — 옛 자리에 0건, 새 자리에 그대로.
-	for _, tbl := range []string{"claim", "item_after", "item_dependents", "job"} {
+	// ★ item_dependents 는 증분 011 이 표째 걷었다 — 볼 표가 없다.
+	for _, tbl := range []string{"claim", "item_after", "job"} {
 		if n := countIn(t, s, tbl, "from-proj", "it-1"); n != 0 {
 			t.Errorf("%s 에 옛 프로젝트 행이 %d건 남았다 — 조용한 고아다", tbl, n)
 		}

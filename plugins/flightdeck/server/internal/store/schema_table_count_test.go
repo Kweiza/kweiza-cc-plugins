@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -125,4 +127,89 @@ func TestSchemaVersionTableIsCounted(t *testing.T) {
 	}
 	t.Fatal("schema_version 이 안 세졌다 — `IF NOT EXISTS` 를 건너뛰는 패턴이 깨졌다. " +
 		"이 상태로 센 수는 실제보다 1 작다")
+}
+
+// migrationsDropTables 는 증분이 **걷어낸** 표다.
+//
+// ★ 이 목록이 필요한 이유는 declaredTables 가 `CREATE TABLE` **텍스트만** 세기 때문이다.
+// DROP 은 안 본다 — 그래서 증분이 표를 걷으면 선언 목록과 실제 DB 가 갈리는데, 그 어긋남을
+// 잡는 시험이 하나도 없었다. 그 구멍은 추측이 아니라 실측이다: migrate_guard_test.go 의
+// neverExempt 주석이 "증분에 DROP TABLE 을 넣어 돌려 보니 지목된 두 시험이 둘 다 통과했다"고
+// 적어 뒀고, 그중 하나가 바로 위 TestDeclaredTablesMatchDesign 이다.
+//
+// ★ 표를 걷는 증분을 실으면 **여기에 그 이름을 더해야 한다.** 안 더하면 아래 시험이 빨개진다.
+var migrationsDropTables = []string{
+	"item_dependents", // 011 · 죽은 표를 걷었다
+}
+
+// TestLiveSchemaAfterAllMigrationsMatchesTheDeclaredList 는 **실제로 올린 DB** 를 센다.
+//
+// ★ 위 TestDeclaredTablesMatchDesign 과 짝이다. 저쪽은 "사람이 선언한 것"을 세고 여기는
+// "실제로 남은 것"을 센다. 둘이 갈리는 유일한 이유가 DROP 이고, 그 차이를 migrationsDropTables
+// 가 명시한다. 한쪽만 있으면 DROP 이 조용히 지나가거나(저쪽만) 선언의 계약이 사라진다(여기만).
+func TestLiveSchemaAfterAllMigrationsMatchesTheDeclaredList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fd.db")
+	mustMigrate(t, path)
+	s, err := OpenWithLogger(path, testLogger())
+	if err != nil {
+		t.Fatalf("올린 DB 를 못 열었다: %v", err)
+	}
+	defer s.Close()
+
+	// ★ 그림자 표는 우리가 정한 값이 아니다 — FTS5 가 judgment_fts 뒤에 만드는 넷과
+	//   AUTOINCREMENT 이 만드는 sqlite_sequence 다. fts5 옵션이나 SQLite 판이 바뀌면
+	//   조용히 달라지므로 세는 대상에서 뺀다(위 시험의 머리말과 같은 규율).
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT name FROM sqlite_master WHERE type='table'
+		   AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'judgment_fts_%'
+		 ORDER BY name`)
+	if err != nil {
+		t.Fatalf("sqlite_master 조회 실패: %v", err)
+	}
+	defer rows.Close()
+	var live []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("표 이름 해석 실패: %v", err)
+		}
+		live = append(live, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("순회 실패: %v", err)
+	}
+
+	dropped := make(map[string]bool, len(migrationsDropTables))
+	for _, n := range migrationsDropTables {
+		dropped[n] = true
+	}
+	var want []string
+	for _, n := range declaredTables(t) {
+		if !dropped[n] {
+			want = append(want, n)
+		}
+	}
+	sort.Strings(want)
+
+	if len(live) != len(want) {
+		t.Fatalf("올린 DB 의 표가 %d개인데 선언−걷어낸 것은 %d개다.\n"+
+			"표를 걷는 증분을 실었으면 migrationsDropTables 에 그 이름을 더하고 **DESIGN §3 도 같이 고쳐라**.\n"+
+			"실측(DB): %v\n기대(선언−DROP): %v", len(live), len(want), live, want)
+	}
+	for i := range want {
+		if live[i] != want[i] {
+			t.Fatalf("정렬 %d번이 DB 에서는 %q, 선언−DROP 에서는 %q다.\n"+
+				"실측(DB): %v\n기대(선언−DROP): %v", i, live[i], want[i], live, want)
+		}
+	}
+
+	// ★ 걷었다고 적은 것이 **실제로 없는지**도 본다. 이것이 없으면 목록에 이름만 올려 두고
+	//   실제로는 안 걷어도 위 대조가 통과한다(수도 목록도 맞는다).
+	for _, n := range migrationsDropTables {
+		for _, l := range live {
+			if l == n {
+				t.Errorf("migrationsDropTables 에 %q 가 있는데 DB 에 그대로 있다 — 증분이 안 걷었다", n)
+			}
+		}
+	}
 }

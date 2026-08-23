@@ -93,6 +93,10 @@ func newHarnessAuth(t *testing.T, token string) *harness {
 // 흉내 내려면 같은 파일을 다시 열 수 있어야 한다(restartProcess).
 func (h *harness) openStore() {
 	h.t.Helper()
+	// ★ 적용은 기동에서 분리돼 있다(설계 §7 ①) — 열기 전에 올린다.
+	if err := store.Migrate(context.Background(), h.db, nil); err != nil {
+		h.t.Fatalf("DB 적용 실패(%s): %v", h.db, err)
+	}
 	st, err := store.Open(h.db)
 	if err != nil {
 		h.t.Fatalf("DB 를 못 열었다(%s): %v", h.db, err)
