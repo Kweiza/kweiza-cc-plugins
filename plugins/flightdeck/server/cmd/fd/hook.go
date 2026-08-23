@@ -78,7 +78,13 @@ func EditedPaths(toolInput map[string]any) []string {
 			out = append(out, v)
 		}
 	}
-	// MultiEdit 류는 edits 배열 안에 경로가 없고 file_path 하나다. 배열형은 아래로 덮는다.
+	// ★ 배열형 키다. 앞서 이 자리가 근거로 든 `MultiEdit` 은 **도구로 존재하지 않는다** —
+	// 2.1.240 실측: `BUILTIN_TOOL_NAMES` 22종에 없고 이름 상수 정의도 0건이며, 유일한 등장이
+	// 권한 규칙 문자열을 Edit 로 접는 레거시 비교 하나다. `file_paths` 라는 키를 쓰는 도구도
+	// 그 판에 **0건**이다. 그래서 이 가지는 지금 아무것도 안 잡는 **예방**이다.
+	// 지우지 않는 이유는 비용이 0이고, 플랫폼이 배열형을 내기 시작한 날 이 함수가 조용히
+	// 0건이 되는 것이 설계 §6 이 가장 두려워하는 모양이기 때문이다(발자국의 유일한 원천).
+	// 잡는 것이 생기는 날 이 주석을 실측으로 바꿔라 — 지금 적힌 것은 '없다'는 사실이다.
 	if raw, ok := toolInput["file_paths"].([]any); ok {
 		for _, v := range raw {
 			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
