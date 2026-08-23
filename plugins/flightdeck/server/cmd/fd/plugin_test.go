@@ -1197,9 +1197,83 @@ func TestComposeAppliesMigrationsInASeparateStepBeforeServing(t *testing.T) {
 	//   똑같이 초록이다.
 	mustContain(t, "compose.yaml", string(cf),
 		// one-shot 이 실제로 그 명령을 돈다.
-		`command: ["/usr/local/bin/fd", "migrate"`,
+		//
+		// ★ 실행 파일 경로가 **없어야** 한다 — 이미지의 ENTRYPOINT 가 그것이고 도커는
+		//   command 를 그 뒤에 붙인다. 앞선 판은 여기에 경로가 든 형태를 단정했는데,
+		//   그 형태는 **한 번도 안 돌았다**(2026-08-23 실기동). 텍스트만 보는 시험이
+		//   깨진 형태를 못박고 있었던 것이다 — 둘의 관계는
+		//   TestComposeCommandsDoNotRepeatTheEntrypoint 가 문다.
+		`command: ["migrate", "--db", "/data/fd.db"]`,
 		// 서버는 그것이 **성공으로 끝난 뒤에만** 뜬다. 단순 depends_on 은 "시작됐다"까지만
 		// 보므로, 적용이 실패해도 서버가 뜬다 — 그러면 이 단계를 둔 의미가 없다.
 		"condition: service_completed_successfully",
 	)
+}
+
+// dockerfileEntrypointRe 는 Dockerfile 의 ENTRYPOINT exec 형식에서 **실행 파일 경로**를 뽑는다.
+var dockerfileEntrypointRe = regexp.MustCompile(`(?m)^ENTRYPOINT\s+\[\s*"([^"]+)"`)
+
+// composeCommandRe 는 compose.yaml 의 `command: [...]` 한 줄에서 **첫 원소**를 뽑는다.
+var composeCommandRe = regexp.MustCompile(`(?m)^\s*command:\s*\[\s*"([^"]+)"`)
+
+// TestComposeCommandsDoNotRepeatTheEntrypoint 는 compose 의 `command` 가 이미지의
+// **ENTRYPOINT 를 한 번 더 적지 않는지** 본다.
+//
+// ★★ 2026-08-23 실기동에서 잡았다. `migrate` one-shot 의 command 가
+// `["/usr/local/bin/fd", "migrate", "--db", "/data/fd.db"]` 였는데, 이미지는
+// `ENTRYPOINT ["/usr/local/bin/fd"]` 다. 도커는 command(=CMD)를 **ENTRYPOINT 뒤에 붙이므로**
+// 실제로 돈 것은 이것이다:
+//
+//	/usr/local/bin/fd /usr/local/bin/fd migrate --db /data/fd.db
+//
+// 인자 파서에게 첫 낱말은 서브커맨드다. 그래서 `모르는 명령: /usr/local/bin/fd` 를 내고
+// **exit 2** 로 죽었다. 그러면 `condition: service_completed_successfully` 가 정확히 제 일을
+// 해서 **서버가 아예 안 뜬다**(실측: 상태가 `created` 에 머물고 StartedAt 이 제로값이었다).
+//
+// ★ **두 단계 compose 는 한 번도 작동한 적이 없다.** 그런데 관문은 초록이었다 —
+// 위 `TestComposeAppliesMigrationsInASeparateStepBeforeServing` 이 compose.yaml **텍스트**에서
+// `command: ["/usr/local/bin/fd", "migrate"` 를 찾았기 때문이다. 그 시험은 **깨진 형태를
+// 문자열로 못박고 있었다.** 한 파일 안에서만 보면 이 결함은 원리적으로 안 보인다:
+// 틀린 것은 compose 도 Dockerfile 도 아니고 **둘의 관계**다.
+//
+// ★ 이 결함이 나타나는 모양이 이 레포가 계속 쫓는 그것이다 — 오류가 아니라 **부재**.
+// `docker compose up -d` 는 실패를 말하지만, 그 다음 사람이 보는 것은 "서버가 없다" 뿐이고
+// `logs migrate` 를 따로 안 보면 원인이 화면에 없다. 다음 컨테이너 갱신이 이 판으로 돌았으면
+// 20~30 세션이 쓰는 서버가 **안 떴을 것이다.**
+func TestComposeCommandsDoNotRepeatTheEntrypoint(t *testing.T) {
+	root := pluginRoot(t)
+	df, err := os.ReadFile(filepath.Join(root, "server", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("Dockerfile 이 없다: %v", err)
+	}
+	m := dockerfileEntrypointRe.FindStringSubmatch(string(df))
+	if m == nil {
+		t.Fatalf("Dockerfile 에서 `ENTRYPOINT [\"…\"]` 를 못 찾았다 —\n" +
+			"이 시험이 무는 자리가 밀렸다. ENTRYPOINT 가 사라졌다면 command 의 계약도 바뀐 것이니\n" +
+			"여기를 다시 재고 고쳐라. 못 찾은 것을 통과로 접으면 안 된다")
+	}
+	entry := m[1]
+
+	cf, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatalf("compose.yaml 이 없다: %v", err)
+	}
+	cmds := composeCommandRe.FindAllStringSubmatch(string(cf), -1)
+	// ★ 하나도 못 찾으면 **통과가 아니라 실패**다. `command:` 의 표기가 밀리면(블록 형식 등)
+	// 이 시험은 아무것도 안 보면서 초록이 된다 — 이 레포가 두 번 밟은 그 자리다.
+	if len(cmds) == 0 {
+		t.Fatalf("compose.yaml 에 `command: [\"…\"]` 가 하나도 없다 —\n" +
+			"표기가 밀렸으면 이 시험은 **아무것도 안 보면서 초록**이 된다. 여기를 고쳐라")
+	}
+	for _, c := range cmds {
+		if c[1] == entry {
+			t.Fatalf("compose 의 command 첫 낱말이 이미지의 ENTRYPOINT 와 같다: %q\n"+
+				"도커는 command 를 ENTRYPOINT **뒤에 붙인다** — 실제로 도는 것은\n"+
+				"  %s %s …\n"+
+				"이고, 인자 파서에게 첫 낱말은 서브커맨드다. `모르는 명령: %s` 로 exit 2 가 되고,\n"+
+				"`service_completed_successfully` 때문에 **서버가 아예 안 뜬다**.\n"+
+				"command 에서 실행 파일 경로를 빼라 — 서브커맨드부터 적는다",
+				c[1], entry, c[1], c[1])
+		}
+	}
 }
