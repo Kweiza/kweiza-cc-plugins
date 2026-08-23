@@ -10,6 +10,16 @@
 # 띄우는 법:  docker compose up -d
 # 보는 법:    http://<서버머신>:7420
 # 세션 쪽:    export FD_URL=http://<서버머신>:7420
+#
+# ★ **되돌리는 법(컨테이너)**. 적용이 깨져 서버가 안 뜨면 사유는 `docker compose logs migrate`
+#   에 있고, 그 줄이 백업 파일명까지 적는다. 되돌리기는:
+#
+#     docker compose run --rm --no-deps migrate migrate --db /data/fd.db --rollback
+#
+#   ★★ `migrate` 가 **두 번** 나오는 것이 오타가 아니다. 앞은 서비스 이름이고 뒤는
+#      서브커맨드다. 그리고 뒤에 `fd` 를 적으면 안 된다 — ENTRYPOINT 가 이미 그 바이너리라
+#      `fd fd migrate …` 가 되어 `모르는 명령: fd` 로 죽는다(2026-08-23 실기동에서 확인).
+#      `--no-deps` 가 없으면 compose 가 이 서비스를 띄우기 전에 의존을 먼저 풀려 든다.
 
 services:
   # ★ 적용 단계. **이 서비스만 스키마를 바꾼다.**
@@ -26,7 +36,13 @@ services:
       context: ./server
       dockerfile: Dockerfile
     image: flightdeck:local
-    command: ["/usr/local/bin/fd", "migrate", "--db", "/data/fd.db"]
+    # ★ **실행 파일 경로를 여기 적지 마라 — 서브커맨드부터다.** 이미지는
+    #   `ENTRYPOINT ["/usr/local/bin/fd"]` 이고 도커는 command 를 그 **뒤에 붙인다**.
+    #   경로를 다시 적으면 실제로 도는 것은 `fd /usr/local/bin/fd migrate …` 가 되고,
+    #   인자 파서에게 첫 낱말은 서브커맨드라 `모르는 명령: /usr/local/bin/fd` 로 exit 2 다.
+    #   그러면 아래 `service_completed_successfully` 가 제 일을 해서 **서버가 아예 안 뜬다**.
+    #   2026-08-23 실기동에서 그렇게 죽는 것을 봤다 — 텍스트 관문은 그때도 초록이었다.
+    command: ["migrate", "--db", "/data/fd.db"]
     restart: "no"
     # 서버와 **같은 uid** 로 돈다. 다르면 이 단계가 만든 파일을 서버가 못 쓴다.
     user: "${FD_UID:-1000}:${FD_GID:-1000}"
