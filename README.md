@@ -26,7 +26,7 @@ Personal Claude Code plugins marketplace.
 
 ### grafik-bar
 
-Graphical status line: login, workspace folder, git branch, model, reasoning effort, context window, 5h/7d rate limits with reset countdowns, and session stats (cost, lines changed, elapsed time) — with a responsive layout that reflows for wide/medium/narrow terminals.
+Graphical status line: login, workspace folder, git branch, model, reasoning effort, context window, 5h/7d rate limits with reset countdowns, and session stats (cost, lines changed, elapsed time) — with a responsive layout that measures each assembled segment and wraps to the terminal's actual width, counting CJK and emoji as the two columns they occupy.
 
 **No setup command.** Just install the plugin — a `SessionStart` hook points your `~/.claude/settings.json` `statusLine` at the plugin's own script and keeps it current. Because it references the installed plugin directly, every plugin update applies automatically. The hook is idempotent and only touches the `statusLine` key (all other settings are preserved). Requires `jq`.
 

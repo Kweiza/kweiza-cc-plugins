@@ -15,18 +15,26 @@ if ! printf '{}' | jq -e . >/dev/null 2>&1; then
 fi
 
 # --- Terminal width ---
-# Both probes need a controlling tty, and there is none under a hook runner, an
-# IDE, or a remote session. The `|| echo 120` that used to close this pipeline
-# never ran: a pipeline's status is awk's, and awk succeeds on empty input. So
-# cols came out EMPTY and every tty-less environment silently fell through to the
-# narrowest layout. Check the value, not the exit status.
-cols=$(tput cols </dev/tty 2>/dev/null)
-[ -z "$cols" ] && cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
-# Neither probe can work without a controlling tty, so honour COLUMNS when the
-# caller sets it. That is also the only handle a test has on the layout branches:
-# /dev/tty cannot be handed to a child process, so a stub tput is never even run.
-[ -z "$cols" ] && cols="${COLUMNS:-}"
+# COLUMNS first, because it is the only probe that actually works here. A status
+# line runs with no controlling terminal: `/dev/tty` cannot be opened at all, so
+# `tput cols </dev/tty` and `stty size </dev/tty` fail at the *redirection* step —
+# before the command runs, which is also why stubbing tput never had any effect.
+# Measured on a live session: both come back empty every time, and each render
+# leaked two "No such device or address" lines to stderr. Claude Code meanwhile
+# exports COLUMNS with the live width, and it tracks window resizes.
+#
+# The tty probes stay as a fallback for hosts that hand this script a terminal but
+# no COLUMNS — guarded by an open test, so they run only where they can work.
+cols="${COLUMNS:-}"
+if [ -z "$cols" ] && (exec 3</dev/tty) 2>/dev/null; then
+  cols=$(tput cols </dev/tty 2>/dev/null)
+  [ -z "$cols" ] && cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+fi
+# Check the value, not the exit status: a pipeline's status is awk's, and awk
+# succeeds on empty input, so a `|| echo 120` tail here would never run.
 case "$cols" in ''|*[!0-9]*) cols=120 ;; esac
+# A floor, so a bogus 0 cannot make every segment its own line.
+if (( cols < 20 )); then cols=20; fi
 
 # --- Extract fields ---
 model=$(echo "$input" | jq -r '.model.display_name // "Unknown Model"')
@@ -91,18 +99,28 @@ lines_removed=$(echo "$input" | jq -r '.cost.total_lines_removed // empty')
 dur_ms=$(echo "$input" | jq -r '.cost.total_duration_ms // empty')
 
 # --- ANSI colors ---
-RST='\033[0m'
-BOLD='\033[1m'
-C_CYAN='\033[36m'
-C_GREEN='\033[32m'
-C_YELLOW='\033[33m'
-C_RED='\033[31m'
-C_MAGENTA='\033[35m'
-C_BLUE='\033[34m'
-C_WHITE='\033[37m'
-C_GRAY='\033[90m'
+# `$'…'` so these hold real escape bytes from the moment they are assigned. The
+# old form kept them as the literal text `\033[36m` and relied on every use site
+# passing them through `printf` — which also made every segment's *content* part
+# of a printf format string, so a `%` in an email or a branch name would eat the
+# next argument. Real bytes here means the layout below can concatenate plainly
+# and print with `%s`.
+RST=$'\033[0m'
+BOLD=$'\033[1m'
+C_CYAN=$'\033[36m'
+C_GREEN=$'\033[32m'
+C_YELLOW=$'\033[33m'
+C_RED=$'\033[31m'
+C_MAGENTA=$'\033[35m'
+C_BLUE=$'\033[34m'
+C_WHITE=$'\033[37m'
+C_GRAY=$'\033[90m'
 
-DOT="${C_GRAY}·${RST}"
+# The separator, in both forms the layout needs: what it looks like, and how many
+# columns it costs.
+sep="  ${C_GRAY}·${RST}  "
+sep_txt="  ·  "
+sep_w=5
 
 # --- Helpers ---
 render_bar() {
@@ -163,133 +181,172 @@ effort_icon() {
 }
 
 # --- Build segments ---
+# Every segment is pushed as a PAIR: the plain text, which is what the width
+# measurement reads, and the colored text, which is what gets printed. Carrying
+# both is the whole point — it lets the layout ask "how wide is this actually?"
+# instead of guessing. The guess is what put a 116-column line into an 89-column
+# window: the branch thresholds (`cols >= 80`, `cols >= 120`) were round numbers
+# picked without ever measuring what the branches emit (they emit 116 and 220).
+# And no constant could have been right, because the content is variable width —
+# a longer email or branch name moves it.
+segs_txt=()
+segs_out=()
+push_seg() {
+  [ -z "$2" ] && return 0
+  segs_txt+=("$1")
+  segs_out+=("$2")
+  return 0
+}
+
 if [ -n "$user" ]; then
-  seg_user="$(printf "${C_CYAN}${BOLD}${user}${RST}")"
+  push_seg "$user" "${C_CYAN}${BOLD}${user}${RST}"
 else
-  seg_user="$(printf "${C_RED}login info unavailable${RST}")"
+  push_seg "login info unavailable" "${C_RED}login info unavailable${RST}"
 fi
-seg_model="$(printf "${C_MAGENTA}${BOLD}◈ ${model}${RST}")"
 
-seg_dir=""
-[ -n "$folder" ] && seg_dir="$(printf "${C_BLUE}${BOLD}⌂ ${folder}${RST}")"
+[ -n "$folder" ] && push_seg "⌂ ${folder}" "${C_BLUE}${BOLD}⌂ ${folder}${RST}"
+[ -n "$branch" ] && push_seg "⎇ ${branch}" "${C_GREEN}⎇ ${branch}${RST}"
 
-seg_branch=""
-[ -n "$branch" ] && seg_branch="$(printf "${C_GREEN}⎇ ${branch}${RST}")"
+push_seg "◈ ${model}" "${C_MAGENTA}${BOLD}◈ ${model}${RST}"
 
-seg_effort=""
 if [ -n "$effort" ]; then
   effort_upper=$(echo "$effort" | tr '[:lower:]' '[:upper:]')
-  seg_effort="$(printf "${C_YELLOW}$(effort_icon "$effort") ${effort_upper}${RST}")"
+  effort_ico=$(effort_icon "$effort")
+  push_seg "${effort_ico} ${effort_upper}" "${C_YELLOW}${effort_ico} ${effort_upper}${RST}"
 fi
 
-seg_ctx=""
 if [ -n "$ctx_used" ]; then
   ctx_int=$(printf '%.0f' "$ctx_used")
   c=$(pct_color "$ctx_int")
-  seg_ctx="$(printf "${C_WHITE}CTX${RST} ${c}$(render_bar "$ctx_int" 12)${RST} ${c}${ctx_int}%%${RST}")"
+  bar=$(render_bar "$ctx_int" 12)
+  push_seg "CTX ${bar} ${ctx_int}%" "${C_WHITE}CTX${RST} ${c}${bar}${RST} ${c}${ctx_int}%${RST}"
 fi
 
-seg_5h=""
-if [ -n "$five_pct" ]; then
-  five_int=$(printf '%.0f' "$five_pct")
-  c=$(pct_color "$five_int")
-  r=$(format_reset "$five_reset")
-  seg_5h="$(printf "${C_WHITE}5h${RST} ${c}$(render_bar "$five_int" 8)${RST} ${c}${five_int}%%${RST}")"
-  [ -n "$r" ] && seg_5h+="$(printf " ${C_GRAY}↺${r}${RST}")"
-fi
+# 5h / 7d / F7d are the same shape three times over — one place to build them, so
+# the plain text and the colored text cannot drift apart between the three.
+push_limit() {
+  local label=$1 pct=$2 reset=$3 i c bar r plain out
+  [ -z "$pct" ] && return 0
+  i=$(printf '%.0f' "$pct")
+  c=$(pct_color "$i")
+  bar=$(render_bar "$i" 8)
+  r=$(format_reset "$reset")
+  plain="${label} ${bar} ${i}%"
+  out="${C_WHITE}${label}${RST} ${c}${bar}${RST} ${c}${i}%${RST}"
+  if [ -n "$r" ]; then
+    plain+=" ↺${r}"
+    out+=" ${C_GRAY}↺${r}${RST}"
+  fi
+  push_seg "$plain" "$out"
+  return 0
+}
+push_limit "5h" "$five_pct" "$five_reset"
+push_limit "7d" "$week_pct" "$week_reset"
+push_limit "F7d" "$fable_pct" "$fable_reset"
 
-seg_7d=""
-if [ -n "$week_pct" ]; then
-  week_int=$(printf '%.0f' "$week_pct")
-  c=$(pct_color "$week_int")
-  r=$(format_reset "$week_reset")
-  seg_7d="$(printf "${C_WHITE}7d${RST} ${c}$(render_bar "$week_int" 8)${RST} ${c}${week_int}%%${RST}")"
-  [ -n "$r" ] && seg_7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
-fi
-
-seg_f7d=""
-if [ -n "$fable_pct" ]; then
-  fable_int=$(printf '%.0f' "$fable_pct")
-  c=$(pct_color "$fable_int")
-  r=$(format_reset "$fable_reset")
-  seg_f7d="$(printf "${C_WHITE}F7d${RST} ${c}$(render_bar "$fable_int" 8)${RST} ${c}${fable_int}%%${RST}")"
-  [ -n "$r" ] && seg_f7d+="$(printf " ${C_GRAY}↺${r}${RST}")"
-fi
-
-seg_cost=""
+# Session stats stay one segment: cost, lines and duration read together, and
+# splitting them across a line break would be worse than moving them as a block.
+stats_txt=""
+stats_out=""
+add_stat() {
+  [ -z "$2" ] && return 0
+  if [ -n "$stats_out" ]; then
+    stats_txt+="$sep_txt"
+    stats_out+="$sep"
+  fi
+  stats_txt+="$1"
+  stats_out+="$2"
+  return 0
+}
 if [ -n "$cost" ]; then
   cost_disp=$(printf '%.2f' "$cost")
-  seg_cost="$(printf "${C_GREEN}\$${cost_disp}${RST}")"
+  add_stat "\$${cost_disp}" "${C_GREEN}\$${cost_disp}${RST}"
 fi
-
-seg_lines=""
 if [ -n "$lines_added" ] || [ -n "$lines_removed" ]; then
-  seg_lines="$(printf "${C_GREEN}+${lines_added:-0}${RST} ${C_RED}-${lines_removed:-0}${RST}")"
+  add_stat "+${lines_added:-0} -${lines_removed:-0}" \
+    "${C_GREEN}+${lines_added:-0}${RST} ${C_RED}-${lines_removed:-0}${RST}"
 fi
-
-seg_dur=""
 if [ -n "$dur_ms" ]; then
   dv=$(format_dur "$dur_ms")
-  [ -n "$dv" ] && seg_dur="$(printf "${C_GRAY}⏱${dv}${RST}")"
+  [ -n "$dv" ] && add_stat "⏱${dv}" "${C_GRAY}⏱${dv}${RST}"
+fi
+push_seg "$stats_txt" "$stats_out"
+
+# --- Measure ---
+# One jq pass over all the plain texts. jq is already this script's hard
+# dependency and it decodes UTF-8 into codepoints, which is what a width rule
+# needs — `${#s}` counts characters, and a character is not a column: ⚡ and CJK
+# take two. Getting that wrong is not cosmetic here, it is the difference between
+# a line that fits and a line the terminal folds.
+seg_w=()
+if (( ${#segs_txt[@]} > 0 )); then
+  # -r matters: without it jq quotes the string and the first and last tokens come
+  # back as `"22` and `30"`. Those are not numbers, `(( ))` on them just evaluates
+  # false, and the effect is invisible — the first and last segments silently stop
+  # joining any line. Measured, not reasoned about.
+  measured=$(printf '%s\n' "${segs_txt[@]}" | jq -Rrn '
+    def w:
+      explode
+      | map(
+          . as $c
+          | if   $c < 32                          then 0   # control: no width
+            elif $c >= 4352   and $c <= 4447      then 2   # 1100..115F  Hangul jamo
+            elif $c >= 11904  and $c <= 12350     then 2   # 2E80..303E  CJK radicals/symbols
+            elif $c >= 12353  and $c <= 13311     then 2   # 3041..33FF  kana, compat
+            elif $c >= 13312  and $c <= 19903     then 2   # 3400..4DBF  CJK ext A
+            elif $c >= 19968  and $c <= 40959     then 2   # 4E00..9FFF  CJK unified
+            elif $c >= 40960  and $c <= 42191     then 2   # A000..A4CF  Yi
+            elif $c >= 44032  and $c <= 55203     then 2   # AC00..D7A3  Hangul syllables
+            elif $c >= 63744  and $c <= 64255     then 2   # F900..FAFF  CJK compat
+            elif $c >= 65072  and $c <= 65135     then 2   # FE30..FE6F  CJK compat forms
+            elif $c >= 65280  and $c <= 65376     then 2   # FF00..FF60  fullwidth
+            elif $c >= 65504  and $c <= 65510     then 2   # FFE0..FFE6  fullwidth signs
+            elif $c >= 127744 and $c <= 129791    then 2   # 1F300..1FAFF emoji (🔥)
+            elif $c >= 131072 and $c <= 262141    then 2   # 20000..3FFFD CJK ext B+
+            # Emoji-presentation singles. 26A1 (⚡) is this script effort icon.
+            elif ([9889,8986,8987,9200,9203,9725,9726,9748,9749,11035,11036,11088,11093]
+                  | index($c))                    then 2
+            else 1 end)
+      | add // 0;
+    [inputs | w] | map(tostring) | join(" ")' 2>/dev/null)
+  read -r -a seg_w <<< "$measured"
 fi
 
-# --- Responsive layout ---
-sep="  ${DOT}  "
+# --- Lay out ---
+# Greedy: fill the current line while the next segment still fits, otherwise start
+# a new one. Every line begins with one leading space, so that column is spent up
+# front. A segment wider than the whole window goes on its own line and overflows
+# — an email cannot be split, and that is the only overflow left.
+avail=$(( cols - 1 ))
+if (( avail < 1 )); then avail=1; fi
 
-# Session stats group (cost · lines · duration)
-seg_stats=""
-for p in "$seg_cost" "$seg_lines" "$seg_dur"; do
-  [ -z "$p" ] && continue
-  [ -n "$seg_stats" ] && seg_stats+="${sep}"
-  seg_stats+="$p"
+line_out=""
+line_w=0
+for i in "${!segs_out[@]}"; do
+  # Fall back to the character count if the measurement is missing or is not a
+  # number. It undercounts wide characters, never overcounts, so the worst case is
+  # the old behaviour for that one segment rather than a silent collapse.
+  #
+  # The digit check is not paranoia: a non-numeric token here does not fail, it
+  # makes `(( ))` quietly evaluate false, and the only symptom is a segment that
+  # stops sharing a line. That is exactly how the missing `-r` above hid.
+  w=${seg_w[i]:-}
+  case "$w" in ''|*[!0-9]*) w=${#segs_txt[i]} ;; esac
+  if [ -z "$line_out" ]; then
+    line_out="${segs_out[i]}"
+    line_w=$w
+  elif (( line_w + sep_w + w <= avail )); then
+    line_out+="${sep}${segs_out[i]}"
+    line_w=$(( line_w + sep_w + w ))
+  else
+    printf ' %s\n' "$line_out"
+    line_out="${segs_out[i]}"
+    line_w=$w
+  fi
 done
+[ -n "$line_out" ] && printf ' %s\n' "$line_out"
 
-if (( cols >= 120 )); then
-  line=" ${seg_user}"
-  [ -n "$seg_dir" ] && line+="${sep}${seg_dir}"
-  [ -n "$seg_branch" ] && line+="${sep}${seg_branch}"
-  line+="${sep}${seg_model}"
-  [ -n "$seg_effort" ] && line+="${sep}${seg_effort}"
-  [ -n "$seg_ctx" ] && line+="${sep}${seg_ctx}"
-  [ -n "$seg_5h" ] && line+="${sep}${seg_5h}"
-  [ -n "$seg_7d" ] && line+="${sep}${seg_7d}"
-  [ -n "$seg_f7d" ] && line+="${sep}${seg_f7d}"
-  [ -n "$seg_stats" ] && line+="${sep}${seg_stats}"
-  printf '%b\n' "$line"
-
-elif (( cols >= 80 )); then
-  line1=" ${seg_user}"
-  [ -n "$seg_dir" ] && line1+="${sep}${seg_dir}"
-  [ -n "$seg_branch" ] && line1+="${sep}${seg_branch}"
-  line1+="${sep}${seg_model}"
-  [ -n "$seg_effort" ] && line1+="${sep}${seg_effort}"
-  [ -n "$seg_ctx" ] && line1+="${sep}${seg_ctx}"
-  printf '%b\n' "$line1"
-  limits=""
-  [ -n "$seg_5h" ] && limits+=" ${seg_5h}"
-  [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
-  [ -n "$seg_f7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_f7d}"; }
-  [ -n "$seg_stats" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_stats}"; }
-  [ -n "$limits" ] && printf '%b\n' " ${limits}"
-
-else
-  line1=" ${seg_user}"
-  [ -n "$seg_dir" ] && line1+="${sep}${seg_dir}"
-  [ -n "$seg_branch" ] && line1+="${sep}${seg_branch}"
-  printf '%b\n' "$line1"
-  line2=" ${seg_model}"
-  [ -n "$seg_effort" ] && line2+="${sep}${seg_effort}"
-  printf '%b\n' "$line2"
-  [ -n "$seg_ctx" ] && printf '%b\n' " ${seg_ctx}"
-  limits=""
-  [ -n "$seg_5h" ] && limits+="${seg_5h}"
-  [ -n "$seg_7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_7d}"; }
-  [ -n "$seg_f7d" ] && { [ -n "$limits" ] && limits+="${sep}"; limits+="${seg_f7d}"; }
-  [ -n "$limits" ] && printf '%b\n' " ${limits}"
-  [ -n "$seg_stats" ] && printf '%b\n' " ${seg_stats}"
-fi
-
-# Each layout branch ends in `[ -n "$x" ] && printf …`, so with an empty trailing
-# segment the script's status was the failed test's — exit 1 on a perfectly good
-# render. A status line has no way to report a failure, so pin the status here.
+# The loop above ends in `[ -n "$x" ] && printf …`, so with nothing to print the
+# script's status would be the failed test's — exit 1 on a perfectly good render.
+# A status line has no way to report a failure, so pin the status here.
 exit 0

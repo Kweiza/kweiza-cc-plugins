@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -735,10 +736,16 @@ func renderedLines(s string) int {
 //	③ **입력이 출력에 도달한다** — stdin 의 model.display_name 이 화면에 나타난다.
 //	   ②만 재면 jq 가 전부 실패해도 껍데기(52바이트)를 내고 초록이다. 실측으로 봤다.
 //
-// ★ 줄 수도 문다. tput·stty 를 둘 다 실패시켰으니 폭은 **폴백 값**으로 정해지는데,
-// 그 폴백이 죽어 있으면(빈 문자열) 스크립트는 최협 레이아웃으로 떨어져 줄이 여럿이 된다.
-// 폭 분기 자체를 재는 것이 아니라 **폴백이 살아 있는가**를 재는 것이다 — 이 결함은
-// tty 없는 환경(IDE·원격·웹)에서만 나타나 사람 눈에는 영영 안 보인다.
+// ★ 폭 폴백이 살아 있는가도 문다. tput·stty 는 둘 다 못 도는 자리라(`/dev/tty` 가 안 열려
+// 리다이렉션 단계에서 죽는다) COLUMNS 도 없으면 폭은 **폴백 값**으로 정해지는데, 그 폴백이
+// 죽어 있으면(빈 문자열) 최협 레이아웃으로 떨어져 줄이 잘게 쪼개진다. tty 없는 환경
+// (IDE·원격·웹)에서만 나타나 사람 눈에는 영영 안 보이는 부류다.
+//
+// ★★ 그 축을 **줄 수 상수**로 적으면 안 된다. 레이아웃이 조각을 조립해 폭에 맞춰 가르는
+// 방식이라, 조각이 하나 늘거나 이메일이 길어지면 같은 폭에서도 줄 수가 바뀐다 — 상수는
+// 내용을 따라 표류하고, 표류하면 사람이 숫자를 고쳐 맞추다가 축이 죽는다. 그래서 무는 것은
+// 숫자가 아니라 **동치**다: COLUMNS 없이 돈 결과가 COLUMNS=120(폴백 값) 과 같은 줄 수여야
+// 한다. 그리고 그 동치가 공허하지 않다는 것을 좁은 폭이 따로 증명한다.
 func TestGrafikBarStatusLineActuallyRenders(t *testing.T) {
 	if !canRunStatusLine(t) {
 		return
@@ -761,11 +768,24 @@ func TestGrafikBarStatusLineActuallyRenders(t *testing.T) {
 		t.Fatalf("사용량 캐시가 신선한데 curl 이 불렸다 — 렌더가 매번 네트워크를 친다.\n" +
 			"화면은 똑같아서 이 회귀는 조용하다")
 	}
-	if n := renderedLines(r.stdout); n != 1 {
-		t.Fatalf("상태줄이 %d줄이다 — 폭 폴백이 죽었다.\nstdout=%q\n"+
-			"tput·stty 를 둘 다 실패시켰으므로 폭은 폴백 값이어야 하고, 그 값이면 한 줄이다.\n"+
-			"폴백이 빈 문자열이면 최협 레이아웃으로 떨어진다 — tty 가 없는 환경에서만 나타나\n"+
-			"사람 눈에는 영영 안 보이는 부류다", n, r.stdout)
+	// 폭 폴백 축. COLUMNS 를 안 준 위 실행이 COLUMNS=120 과 같은 줄 수여야 한다.
+	fallback := renderedLines(r.stdout)
+	at120 := renderedLines(runStatusLine(t, grafikStatusLinePayload,
+		statusLineOpts{env: map[string]string{"COLUMNS": "120"}}).stdout)
+	if fallback != at120 {
+		t.Fatalf("COLUMNS 없이 %d줄, COLUMNS=120 에서 %d줄 — 폭 폴백이 120 이 아니다.\nstdout=%q\n"+
+			"tput·stty 는 이 자리에서 못 돈다(`/dev/tty` 가 안 열린다). COLUMNS 도 없으면\n"+
+			"폭은 폴백 값이어야 하는데, 그 값이 죽으면 최협 레이아웃으로 떨어진다 —\n"+
+			"tty 없는 환경에서만 나타나 사람 눈에는 영영 안 보인다", fallback, at120, r.stdout)
+	}
+	// ★ 위 동치가 **공허하지 않다**는 증명. 폭 손잡이가 통째로 없으면 어떤 COLUMNS 를 줘도
+	// 같은 줄 수가 나오고, 그러면 위 단정은 아무것도 안 문다(변이 M16 과 같은 자리다).
+	narrow := renderedLines(runStatusLine(t, grafikStatusLinePayload,
+		statusLineOpts{env: map[string]string{"COLUMNS": "30"}}).stdout)
+	if narrow <= at120 {
+		t.Fatalf("COLUMNS=30 에서 %d줄, COLUMNS=120 에서 %d줄 — 좁은 쪽이 더 많아야 한다.\n"+
+			"둘이 같으면 폭이 레이아웃에 안 먹는 것이고, 그러면 바로 위의 폴백 단정이\n"+
+			"**아무것도 안 무는 채로 초록**이다", narrow, at120)
 	}
 }
 
@@ -796,10 +816,13 @@ func TestGrafikBarStatusLineSurvivesDegradedInput(t *testing.T) {
 		{"빈 객체", "{}", nil, 0},
 		{"필드가 null 이다", `{"model":null,"cost":null,"workspace":null}`, nil, 0},
 		// ★★ 좁은·중간 폭. 이것이 없으면 **종료 코드 축이 안 닿는다** — 변이 M7 이 그것을
-		// 드러냈다(끝의 `exit 0` 을 지워도 초록이었다). 넓은 분기는 `printf` 로 끝나 늘 0 인데,
-		// 좁은·중간 분기는 `[ -n "$x" ] && printf …` 로 끝나서 **마지막 조각이 비면 exit 1** 이다.
-		// 그래서 통계·한도가 없는 페이로드를 그 분기에 태워야 이 축이 산다.
-		{"좁은 폭, 통계 없음", `{"model":{"display_name":"Opus 5"}}`, map[string]string{"COLUMNS": "60"}, 2},
+		// 드러냈다(끝의 `exit 0` 을 지워도 초록이었다). 레이아웃은 `[ -n "$x" ] && printf …`
+		// 로 끝나서 **낼 것이 없으면 exit 1** 이다. 통계·한도가 없는 페이로드를 태워야 산다.
+		//
+		// ★ 좁은 쪽 폭이 60 이 아니라 25 인 이유: 레이아웃이 조각을 조립해 폭에 맞춰 가르게
+		// 되면서, 계정(22칸)과 모델(8칸)은 60칸에 **함께 들어간다**. 그 폭으로는 줄이 안
+		// 갈리고, 갈림을 무는 이 축이 조용히 죽는다. 25 는 둘이 못 붙는 폭이다.
+		{"좁은 폭, 통계 없음", `{"model":{"display_name":"Opus 5"}}`, map[string]string{"COLUMNS": "25"}, 2},
 		{"중간 폭, 한도 없음", `{"model":{"display_name":"Opus 5"}}`, map[string]string{"COLUMNS": "100"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -848,6 +871,168 @@ func TestGrafikBarStatusLineSaysSoWhenJQIsGone(t *testing.T) {
 	if n := renderedLines(r.stdout); n != 1 {
 		t.Fatalf("jq 진단이 %d줄이다 — 한 줄이어야 한다.\nstdout=%q\n"+
 			"상태줄이 여러 줄을 먹으면 그 자체가 화면 파괴다", n, r.stdout)
+	}
+}
+
+// ── 폭 ──────────────────────────────────────────────────────────────────────
+//
+// grafikSGRRe 는 ANSI SGR(색) 시퀀스다. 화면 폭에 0 을 먹는다.
+var grafikSGRRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// grafikIsWide 는 그 룬이 터미널에서 **두 칸**을 먹는지 본다.
+//
+// ★ 이것은 스크립트가 쓰는 규칙의 **사본이 아니라 독립 구현**이다. 같은 코드를 양쪽에
+// 두면 규칙이 틀렸을 때 둘이 사이좋게 틀리고 관문은 초록이다. 여기 적힌 범위는
+// Unicode East Asian Width(W/F) + 이모지 표현 문자로, python unicodedata 로 따로 재서
+// 맞춘 것이다(⚡=2, █=1, ·=1).
+func grafikIsWide(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // 한글 자모
+		r >= 0x2E80 && r <= 0x303E,   // CJK 부수·기호
+		r >= 0x3041 && r <= 0x33FF,   // 가나·한글 호환·CJK 기호
+		r >= 0x3400 && r <= 0x4DBF,   // CJK 확장 A
+		r >= 0x4E00 && r <= 0x9FFF,   // CJK 통합
+		r >= 0xA000 && r <= 0xA4CF,   // 이족
+		r >= 0xAC00 && r <= 0xD7A3,   // 한글 음절
+		r >= 0xF900 && r <= 0xFAFF,   // CJK 호환
+		r >= 0xFE30 && r <= 0xFE6F,   // CJK 호환 형태
+		r >= 0xFF00 && r <= 0xFF60,   // 전각
+		r >= 0xFFE0 && r <= 0xFFE6,   // 전각 기호
+		r >= 0x1F300 && r <= 0x1FAFF, // 이모지 (🔥 포함)
+		r >= 0x20000 && r <= 0x3FFFD: // CJK 확장 B+
+		return true
+	// 이모지 표현이 기본인 낱개들. ⚡(U+26A1)이 이 스크립트의 effort 아이콘이다.
+	case r == 0x26A1, r == 0x231A, r == 0x231B, r == 0x23F0, r == 0x23F3,
+		r == 0x25FD, r == 0x25FE, r == 0x2614, r == 0x2615,
+		r == 0x2B1B, r == 0x2B1C, r == 0x2B50, r == 0x2B55:
+		return true
+	}
+	return false
+}
+
+// grafikDisplayWidth 는 그 줄이 **화면에서 먹는 칸 수**다.
+func grafikDisplayWidth(s string) int {
+	w := 0
+	for _, r := range grafikSGRRe.ReplaceAllString(s, "") {
+		switch {
+		case r < 0x20: // 제어 문자는 폭이 없다
+		case grafikIsWide(r):
+			w += 2
+		default:
+			w++
+		}
+	}
+	return w
+}
+
+// grafikStatusLineHangulPayload 는 폴더명이 **한글**인 판이다.
+//
+// ★★ 이것이 없으면 폭 규칙의 CJK 갈래가 **통째로 미검증**이다 — 변이로 확인했다.
+// 한글 음절 범위를 2칸에서 1칸으로 바꿔도 관문 전체가 초록이었다(M4). 이 저장소는
+// 경로·브랜치·커밋이 전부 한글이고, 한글 폴더명은 글자 수의 **두 배**를 먹는다.
+// 글자 수로 세면 그만큼 모자라게 재고, 모자라게 잰 줄은 화면에서 접힌다.
+const grafikStatusLineHangulPayload = `{"model":{"display_name":"Opus 5"},` +
+	`"effort":{"level":"high"},"context_window":{"used_percentage":42.5},` +
+	`"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":9999999999},` +
+	`"seven_day":{"used_percentage":20,"resets_at":9999999999}},` +
+	`"workspace":{"project_dir":"/tmp/한글프로젝트폴더","current_dir":"/tmp/한글프로젝트폴더"},` +
+	`"cost":{"total_cost_usd":1.234,"total_lines_added":10,"total_lines_removed":3,` +
+	`"total_duration_ms":65000}}`
+
+// TestGrafikBarStatusLineFitsTerminalWidth 는 **낸 줄이 그 폭에 들어가는지** 본다.
+//
+// ★★ 이 관문이 없어서 나온 결함이다. 지금까지 폭 축이 무는 것은 "줄 수"뿐이었고
+// (`renderedLines`), 줄이 **얼마나 넓은지**는 아무도 안 쟀다. 그래서 레이아웃 문턱
+// (`cols >= 80`, `cols >= 120`)이 조립 결과와 무관한 어림수인 채로 살아남았다 — 실측:
+//
+//	cols >= 120 분기 → 220칸을 낸다   (120 에서 100칸 넘침)
+//	cols >=  80 분기 → 116칸을 낸다   ( 80 에서  36칸 넘침)
+//
+// 사용자 창은 89칸이었고 116칸짜리 줄이 접혔다. **넘치면 터미널이 접어서 줄 수가 늘고,
+// 상태줄이 화면을 먹는다** — 줄 수만 재는 관문은 이것을 영영 못 본다(접힘은 스크립트
+// 출력이 아니라 터미널이 하는 일이라 stdout 에는 안 나타난다).
+//
+// 넘침을 허용하는 자리는 하나뿐이다: **조각 하나가 그 폭보다 넓을 때**. 이메일 하나가
+// 40칸인데 창이 30칸이면 쪼갤 방법이 없다. 그래서 구분자(`·`)가 없는 줄 — 조각 하나짜리
+// 줄 — 만 면제한다.
+func TestGrafikBarStatusLineFitsTerminalWidth(t *testing.T) {
+	if !canRunStatusLine(t) {
+		return
+	}
+	// ★ 실제 신고 사례를 태운다. 계정 조각은 `claude auth status` 에서 오는데 기본 봉인은
+	// 그것을 실패시켜 "login info unavailable" 로 떨어진다 — 길이가 실물과 다르다.
+	// 스텁으로 실제 길이의 이메일을 돌려주게 해서 신고된 조합을 그대로 잰다.
+	authStub := map[string]string{
+		"claude": "#!/bin/sh\nprintf '{\"email\":\"tlfyvhsdlek@gmail.com\"}\\n'\n",
+	}
+	for _, p := range []struct{ name, stdin string }{
+		{"기본", grafikStatusLinePayload},
+		{"한글 폴더명", grafikStatusLineHangulPayload},
+	} {
+		for _, cols := range []int{40, 50, 60, 70, 80, 89, 100, 110, 119, 120, 140, 160, 200, 240} {
+			t.Run(fmt.Sprintf("%s/cols=%d", p.name, cols), func(t *testing.T) {
+				r := runStatusLine(t, p.stdin, statusLineOpts{
+					stubs: authStub,
+					env:   map[string]string{"COLUMNS": strconv.Itoa(cols)},
+				})
+				if r.code != 0 {
+					t.Fatalf("COLUMNS=%d 에서 %d 로 끝났다.\nstdout=%q\nstderr=%s", cols, r.code, r.stdout, r.stderr)
+				}
+				out := strings.TrimSuffix(r.stdout, "\n")
+				if out == "" {
+					t.Fatalf("COLUMNS=%d 에서 아무것도 안 냈다", cols)
+				}
+				lines := strings.Split(out, "\n")
+
+				// ① 위쪽 — 넘치지 않는다.
+				for i, line := range lines {
+					w := grafikDisplayWidth(line)
+					if w <= cols {
+						continue
+					}
+					if !strings.Contains(line, "·") {
+						// 조각 하나짜리 줄이다 — 쪼갤 수 없으니 면제한다.
+						continue
+					}
+					t.Fatalf("COLUMNS=%d 인데 %d번째 줄이 %d칸이다 — %d칸 넘친다.\n"+
+						"줄=%q\n"+
+						"터미널이 이 줄을 접는다. 접힘은 스크립트 출력이 아니라 터미널이 하는 일이라\n"+
+						"stdout 에는 안 나타나고, **줄 수만 재는 관문은 이것을 영영 못 본다**.\n"+
+						"레이아웃은 조각을 조립한 뒤 그 폭을 재서 줄을 갈라야 한다 —\n"+
+						"`cols >= 80` 같은 상수 문턱은 내용 폭(이메일·브랜치명·모델명 길이)이\n"+
+						"가변이라 원리상 맞을 수가 없다",
+						cols, i+1, w, w-cols, line)
+				}
+
+				// ② 아래쪽 — 들어갈 수 있는데 굳이 줄을 가르지 않는다.
+				//
+				// ★★ ①만 재면 **넘치는 쪽만** 막힌다. 반대편 고장 — 들어가는데도 줄을
+				// 쪼개서 화면을 필요 이상 먹는 것 — 은 ① 아래에서 영영 초록이다.
+				// 실제로 밟았다: 폭을 재는 jq 호출에서 `-r` 을 빠뜨려 첫 조각과 마지막
+				// 조각의 폭이 `"22`·`30"` 으로 왔고, 그것들은 숫자가 아니라 `(( ))` 가
+				// 그냥 거짓이 되어 두 조각이 **영영 다른 줄로** 밀렸다. 아무 시험도 안 물었다.
+				// ★ 무는 것은 "다음 **줄 전체**가 이 줄에 들어가는가" 다. 다음 줄의 첫
+				// 조각만 보는 편이 더 촘촘하겠지만, 렌더된 텍스트에서 조각 경계를 되찾을
+				// 수가 없다 — 통계 묶음(`$1.23 · +10 -3 · ⏱1m05s`)이 조각 하나인데 내부에
+				// 같은 구분자를 쓴다. 그것을 조각 셋으로 잘못 읽으면 **멀쩡한 줄바꿈을
+				// 결함이라 부른다**(실제로 그렇게 냈다). 줄 전체로 물면 느슨한 대신
+				// 거짓양성이 원리상 불가능하다: 줄 전체가 들어가면 그 첫 조각도 반드시
+				// 들어갔을 것이므로, 그리디 패커라면 갈랐을 리가 없다.
+				for i := 0; i+1 < len(lines); i++ {
+					// 붙이면 다음 줄의 맨 앞 공백 한 칸은 사라지고 구분자 5칸이 든다.
+					joined := grafikDisplayWidth(lines[i]) + 5 + grafikDisplayWidth(lines[i+1]) - 1
+					if joined <= cols {
+						t.Fatalf("COLUMNS=%d 인데 %d번째 줄에서 일찍 갈랐다.\n"+
+							"이 줄=%q (%d칸)\n다음 줄=%q (%d칸)\n"+
+							"둘을 붙이면 %d칸으로 %d칸 안에 들어간다 — 가를 이유가 없다.\n"+
+							"상태줄이 화면 줄을 필요 이상 먹는다. 이 방향의 고장은 **넘침을 재는\n"+
+							"단정 아래에서 영영 초록**이라, 폭 계산이 조용히 망가져도 안 보인다",
+							cols, i+1, lines[i], grafikDisplayWidth(lines[i]),
+							lines[i+1], grafikDisplayWidth(lines[i+1]), joined, cols)
+					}
+				}
+			})
+		}
 	}
 }
 
