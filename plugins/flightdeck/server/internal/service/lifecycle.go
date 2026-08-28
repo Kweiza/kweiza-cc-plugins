@@ -57,9 +57,20 @@ func judgeLifecycleGate(c store.ConvLifecycle) *LifecycleGate {
 			res, c.LaneRow.ID)}
 	}
 	if len(c.LiveClaims) > 0 {
+		// ★ 세 갈래 전부에 **다음에 할 것**을 적는다. 앞 판의 이 문구는 "끝났으면 finish,
+		// 끝나지 않았으면 이어서 하라" 두 갈래뿐이었는데, 그 둘 다 명령형이라 **기다리는
+		// 중인 세션에 줄 갈래가 없었다** — lane-wait 는 `fd lane wait` 를, land 는 줄서기를
+		// 주는데 이 갈래만 대기 통로가 없었다. 그래서 모델이 "이어서 하라"를 스스로
+		// 해석했고, 대기 중에 가능한 가장 싼 "이어서"가 새 대기 프로세스를 띄우는 것이었다
+		// (2026-08-28 실측: 대기 셸 59개 중 26개가 이 관문이 되살린 턴에서 났다).
+		//
+		// ★ 이 문구는 보조다 — 근본 처방은 훅이 background_tasks 를 읽어 대기 중에는
+		// 발화 자체를 안 하는 것이다(cmd/fd/hook.go 의 hookStop 대기 가드). 그 가드가 없는
+		// 옛 클라이언트에는 이 문장만 닿으므로, 여기서도 같은 것을 말한다.
 		return &LifecycleGate{Stage: "finish", Reason: fmt.Sprintf(
 			"선점 중인 항목 %s 가 아직 열려 있다. 끝났으면 finish 로 닫아라(판단·후속·반납이 한 호출이다). "+
-				"끝나지 않았으면 이어서 하라 — 이 알림은 턴 끝마다 온다.",
+				"백그라운드 작업이나 리뷰를 기다리는 중이면 아무것도 새로 띄우지 마라 — "+
+				"끝나면 하네스가 이 세션을 다시 부른다. 그 밖이면 이어서 하라.",
 			strings.Join(c.LiveClaims, " "))}
 	}
 	if len(c.DoneItems) > 0 && !c.EverEnqueued {

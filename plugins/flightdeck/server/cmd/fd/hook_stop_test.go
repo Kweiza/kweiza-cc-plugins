@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -220,7 +221,9 @@ func TestHookStopBlocksOnLifecycleGate(t *testing.T) {
 }
 
 // stop_hook_active=true 면 lifecycle 이 있어도 **아무것도** 안 나간다 — 이 가드가
-// 루프 방벽의 전부다(억제표는 방벽이 아니다 — hook.go:525-533 이 명시로 기각했다).
+// 루프 방벽의 전부다(억제표는 방벽이 아니다 — emitBlock 의 ★ 문단이 명시로 기각했다).
+// ★ 정정: "전부"는 **한 query 호출 안**에서만 참이다. 백그라운드 기상 턴은 새 호출이라
+// 이 가드가 안 걸린다 — 그 축은 hookStop 의 대기 가드(background_tasks)가 맡는다.
 func TestHookStopNeverBlocksItsOwnTurn(t *testing.T) {
 	srv := fakeServer(t, map[string]string{
 		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0,` +
@@ -259,5 +262,147 @@ func TestHookStopStillEmitsPrescriptionsWithoutGate(t *testing.T) {
 	}
 	if !strings.Contains(out, "XYZ-MARK") {
 		t.Fatalf("처방 본문이 없다: %q", out)
+	}
+}
+
+// countingServer 는 fakeServer 와 같지만 경로별 요청 수를 함께 낸다.
+//
+// ★ 이 계수기가 아래 대기 가드 시험들의 **본 축**이다. "출력이 비었나"만 보면 통과하는
+// 판이 여럿 있다(호출해 놓고 출력만 삼키는 판도 통과한다) — 그런데 그 판은 틀렸다:
+// service/prescribe.go 의 LogEvent(eventPrescribe)/LogEvent(eventPrescribeFolded) 가
+// **응답을 만들면서** (세션×키) 억제표를 태우므로, 부르고 나서 삼키면 그 처방은 영영
+// 소실된다. 그래서 가드는 출력부가 아니라 **서버 호출 앞**에 있어야 하고, 그 자리를
+// 잠그는 것은 이 계수기뿐이다.
+func countingServer(t *testing.T, routes map[string]string) (*httptest.Server, func(string) int) {
+	t.Helper()
+	var mu sync.Mutex
+	hits := map[string]int{}
+	mux := http.NewServeMux()
+	record := func(path string) {
+		mu.Lock()
+		hits[path]++
+		mu.Unlock()
+	}
+	for path, body := range routes {
+		path, body := path, body
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			record(path)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		})
+	}
+	if _, ok := routes["/api/v1/sessions"]; !ok {
+		mux.HandleFunc("/api/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+			record("/api/v1/sessions")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"session":{"id":"S1"},"created":false}`)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits[path]
+	}
+}
+
+// gateRoutes 는 lifecycle 관문(stage=finish)이 켜진 서버 응답이다 — 가드가 없으면
+// 반드시 decision:block 이 나가는 조건이라, 무출력이 관측되면 그것은 가드 때문이다.
+func gateRoutes() map[string]string {
+	return map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0,` +
+			`"lifecycle":{"stage":"finish","reason":"FINISH-GATE-REASON"}}`,
+	}
+}
+
+// ★★ 이 시험이 이 파일에서 stop_hook_active 가드 다음으로 중요하다.
+//
+// **살아 있는 백그라운드 작업이 있으면 아무것도 안 낸다 — 서버도 안 부른다.**
+//
+// stop_hook_active 가드는 **한 query 호출 안**의 재진입만 끊는다. 백그라운드 작업이
+// 끝나며 만드는 기상 턴은 새 query 호출이라 stop_hook_active 가 false 로 시작하고,
+// 그래서 그 턴 끝에 관문이 또 발화한다 — block 이 턴을 되살리고, 되살아난 턴이
+// 기다리려고 또 대기 프로세스를 띄우고, 그것이 끝나며 또 기상 턴을 만든다.
+// 2026-08-28 실측(figma-agent 전사): block 76회 중 67회(88.2%)가 하네스 추적
+// 백그라운드 작업이 살아 있는 동안 떴고, 대기 셸 59개 중 26개(44%)가 block 이
+// 되살린 턴에서 났다. 동시 생존 최대 11개.
+//
+// 하네스는 이 축을 이미 준다 — Stop 페이로드의 background_tasks 는 스키마 설명이
+// 문자 그대로 `Lets hooks distinguish "session is done" from "session is paused
+// waiting for background work to wake it"` 이다(2.1.250). 마지막 작업이 끝난 턴에는
+// 배열이 비므로 관문은 **정확히 한 번** 뜬다 — 공짜 edge-trigger 다.
+func TestHookStopStaysSilentWhileBackgroundWorkIsLive(t *testing.T) {
+	srv, hits := countingServer(t, gateRoutes())
+
+	out := runHookForTest(t, srv.URL, "stop", `{"session_id":"cc-1","cwd":".",`+
+		`"background_tasks":[{"id":"bg-1","type":"local_agent","status":"running"}]}`)
+
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("백그라운드 작업이 살아 있는데 뭔가 냈다 — 이게 대기 셸 증식의 씨앗이다: %q", out)
+	}
+	if n := hits("/api/v1/sessions/S1/prescriptions"); n != 0 {
+		t.Fatalf("처방을 %d번 조회했다 — 가드가 출력부에 있다. 그 판은 억제표를 태우고 "+
+			"처방을 영영 잃는다(가드는 서버 호출 앞에 있어야 한다)", n)
+	}
+}
+
+// ★ **대조군이다 — 이게 없으면 위 시험은 변이가 안 닿아도 초록이다.**
+// background_tasks 가 빈 배열이면 가드가 안 걸리고 관문이 예전처럼 block 한다.
+// 위 시험이 잡는 것이 "가드가 걸렸다"인지 "훅이 그냥 조용해졌다"인지를 가르는 자리다.
+func TestHookStopStillBlocksWhenNoBackgroundWork(t *testing.T) {
+	srv, hits := countingServer(t, gateRoutes())
+
+	out := runHookForTest(t, srv.URL, "stop",
+		`{"session_id":"cc-1","cwd":".","background_tasks":[],"session_crons":[]}`)
+
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Fatalf("살아 있는 백그라운드 작업이 없는데 block 이 안 나왔다 — "+
+			"가드가 과발화해 관문을 통째로 껐다: %q", out)
+	}
+	if !strings.Contains(out, "FINISH-GATE-REASON") {
+		t.Fatalf("관문 사유가 없다: %q", out)
+	}
+	if n := hits("/api/v1/sessions/S1/prescriptions"); n != 1 {
+		t.Fatalf("처방 조회가 %d회다 — 1회여야 한다", n)
+	}
+}
+
+// session_crons 도 같은 축이다 — ScheduleWakeup·CronCreate·/loop 가 걸어 둔 것이
+// 있으면 그 세션은 끝난 것이 아니라 **나중에 깨어날** 세션이다. 스키마 설명이 그렇게
+// 말한다("Session-scoped cron tasks … that will wake this session later").
+// 크론이 깨우는 턴도 새 query 호출이라 stop_hook_active 가 false 다 — 같은 사슬이다.
+func TestHookStopStaysSilentWhileSessionCronIsScheduled(t *testing.T) {
+	srv, hits := countingServer(t, gateRoutes())
+
+	out := runHookForTest(t, srv.URL, "stop", `{"session_id":"cc-1","cwd":".",`+
+		`"session_crons":[{"id":"cron-1","schedule":"*/5 * * * *","recurring":true}]}`)
+
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("크론이 이 세션을 깨울 예정인데 뭔가 냈다: %q", out)
+	}
+	if n := hits("/api/v1/sessions/S1/prescriptions"); n != 0 {
+		t.Fatalf("처방을 %d번 조회했다 — 가드가 서버 호출 앞에 없다", n)
+	}
+}
+
+// ★ **가드는 대기 중에 처방도 함께 삼킨다 — 그것이 의도다.** lifecycle 관문이 없는
+// (=block 이 애초에 안 나가는) 경우에도 조용해야 한다: 2026-08-04 실측대로
+// additionalContext **도** 모델을 다시 부르기 때문이다(하네스 2.1.250 집계부가
+// additionalContexts 를 blockingErrors 배열에 함께 담아 턴을 continue 한다).
+// 그러니 block 만 막고 처방은 내는 판은 증식을 못 끊는다 — 그 판을 잠그는 자리다.
+func TestHookStopSwallowsPlainPrescriptionsWhileWaiting(t *testing.T) {
+	srv, hits := countingServer(t, map[string]string{
+		"/api/v1/sessions/S1/prescriptions": `{"shown":[{"key":"unclaimed","text":"XYZ-MARK"}],"folded":0}`,
+	})
+
+	out := runHookForTest(t, srv.URL, "stop", `{"session_id":"cc-1","cwd":".",`+
+		`"background_tasks":[{"id":"bg-1","type":"local_bash","status":"pending"}]}`)
+
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("대기 중인데 처방을 냈다 — additionalContext 도 턴을 되살린다: %q", out)
+	}
+	if n := hits("/api/v1/sessions/S1/prescriptions"); n != 0 {
+		t.Fatalf("처방을 %d번 조회했다 — 억제표를 태웠다", n)
 	}
 }

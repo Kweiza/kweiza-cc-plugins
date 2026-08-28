@@ -45,6 +45,33 @@ type HookPayload struct {
 	// StopHookActive 는 지금 이 호출 자체가 **Stop 훅의 주입이 만든 턴**의 끝에서
 	// 왔다는 뜻이다. hookStop 이 이것을 확인 없이 넘기면 무한 루프다(hookStop 주석 참고).
 	StopHookActive bool `json:"stop_hook_active"`
+	// BackgroundTasks·SessionCrons 는 **이 대화가 끝난 것이 아니라 기다리는 중**이라는
+	// 하네스의 신호다. Stop 페이로드에만 온다.
+	//
+	// ★ 이 축은 추론이 아니라 하네스가 그 목적으로 실어 주는 값이다 — 2.1.250 의
+	// zod 설명이 문자 그대로 이렇게 적혀 있다:
+	//   background_tasks: "In-flight background work (running/pending + backgrounded)
+	//     registered in this session. Lets hooks distinguish \"session is done\" from
+	//     \"session is paused waiting for background work to wake it\".
+	//     Empty array when nothing is in flight."
+	//   session_crons: "Session-scoped cron tasks (CronCreate, ScheduleWakeup, /loop)
+	//     that will wake this session later. Empty array when none are scheduled."
+	// 그리고 페이로드 조립부가 두 키를 Stop·SubagentStop 양쪽에 **조건 없이** 얹는다.
+	// 담기는 것은 status 가 running·pending 이면서 backgrounded 인 것뿐이다.
+	//
+	// ★ 원소의 나머지 필드(command·agent_type·server·tool·name·prompt…)는 안 읽는다.
+	// 이 훅이 묻는 것은 "살아 있는 것이 있나" 하나이고, id·type 은 로그 한 줄의 재료다.
+	// 모르는 필드는 여기서도 무시된다(파일 머리말의 규율 그대로).
+	BackgroundTasks []hookLiveWork `json:"background_tasks"`
+	SessionCrons    []hookLiveWork `json:"session_crons"`
+}
+
+// hookLiveWork 는 background_tasks·session_crons 원소 중 이 도구가 쓰는 축이다.
+// 두 배열의 원소 모양은 서로 다르지만(크론에는 type 이 없다) 이 훅이 보는 것은
+// 개수와 로그용 이름뿐이라 한 타입으로 받는다 — 없는 키는 빈 문자열이 된다.
+type hookLiveWork struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 // ParseHookPayload 는 훅 stdin 을 읽는다. 순수 함수다.
@@ -574,6 +601,36 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Wr
 		// 내가 만든 턴이다. 여기서 또 내면 그 턴이 또 턴을 만든다.
 		return
 	}
+	if live := len(p.BackgroundTasks) + len(p.SessionCrons); live > 0 {
+		// ★★ **이 대화는 끝난 것이 아니라 기다리는 중이다 — 서버도 안 부르고 반환한다.**
+		//
+		// 바로 위 가드가 못 끊는 사슬이 여기 있다. stop_hook_active 는 **한 query 호출
+		// 안**의 재진입만 표시한다 — 백그라운드 작업이 끝나며 만드는 기상 턴은 새 query
+		// 호출이라 그 값이 false 로 시작하고, 그래서 그 턴 끝에 관문이 다시 발화한다.
+		// block 이 턴을 되살리면 되살아난 턴은 여전히 기다리는 중이라 또 대기 프로세스를
+		// 띄우고, 그것이 끝나며 또 기상 턴을 만든다 — 배가한다.
+		// 2026-08-28 실측: block 76회 중 67회(88.2%)가 백그라운드 작업이 살아 있는 동안
+		// 떴고, 대기 셸 59개 중 26개(44%)가 block 이 되살린 턴에서 났다(동시 최대 11개).
+		// 하네스의 폭주 차단기(연속 block 8회)도 안 걸린다 — query 당 1회씩이라 그 계수가
+		// 매번 0으로 리셋된다. 즉 이 사슬에는 상위 방벽이 없다.
+		//
+		// ★ **처방까지 함께 삼키는 것이 의도다.** block 만 막는 판은 못 끊는다 —
+		// additionalContext 도 모델을 다시 부르기 때문이다(2026-08-04 실측, 위 ★★ 문단.
+		// 하네스 집계부가 additionalContexts 를 blockingErrors 와 같은 배열에 담아 턴을
+		// 잇는다). 잃는 것은 없다: 마지막 작업이 끝난 턴에는 두 배열이 비므로 관문도
+		// 처방도 **정확히 한 번** 그때 뜬다 — 억지 쿨다운이 아니라 공짜 edge-trigger 다.
+		//
+		// ★ **자리가 서버 호출 앞이어야 한다.** 처방 응답을 만드는 쪽이 그 자리에서
+		// (세션×키) 억제를 태우므로(service/prescribe.go 의 "처방 발화" 문단), 부르고 나서
+		// 출력만 삼키면 그 처방은 영영 소실된다. 여기서 반환하면 아무것도 안 태운다.
+		//
+		// ★ 구 하네스(이 키를 안 싣던 판)에서는 둘 다 빈 슬라이스라 이 가드가 안 걸린다 —
+		// 그때 동작은 오늘 그대로다. 필드가 늘어난 것이지 계약이 바뀐 것이 아니다.
+		a.log.Info("stop: 대기 중이라 처방을 안 냈다",
+			"background_tasks", len(p.BackgroundTasks), "session_crons", len(p.SessionCrons),
+			"first", liveWorkName(p))
+		return
+	}
 	if strings.TrimSpace(p.CWD) != "" {
 		a.proj = resolveProject(a.env, p.CWD)
 	}
@@ -627,6 +684,21 @@ func (a *App) hookStop(ctx context.Context, p HookPayload, perr error, out io.Wr
 	if text != "" {
 		emitContext(out, "Stop", text)
 	}
+}
+
+// liveWorkName 은 대기 로그에 실을 이름 하나다 — 무엇을 기다리다 조용했는지 모르면
+// 나중에 이 가드가 과발화했는지 아닌지를 로그만 보고 못 가른다.
+func liveWorkName(p HookPayload) string {
+	for _, w := range p.BackgroundTasks {
+		if w.Type != "" {
+			return w.Type + ":" + w.ID
+		}
+		return w.ID
+	}
+	for _, w := range p.SessionCrons {
+		return "cron:" + w.ID
+	}
+	return ""
 }
 
 // beatFromHook 은 신호 하나를 남기고 세션 id 를 돌려준다. 실패하면 빈 문자열이다.
