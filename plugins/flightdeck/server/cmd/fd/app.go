@@ -12,18 +12,22 @@ import (
 	"time"
 
 	"github.com/kweiza/flightdeck/internal/buildinfo"
+	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
 // App 은 클라이언트 한 실행분의 좌표다. 서브명령·훅·MCP 가 전부 이것을 공유한다.
 type App struct {
-	env        func(string) (string, bool)
-	log        *slog.Logger
-	sd         StateDir
-	cli        *Client
-	proj       ProjectCoord
-	machine    string
+	env     func(string) (string, bool)
+	log     *slog.Logger
+	sd      StateDir
+	cli     *Client
+	proj    ProjectCoord
+	machine string
+	// harness 는 **선언된** 하네스다(DESIGN 「14. 하네스 축」). 빈 값은 「미상」이고
+	// claude 로 접지 않는다 — 환경으로는 못 가르기 때문이다.
+	harness    string
 	notice     string // 도구가 스스로 못 한 것. 침묵하지 않는다
 	machineSrc string // machine-id 를 읽은 자리. doctor 가 찍는다 — 값이 갈리면 여기가 원인이다
 	beaconDir  string // 창 비콘 디렉토리(BeaconDir). mcp.go 가 mcpsrv.WithBeaconDir 에 그대로 넘긴다
@@ -130,10 +134,32 @@ func (a *App) ccSessionID(fromHook string) string {
 	if s := strings.TrimSpace(fromHook); s != "" {
 		return s
 	}
-	if v, ok := a.env("CLAUDE_CODE_SESSION_ID"); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+	// ★ 환경 갈래는 **하네스별로 이름이 다르다**(DESIGN 「14. 하네스 축」).
+	// 선언이 있으면 그 이름만 보고, 없으면 아는 이름들을 순서대로 훑는다 —
+	// 훑는 것은 값을 찾는 일이지 하네스를 정하는 일이 아니다.
+	if name := mcpsrv.SessionEnvFor(a.harness); name != "" {
+		if v, ok := a.env(name); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+		return ""
+	}
+	for _, name := range []string{mcpsrv.EnvSessionID, mcpsrv.EnvCodexSessionID} {
+		if v, ok := a.env(name); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
 	}
 	return ""
+}
+
+// sessionEnvName 은 이 실행이 세션 id 를 찾는 환경변수 이름이다.
+//
+// ★ 안내 문구가 이 값을 불러야 한다. "CLAUDE_CODE_SESSION_ID 를 못 읽었다" 를 박아 두면
+// codex 세션에서 **없는 변수를 가리키는 안내**가 나오고, 그것은 이 도구가 안 하기로 한 일이다.
+func (a *App) sessionEnvName() string {
+	if name := mcpsrv.SessionEnvFor(a.harness); name != "" {
+		return name
+	}
+	return mcpsrv.EnvSessionID
 }
 
 const sessionCachePath = "/local/session"

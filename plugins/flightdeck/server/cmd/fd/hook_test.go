@@ -349,7 +349,7 @@ func TestEditedPathsReadsEveryToolShape(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := EditedPaths(c.in)
+			got := EditedPaths(c.in, "/repo")
 			if len(got) != len(c.want) {
 				t.Fatalf("%v → %v, %v 를 기대했다", c.in, got, c.want)
 			}
@@ -359,6 +359,69 @@ func TestEditedPathsReadsEveryToolShape(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEditedPathsReadsCodexApplyPatch 는 codex 하네스의 발자국을 문다.
+//
+// ★ 이 시험이 없으면 codex 세션의 경로 겹침이 **0건인 채로 초록**이다. 위 시험표는
+// Claude 의 도구 모양(file_path)만 보므로 codex 가 들어와도 안 깨진다 — 조용한 부재는
+// 시험이 따로 물지 않으면 영영 안 뜬다.
+//
+// 입력 문자열은 2026-08-30 실측을 **그대로** 옮긴 것이다(codex-cli 0.151.0).
+func TestEditedPathsReadsCodexApplyPatch(t *testing.T) {
+	const cwd = "/repo/work"
+	cases := []struct {
+		name string
+		cmd  string
+		want []string
+	}{
+		{"Add File", "*** Begin Patch\n*** Add File: sub/extra.txt\n+x\n*** End Patch",
+			[]string{"/repo/work/sub/extra.txt"}},
+		{"Delete File", "*** Begin Patch\n*** Delete File: sub/extra.txt\n*** End Patch",
+			[]string{"/repo/work/sub/extra.txt"}},
+		// ★ 이름 바꾸기는 경로가 **둘**이다. 하나만 잡으면 겹침의 한쪽이 사라진다.
+		{"Update + Move to", "*** Begin Patch\n*** Update File: sub/old.txt\n*** Move to: sub/new.txt\n@@\n-old content\n+new content\n*** End Patch",
+			[]string{"/repo/work/sub/old.txt", "/repo/work/sub/new.txt"}},
+		// 패치가 아닌 셸 명령은 아무것도 안 낸다 — `command` 키를 본다고 다 뒤지면
+		// `rm -rf x` 같은 문자열에서 유령 경로가 나온다.
+		{"패치가 아닌 셸 명령", "pwd && rg --files -g 'probe.txt'", nil},
+		{"빈 문자열", "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := EditedPaths(map[string]any{"command": c.cmd}, cwd)
+			if len(got) != len(c.want) {
+				t.Fatalf("%q → %v, %v 를 기대했다", c.cmd, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("%q → %v, %v 를 기대했다", c.cmd, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestEditedPathsAbsolutizesAgainstCwd 는 **좌표계**를 문다.
+//
+// 서버의 service.RelPathWithin 은 상대경로를 그대로 통과시켜 저장소 상대로 취급한다.
+// 그래서 cwd 가 저장소 하위일 때 절대화를 빼먹으면 오류 없이 틀린 발자국이 남는다.
+// 위 시험은 값이 맞는지만 보므로 이 축을 따로 문다 — 절대화를 지워도 위 시험이
+// 안 깨지는 판(cwd 가 뿌리인 경우)이 존재하기 때문이다.
+func TestEditedPathsAbsolutizesAgainstCwd(t *testing.T) {
+	got := EditedPaths(map[string]any{"command": "*** Begin Patch\n*** Add File: a/b.go\n*** End Patch"}, "/repo/sub")
+	if len(got) != 1 || got[0] != "/repo/sub/a/b.go" {
+		t.Fatalf("하위 디렉토리 cwd 에서 %v — [/repo/sub/a/b.go] 여야 한다. "+
+			"상대로 두면 서버가 저장소 뿌리 기준으로 읽어 없는 경로의 발자국이 된다", got)
+	}
+	// 이미 절대인 것(Claude 의 file_path)은 안 건드린다.
+	if got := EditedPaths(map[string]any{"file_path": "/a/b.go"}, "/repo/sub"); got[0] != "/a/b.go" {
+		t.Fatalf("절대경로를 건드렸다: %v", got)
+	}
+	// cwd 를 모르면 지어내지 않는다 — 변경 전 동작 그대로 둔다.
+	if got := EditedPaths(map[string]any{"command": "*** Begin Patch\n*** Add File: a/b.go\n*** End Patch"}, ""); got[0] != "a/b.go" {
+		t.Fatalf("cwd 가 없는데 지어냈다: %v", got)
 	}
 }
 

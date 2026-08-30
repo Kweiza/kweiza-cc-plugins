@@ -94,12 +94,17 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return 0
 	}
 
+	// ★ --harness 는 **전역**이다. hook 도 mcp 도 같은 선언을 받아야 하고, 서브명령마다
+	// 따로 파싱하면 한 곳만 고칠 때 조용히 어긋난다(DESIGN 「14. 하네스 축」 ②).
+	harness, args := SplitHarnessFlag(args)
+
 	cwd, cwdErr := os.Getwd()
 	if cwdErr != nil {
 		// cwd 가 세션의 워크트리다(설계 §13). 못 읽으면 좌표가 없다 — 다만 훅은 그래도 살아야 한다.
 		log.Error("cwd 를 읽지 못했다", "error", cwdErr.Error())
 	}
 	app := newApp(env, log, cwd, stdin)
+	app.harness = harness
 	if app.notice != "" {
 		log.Warn("클라이언트 초기화 경고", "reason", app.notice)
 	}
@@ -194,4 +199,30 @@ func newLoggerNamed(env func(string) (string, bool), stderr io.Writer, service s
 	}
 	return slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level})).
 		With("service.name", service)
+}
+
+// SplitHarnessFlag 는 인자에서 `--harness <이름>`(과 `--harness=<이름>`)을 떼어낸다. 순수 함수다.
+//
+// ★ 하네스는 **선언**이지 관측이 아니다(DESIGN 「14. 하네스 축」 ②) — 환경변수로 받으면
+// 중첩 실행에서 상속되어 거짓말한다. 인자는 상속되지 않으므로 그 축이 원리적으로 안 샌다.
+//
+// 모르는 이름이어도 여기서 거절하지 않는다. 훅은 fail-open 이고(인자가 틀려도 세션을 막지
+// 않는다), 모르는 이름의 처리는 ResolveIdentityAs 가 경고로 말한다 — 판정은 한 자리에 둔다.
+func SplitHarnessFlag(args []string) (harness string, rest []string) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--harness":
+			if i+1 < len(args) {
+				harness = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--harness="):
+			harness = strings.TrimSpace(strings.TrimPrefix(a, "--harness="))
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return harness, rest
 }

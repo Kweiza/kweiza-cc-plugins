@@ -76,6 +76,9 @@ func runMCP(ctx context.Context, app *App, log *slog.Logger, stdin io.Reader, st
 		// 이 한 줄이 없으면 MCP 는 자기 cwd 를 워크트리로 봐서 훅과 3중키가 갈린다 —
 		// 저장소 하위 디렉토리에서 연 창이 카드 두 장이 된다(TestHookAndMCPAgreeOnWorktreeFromSubdir).
 		mcpsrv.WithWorktree(app.proj.Worktree),
+		// ★ 하네스 선언을 그대로 넘긴다. 안 넘기면 `fd mcp --harness codex` 가
+		// **조용한 무연산**이 된다 — 이 저장소가 가장 싫어하는 모양이다.
+		mcpsrv.WithHarness(app.harness),
 		mcpsrv.WithBeaconDir(app.beaconDir))
 	if err := srv.Serve(ctx, stdin, stdout); err != nil {
 		log.Error("MCP 서버 종료", "error", err.Error())

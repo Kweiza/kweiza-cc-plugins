@@ -223,3 +223,82 @@ func TestProjectIDFor(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveIdentityAsNamesTheHarnessEnv 는 이 항목의 **이유**를 문다.
+//
+// 배너와 거절 사유가 부르는 환경변수 이름이 그 하네스의 것이어야 한다. codex 세션에서
+// CLAUDE_CODE_SESSION_ID 를 가리키면, "지어내지 않는다"를 지키려고 만든 문장이 그 자리에서
+// 존재하지 않는 변수를 가리키는 안내가 된다.
+func TestResolveIdentityAsNamesTheHarnessEnv(t *testing.T) {
+	codexEnv := env(map[string]string{EnvCodexSessionID: "codex-uuid", EnvProjectDir: "/p"})
+	id := ResolveIdentityAs(HarnessCodex, codexEnv, "/p", nil, "h", nil)
+	if id.CCSessionID != "codex-uuid" {
+		t.Fatalf("codex 세션 id 를 못 읽었다: %q", id.CCSessionID)
+	}
+	if id.Harness != HarnessCodex || id.HarnessLabel() != "codex" {
+		t.Fatalf("하네스가 %q · 라벨 %q — codex 여야 한다", id.Harness, id.HarnessLabel())
+	}
+	if id.SessionEnvName() != EnvCodexSessionID {
+		t.Fatalf("세션 축 이름이 %q — %q 여야 한다", id.SessionEnvName(), EnvCodexSessionID)
+	}
+
+	// ★ codex 인데 값이 없으면 **codex 의 이름**이 결손으로 나와야 한다.
+	empty := ResolveIdentityAs(HarnessCodex, env(map[string]string{EnvProjectDir: "/p"}), "/p", nil, "h", nil)
+	if !containsAxis(empty.Missing, EnvCodexSessionID) {
+		t.Fatalf("결손 축이 %v — %s 를 불러야 한다", empty.Missing, EnvCodexSessionID)
+	}
+	if containsAxis(empty.Missing, EnvSessionID) {
+		t.Fatalf("codex 세션인데 결손 축이 %s 를 불렀다 — 없는 변수를 가리키는 안내다", EnvSessionID)
+	}
+	ok, reason := GateTool("note", empty)
+	if ok {
+		t.Fatal("세션 id 가 없는데 note 가 통과했다")
+	}
+	if !strings.Contains(reason, EnvCodexSessionID) {
+		t.Fatalf("거절 사유가 codex 축을 안 불렀다: %s", reason)
+	}
+}
+
+// TestResolveIdentityDeclarationBeatsProbing 은 **선언이 관측을 이긴다**를 문다.
+//
+// 실측된 오염이 근거다: Claude 세션 안에서 띄운 codex 는 CLAUDE_CODE_SESSION_ID 를
+// 물려받는다. 선언이 그 값을 이기지 못하면 codex 카드가 남의 카드에 붙는다.
+func TestResolveIdentityDeclarationBeatsProbing(t *testing.T) {
+	both := env(map[string]string{
+		EnvSessionID:      "claude-uuid(물려받은 것)",
+		EnvCodexSessionID: "codex-uuid",
+		EnvProjectDir:     "/p",
+	})
+	id := ResolveIdentityAs(HarnessCodex, both, "/p", nil, "h", nil)
+	if id.CCSessionID != "codex-uuid" {
+		t.Fatalf("세션 id 가 %q — 선언한 하네스의 값(codex-uuid)이어야 한다. "+
+			"상속된 CLAUDE_CODE_SESSION_ID 를 집으면 codex 세션이 남의 카드에 붙는다", id.CCSessionID)
+	}
+}
+
+// TestResolveIdentityWithoutHarnessStaysUnknown 은 **미선언을 claude 로 접지 않는다**를 문다.
+func TestResolveIdentityWithoutHarnessStaysUnknown(t *testing.T) {
+	id := ResolveIdentityAs("", env(map[string]string{EnvCodexSessionID: "codex-uuid", EnvProjectDir: "/p"}), "/p", nil, "h", nil)
+	if id.Harness != "" || id.HarnessLabel() != "미상" {
+		t.Fatalf("선언이 없는데 하네스가 %q 로 정해졌다 — 「미상」이어야 한다", id.Harness)
+	}
+	// 값은 찾는다. 찾는 것과 이름 붙이는 것은 다른 질문이다.
+	if id.CCSessionID != "codex-uuid" || id.SessionEnvName() != EnvCodexSessionID {
+		t.Fatalf("훑기로 값을 못 찾았다: id=%q env=%q", id.CCSessionID, id.SessionEnvName())
+	}
+	if len(id.Warnings) == 0 {
+		t.Fatal("미선언인데 경고가 없다 — 조용히 넘어가면 그 사실이 어느 화면에도 안 뜬다")
+	}
+}
+
+// TestResolveIdentityRejectsUnknownHarnessLoudly 는 오타가 조용히 「미상」으로 접히지 않게 한다.
+func TestResolveIdentityRejectsUnknownHarnessLoudly(t *testing.T) {
+	id := ResolveIdentityAs("codx", env(map[string]string{EnvSessionID: "u", EnvProjectDir: "/p"}), "/p", nil, "h", nil)
+	if id.Harness != "" {
+		t.Fatalf("모르는 이름이 하네스로 앉았다: %q", id.Harness)
+	}
+	joined := strings.Join(id.Warnings, " ")
+	if !strings.Contains(joined, "codx") {
+		t.Fatalf("경고가 오타를 안 불렀다: %v", id.Warnings)
+	}
+}

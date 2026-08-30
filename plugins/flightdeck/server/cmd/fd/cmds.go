@@ -160,7 +160,7 @@ func (a *App) runOpen(ctx context.Context, args []string, out io.Writer) int {
 	a.cli.Flush(ctx)
 	cc := a.ccSessionID(*session)
 	if cc == "" {
-		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다). 지어내지 않는다.")
+		fmt.Fprintf(out, "%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다). 지어내지 않는다.\n", a.sessionEnvName())
 		return 1
 	}
 	res, stale, err := a.OpenSession(ctx, cc, *label)
@@ -578,7 +578,7 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 
 	cc := a.ccSessionID(*session)
 	if cc == "" {
-		fmt.Fprintln(out, "CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).")
+		fmt.Fprintf(out, "%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).\n", a.sessionEnvName())
 		return 1
 	}
 	// ★ **먼저 조회한다. 없으면 만들지 않는다.**
@@ -1644,7 +1644,7 @@ func (a *App) sessionID(ctx context.Context, fromFlag string) (string, error) {
 	}
 	cc := a.ccSessionID(fromFlag)
 	if cc == "" {
-		return "", fmt.Errorf("CLAUDE_CODE_SESSION_ID 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다)")
+		return "", fmt.Errorf("%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다)", a.sessionEnvName())
 	}
 	res, _, err := a.OpenSession(ctx, cc, "")
 	if err != nil {

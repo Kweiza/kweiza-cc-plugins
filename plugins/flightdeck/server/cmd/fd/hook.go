@@ -95,7 +95,7 @@ func ParseHookPayload(raw []byte) (HookPayload, error) {
 // ★ 미커밋 발자국의 **유일한 원천**이다(설계 §6). 여기서 조용히 0건이 되면
 // 착수 직후 구간의 경로 겹침 축이 통째로 죽는다 — 그 구간은 브랜치 diff 가 정의상 비어 있다.
 // 그래서 도구마다 다른 키 이름을 전부 본다.
-func EditedPaths(toolInput map[string]any) []string {
+func EditedPaths(toolInput map[string]any, cwd string) []string {
 	if toolInput == nil {
 		return nil
 	}
@@ -118,6 +118,84 @@ func EditedPaths(toolInput map[string]any) []string {
 				out = append(out, s)
 			}
 		}
+	}
+	// ★ codex 갈래. 이 하네스의 `tool_input` 에는 키가 `command` **하나뿐**이고
+	// `file_path` 가 아예 없다(2026-08-30 실측, codex-cli 0.151.0) — 위 표만 보면
+	// codex 세션의 발자국이 **통째로 0건**이 된다. 그것이 이 함수가 가장 두려워하는
+	// 모양이다(위 주석: 미커밋 발자국의 유일한 원천).
+	//
+	// tool_name 으로 갈래를 트지 않는다. §13 이 적어 뒀듯 그 축은 닫힌 열거가 아니고,
+	// 같은 패치가 `apply_patch` 로도 셸 heredoc 으로도 올 수 있다. 내용으로 판별하면
+	// 이름이 바뀌는 날에도 산다.
+	if cmd, ok := toolInput["command"].(string); ok {
+		out = append(out, ApplyPatchPaths(cmd)...)
+	}
+	return absolutizeAgainst(cwd, out)
+}
+
+// applyPatchDirectives 는 codex apply_patch 가 경로를 싣는 줄머리다. 넷 다 실측했다
+// (2026-08-30: Add·Delete 는 단독으로, Update 는 Move to 와 한 패치 안에서 함께 왔다).
+//
+// **Move to 를 빼지 마라.** 이름을 바꾼 파일은 옛 이름과 새 이름 **둘 다** 발자국이다 —
+// 옛 이름을 빼면 그 파일을 만지던 다른 세션과의 겹침이 사라지고, 새 이름을 빼면
+// 지금부터의 겹침이 안 잡힌다.
+var applyPatchDirectives = []string{
+	"*** Add File: ",
+	"*** Update File: ",
+	"*** Delete File: ",
+	"*** Move to: ",
+}
+
+// ApplyPatchPaths 는 codex 의 apply_patch 명령 문자열에서 편집 대상 경로를 뽑는다. 순수 함수다.
+//
+// 경로는 **cwd 상대**로 온다(실측: cwd 가 `…/work` 일 때 `sub/old.txt`). 절대화는
+// 여기서 안 한다 — 이 함수는 문자열만 알고 cwd 는 호출부(EditedPaths)가 안다.
+func ApplyPatchPaths(command string) []string {
+	if !strings.Contains(command, "*** Begin Patch") {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(command, "\n") {
+		line = strings.TrimRight(line, "\r")
+		for _, d := range applyPatchDirectives {
+			if !strings.HasPrefix(line, d) {
+				continue
+			}
+			if p := strings.TrimSpace(strings.TrimPrefix(line, d)); p != "" {
+				out = append(out, p)
+			}
+			break
+		}
+	}
+	return out
+}
+
+// absolutizeAgainst 는 상대 발자국을 cwd 기준 절대경로로 만든다. 순수 함수다.
+//
+// ★ **이 변환이 없으면 조용히 틀린다.** 서버의 service.RelPathWithin 은 상대경로를
+// 받으면 그대로 통과시키고(`!filepath.IsAbs(q)` 갈래) 그것을 이미 저장소 상대인 값으로
+// 취급한다. codex 의 cwd 가 저장소 **하위 디렉토리**면 `sub/old.txt` 가 저장소 뿌리
+// 기준으로 해석되어 존재하지 않는 경로의 발자국이 남는다 — 오류 없이.
+// 절대경로로 올려 보내면 서버가 워크트리 뿌리 기준으로 다시 상대화하므로 좌표가 맞는다
+// (Claude 의 file_path 가 이미 그 경로를 지나간다).
+//
+// cwd 가 절대경로가 아니면 **바꾸지 않고 그대로 둔다.** 지어내는 것보다 낫고,
+// 그 경우 동작은 이 변경 전과 같다.
+func absolutizeAgainst(cwd string, paths []string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	cwd = filepath.Clean(strings.TrimSpace(cwd))
+	if !filepath.IsAbs(cwd) {
+		return paths
+	}
+	out := paths[:0:0]
+	for _, p := range paths {
+		if filepath.IsAbs(p) {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, filepath.Join(cwd, p))
 	}
 	return out
 }
@@ -247,7 +325,7 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 
 	cc := a.ccSessionID(p.SessionID)
 	if cc == "" {
-		in.Notice = strings.TrimSpace(in.Notice + " CLAUDE_CODE_SESSION_ID 도 훅 페이로드의 session_id 도 못 읽었다 — 이 세션은 등록되지 않는다(fd doctor 가 그 축을 잰다).")
+		in.Notice = strings.TrimSpace(in.Notice + " " + a.sessionEnvName() + " 도 훅 페이로드의 session_id 도 못 읽었다 — 이 세션은 등록되지 않는다(fd doctor 가 그 축을 잰다).")
 		emitContext(out, "SessionStart", RenderSessionStart(in))
 		return
 	}
@@ -510,7 +588,7 @@ func (a *App) hookUserPrompt(ctx context.Context, p HookPayload, out io.Writer) 
 // 여기서 거르는 이유는 좌표계다 — 무시 여부는 그 경로가 든 트리만 답할 수 있고,
 // 그 트리를 아는 것은 서버가 아니라 이 프로세스다.
 func (a *App) hookPostTool(ctx context.Context, p HookPayload) {
-	a.beatFromHook(ctx, p, model.SignalTool, DropIgnoredPaths(a.log, EditedPaths(p.ToolInput)))
+	a.beatFromHook(ctx, p, model.SignalTool, DropIgnoredPaths(a.log, EditedPaths(p.ToolInput, p.CWD)))
 }
 
 // hookPreCompact 는 압축 직전에 초안 판단을 남긴다.

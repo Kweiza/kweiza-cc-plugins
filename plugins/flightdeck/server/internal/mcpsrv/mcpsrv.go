@@ -85,6 +85,15 @@ type builder struct {
 	hostErr    error
 	now        func() time.Time
 	beaconDir  string
+	harness    string
+}
+
+// WithHarness 는 이 프로세스가 **어느 하네스의 것인지 선언한다**(DESIGN 「14. 하네스 축」).
+//
+// ★ 관측이 아니라 선언이다. 환경으로는 못 가르므로(중첩 실행이 양방향으로 거짓말한다)
+// 진입점이 알려 줘야 하고, 안 알려 주면 「미상」으로 남는다 — claude 로 접지 않는다.
+func WithHarness(name string) Option {
+	return func(b *builder) { b.harness = name }
 }
 
 // WithEnv 는 환경 조회를 바꾼다. nil 은 무시한다.
@@ -152,7 +161,7 @@ func New(be Backend, log *slog.Logger, opts ...Option) *Server {
 	for _, o := range opts {
 		o(b)
 	}
-	id := ResolveIdentity(b.getenv, b.cwd, b.cwdErr, b.hostname, b.hostErr)
+	id := ResolveIdentityAs(b.harness, b.getenv, b.cwd, b.cwdErr, b.hostname, b.hostErr)
 	// ★ 프로젝트 좌표는 **주입이 이긴다.**
 	//
 	// 이 패키지가 스스로 푸는 규칙(경로의 마지막 성분)은 워크트리에서 틀린다:

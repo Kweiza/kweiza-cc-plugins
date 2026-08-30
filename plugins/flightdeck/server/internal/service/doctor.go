@@ -100,6 +100,16 @@ var platformAxes = []struct{ name, why string }{
 	{"CLAUDE_PLUGIN_ROOT", "훅이 절대경로로 부르는 기준. **버전이 들어가므로 저장하지 않는다**"},
 	{"CLAUDE_PLUGIN_DATA", "**응답 캐시**를 두는 곳. PLUGIN_ROOT 는 갱신마다 바뀌므로 거기 두면 안 된다. 바이너리 캐시(~/.cache/flightdeck/bin)와 아웃박스·격리(~/.flightdeck)는 채널 무관한 고정 자리에 있다"},
 	{"CLAUDE_ENV_FILE", "2.1.220 에는 없는 것이 정상이다 — 먼저 푼 플러그인이 여기서 세션 id 를 뽑다 조용히 None 이 됐다"},
+
+	// ── codex 하네스(DESIGN 「14. 하네스 축」). 2026-08-30 실측, codex-cli 0.151.0 ──
+	//
+	// ★ 두 하네스의 축을 **함께** 잰다. 어느 쪽이 관측되느냐가 곧 "지금 어디에 있나"의 답이고,
+	// 한쪽만 재면 다른 하네스에서 doctor 가 통째로 침묵한다. CLAUDE_ENV_FILE 이 여기 있는
+	// 이유와 같은 규율이다 — 없는 것이 정상인 축도 재서 이름으로 낸다.
+	{"CODEX_SESSION_ID", "codex 세션 정체의 원천. **셸 자식에만 온다** — MCP 자식에는 안 온다"},
+	{"CODEX_THREAD_ID", "CODEX_SESSION_ID 와 같은 값이다. 갈리면 그날 codex 가 바뀐 것이다"},
+	{"CODEX_SANDBOX", "codex 샌드박스 종류(seatbelt 등). 있으면 codex 가 띄운 프로세스다"},
+	{"CODEX_SANDBOX_NETWORK_DISABLED", "**1 이면 fd 가 서버에 못 붙는다.** codex 기본값이 그렇고, 그 상태의 fd 는 전부 미도달로 죽는다 — sandbox_workspace_write.network_access 를 켜야 한다"},
 }
 
 // ProbePlatform 은 환경 축을 실제로 재서 결과를 낸다.
