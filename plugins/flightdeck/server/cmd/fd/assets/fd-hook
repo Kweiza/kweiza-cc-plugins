@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# fd-hook — **고정 경로** 훅 진입점.
+#
+# codex 는 훅을 신뢰할 때 `~/.codex/config.toml` 에
+# `[hooks.state."<hooks.json 경로>:<event>:<group>:<hook>"] trusted_hash` 를 박는데,
+# **그 해시는 훅 정의(명령 문자열)만 본다**(2026-08-30 실측, codex-cli 0.151.0: 명령을 한
+# 글자 바꾸면 신뢰가 깨지고, 원복하면 스크립트 내용을 통째로 갈아도 다시 신뢰된다).
+#
+# ★ 그래서 훅 command 에 `${CLAUDE_PLUGIN_ROOT}/bin/fd` 같은 **버전이 든 경로를 쓰면
+#   fd 판올림마다 TUI 재승인**이다. 그리고 재승인 전까지 `codex exec` 는 훅을 **조용히
+#   건너뛴다** — 로그에 훅 얘기가 한 줄도 안 나온다. 이 파일이 존재하는 이유가 그것이다:
+#   명령 문자열을 고정해 두고 **어느 판을 부를지는 이 안에서** 고른다. 이 스크립트의
+#   내용은 마음껏 바뀌어도 신뢰가 산다.
+#
+# ★ 그러므로 **이 파일의 설치 경로를 절대 바꾸지 마라.** 경로가 바뀌면 그것이 곧 명령
+#   문자열의 변경이고, 신뢰한 사용자 전원이 다시 TUI 를 띄워야 한다.
+#
+# ★ 실패해도 **종료코드 0** 이다. 훅이 실패로 끊기면 세션이 안 뜬다. 안내는 stderr 로 낸다 —
+#   stdout 은 훅 계약(hookSpecificOutput)이 쓰는 자리라 한 줄이라도 섞이면 통째로 깨진다.
+#   bin/fd 와 같은 규율이다.
+
+set -uo pipefail
+
+note() { printf 'flightdeck: %s\n' "$1" >&2; }
+
+if [ -z "${HOME:-}" ]; then
+  note "HOME 이 없어 플러그인 설치본을 찾을 자리가 없다. 조정 기능 없이 세션은 계속된다."
+  exit 0
+fi
+
+# ── 정식 설치본만 고른다 ──────────────────────────────────────────────────
+#
+# ★ **저장소 체크아웃을 가리키지 않는다.** 개발 트리를 가리키면 낡은 판이 최신인 척 돌고
+#   아무도 모른다(실측 선례: 수동 빌드 서버가 19시간·115커밋만큼 낡은 채로 돌았다).
+#   여기서 보는 것은 Claude Code 가 관리하는 플러그인 캐시 하나뿐이다.
+root="$HOME/.claude/plugins/cache"
+
+# ── 버전 고르기는 **사전순이 아니라 semver** ───────────────────────────────
+#
+# ★ 사전순으로 하면 `0.9.0` 이 `0.31.0` 을 이긴다 — 판올림할수록 더 낡은 판을 부르게 되고,
+#   그 증상은 "훅은 도는데 답이 이상하다"라 원인에 이르는 실이 없다.
+#   외부 명령(sort)을 안 쓴다: 훅 환경의 PATH 를 신뢰하지 않는다(bin/fd 와 같은 축).
+best="" best_ma=-1 best_mi=-1 best_pa=-1
+shopt -s nullglob
+for cand in "$root"/*/flightdeck/*/bin/fd; do
+  [ -x "$cand" ] || continue
+  # 경로에서 버전 디렉토리를 뽑는다: …/flightdeck/<ver>/bin/fd
+  v="${cand%/bin/fd}"; v="${v##*/}"
+  # semver 세 축만 본다. 접미(예 -rc1)는 떼고 숫자만 남긴다 — 숫자가 아니면 건너뛴다.
+  ma="${v%%.*}"; rest="${v#*.}"; mi="${rest%%.*}"; pa="${rest#*.}"; pa="${pa%%[!0-9]*}"
+  case "$ma$mi$pa" in ''|*[!0-9]*) continue ;; esac
+  if [ "$ma" -gt "$best_ma" ] ||
+     { [ "$ma" -eq "$best_ma" ] && [ "$mi" -gt "$best_mi" ]; } ||
+     { [ "$ma" -eq "$best_ma" ] && [ "$mi" -eq "$best_mi" ] && [ "$pa" -gt "$best_pa" ]; }; then
+    best="$cand" best_ma="$ma" best_mi="$mi" best_pa="$pa"
+  fi
+done
+shopt -u nullglob
+
+if [ -z "$best" ]; then
+  note "flightdeck 플러그인 설치본을 못 찾았다($root/*/flightdeck/*/bin/fd)."
+  note "  조정 기능 없이 세션은 계속된다. 쓰려면 Claude Code 에서 플러그인을 설치해라 —"
+  note "  이 래퍼는 **정식 설치본만** 고른다(저장소 체크아웃은 일부러 안 본다)."
+  exit 0
+fi
+
+# 시험용 이음매 — 어느 판을 골랐는지만 내고 아무것도 안 부른다. stdout 에 안 쓴다.
+# 값을 잠근다(bin/fd 의 FD_PRINT_BIN 과 같은 규율): 아무 값에나 걸리면 셸 프로필에 남은
+# export 하나로 훅 전체가 조용한 no-op 이 된다.
+if [ "${FD_HOOK_PRINT_PICK:-}" = "__fd_hook_pick__" ]; then
+  printf 'pick=%s\n' "$best" >&2
+  exit 0
+fi
+
+exec "$best" "$@"

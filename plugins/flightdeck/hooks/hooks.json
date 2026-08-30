@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook session-start",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook session-start --harness claude",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook user-prompt",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook user-prompt --harness claude",
             "timeout": 2
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook post-tool",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook post-tool --harness claude",
             "async": true,
             "timeout": 10
           }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook pre-compact",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook pre-compact --harness claude",
             "async": true,
             "timeout": 10
           }
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop --harness claude",
             "timeout": 3
           }
         ]
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook session-end",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook session-end --harness claude",
             "async": true,
             "timeout": 5
           }

@@ -307,8 +307,20 @@ func (a *App) runSetup(ctx context.Context, args []string, out io.Writer) int {
 	setURL := fs.String("url", "", "서버 주소를 정한다(예: http://10.0.0.5:7420). 이 머신이 서버면 "+DefaultURL)
 	setToken := fs.String("token", "", "서버 토큰. --url 과 함께 쓴다")
 	clearToken := fs.Bool("clear-token", false, "저장된 토큰을 지운다")
+	installCodex := fs.Bool("install-codex", false,
+		"codex 훅 자산을 깐다(고정 경로 래퍼 + ~/.codex/hooks.json). 신뢰는 사람이 TUI 에서 누른다")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// ── 설치 갈래 ───────────────────────────────────────────────────────────
+	//
+	// ★ 이것이 이 명령에서 **유일하게 무언가를 쓰는** 갈래이고, 그래서 **명시적 플래그를
+	// 요구한다.** 머리말의 판정("도구가 조용히 시스템을 바꾸지 않는다")은 그대로다 —
+	// 보고 갈래는 이 명령을 화면에 낼 뿐이고, 사람이 그것을 승인해서 부를 때만 깔린다.
+	// 그리고 여기서도 **신뢰는 안 박는다**: 그것은 사용자가 TUI 에서 누르는 관문이다.
+	if *installCodex {
+		return a.InstallCodex(out)
 	}
 
 	home := homeDir(a.env)
@@ -342,7 +354,11 @@ func (a *App) runSetup(ctx context.Context, args []string, out io.Writer) int {
 	// ── 보고 갈래 ───────────────────────────────────────────────────────────
 	st := a.observeSetup(ctx)
 	fmt.Fprint(out, RenderSetupPlan(PlanSetup(st)))
+	// ★ codex 절은 **PlanSetup 밖**이다. 그 함수는 "이 머신이 fd 를 돌릴 수 있나"를 판정하고,
+	// 이쪽은 "이 머신의 두 번째 하네스에 설치물이 붙었나"라 축이 다르다. 한 판정기에 넣으면
+	// Ready 의 뜻이 갈린다 — codex 가 안 깔린 것은 fd 가 못 도는 것이 아니다.
 	if st.OS != "windows" {
+		fmt.Fprint(out, RenderCodexSetup(a.observeCodex()))
 		fmt.Fprintf(out, "\n설정 파일  %s (%s)\n", path, pathSrc)
 	}
 	return 0

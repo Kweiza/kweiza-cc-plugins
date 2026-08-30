@@ -147,7 +147,23 @@ func TestHooksJSONIsWiredAsDesigned(t *testing.T) {
 	for ev, groups := range hf.Hooks {
 		cmd := groups[0].Hooks[0].Command
 		fields := strings.Fields(cmd)
-		name := fields[len(fields)-1]
+		// ★ **하네스 선언을 프로덕션과 같은 함수로 뗀다.** 앞선 판은 마지막 토큰을 그대로
+		// 훅 이름으로 읽었는데, 그것은 "명령 뒤에 플래그가 절대 안 붙는다"에 기댄 파싱이라
+		// `--harness claude` 를 싣는 순간 훅 이름을 "claude" 로 읽고 빨개졌다. 파싱을 여기서
+		// 손으로 다시 짜면 판정이 두 자리에 살고 그 둘은 반드시 표류한다 — 진입점이 실제로
+		// 쓰는 SplitHarnessFlag 를 그대로 부른다.
+		harness, rest := SplitHarnessFlag(fields)
+		// ★ 하네스 선언이 **있어야 한다.** 없으면 `--harness` 는 「미상」으로 남고
+		// (claude 로 안 접는 것이 판정이다), 그러면 이 함대의 Claude 카드가 전부 영영
+		// 「미상」인 채로 codex 카드만 이름이 붙어 보드가 반쪽 진실을 말한다.
+		if harness != "claude" {
+			t.Fatalf("%s 의 명령이 --harness claude 를 안 싣는다(%q) — "+
+				"선언이 없으면 그 세션은 보드에서 영영 「미상」이다", ev, cmd)
+		}
+		if len(rest) == 0 {
+			t.Fatalf("%s 의 명령에 하네스 선언 말고 아무것도 없다(%q)", ev, cmd)
+		}
+		name := rest[len(rest)-1]
 		if !known[name] {
 			t.Fatalf("%s 가 fd 가 모르는 훅 이름 %q 를 부른다", ev, name)
 		}

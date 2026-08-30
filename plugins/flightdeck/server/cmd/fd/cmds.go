@@ -1550,6 +1550,27 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "  ! %s\n", a.notice)
 	}
 
+	// ── codex 절 ─────────────────────────────────────────────────────────────
+	//
+	// ★ **별도 절이고 clip 폭이 다르다.** 위 축들은 값이 본문인데 codex 축은 **처방이
+	// 본문**이다 — 신뢰가 없으면 codex 는 훅을 조용히 건너뛰고(로그에 한 줄도 안 남는다),
+	// 그때 사람이 볼 수 있는 유일한 문장이 이 줄이기 때문이다. 위 루프의 160자로 자르면
+	// 그 처방이 중간에서 끊긴다.
+	//
+	// ★ 미관측 줄에 「관측 안 됨」을 안 붙인다. 이 절에서 미관측은 '못 쟀다'가 아니라
+	// **'이 상태다'** 이고(훅이 안 깔렸다 · 신뢰가 없다), 그 둘을 같은 말로 덮으면
+	// 잡으려던 침묵이 화면에서 다시 침묵이 된다.
+	for i, ax := range CodexAxes(a.observeCodex()) {
+		if i == 0 {
+			fmt.Fprintln(out, "■ codex")
+		}
+		if ax.Observed {
+			fmt.Fprintf(out, "  ✓ %-18s %s\n", ax.Name, clip(ax.Value, 140))
+		} else {
+			fmt.Fprintf(out, "  ✗ %-18s %s\n", ax.Name, clip(ax.Detail, 400))
+		}
+	}
+
 	// 서버 절. **REST 에 진단 엔드포인트가 없으므로**(설계 §6 의 표에 없다)
 	// /healthz 가 낼 수 있는 것만 낸다. 없는 축을 있는 척 지어내지 않는다.
 	h, herr := a.cli.Healthz(ctx)
