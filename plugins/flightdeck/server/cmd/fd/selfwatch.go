@@ -373,6 +373,34 @@ var osExecutable = os.Executable
 // binDir 은 그 사실을 **화면까지 보내려고** 받는다(selfUpdateStatus.Uncovered). 자리 계산의
 // 주인은 BinCacheDir 하나이므로 여기서 다시 조립하지 않고 **받은 것과 견주기만** 한다.
 // 빈 문자열이면 견줄 것이 없다는 뜻이라 그 갈래를 안 낸다 — 모르면 침묵한다(설계 §13).
+// resolveStartID 는 감시의 **기준값**을 정한다. 순수 함수다(stat 을 인자로 받는다).
+//
+// ★ `/proc/self/exe` 를 먼저 보는 이유: 그 자리는 **지금 도는 이미지**를 가리키고, 파일이
+// 이미 교체된 뒤라면 경로를 stat 한 값과 다르다. 경로만 재면 "이미 낡은 채로 시작한 서버"가
+// 자기를 최신으로 기억해 영원히 트리거하지 않는다.
+//
+// ★ **`procErr` 을 따로 낸다 — 이것이 이 함수가 존재하는 이유다.** 그 자리는 리눅스에만
+// 있어서 **맥에서는 언제나 두 번째 갈래**인데, 앞선 판은 그 갈래를 `else if id, err := …`
+// 로 써서 `err` 을 섀도잉했다. 그 블록의 조건이 `err == nil` 이므로 안에서 부른
+// `err.Error()` 는 **항상 nil 역참조**였다(맥에서 `newSelfWatcher` 가 통째로 패닉했고,
+// `fd serve` 와 이 파일의 시험 13개가 함께 죽었다). 리눅스는 첫 갈래로 가므로 **거기서는
+// 영영 안 보이는 결함**이었다 — 이 함대가 두 OS 를 쓴다는 사실이 그것을 8일 숨겼다.
+//
+// 그래서 두 오류를 **이름이 다른 자리에** 담아 돌려준다: `procErr` 은 경고의 사유(값이
+// 있어도 성공이다), `err` 은 실패의 사유다. 섀도잉이 다시 생길 여지를 타입이 없앤다.
+func resolveStartID(stat func(string) (ExeID, error), exe string) (start ExeID, procErr, err error) {
+	if id, e := stat("/proc/self/exe"); e == nil {
+		return id, nil, nil
+	} else {
+		procErr = e
+	}
+	id, e := stat(exe)
+	if e != nil {
+		return ExeID{}, procErr, e
+	}
+	return id, procErr, nil
+}
+
 func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 	w := &selfWatcher{
 		log: log, dbPath: dbPath, interval: defaultSelfWatchInterval,
@@ -393,18 +421,15 @@ func newSelfWatcher(log *slog.Logger, dbPath, binDir string) *selfWatcher {
 	}
 	w.exePath = exe
 
-	// ★ 기준값을 /proc/self/exe 에서 읽는다. 그 자리는 **지금 도는 이미지**를 가리키고,
-	// 파일이 이미 교체된 뒤라면 경로를 stat 한 값과 다르다. 경로만 재면
-	// "이미 낡은 채로 시작한 서버"가 자기를 최신으로 기억해 영원히 트리거하지 않는다.
-	if id, err := w.stat("/proc/self/exe"); err == nil {
-		w.start = id
-	} else if id, err := w.stat(exe); err == nil {
-		w.start = id
-		log.Warn("/proc/self/exe 를 못 읽어 경로로 기준을 잡는다 — "+
-			"이미 교체된 채 시작한 경우를 이 프로세스는 못 본다", "error", err.Error())
-	} else {
+	start, procErr, err := resolveStartID(w.stat, exe)
+	if err != nil {
 		w.reason = fmt.Sprintf("실행 파일을 못 쟀다: %v", err)
 		return w
+	}
+	w.start = start
+	if procErr != nil {
+		log.Warn("/proc/self/exe 를 못 읽어 경로로 기준을 잡는다 — "+
+			"이미 교체된 채 시작한 경우를 이 프로세스는 못 본다", "error", procErr.Error())
 	}
 
 	// ★ 런처가 소스 지문으로 이름 붙인 자리에서 도는가. 그렇다면 같은 소스의 재빌드는

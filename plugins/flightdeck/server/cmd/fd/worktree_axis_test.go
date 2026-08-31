@@ -36,6 +36,19 @@ func TestHookAndMCPAgreeOnWorktreeFromSubdir(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("저장소 디렉토리 생성 실패: %v", err)
 	}
+	// ★ **비교 기준을 실경로로 맞춘다 — macOS 에서 `/var` 는 `/private/var` 의 심볼릭 링크다.**
+	// `t.TempDir()` 은 링크 경로(`/var/folders/…`)를 주는데 `git rev-parse --show-toplevel` 은
+	// 링크를 해석한 실경로(`/private/var/folders/…`)를 낸다. 그래서 아래 「대조 전제 ①」이
+	// 맥에서 **항상** 깨졌다(실측: `hookApp.proj.Worktree` 가 `/private/var/…`, 기대가 `/var/…`).
+	//
+	// 고칠 자리가 시험인 이유: git 이 실경로를 내는 것이 **옳다.** 같은 저장소를 링크로도
+	// 실경로로도 열 수 있는데 그 둘이 다른 워크트리로 갈리면 카드가 쪼개진다 — 이 시험이
+	// 애초에 막으려는 그 사고다. 코드를 링크 경로에 맞추면 그 보호가 사라진다.
+	//
+	// 리눅스에서는 `/var` 가 링크가 아니라 이 줄이 같은 값을 낸다(무해하다).
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	git := func(dir string, args ...string) {
 		t.Helper()
 		c := exec.Command("git", args...)

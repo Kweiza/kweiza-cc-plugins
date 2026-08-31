@@ -12,12 +12,16 @@ import (
 // 상대화되는지 본다.
 //
 // ★ 이 축은 저장소 코드가 아니라 표준 라이브러리 안에서 난다. mux 는 경로를 정규화해야
-// 할 때(`//` · `/a//b` · `/a/../` 같은 요청) RedirectHandler 로 307 을 내는데, 그 Location 이
-// 경로만 있는 절대경로다 — `grep 'http.Redirect('` 로는 원리적으로 안 보인다
+// 할 때(`//` · `/a//b` · `/a/../` 같은 요청) RedirectHandler 로 리다이렉트를 내는데, 그
+// Location 이 경로만 있는 절대경로다 — `grep 'http.Redirect('` 로는 원리적으로 안 보인다
 // (withRelativeLocation 의 독 코멘트가 실측 표를 남겼다).
 //
 // 표는 이 브랜치의 라우트를 실측한 값이다 — GET // · POST /actions//reclaim ·
-// GET /actions/../ · GET //?project=kweiza 넷 다 307 이고 Location 은 경로만 있는 절대경로다.
+// GET /actions/../ · GET //?project=kweiza 넷 다 리다이렉트이고 Location 은 경로만 있는 절대경로다.
+//
+// ★ **상태 코드는 stdlib 이 바꾼다.** 2026-08-12 에는 `307` 이었고 Go 1.25.6 은 `301` 을 낸다.
+// 그 값을 못박았던 앞선 판은 하위 넷이 전부 상태 단정에서 죽어 **이 시험의 진짜 주장이
+// 한 번도 검증되지 않았다.** 아래 단정이 "3xx 인가"만 무는 이유가 그것이다.
 func TestMuxRedirectLocationIsRelative(t *testing.T) {
 	const prefix = "/dcp-dev-board"
 	cases := []struct {
@@ -46,8 +50,20 @@ func TestMuxRedirectLocationIsRelative(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusTemporaryRedirect {
-				t.Fatalf("상태가 %d 다 — mux 의 정규화 307 이어야 한다\n%s", rec.Code, rec.Body.String())
+			// ★ **어느 3xx 인지는 stdlib 이 정한다 — 이 저장소의 계약이 아니다.**
+			// 앞선 판은 `307` 을 못박았는데(2026-08-12 실측), Go 1.25.6 의 ServeMux 는 정규화
+			// 리다이렉트를 `301` 로 낸다(`net/http/server.go` 의 해당 세 자리가 전부
+			// `StatusMovedPermanently` 이고 307 은 아예 없다). 그래서 이 시험은 하위 넷이 **전부
+			// 이 줄에서 Fatal 로 죽었고, 그 뒤의 진짜 단정(Location 상대화)은 한 번도 안 돌았다.**
+			// 정작 그 기능은 멀쩡했다 — 상태만 맞춰 주니 나머지가 그대로 통과했다.
+			//
+			// 이 시험의 주장은 "mux 가 정규화 리다이렉트를 낼 때 그 Location 이 접두 안에
+			// 착지하는가"다. 코드가 301 이냐 307 이냐는 그 주장의 일부가 아니고, 못박으면
+			// stdlib 이 바꾸는 날 **주장이 검증되지 않은 채로 빨개진다** — 방금 그랬듯이.
+			// 그래서 "리다이렉트인가"만 문다. 200 이 오면 여기서 잡힌다.
+			if rec.Code < 300 || rec.Code > 399 {
+				t.Fatalf("상태가 %d 다 — mux 의 정규화 리다이렉트(3xx)여야 한다\n%s",
+					rec.Code, rec.Body.String())
 			}
 			loc := rec.Header().Get("Location")
 			if loc == "" {
