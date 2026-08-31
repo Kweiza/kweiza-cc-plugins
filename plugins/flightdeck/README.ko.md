@@ -415,33 +415,24 @@ codex -c sandbox_workspace_write.network_access=true
 또는 `~/.codex/config.toml` 에 박아라. 이것은 당신의 샌드박스 정책을 여는 일이다 —
 무엇을 왜 여는지 알고 켜라.
 
-#### MCP 도구는 아직 codex 에서 안 붙는다
+#### codex 에서는 MCP 대신 터미널 `fd` 를 쓴다
 
-codex 에 MCP 를 붙일 수는 있다:
-
-```toml
-[mcp_servers.fd]
-command = "/Users/…/.local/bin/fd-hook"
-args = ["mcp", "--harness", "codex"]
-env = { FD_URL = "http://127.0.0.1:7420", FD_TOKEN = "…" }
-```
-
-**`env` 를 반드시 명시 주입해라.** codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고
-부모의 `FD_URL`·`FD_TOKEN` 을 **안 물려준다**(훅과 셸 도구는 전량 상속한다 — MCP 만 다르다).
-
-다만 **지금은 여기까지다.** codex 는 MCP 자식에게 세션 id 도 안 주고(`CODEX_SESSION_ID` 는
-셸에만 온다), 프로세스 계보로 알아내는 길은 macOS 에서 막혀 있다. 그래서 codex 세션의
-MCP 도구는 자기가 **어느 세션인지 모른다.** 훅이 남긴 cwd 좌표를 읽어 붙는 설계가 DESIGN
-「하네스 축」 절에 있으나 아직 구현 전이다.
-
-**그동안 codex 에서는 터미널의 `fd` 를 써라** — 셸 도구는 환경을 전량 상속하고
-`CODEX_SESSION_ID` 도 오므로 그쪽은 정상으로 돈다.
-
-| codex 에서 | 지금 되나 |
+| codex 에서 | |
 |---|---|
 | 훅(세션 카드 · 발자국 · 겹침 처방 · 배너) | ✅ |
 | 터미널 `fd` (`board`·`pick`·`note`·`finish`) | ✅ |
-| MCP 도구 8개 | ❌ 세션 정체를 못 얻는다 |
+| MCP 도구 8개 | ❌ **안 만든다** — 아래 이유 |
+
+셸 도구는 환경을 전량 상속하고 `CODEX_SESSION_ID` 를 받으므로 **터미널 `fd` 는 자기가 어느
+세션인지 안다.** `pick`→`note`→`finish` 왕복이 그대로 돈다.
+
+MCP 는 다르다. codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고 **세션 id 를 안
+준다.** 그래서 MCP 도구는 자기가 어느 창의 것인지 모르고, 가릴 방법도 없다 — 부모 codex
+프로세스의 환경에도 세션 id 가 없고(실측), cwd 는 같은 저장소의 두 창이 똑같다.
+
+**정체 없는 MCP 를 붙이면 창 둘이 카드 한 장을 공유해 원장이 거짓말한다.** 그래서 안 만들기로
+했다(판정과 뒤집히는 조건은 DESIGN 「하네스 축」 절에 있다). 도구 표면 하나를 얻으려고
+기록의 진실을 걸지 않는다.
 
 ---
 

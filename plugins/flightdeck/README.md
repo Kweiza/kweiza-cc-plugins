@@ -433,34 +433,25 @@ codex -c sandbox_workspace_write.network_access=true
 
 Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know what you are opening and why.
 
-#### MCP tools do not attach from codex yet
+#### From codex, use the terminal `fd` instead of MCP
 
-You can wire MCP into codex:
-
-```toml
-[mcp_servers.fd]
-command = "/Users/…/.local/bin/fd-hook"
-args = ["mcp", "--harness", "codex"]
-env = { FD_URL = "http://127.0.0.1:7420", FD_TOKEN = "…" }
-```
-
-**You must inject `env` explicitly.** codex gives MCP children only the core 13 variables
-(HOME, PATH, PWD, …) and does **not** pass down your `FD_URL`/`FD_TOKEN` — hooks and shell tools
-inherit the full environment; MCP alone does not.
-
-But **that is as far as it goes today.** codex also withholds the session id from MCP children
-(`CODEX_SESSION_ID` reaches the shell only), and the process-ancestry route is closed on macOS.
-So MCP tools in a codex session **do not know which session they are.** The design that reads the
-cwd coordinate left behind by the hook lives in DESIGN's "harness axis" section, but is not built yet.
-
-**Until then, use the terminal `fd` from codex** — shell tools inherit the full environment and do
-get `CODEX_SESSION_ID`, so that path works normally.
-
-| From codex | Works today |
+| From codex | |
 |---|---|
 | Hooks (session card · footprints · overlap prescriptions · banner) | ✅ |
 | Terminal `fd` (`board`/`pick`/`note`/`finish`) | ✅ |
-| The 8 MCP tools | ❌ cannot resolve session identity |
+| The 8 MCP tools | ❌ **deliberately not built** — see below |
+
+Shell tools inherit the full environment and receive `CODEX_SESSION_ID`, so **the terminal `fd`
+knows which session it is.** The `pick`→`note`→`finish` round trip works as-is.
+
+MCP is different. codex gives MCP children only the core 13 variables (HOME, PATH, PWD, …) and
+**withholds the session id.** So an MCP tool cannot tell which window it belongs to, and there is
+no way to recover it — the parent codex process does not carry the session id in its environment
+either (measured), and cwd is identical across two windows on the same repo.
+
+**Attaching an identity-less MCP would make two windows share one card, and the ledger would lie.**
+So it is not built (the ruling, and what would reverse it, are in DESIGN's "harness axis" section).
+One more tool surface is not worth wagering the truth of the record.
 
 ---
 
