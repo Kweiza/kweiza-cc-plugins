@@ -366,6 +366,102 @@ export FD_TOKEN=<same token as the server>   # only if you gave the server FD_TO
 
 Without a token, auth is off. **`/healthz` announces that** — it is never left open quietly.
 
+### 4. To use it from codex too
+
+codex sessions can land on the same board. Overlap prescriptions seeing both harnesses at once is the whole point.
+
+```bash
+fd setup --install-codex
+```
+
+It installs two things — the fixed-path wrapper `~/.local/bin/fd-hook` and `~/.codex/hooks.json`.
+**It never overwrites an existing `hooks.json`.** If one is there, it prints what to add and stops, so you merge by hand.
+
+#### ★ And you must open the TUI once
+
+```bash
+codex        # clear the "Hooks need review" prompt
+```
+
+**Without this the hooks never run once.** codex **silently skips** untrusted hooks — if you only
+ever use `codex exec`, you never get a chance to see the approval screen, and nothing anywhere
+tells you why no card appears on the board. **Not one line about hooks reaches the log.**
+
+Once trusted, the log tells you the opposite — `hook: SessionStart` … `hook: SessionStart Completed`.
+The presence of that line *is* the trust signal.
+
+#### Why the hook command looks like that
+
+Trust is pinned in `~/.codex/config.toml` like this:
+
+```toml
+[hooks.state."/Users/…/.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:086dc4d6…"
+```
+
+**That hash covers the hook definition (the command string) only** — not the script's contents.
+Change one character of the command and trust breaks; restore it and the hook runs again even if
+you rewrote the script entirely.
+
+That is why the hook command calls a **fixed path**, `~/.local/bin/fd-hook`. Put a versioned path
+there — `${CLAUDE_PLUGIN_ROOT}/bin/fd` — and **every fd upgrade demands re-approval in the TUI**,
+with the hooks silently dead until you do it. The wrapper picks the newest installed build from
+inside, so **upgrading never changes the command string.**
+
+> The wrapper considers **only official plugin installs.** It deliberately ignores repo checkouts —
+> otherwise a stale build runs while pretending to be current and nobody notices.
+
+#### How to tell when it is broken
+
+```bash
+fd doctor        # the ■ codex section
+```
+
+It names four axes: hook file · **hook trust** · hook command (is it a fixed path) · hook wrapper.
+With no trust, that row shows `✗` and says what to do. **Silence is not a pass** — codex's own
+`codex doctor` says nothing about hooks at all (none of its 19 checks mention them), so this screen
+is the only place the state is observable.
+
+#### Sandbox networking
+
+codex's default sandbox cuts networking, and fd then **cannot reach the server at all**
+(`connect: operation not permitted`).
+
+```bash
+codex -c sandbox_workspace_write.network_access=true
+```
+
+Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know what you are opening and why.
+
+#### MCP tools do not attach from codex yet
+
+You can wire MCP into codex:
+
+```toml
+[mcp_servers.fd]
+command = "/Users/…/.local/bin/fd-hook"
+args = ["mcp", "--harness", "codex"]
+env = { FD_URL = "http://127.0.0.1:7420", FD_TOKEN = "…" }
+```
+
+**You must inject `env` explicitly.** codex gives MCP children only the core 13 variables
+(HOME, PATH, PWD, …) and does **not** pass down your `FD_URL`/`FD_TOKEN` — hooks and shell tools
+inherit the full environment; MCP alone does not.
+
+But **that is as far as it goes today.** codex also withholds the session id from MCP children
+(`CODEX_SESSION_ID` reaches the shell only), and the process-ancestry route is closed on macOS.
+So MCP tools in a codex session **do not know which session they are.** The design that reads the
+cwd coordinate left behind by the hook lives in DESIGN's "harness axis" section, but is not built yet.
+
+**Until then, use the terminal `fd` from codex** — shell tools inherit the full environment and do
+get `CODEX_SESSION_ID`, so that path works normally.
+
+| From codex | Works today |
+|---|---|
+| Hooks (session card · footprints · overlap prescriptions · banner) | ✅ |
+| Terminal `fd` (`board`/`pick`/`note`/`finish`) | ✅ |
+| The 8 MCP tools | ❌ cannot resolve session identity |
+
 ---
 
 ## Using it

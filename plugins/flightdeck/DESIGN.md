@@ -3138,6 +3138,12 @@ codex 배너의 session id 가 전부 `01a05309-1c42-7891-ad49-10c06b7b0aa4` 였
 - 갈렸을 때 조용히 하나로 접지 않는다 — `DriftedTwins`·`RenderDrift` 가 지금 하는 그 태도 그대로,
   **갈렸다는 사실을 보드에서 이름으로 말한다.**
 
+> **★ 구현 상태(2026-08-31): 이 ④ 는 아직 설계뿐이다.** `mcpsrv.ResolveIdentityAs` 는 여전히
+> **환경변수만** 본다. codex MCP 에는 그 값이 안 오므로(위 표) codex 세션의 MCP 도구는 지금
+> **자기가 어느 세션인지 모른다.** 훅 축과 셸 축은 정상으로 돈다 — 그래서 codex 에서는
+> 터미널 `fd` 를 쓰면 되고, 그 사실이 README 의 codex 절에 적혀 있다.
+> 이 구멍이 `codex-mcp-identity-without-beacon` 이고, 위 설계가 그 항목의 처방이다.
+
 ### ⑤ 훅 신뢰는 명령 문자열에 걸린다 — 그리고 깨지면 조용하다
 
 codex 훅은 **신뢰 전에는 안 돈다.** TUI 첫 실행이 "Hooks need review" 를 띄우고, 통과시키면
@@ -3160,9 +3166,35 @@ Claude 쪽에서는 경로가 바뀌어도 훅이 그냥 돌지만, codex 쪽에
 
 > **★ 그리고 신뢰가 깨진 `codex exec` 는 조용히 건너뛴다** — 로그에 훅 얘기가 한 줄도 안 나온다.
 > 판올림 뒤 훅이 통째로 죽어도 아무도 모른다는 뜻이고, 이 저장소가 반복해서 만난 그 모양이다
-> (§13 의 matcher 표류, `NotebookEdit` 의 발자국 부재). 그래서 `fd doctor` 가 codex 축을 잴 때
-> **hooks.json 의 존재와 `trusted_hash` 의 일치 여부를 같이 재서 이름으로 낸다.**
+> (§13 의 matcher 표류, `NotebookEdit` 의 발자국 부재). 그래서 `fd doctor` 가 codex 축을 잰다.
 > 이것이 위 ④ 의 폴백이 배너로 말해야 하는 이유이기도 하다 — 좌표의 부재가 곧 이 침묵의 증상이다.
+
+**★ 그런데 「일치 여부」는 안 잰다 — 못 재는 것이 아니라 안 재기로 한 것이다.**
+이 절의 앞선 판은 "`trusted_hash` 의 일치 여부를 같이 재서 이름으로 낸다"고 적었다. 구현은
+그렇게 하지 않았고, 그 차이가 설계 판정이다(2026-08-31, `codex-hook-assets-and-setup`).
+
+- 해시 입력 규칙은 **codex 내부 계약**이다. 베끼면 codex 가 그것을 바꾸는 날 우리 doctor 가
+  **조용히 거짓**이 된다 — 이 절이 통째로 싸우는 침묵과 똑같은 모양이고, 게다가 그때는
+  "우리가 틀렸다"는 사실조차 안 보인다.
+- 그리고 규칙은 자명하지 않다. `sha256(명령문자열)` 이 **아니다**: 실제 명령의 해시
+  `f489359f…` 와 박힌 값 `086dc4d6…` 가 다르다(type·timeout 등이 함께 들어가는 것으로 보이나
+  캐지 않았다 — 캘 이유가 없다).
+
+**대신 재현이 필요 없는 셋으로 가른다:** ⑴ `hooks.json` 이 있나 ⑵ **그 경로로** 신뢰 항목이
+박혔나 ⑶ 명령이 고정 경로인가. 실측으로 네 상태가 갈리는 것을 확인했다(신뢰 없음 → `✗` +
+"지금 조용히 안 돈다", 신뢰 박은 뒤 → `✓`).
+
+> **★ 신뢰 항목을 찾을 때 이벤트 이름을 대조하지 마라.** config 키의 이벤트 이름은
+> **snake_case** 인데(`post_tool_use` · `user_prompt_submit` · `session_start`) `hooks.json` 은
+> PascalCase 다. 이름을 맞춰 보면 **전부 「신뢰 없음」으로 오판한다.** 경로 접두만 봐라.
+
+**신뢰가 붙으면 로그가 반대로 말한다** — `hook: SessionStart` … `hook: SessionStart Completed`.
+그 줄의 유무가 곧 신뢰 여부이고, 위 침묵과 정확히 짝을 이루는 관측이다.
+
+**그리고 `codex doctor` 는 이 축을 안 잰다.** 체크 19개(system·disk·security·runtime·install·
+search·git·terminal·title·state·threads·config·auth·mcp·sandbox·updates·network·websocket·
+reachability) 어디에도 훅이 없다(전량 확인). codex 를 호출해서 확인하는 설계는 값이 0이고,
+이 침묵을 잡을 자리는 `fd doctor` 뿐이다.
 
 ### 아직 아님
 
@@ -3171,5 +3203,14 @@ Claude 쪽에서는 경로가 바뀌어도 훅이 그냥 돌지만, codex 쪽에
    `/clear` 를 친다.
 2. **codex `PostToolUse` 의 `tool_name` 열거.** `Bash` 와 `apply_patch` 둘을 봤다. §13 의
    `platformFileWritingTools` 와 같은 문제가 여기도 있고 — 이쪽도 **닫힌 열거가 아니다.**
+   → 그래서 codex 훅 템플릿의 `PostToolUse` 에는 **matcher 를 안 준다.** 추측이 틀리면 발자국이
+   통째로 0건이 되고, `EditedPaths` 는 이미 `tool_input` 을 **내용으로** 판별하므로 거를 이유도 없다.
 3. **리눅스 codex 에서 셸이 같은 값을 주는가.** 위 표는 맥 실측이다. `CODEX_SESSION_ID` 가
    플랫폼을 안 탄다고 믿을 근거가 아직 없다.
+4. **④ 의 cwd 좌표가 실제로 MCP 를 붙이는가.** 설계뿐이고 구현이 없다(위 ④ 의 구현 상태 참고).
+   그래서 codex 세션에서 `pick`→`note`→`finish` 왕복은 **MCP 로는 아직 못 돈다.**
+5. **판올림을 넘어 신뢰가 사는가.** 이 절의 핵심 주장인데 **실물로 못 쟀다** — 잴 시점에
+   판올림 대상이 없었다. 재는 법: 판올림 전 `config.toml` 의 `hooks.state` 다섯 해시를 적어 두고,
+   판올림한 뒤 `FD_HOOK_PRINT_PICK=__fd_hook_pick__ ~/.local/bin/fd-hook` 로 래퍼가 **새 판**을
+   고르는지 보고, `codex exec` 가 **재승인 없이** 훅을 돌리는지 보고, 해시 다섯이 그대로인지 대조한다.
+   틀렸으면 고정 경로 래퍼의 존재 이유가 사라지므로 그 사실을 문서에 적고 setup 이 말해야 한다.

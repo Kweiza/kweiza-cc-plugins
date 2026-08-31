@@ -348,6 +348,101 @@ export FD_TOKEN=<서버와 같은 토큰>   # 서버에 FD_TOKEN 을 줬을 때�
 
 토큰을 안 주면 인증이 꺼진다. **그 사실은 `/healthz` 가 알린다** — 조용히 열어 두지 않는다.
 
+### 4. codex 에서도 쓰려면
+
+같은 보드에 codex 세션을 올릴 수 있다. 겹침 처방이 두 하네스를 함께 보는 것이 이 기능의 목적이다.
+
+```bash
+fd setup --install-codex
+```
+
+이것이 깔아 주는 것은 둘이다 — 고정 경로 래퍼 `~/.local/bin/fd-hook` 과 `~/.codex/hooks.json`.
+**기존 `hooks.json` 은 절대 안 덮는다.** 이미 있으면 넣을 내용을 화면에 내고 멈추므로 손으로 병합해라.
+
+#### ★ 그리고 반드시 TUI 를 한 번 띄워라
+
+```bash
+codex        # "Hooks need review" 를 통과시킨다
+```
+
+**이것을 안 하면 훅은 한 번도 안 돈다.** codex 는 신뢰받지 않은 훅을 **조용히 건너뛴다** —
+`codex exec` 로만 쓰면 승인 화면을 볼 기회가 영영 없고, 보드에 카드가 안 뜨는 이유를
+어디에서도 알 수 없다. 로그에 훅 얘기가 **한 줄도 안 나온다.**
+
+신뢰가 붙으면 반대로 로그가 말해 준다 — `hook: SessionStart` … `hook: SessionStart Completed`.
+그 줄의 유무가 곧 신뢰 여부다.
+
+#### 왜 훅 명령이 그렇게 생겼나
+
+신뢰는 `~/.codex/config.toml` 에 이렇게 박힌다:
+
+```toml
+[hooks.state."/Users/…/.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:086dc4d6…"
+```
+
+**그 해시는 훅 정의(명령 문자열)만 본다.** 스크립트 내용은 안 본다 — 명령을 한 글자 바꾸면
+신뢰가 깨지고, 원복하면 내용을 통째로 갈아도 다시 돈다.
+
+그래서 훅 명령이 `~/.local/bin/fd-hook` 이라는 **고정 경로**를 부른다. 여기에
+`${CLAUDE_PLUGIN_ROOT}/bin/fd` 처럼 버전이 든 경로를 쓰면 **fd 를 판올림할 때마다 TUI 재승인**이고,
+재승인 전까지 훅이 조용히 죽는다. 래퍼가 그 안에서 설치본 중 최신 판을 고르므로
+**판올림해도 명령 문자열은 안 바뀐다.**
+
+> 이 래퍼는 **정식 플러그인 설치본만** 고른다. 저장소 체크아웃은 일부러 안 본다 —
+> 그러면 낡은 판이 최신인 척 돌고 아무도 모른다.
+
+#### 안 되는지 재는 법
+
+```bash
+fd doctor        # ■ codex 절
+```
+
+네 축을 이름으로 낸다: 훅 파일 · **훅 신뢰** · 훅 명령(고정 경로인가) · 훅 래퍼.
+신뢰가 없으면 그 줄이 `✗` 로 뜨고 무엇을 해야 하는지 말한다. **무출력은 통과가 아니다** —
+codex 자신의 `codex doctor` 는 훅을 한 마디도 안 재므로(체크 19개 어디에도 없다) 이 화면이
+유일한 관측 창구다.
+
+#### 샌드박스 네트워크
+
+codex 기본 샌드박스는 네트워크를 끊고, 그 상태의 fd 는 서버에 **통째로 못 붙는다**
+(`connect: operation not permitted`).
+
+```bash
+codex -c sandbox_workspace_write.network_access=true
+```
+
+또는 `~/.codex/config.toml` 에 박아라. 이것은 당신의 샌드박스 정책을 여는 일이다 —
+무엇을 왜 여는지 알고 켜라.
+
+#### MCP 도구는 아직 codex 에서 안 붙는다
+
+codex 에 MCP 를 붙일 수는 있다:
+
+```toml
+[mcp_servers.fd]
+command = "/Users/…/.local/bin/fd-hook"
+args = ["mcp", "--harness", "codex"]
+env = { FD_URL = "http://127.0.0.1:7420", FD_TOKEN = "…" }
+```
+
+**`env` 를 반드시 명시 주입해라.** codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고
+부모의 `FD_URL`·`FD_TOKEN` 을 **안 물려준다**(훅과 셸 도구는 전량 상속한다 — MCP 만 다르다).
+
+다만 **지금은 여기까지다.** codex 는 MCP 자식에게 세션 id 도 안 주고(`CODEX_SESSION_ID` 는
+셸에만 온다), 프로세스 계보로 알아내는 길은 macOS 에서 막혀 있다. 그래서 codex 세션의
+MCP 도구는 자기가 **어느 세션인지 모른다.** 훅이 남긴 cwd 좌표를 읽어 붙는 설계가 DESIGN
+「하네스 축」 절에 있으나 아직 구현 전이다.
+
+**그동안 codex 에서는 터미널의 `fd` 를 써라** — 셸 도구는 환경을 전량 상속하고
+`CODEX_SESSION_ID` 도 오므로 그쪽은 정상으로 돈다.
+
+| codex 에서 | 지금 되나 |
+|---|---|
+| 훅(세션 카드 · 발자국 · 겹침 처방 · 배너) | ✅ |
+| 터미널 `fd` (`board`·`pick`·`note`·`finish`) | ✅ |
+| MCP 도구 8개 | ❌ 세션 정체를 못 얻는다 |
+
 ---
 
 ## 쓰는 법
