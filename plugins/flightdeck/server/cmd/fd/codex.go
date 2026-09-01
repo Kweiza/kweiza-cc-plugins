@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +25,17 @@ var codexWrapperScript []byte
 
 //go:embed assets/codex-hooks.json
 var codexHooksTemplate string
+
+// codexSkillsFS 는 **codex 판 스킬**이다. `~/.codex/skills/<이름>/SKILL.md` 로 깔린다.
+//
+// ★ **`plugins/flightdeck/skills/` 아래 두면 안 된다.** 그 자리는 Claude Code 가 통째로
+// 적재하는 자리라, codex 전용 산문 둘이 **모든 Claude 세션의 컨텍스트에 상주**하고
+// 모델이 잘못 고를 여지가 생긴다. description 으로 가리는 것은 완화이지 격리가 아니다.
+// 게다가 `repo_skills_test.go` 의 훑기는 `plugins/*/skills/*/SKILL.md` **1단계**라
+// 하위 디렉토리를 만들면 그 관문이 즉시 빨개진다. hooks 템플릿이 간 길을 그대로 간다.
+//
+//go:embed assets/codex-skills
+var codexSkillsFS embed.FS
 
 // codex 설치 축 — **무출력은 통과가 아니다.**
 //
@@ -345,6 +356,54 @@ func CodexWrapperPath(home string) string {
 	return filepath.Join(home, ".local", "bin", "fd-hook")
 }
 
+// CodexSkillsDir 는 codex 가 스킬을 읽는 자리다.
+//
+// ★ 실측으로 못박았다(codex-cli 0.151.0 바이너리): `$CODEX_HOME/skills` 문자열이 들어
+// 있고 기본값은 `$HOME/.codex`. 추측이 아니다 — 자리를 틀리면 깔리기는 하는데 아무도
+// 안 읽고, 그 상태가 화면에서 「설치됨」과 구별되지 않는다.
+func CodexSkillsDir(home string) string {
+	return filepath.Join(home, ".codex", "skills")
+}
+
+// InstallCodexSkills 는 embed 된 codex 판 스킬을 깐다.
+//
+// ★ **있으면 안 덮는다** — hooks.json 과 같은 규율이다. 사용자가 손본 스킬을 덮으면
+// 복구 경로가 0이다. 대신 그 사실을 화면에 내고 넘어간다(설치 전체를 세우지는 않는다 —
+// 스킬은 훅과 달리 없다고 조정이 죽지는 않는다).
+func InstallCodexSkills(home string, out io.Writer) {
+	root := CodexSkillsDir(home)
+	ents, err := codexSkillsFS.ReadDir("assets/codex-skills")
+	if err != nil {
+		fmt.Fprintf(out, "! codex 스킬 자산을 못 읽었다: %v\n", err)
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		body, err := codexSkillsFS.ReadFile("assets/codex-skills/" + e.Name() + "/SKILL.md")
+		if err != nil {
+			fmt.Fprintf(out, "! %s 의 SKILL.md 를 못 읽었다: %v\n", e.Name(), err)
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		dst := filepath.Join(dir, "SKILL.md")
+		if _, err := os.Stat(dst); err == nil {
+			fmt.Fprintf(out, "✓ 스킬 %s 가 이미 있다 (%s) — 안 덮었다\n", e.Name(), dst)
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintf(out, "! %s 를 못 만들었다: %v\n", dir, err)
+			continue
+		}
+		if err := os.WriteFile(dst, body, 0o644); err != nil {
+			fmt.Fprintf(out, "! %s 를 못 썼다: %v\n", dst, err)
+			continue
+		}
+		fmt.Fprintf(out, "✓ 스킬 %s %s\n", e.Name(), dst)
+	}
+}
+
 // RenderCodexHooks 는 템플릿의 플레이스홀더를 실제 래퍼 경로로 바꾼다. 순수 함수다.
 //
 // ★ 왜 템플릿에 플레이스홀더인가: 홈 경로는 사람마다 다른데 codex 가 `~` 나 `$HOME` 을
@@ -444,6 +503,13 @@ func (a *App) InstallCodex(out io.Writer) int {
 		}
 		fmt.Fprintf(out, "✓ hooks.json %s\n", st.HooksPath)
 	}
+
+	// ── ③ codex 판 스킬 ─────────────────────────────────────────────────────
+	//
+	// ★ Claude 판 스킬 둘은 codex 에 **없는 도구**(`pick(...)`·`finish(...)`)를 부르라고
+	// 가르친다. 그대로 두면 codex 창이 그 문법을 따라 하다 아무것도 안 일어나고,
+	// 실패조차 안 나므로 무엇이 틀렸는지 아무도 모른다.
+	InstallCodexSkills(home, out)
 
 	fmt.Fprint(out, RenderCodexNextSteps(a.observeCodex()))
 	return 0

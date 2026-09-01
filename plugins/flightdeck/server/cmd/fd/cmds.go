@@ -1620,6 +1620,24 @@ func (a *App) runDoctor(ctx context.Context, args []string, out io.Writer) int {
 		}
 	}
 
+	// ── 신원 관문 절 ─────────────────────────────────────────────────────────
+	//
+	// ★ codex 절과 같은 규율로 낸다: 미관측에 「관측 안 됨」을 안 붙이고 처방을 본문으로
+	// 낸다. 여기서 ✗ 는 '못 쟀다'가 아니라 **'관문이 죽어 있다'** 이기 때문이다.
+	//
+	// ★ 저장소 밖이면 축이 0건이고 그때 절 제목도 안 나온다 — 없는 것이 정상인 자리에
+	// 빈 제목을 남기면 그것이 다음 사람의 오독이 된다.
+	for i, ax := range IdentityGateAxes(a.observeIdentityGate()) {
+		if i == 0 {
+			fmt.Fprintln(out, "■ 신원 관문(이 저장소 · 이 머신)")
+		}
+		if ax.Observed {
+			fmt.Fprintf(out, "  ✓ %-18s %s\n", ax.Name, clip(ax.Value, 140))
+		} else {
+			fmt.Fprintf(out, "  ✗ %-18s %s\n", ax.Name, clip(ax.Detail, 400))
+		}
+	}
+
 	// 서버 절. **REST 에 진단 엔드포인트가 없으므로**(설계 §6 의 표에 없다)
 	// /healthz 가 낼 수 있는 것만 낸다. 없는 축을 있는 척 지어내지 않는다.
 	h, herr := a.cli.Healthz(ctx)

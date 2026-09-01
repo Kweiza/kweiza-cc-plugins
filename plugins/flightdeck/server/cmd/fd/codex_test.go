@@ -46,13 +46,23 @@ func TestCodexHooksTemplateIsWiredAsDesigned(t *testing.T) {
 		t.Fatal("템플릿에 훅이 하나도 없다")
 	}
 
-	// ★ **다섯 이벤트를 표로 문다.** glob 처럼 "있는 것만" 보면 이벤트가 사라진 날
+	// ★ **여섯 이벤트를 표로 문다.** glob 처럼 "있는 것만" 보면 이벤트가 사라진 날
 	// 그 사실이 화면에서 침묵한다(repo_hooks_test.go 의 같은 규율).
-	// SessionEnd 는 **일부러 없다** — codex 문서에는 있으나 발화를 못 봤고, 안 재고 실으면
-	// "도는 줄 알았는데 안 도는" 침묵이 하나 더 생긴다. 재고 나서 넣어라.
+	//
+	// ★★ **SessionEnd 는 2026-09-01 에 재고 넣었다** — 앞 판이 "발화를 못 봤다"고 뺀 자리다.
+	// 그 관측이 틀렸다: **발화는 한다. codex 가 그것을 로그에 안 찍을 뿐이다.**
+	// 실측(codex-cli 0.151.0, `codex exec`): 훅 래퍼 자신에 프로브를 심어 재니
+	// `event=session-end … rc=0` 이 매 실행마다 남는데, 같은 실행의 codex stderr 에는
+	// `hook: SessionEnd` 가 **한 줄도 없다**(SessionStart·UserPromptSubmit·PostToolUse·Stop 은
+	// 전부 찍힌다). `--dangerously-bypass-hook-trust` 로 신뢰 축까지 배제하고 갈랐다.
+	//
+	// ★ 그러므로 **codex 로그의 무출력을 미발화로 읽지 마라.** 이 저장소가 반복해서 만난
+	// "관문의 무출력은 통과가 아니다"의 거울상이다 — 여기서는 무출력을 **미발화**로 읽었고,
+	// 그 오독 하나가 훅 하나를 판 넷에 걸쳐 안 싣게 만들었다. 발화를 재려면 로그가 아니라
+	// **훅 자신**에 프로브를 심어라.
 	want := map[string]bool{
 		"SessionStart": true, "UserPromptSubmit": true, "PostToolUse": true,
-		"PreCompact": true, "Stop": true,
+		"PreCompact": true, "Stop": true, "SessionEnd": true,
 	}
 	for ev := range doc.Hooks {
 		if !want[ev] {
@@ -63,10 +73,6 @@ func TestCodexHooksTemplateIsWiredAsDesigned(t *testing.T) {
 		if _, ok := doc.Hooks[ev]; !ok {
 			t.Errorf("템플릿에 %s 가 없다", ev)
 		}
-	}
-	if _, ok := doc.Hooks["SessionEnd"]; ok {
-		t.Error("SessionEnd 가 실렸다 — codex 에서 이 이벤트의 발화를 아직 못 봤다. " +
-			"재고 나서 넣어라(안 재고 실으면 안 도는 훅을 실은 것이다)")
 	}
 
 	for ev, groups := range doc.Hooks {
@@ -83,6 +89,13 @@ func TestCodexHooksTemplateIsWiredAsDesigned(t *testing.T) {
 				}
 				if h.Timeout <= 0 {
 					t.Errorf("%s 에 타임아웃이 없다 — 훅이 안 끊기면 세션이 멈춘다", ev)
+				}
+				// ★ 두 하네스가 **같은 예산**을 갖게 잠근다. 한쪽만 고치면 같은 콜드
+				// 스타트에서 codex 세션만 조용히 처방을 잃는다(근거는 저쪽 상수 주석).
+				if promptPathHooks[ev] && h.Timeout < promptPathHookMinTimeout {
+					t.Errorf("codex 템플릿의 %s 예산이 %d초다 — 콜드 스타트 실측 3.36초를 못 덮는다. "+
+						"claude 쪽(hooks/hooks.json)과 같은 최소 %d초여야 한다",
+						ev, h.Timeout, promptPathHookMinTimeout)
 				}
 				fields := strings.Fields(h.Command)
 				harness, rest := SplitHarnessFlag(fields)

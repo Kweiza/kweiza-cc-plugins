@@ -405,6 +405,69 @@ func TestEveryHookMatcherIsAValueThePlatformSends(t *testing.T) {
 	}
 }
 
+// promptPathHookMinTimeout 은 flightdeck 의 **사람 입력 경로 훅**이 가져야 하는 최소 예산이다.
+//
+// ★★ **여기는 값을 문다** — 바로 아래 `TestEveryHookHasATimeout` 이 값을 안 무는 것과
+// 일부러 다르다. 그 시험이 값을 피한 이유는 "근거가 안 따라와서"인데, 이 축은 근거가
+// 따라온다. 2026-09-01 실측(이 머신, `fd hook user-prompt`):
+//
+//	단독 p50            0.56s   (12회 · 0.52~0.68)
+//	동시 8개 경합       0.98s   (8회 · 0.83~0.98)
+//	서버 완전 미도달    1.18s   (재시도 없이 아웃박스로 빠지는 경로)
+//	**콜드 스타트       3.36s**  ← 이 상수의 유일한 이유
+//
+// 앞의 셋은 2초 안에 드는데 **콜드 스타트만 2초를 넘는다.** 바이너리가 페이지 캐시에서
+// 밀려난 뒤의 첫 호출이 그렇고, 그 조건은 **긴 에이전트가 끝난 직후**에 정확히 성립한다 —
+// 사용자가 `UserPromptSubmit hook timed out after 2s — output discarded` 를 본 자리가
+// 거기다. 그때 버려지는 것은 **미확인 알림과 처방 전부**이고, 훅은 fail-open 이라 사람도
+// 모델도 무엇을 못 받았는지 모른다. 확인율 지표가 그 소실만큼 아래로 편향된다.
+//
+// ★ **타임아웃은 상한이지 대기 시간이 아니다.** "올리면 매 프롬프트가 그만큼 멈춘다"는
+// 걱정은 틀렸다 — 훅이 0.56초에 끝나면 0.56초만 쓴다. 올려서 늘어나는 것은 서버가 정말
+// 죽었을 때의 최악값뿐이고, 그것도 실측 1.18초다.
+//
+// ★ **flightdeck 에만 건다.** grafik-bar 에는 이 실측이 없고, 근거가 안 따라오는 수를
+// 관문에 들이면 그것은 관문이 아니라 장식이다(아래 시험의 머리말과 같은 규율).
+const promptPathHookMinTimeout = 5
+
+// promptPathHooks 는 그 하한이 걸리는 이벤트다 — **사람의 턴 경계에 있는 것**만이다.
+// PostToolUse·PreCompact 는 async 라 사람을 안 막고, SessionStart 는 이미 10초다.
+var promptPathHooks = map[string]bool{"UserPromptSubmit": true, "Stop": true}
+
+// TestFlightdeckPromptPathHooksCoverColdStart 는 그 하한을 잠근다.
+//
+// ★ 이 시험이 없으면 누군가 2초로 되돌려도 **아무 화면도 안 붉는다** — 소실이 조용하기
+// 때문에 되돌린 사실조차 관측되지 않는다. 그것이 이 항목이 처음 열린 이유다.
+func TestFlightdeckPromptPathHooksCoverColdStart(t *testing.T) {
+	root := repoRootFromCmdFd(t)
+	seen := 0
+	for _, h := range hookRefs(t, root) {
+		if h.plugin != "flightdeck" {
+			continue
+		}
+		hf := readHooksFile(t, h)
+		for ev, groups := range hf.Hooks {
+			if !promptPathHooks[ev] {
+				continue
+			}
+			for _, g := range groups {
+				for _, hk := range g.Hooks {
+					if hk.Timeout < promptPathHookMinTimeout {
+						t.Errorf("%s 의 %s 예산이 %d초다 — 콜드 스타트 실측 3.36초를 못 덮는다.\n"+
+							"그 초과분은 조용히 버려진다(output discarded) — 미확인 알림과 처방이 통째로 사라지고 "+
+							"사람도 모델도 무엇을 못 받았는지 모른다. 최소 %d초여야 한다",
+							h.plugin, ev, hk.Timeout, promptPathHookMinTimeout)
+					}
+					seen++
+				}
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("입력 경로 훅을 하나도 안 봤다 — 훑기가 눈이 먼 것이지 통과가 아니다")
+	}
+}
+
 // TestEveryHookHasATimeout 은 훅마다 **예산이 적혀 있는지** 본다.
 //
 // ★★ **값이 아니라 존재를 문다.** 이 레포는 flightdeck 의 훅 예산(2s·3s·10s)을 DESIGN 에서

@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook user-prompt --harness claude",
-            "timeout": 2
+            "timeout": 5
           }
         ]
       }
@@ -54,7 +54,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/fd\" hook stop --harness claude",
-            "timeout": 3
+            "timeout": 5
           }
         ]
       }
