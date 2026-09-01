@@ -433,25 +433,51 @@ codex -c sandbox_workspace_write.network_access=true
 
 Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know what you are opening and why.
 
-#### From codex, use the terminal `fd` instead of MCP
+#### What works from codex today, and what does not
 
-| From codex | |
+| From codex | Today |
 |---|---|
-| Hooks (session card · footprints · overlap prescriptions · banner) | ✅ |
-| Terminal `fd` (`board`/`pick`/`note`/`finish`) | ✅ |
-| The 8 MCP tools | ❌ **deliberately not built** — see below |
+| Hooks — session card · footprints · overlap prescriptions · banner | ✅ works |
+| Terminal `fd` | ⚠️ **`fd` is not installed yet** — workaround below |
+| Response tail (overlap/unacked) · `finish --followups` · `land --resource` | ❌ not in the CLI yet |
+| The 8 MCP tools | ❌ **deliberately not built** (design ruling) |
 
-Shell tools inherit the full environment and receive `CODEX_SESSION_ID`, so **the terminal `fd`
-knows which session it is.** The `pick`→`note`→`finish` round trip works as-is.
+**Plainly: the codex side is finished only up to hooks.** Session cards, footprints and overlap all
+work, but `fd setup --install-codex` does not install the `fd` command itself — it installs the
+`fd-hook` wrapper and `hooks.json`, and nothing else. An earlier version of this document claimed
+"Terminal `fd` ✅"; **that was false.**
 
-MCP is different. codex gives MCP children only the core 13 variables (HOME, PATH, PWD, …) and
-**withholds the session id.** So an MCP tool cannot tell which window it belongs to, and there is
-no way to recover it — the parent codex process does not carry the session id in its environment
-either (measured), and cwd is identical across two windows on the same repo.
+##### How to use it right now
+
+Call the wrapper by absolute path — it forwards its arguments verbatim.
+
+```bash
+~/.local/bin/fd-hook status
+~/.local/bin/fd-hook note --kind decision --title "…"
+```
+
+For convenience, alias it or widen your PATH:
+
+```bash
+alias fd=~/.local/bin/fd-hook          # or
+export PATH="$HOME/.local/bin:$PATH"   # in ~/.zshrc, etc.
+```
+
+> ⚠️ The name `fd` collides with `fd-find` (the find replacement). If you use that, pick another alias.
+
+##### Why MCP is not built
+
+codex gives MCP children only the core 13 variables (HOME, PATH, PWD, …) and **withholds the
+session id.** So an MCP tool cannot tell which window it belongs to, and there is no way to recover
+it — the parent codex process does not carry the session id in its environment either (measured),
+and cwd is identical across two windows on the same repo.
 
 **Attaching an identity-less MCP would make two windows share one card, and the ledger would lie.**
-So it is not built (the ruling, and what would reverse it, are in DESIGN's "harness axis" section).
-One more tool surface is not worth wagering the truth of the record.
+
+And crucially — **building MCP would not close any gap in the table above.** The missing `fd` is an
+install problem; the tail and the handles are CLI-surface problems. MCP fixes neither, and would
+introduce a new falsehood (identity-less cards) in exchange. So it is not built — the ruling and its
+**four reversal conditions** live in DESIGN's "harness axis" section.
 
 ---
 
