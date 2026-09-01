@@ -188,7 +188,7 @@ func (b *mcpBackend) OpenSession(ctx context.Context, in service.OpenSessionInpu
 	res, stale, err := b.app.openSession(ctx, openReq{
 		Project: in.Project, ProjectPath: in.ProjectPath, DefaultBranch: in.DefaultBranch,
 		MachineID: in.MachineID, Hostname: in.Hostname, Worktree: in.Worktree,
-		CCSessionID: in.CCSessionID, Label: in.Label,
+		CCSessionID: in.CCSessionID, Label: in.Label, Harness: in.Harness,
 	})
 	if err != nil {
 		if Unreachable(err, 0) {

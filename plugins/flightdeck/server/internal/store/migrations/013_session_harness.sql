@@ -1,0 +1,28 @@
+-- 013 · 세션에 하네스 축을 준다 (schema_version 12 → 13)
+--
+-- ★ 무엇을 위한 컬럼인가: 하네스는 오늘 **관측되고 배너에 뜨지만 원장에 안 남는다**.
+--   그래서 보드를 보는 사람이 "저건 codex 다"를 모르고 — 겹침 처방을 읽는 것이 이 사슬
+--   전체의 목적인데 그 한 칸이 비어 있다 — 잘못 귀속된 카드를 나중에 가려낼 축도 0이다.
+--
+-- ★ **기존 행은 NULL 로 둔다. 소급해서 'claude' 로 채우지 마라.**
+--   채우면 그것이 곧 지어내는 것이다(원칙 ①). 이 DB 의 옛 행들은 하네스가 관측되기
+--   전에 열린 세션이고, 그것들이 claude 였다는 것은 **추측이지 관측이 아니다.**
+--   렌더는 NULL 을 「미상」으로 찍는다 — Identity.HarnessLabel() 이 이미 그 문자열을 낸다.
+--
+-- ★ **3중키에 안 넣는다.** UNIQUE(machine_id, worktree, cc_session_id) 는 그대로다.
+--   두 하네스의 세션 id 가 둘 다 UUID 라 유일성은 이미 성립하고, 하네스는 **좌표가
+--   아니라 속성**이다. 키에 넣으면 표기 하나가 바뀔 때 같은 세션이 다른 카드가 된다.
+--
+-- ★ CHECK 를 안 건다. 아는 이름은 오늘 둘(claude·codex)이지만 그 표의 주인은
+--   mcpsrv 의 harnessSessionEnv 이고, 이름이 셋으로 느는 날 스키마가 그것을 막으면
+--   증분 하나가 더 필요해진다 — 원장은 관측을 **기록**하는 자리이지 어휘를 강제하는
+--   자리가 아니다. 빈 문자열 대신 NULL 을 쓰는 것으로 「미상」은 이미 표현된다.
+--
+-- ★ 순수 가산이다 — ALTER TABLE ADD COLUMN 뿐이라 migrate_guard_test.go 의
+--   destructiveOps 여섯 축(DROP TABLE·DROP COLUMN·RENAME·DELETE FROM·UPDATE…SET·
+--   INSERT…SELECT) 어느 것에도 안 걸린다. 예외 등재가 필요 없다.
+--
+-- ★ 멱등이 아니다(ALTER 는 두 번 돌면 "duplicate column name" 으로 죽는다). 그것으로 족하다 —
+--   증분은 schema_version 으로 정확히 한 번만 돈다.
+
+ALTER TABLE session ADD COLUMN harness TEXT;

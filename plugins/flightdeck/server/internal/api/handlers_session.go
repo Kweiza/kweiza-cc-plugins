@@ -25,6 +25,9 @@ type openSessionRequest struct {
 	Worktree      string `json:"worktree"`
 	CCSessionID   string `json:"cc_session_id"`
 	Label         string `json:"label"`
+	// ★ 옛 클라이언트는 이 필드를 안 싣는다 — 그때 빈 문자열이고 「미상」이다.
+	// 없는 것을 claude 로 접지 않는 규율이 여기서도 그대로다.
+	Harness string `json:"harness"`
 }
 
 // handleOpenSession 은 세션을 열거나(신규) 그대로 돌려준다(재개).
@@ -42,6 +45,7 @@ func (s *server) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 		Worktree:      req.Worktree,
 		CCSessionID:   req.CCSessionID,
 		Label:         req.Label,
+		Harness:       req.Harness,
 	})
 	if err != nil {
 		s.fail(w, r, err)

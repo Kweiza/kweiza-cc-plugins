@@ -671,8 +671,9 @@ func boardCard(c service.SessionCard, now time.Time, pathLimit int, detail bool,
 	// (실측: 3줄로 늘렸더니 24세션 기본 보드가 1208토큰이 됐다).
 	lines := []string{
 		fmt.Sprintf("%s%s %s · %s", mark, ShortID(v.Session.ID), claims, act),
-		fmt.Sprintf("   %s · %s · %s · %s · %s",
-			label, branch, state, formatPaths(v.Paths, pathLimit), FormatSignals(v.Signals, now)),
+		fmt.Sprintf("   %s · %s · %s · %s · %s · %s",
+			label, v.Session.HarnessLabel(), branch, state,
+			formatPaths(v.Paths, pathLimit), FormatSignals(v.Signals, now)),
 	}
 	if !v.HasFootprint {
 		// 안 막는다는 사실이 화면에 있어야 한다(설계 §5의 "그래도 안 보이는 것" ①).
@@ -2096,7 +2097,7 @@ type TailInput struct {
 // 그만큼 밀려난다. 즉 꼬리가 살아 있는 세션 수에 O(N) 으로 자라는데 예산은 상수다.
 // 실측(2026-08-05): 겹침 16줄일 때 788토큰 = 예산 1200 의 66%.
 //
-// ★★ 알림 쪽에 같은 상한을 **여기 두지 않는다.** 그 축은 tailNoteLimit(mcpsrv.go)이 이미
+// ★★ 알림 쪽에 같은 상한을 **여기 두지 않는다.** 그 축은 TailNoteLimit(mcpsrv.go)이 이미
 // 쥐고 있다 — 같은 판정을 두 자리에 두면 반드시 표류한다(이 패키지가 워크트리·머신·프로젝트
 // 축에서 세 번 겪고 세 번 다 주입으로 고친 그 사고다).
 const tailOverlapLimit = 5

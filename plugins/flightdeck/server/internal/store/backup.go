@@ -99,6 +99,9 @@ type LedgerSession struct {
 	State       string  `json:"state"`
 	BlockedWhy  *string `json:"blocked_why"`
 	OpenedAt    string  `json:"opened_at"`
+	// Harness 는 013 이 더한 축이다. 포인터인 이유는 Label·BlockedWhy 와 같다 —
+	// NULL(「미상」)과 빈 문자열을 원장이 구별해야 한다.
+	Harness *string `json:"harness"`
 }
 
 // LedgerDump 는 한 순간의 FK 폐포 전량이다.
@@ -357,12 +360,12 @@ func readLedgerSessions(ctx context.Context, q dbtx) ([]LedgerSession, error) {
 	var out []LedgerSession
 	for rows.Next() {
 		var x LedgerSession
-		var label, blockedWhy sql.NullString
+		var label, blockedWhy, harness sql.NullString
 		if err := rows.Scan(&x.ID, &x.Project, &x.MachineID, &x.Worktree, &x.CCSessionID,
-			&label, &x.State, &blockedWhy, &x.OpenedAt); err != nil {
+			&label, &x.State, &blockedWhy, &x.OpenedAt, &harness); err != nil {
 			return nil, fmt.Errorf("원장 세션 행 해석 실패: %w", err)
 		}
-		x.Label, x.BlockedWhy = ptrOf(label), ptrOf(blockedWhy)
+		x.Label, x.BlockedWhy, x.Harness = ptrOf(label), ptrOf(blockedWhy), ptrOf(harness)
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
@@ -441,7 +444,7 @@ func (s *Store) WriteLedger(ctx context.Context, d LedgerDump) error {
 		for _, x := range d.Sessions {
 			if _, err := t.tx.ExecContext(t.ctx, sessionStmt,
 				x.ID, x.Project, x.MachineID, x.Worktree, x.CCSessionID,
-				x.Label, x.State, x.BlockedWhy, x.OpenedAt); err != nil {
+				x.Label, x.State, x.BlockedWhy, x.OpenedAt, x.Harness); err != nil {
 				return fmt.Errorf("원장 세션 되쓰기 실패(id=%q project=%q): %w",
 					clip(x.ID, 64), clip(x.Project, 64), err)
 			}

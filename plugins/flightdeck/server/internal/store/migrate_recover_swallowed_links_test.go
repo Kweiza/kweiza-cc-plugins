@@ -38,7 +38,8 @@ func TestMigration012RecoversSwallowedLinksAndTouchesNothingElse(t *testing.T) {
 		t.Fatalf("열기 실패: %v", err)
 	}
 	seed(t, s, "context-platform")
-	sess := mustSession(t, s, "context-platform", "cc-swallow")
+	// ★ 11판 DB 다 — store 의 질의는 지금 판의 칼럼을 보므로 mustSession 을 못 쓴다.
+	sessID := mustSessionAtOldSchema(t, s, "context-platform", "cc-swallow")
 
 	for _, id := range []string{
 		"owner-audit-worm-blocks-e2e-reset", // 증분이 되살리는 대상 중 open 인 것
@@ -61,7 +62,7 @@ func TestMigration012RecoversSwallowedLinksAndTouchesNothingElse(t *testing.T) {
 	const jFollowups = "01KZQ8HEWK5ZQBB0JRTG7BZVW1" // followups 가 삼켜졌다
 	for _, id := range []string{jItemID, jFollowups} {
 		if _, err := s.AddJudgment(ctx, model.Judgment{
-			ID: id, Project: "context-platform", SessionID: sess.ID,
+			ID: id, Project: "context-platform", SessionID: sessID,
 			Kind: model.JudgmentHandoff,
 			Body: "삼킨 인자가 값 안으로 들어온 판단이다. 링크가 하나도 안 걸렸다.",
 			// Links 가 비어 있는 것이 이 사고의 실물이다.
@@ -72,7 +73,7 @@ func TestMigration012RecoversSwallowedLinksAndTouchesNothingElse(t *testing.T) {
 
 	// ── 안 건드려야 할 것 ①: 이미 정상 링크를 가진 판단 ──
 	if _, err := s.AddJudgment(ctx, model.Judgment{
-		Project: "context-platform", SessionID: sess.ID, Kind: model.JudgmentDecision,
+		Project: "context-platform", SessionID: sessID, Kind: model.JudgmentDecision,
 		Body:  "정상 링크를 가진 대조군이다.",
 		Links: []model.JudgmentLink{{TargetKind: "item", TargetID: "e2e-sa-owners-roundtrip"}},
 	}); err != nil {
@@ -103,7 +104,17 @@ func TestMigration012RecoversSwallowedLinksAndTouchesNothingElse(t *testing.T) {
 	}
 
 	// ── 증분을 태운다 ──
-	mustMigrateTo(t, path, prev+1)
+	//
+	// ★ prev+1 이 아니라 **전부** 태운다. Open 은 이 바이너리의 SchemaVersion 과 정확히
+	//   맞는 DB 만 열기 때문이다(적용이 기동에서 분리된 뒤의 규약). 012 하나만 태우면
+	//   그 뒤 판이 하나 생기는 순간 이 시험이 「적용 뒤 열기 실패」로 죽는데 그것은 012 와
+	//   아무 상관이 없다 — 013(session.harness)이 실제로 그렇게 죽였다.
+	//
+	//   012 의 판정은 그대로 유효하다: 아래 단정은 **어느 판단이 어느 항목에 닿는가**를
+	//   보고, 뒤 증분들은 judgment_link 를 건드리지 않는다. 위의 `prev` 가 리터럴 11 인
+	//   것과 여기가 「전부」인 것은 모순이 아니다 — 재현해야 하는 것은 **012 직전 상태**이고,
+	//   태워야 하는 것은 **이 바이너리가 아는 전부**다.
+	mustMigrate(t, path)
 	s2, err := OpenWithLogger(path, log)
 	if err != nil {
 		t.Fatalf("적용 뒤 열기 실패: %v", err)

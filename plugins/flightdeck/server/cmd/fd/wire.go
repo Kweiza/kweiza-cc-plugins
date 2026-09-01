@@ -37,6 +37,9 @@ type openReq struct {
 	Worktree      string `json:"worktree"`
 	CCSessionID   string `json:"cc_session_id"`
 	Label         string `json:"label"`
+	// Harness 는 **선언된** 하네스다(--harness). 빈 값은 「미상」이고 서버는 그것을
+	// NULL 로 둔다 — 옆 버전 서버(013 이전)는 이 필드를 그냥 무시한다.
+	Harness string `json:"harness,omitempty"`
 }
 
 type beatReq struct {

@@ -57,6 +57,26 @@ func mustSession(t *testing.T, s *Store, project, cc string) model.Session {
 	return sess
 }
 
+// mustSessionAtOldSchema 는 **옛 판 DB** 에 세션 한 행을 직접 넣는다.
+//
+// ★ 증분 시험에는 mustSession 을 쓰면 안 되는 자리가 있다. 그 시험들은 특정 판(예: 11)을
+// 재현한 DB 를 openRaw 로 열고 쓰는데, store 의 질의는 **지금 판의 칼럼**을 SELECT 하므로
+// 그 DB 에서 "no such column" 으로 죽는다 — 그 실패는 증분 결함처럼 보이지만 실은
+// 시험의 좌표가 틀린 것이다(013 이 session.harness 를 더하면서 실제로 그렇게 죽었다).
+//
+// 그래서 여기서는 **v1 부터 있던 칼럼만** 쓴다. 뒤에 무엇이 더해져도 이 헬퍼는 안 깨진다.
+func mustSessionAtOldSchema(t *testing.T, s *Store, project, cc string) string {
+	t.Helper()
+	id := NewID()
+	if _, err := s.db.Exec(
+		`INSERT INTO session(id, project, machine_id, worktree, cc_session_id, label, state, blocked_why, opened_at)
+		 VALUES (?, ?, ?, ?, ?, NULL, 'active', NULL, ?)`,
+		id, project, "m1", "/w/"+cc, cc, fmtTime(time.Now().UTC())); err != nil {
+		t.Fatalf("옛 판 스키마에 세션 등록 실패(cc=%s): %v", cc, err)
+	}
+	return id
+}
+
 func mustItem(t *testing.T, s *Store, project, id string) {
 	t.Helper()
 	err := s.AddItem(context.Background(), model.Item{
@@ -103,6 +123,8 @@ func undoNonIdempotentMigrations(t *testing.T, exec func(string) (sql.Result, er
 		`ALTER TABLE project DROP COLUMN archived_at`,
 		// 009 · judgment_link.target_project
 		`ALTER TABLE judgment_link DROP COLUMN target_project`,
+		// 013 · session.harness
+		`ALTER TABLE session DROP COLUMN harness`,
 		// 011 · item_dependents 를 **되살린다**(schema.sql 의 v1 정의 그대로).
 		`CREATE TABLE IF NOT EXISTS item_dependents (
   project TEXT NOT NULL,

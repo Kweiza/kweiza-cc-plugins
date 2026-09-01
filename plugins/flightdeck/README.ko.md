@@ -356,7 +356,8 @@ export FD_TOKEN=<서버와 같은 토큰>   # 서버에 FD_TOKEN 을 줬을 때�
 fd setup --install-codex
 ```
 
-이것이 깔아 주는 것은 둘이다 — 고정 경로 래퍼 `~/.local/bin/fd-hook` 과 `~/.codex/hooks.json`.
+이것이 깔아 주는 것은 셋이다 — 고정 경로 래퍼 `~/.local/bin/fd-hook`, **`fd` 그 자체
+(`~/.local/bin/fd`)**, 그리고 `~/.codex/hooks.json`.
 **기존 `hooks.json` 은 절대 안 덮는다.** 이미 있으면 넣을 내용을 화면에 내고 멈추므로 손으로 병합해라.
 
 #### ★ 그리고 반드시 TUI 를 한 번 띄워라
@@ -420,31 +421,38 @@ codex -c sandbox_workspace_write.network_access=true
 | codex 에서 | 오늘 |
 |---|---|
 | 훅 — 세션 카드 · 발자국 · 겹침 처방 · 배너 | ✅ 돈다 |
-| 터미널 `fd` | ⚠️ **`fd` 가 아직 안 깔린다** — 아래 우회로 |
-| 응답 꼬리(겹침·미확인) · `finish --followups` · `land --resource` | ❌ CLI 에 아직 없다 |
+| 터미널 `fd` | ✅ 깔린다 — **PATH 는 당신이 넣어야 한다**(아래) |
+| 응답 꼬리(겹침·미확인) | ✅ 쓰기 명령 전부에 붙는다 |
+| `pick --leave` · `finish --followups` · `land --resource` | ✅ 있다 |
+| 처방문의 도구 문법 | ✅ codex 카드에는 `fd …` 로 나온다 |
 | MCP 도구 8개 | ❌ **안 만든다**(설계 판정) |
 
-**솔직하게: codex 쪽은 훅까지만 완성돼 있다.** 세션 카드와 발자국·겹침은 정상으로 돌지만,
-`fd` 명령 자체는 `fd setup --install-codex` 가 안 깐다(까는 것은 `fd-hook` 래퍼와 `hooks.json`
-둘뿐이다). 앞선 판의 이 문서가 「터미널 `fd` ✅」라고 적었는데 **그것은 거짓이었다.**
+##### PATH 를 넣어야 한다 — 이것만 사람이 한다
 
-##### 지금 당장 쓰는 법
-
-래퍼를 절대경로로 부르면 된다 — 인자를 그대로 넘긴다.
+`fd setup --install-codex` 가 `~/.local/bin/fd` 를 깔지만, **그 디렉토리는 이 머신의 깨끗한
+로그인 셸 PATH 에 없다**(2026-08-31 실측: 항목 20개 어디에도 없다). 그래서 설치 직후
+화면이 이 줄을 낸다:
 
 ```bash
-~/.local/bin/fd-hook status
-~/.local/bin/fd-hook note --kind decision --title "…"
+export PATH="$HOME/.local/bin:$PATH"   # ~/.zshrc 등에 넣어라
 ```
 
-편하게 쓰려면 셸에 별칭을 두거나 PATH 를 넓혀라:
+넣기 전에도 절대경로로는 바로 된다:
 
 ```bash
-alias fd=~/.local/bin/fd-hook          # 또는
-export PATH="$HOME/.local/bin:$PATH"   # ~/.zshrc 등에
+~/.local/bin/fd board
+~/.local/bin/fd note --kind decision --title "…" --body -
 ```
 
-> ⚠️ `fd` 라는 이름은 `fd-find`(find 대체제)와 겹친다. 그쪽을 쓰고 있다면 별칭을 다른 이름으로 잡아라.
+> ⚠️ `fd` 라는 이름은 `fd-find`(find 대체제)와 겹친다. 그쪽이 PATH 앞에 있으면 그쪽이 돈다 —
+> `fd doctor` 의 「codex 창의 fd」 축이 **무엇이 먼저 잡히는지 경로로** 말한다. 별칭을 다른
+> 이름으로 잡거나 `~/.local/bin` 을 앞에 둬라.
+
+##### 깔린 `fd` 는 판올림을 따라간다
+
+래퍼와 **같은 스크립트**다 — 설치본(`~/.claude/plugins/cache/*/flightdeck/*/bin/fd`) 중
+가장 높은 판을 골라 exec 한다. 그래서 플러그인을 판올림해도 이 파일을 다시 깔 필요가 없고,
+훅 신뢰도 안 깨진다(명령 문자열이 안 바뀐다).
 
 ##### MCP 를 안 만드는 이유
 

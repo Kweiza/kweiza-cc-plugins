@@ -135,7 +135,12 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 		return PrescribeResult{}, err
 	}
 
-	in := judge.PrescribeInput{Now: s.now(), SessionID: sessionID, SelfCC: sess.CCSessionID}
+	// ★ Harness 를 함께 싣는다 — 처방문의 도구 호출 표기가 이 값으로 갈린다.
+	// 없는 문법을 말하는 처방은 그 창에서 **아무 일도 안 일으킨다**(codex 는 MCP 표면이 0이다).
+	// 원장의 값이므로 선언이 없던 세션은 빈 채로 오고, 그때는 MCP 문법이다(judge.syntaxFor).
+	in := judge.PrescribeInput{
+		Now: s.now(), SessionID: sessionID, SelfCC: sess.CCSessionID, Harness: sess.Harness,
+	}
 
 	// 억제 상태 — 이 세션이 이미 낸 키와 그 시각.
 	emitted, since, err := s.emittedKeys(ctx, sessionID, sess.OpenedAt)

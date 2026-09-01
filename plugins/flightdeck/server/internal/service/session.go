@@ -38,6 +38,9 @@ type OpenSessionInput struct {
 	Worktree      string // 이 세션의 작업 트리 절대경로
 	CCSessionID   string // Claude Code 세션 UUID
 	Label         string // 표시 전용. 어떤 필터의 축도 아니다
+	// Harness 는 이 카드를 연 도구다(claude·codex). **선언에서만 온다.**
+	// 빈 값은 「미상」이고 저장층이 그것을 NULL 로 둔다 — claude 로 접지 않는다.
+	Harness string
 }
 
 // SessionResult 는 세션 하나를 연 결과다.
@@ -304,7 +307,7 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 			return err
 		}
 
-		sess, created, err = t.OpenSession(in.Project, in.MachineID, in.Worktree, in.CCSessionID, in.Label, now)
+		sess, created, err = t.OpenSessionAs(in.Project, in.MachineID, in.Worktree, in.CCSessionID, in.Label, in.Harness, now)
 		if err != nil {
 			return err
 		}

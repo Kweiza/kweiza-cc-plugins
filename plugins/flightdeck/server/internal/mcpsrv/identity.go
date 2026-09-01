@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kweiza/flightdeck/internal/model"
 )
 
 // 세션 정체 — 실측된 환경 축에서만 온다(설계 §13).
@@ -33,9 +35,11 @@ const (
 // ★ 이 축은 환경으로 못 가른다. 중첩 실행이 양방향으로 거짓말하기 때문이다 —
 // Claude 세션 안에서 띄운 codex 는 CLAUDE_CODE_SESSION_ID 를 물려받고, 그 반대도 같다
 // (실측). 그래서 **진입점이 선언한다**(`--harness`). 아는 쪽은 설치물이다.
+// ★ 값의 주인은 model 이다 — judge 도 같은 이름을 봐야 하는데 그 패키지는 mcpsrv 를
+// import 할 수 없다(역방향 의존). 여기 별칭을 두는 것은 기존 호출부를 안 깨기 위해서다.
 const (
-	HarnessClaude = "claude"
-	HarnessCodex  = "codex"
+	HarnessClaude = model.HarnessClaude
+	HarnessCodex  = model.HarnessCodex
 )
 
 // harnessSessionEnv 는 하네스별 세션 id 환경변수다. 이 표가 "어느 이름을 부를 것인가"의
@@ -50,6 +54,56 @@ var harnessSessionEnv = map[string]string{
 // ★ 이것은 하네스 판정이 아니다. 값을 하나 찾을 뿐이고 Identity.Harness 는 빈 채로 남는다 —
 // 관측되지 않은 것을 이름 붙이면 그것이 곧 지어내는 것이다(DESIGN §14 ②).
 var harnessProbeOrder = []string{HarnessClaude, HarnessCodex}
+
+// ProbeSession 은 선언이 없을 때 세션 id 를 찾는다. 순수 함수다.
+//
+// 돌려주는 것이 셋인 이유: 앞의 둘(값·찾은 이름)은 "무엇을 쓸 것인가"이고,
+// 셋째(found)는 **"몇 개가 있었나"** 다. 옛 코드는 첫 값에서 break 해서 셋째를
+// 영영 못 봤고, 그래서 두 축이 동시에 찬 중첩 기동이 조용히 지나갔다.
+//
+// found 는 harnessProbeOrder 순서를 유지한다 — 배너와 거절 사유가 그 순서로 찍히고
+// 사람이 두 실행의 화면을 눈으로 견준다(Missing 이 정렬된 목록이 아닌 이유와 같다).
+//
+// ★ **내보내는 이유**: cmd/fd 의 App 이 이 훑기의 사본을 들고 있었다. 이 파일이
+// "유일한 정체의 원천"이라 선언했으므로 사본 쪽이 결함이고, 사본을 지우려면 원천이
+// 패키지 밖에서 불릴 수 있어야 한다. 새 사본을 만들지 마라 — 관문이 한쪽에만 서면
+// 다른 쪽이 그대로 뚫리고, 뚫린 쪽은 어떤 시험도 안 깨서 조용하다.
+func ProbeSession(get func(string) (string, bool)) (sessionID, envName string, found []string) {
+	envName = EnvSessionID // 아무것도 못 찾아도 안내가 부를 이름은 있어야 한다
+	for _, h := range harnessProbeOrder {
+		name := harnessSessionEnv[h]
+		v, ok := get(name)
+		if !ok || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if sessionID == "" {
+			sessionID, envName = strings.TrimSpace(v), name
+		}
+		found = append(found, name)
+	}
+	return sessionID, envName, found
+}
+
+// HarnessConflictReason 은 부딪힘의 거절 사유 문장이다. 부딪힘이 아니면 빈 문자열이다.
+// 순수 함수다.
+//
+// ★ **이 문장의 주인은 하나여야 한다.** 같은 상황을 MCP 의 거절 사유와 CLI 의 안내가
+// 다르게 말하면, 사람은 두 화면이 같은 일을 말하는지 알 수 없고 한쪽만 고쳐진 날
+// 어긋남이 조용하다. 그래서 두 진입점이 이 함수를 함께 부른다.
+//
+// what 은 막힌 것의 이름(도구명 또는 명령명)이고, picked 는 훑기가 **집은** 환경변수
+// 이름이다. 집었다는 사실을 화면에 내는 이유: 그 선택에 근거가 없다는 것이 이 거절의
+// 내용이므로, 무엇이 집혔는지를 감추면 사람이 무엇을 의심할지 모른다.
+func HarnessConflictReason(found []string, what, picked string) string {
+	if len(found) < 2 {
+		return ""
+	}
+	return fmt.Sprintf("하네스가 부딪힌다 — %s 가 동시에 관측됐는데 선언이 없다. "+
+		"%s 는 원장에 세션 id 로 행을 남기는데 이 카드가 어느 창의 것인지 정할 수 없다"+
+		"(훑기가 %s 를 집었으나 그 선택에는 근거가 없다). "+
+		"--harness %s 를 실어라 — 선언이 관측을 이긴다",
+		strings.Join(found, " · "), what, picked, strings.Join(HarnessNames(), "|"))
+}
 
 // KnownHarness 는 이 이름을 아는가다. 순수 함수다.
 func KnownHarness(name string) bool {
@@ -101,6 +155,17 @@ type Identity struct {
 	// 배너가 이 값을 불러야 "없는 변수를 가리키는 안내"가 안 나온다.
 	SessionEnv string
 
+	// HarnessConflict 는 세션 id 가 **동시에 관측된** 축들의 이름이다. 선언이 없을 때만 찬다.
+	//
+	// ★ Missing 과 급이 다르다 — 저쪽은 값이 **없는** 것이고 이쪽은 값이 **둘인** 것이다.
+	// 중첩 기동(Claude 의 Bash 에서 띄운 codex)에서 두 축이 다 차고, 그때
+	// harnessProbeOrder 가 claude 를 집어 codex 작업이 조용히 Claude 카드로 들어간다.
+	//
+	// 불리언이 아니라 **이름 목록**인 이유는 Missing 과 같다: 무엇과 무엇이 부딪혔는지가
+	// 화면에 있어야 사람이 어느 창인지 판단할 수 있고, 축이 셋으로 늘어난 날 문구가
+	// 저절로 따라온다.
+	HarnessConflict []string
+
 	Missing  []string // 관측되지 않은 축의 **이름**
 	Warnings []string // 관측은 됐으나 대체값을 쓴 축
 }
@@ -123,30 +188,39 @@ func ResolveIdentityAs(harness string, get func(string) (string, bool), cwd stri
 	harness = strings.TrimSpace(harness)
 	switch {
 	case harness == "":
-		// 선언이 없다 — 오늘까지의 동작 그대로 훑는다. 결손 이름은 첫 후보(claude)의 것이고,
+		// 선언이 없다 — 아는 이름들을 순서대로 훑는다. 결손 이름은 첫 후보(claude)의 것이고,
 		// 그 사실을 경고로 남긴다. 이 조합이 곧 "하네스를 모른다"의 정직한 표현이다.
-		id.SessionEnv = EnvSessionID
-		for _, h := range harnessProbeOrder {
-			if v, ok := get(harnessSessionEnv[h]); ok && strings.TrimSpace(v) != "" {
-				id.CCSessionID, id.SessionEnv = strings.TrimSpace(v), harnessSessionEnv[h]
-				break
-			}
-		}
+		//
+		// ★ **첫 값에서 멈추지 않는다.** 멈추면 두 축이 동시에 찬 사실 자체가 관측되지
+		// 않고, 관측되지 않은 것은 화면에도 원장에도 안 남는다 — 그것이 중첩 기동에서
+		// codex 작업이 조용히 Claude 카드로 가던 경로다.
+		var found []string
+		id.CCSessionID, id.SessionEnv, found = ProbeSession(get)
 		// ★ **여기서 무조건 경고하지 마라.** 선언 없이 부르는 것은 지금 함대의 정상 상태다
 		// (Claude 쪽 설치물이 아직 --harness 를 안 싣는다). 무조건 달면 살아 있는 모든 세션의
 		// **모든 도구 응답 꼬리**에 잡음이 붙고, 그러면 사람이 배너를 안 읽게 된다 —
 		// 배너가 무언가를 말해야 할 날 그것이 안 읽히는 것이 이 기구의 유일한 실패 양식이다.
 		// 시험이 이 회귀를 잡았다(TestBannerNamesEveryMissingAxis).
 		//
-		// 말할 값이 있는 경우는 둘뿐이다:
-		if id.SessionEnv != EnvSessionID && id.CCSessionID != "" {
+		// 말할 값이 있는 경우는 셋뿐이다:
+		switch {
+		case len(found) > 1:
+			// (다) **두 축이 동시에 찼다.** 값이 없는 것이 아니라 값이 둘이고, 훑기가
+			// 그중 첫째(claude)를 집었다 — 그런데 그 선택에는 근거가 없다.
+			//
+			// 이것만 경고가 아니라 **거절**인 이유(GateTool 참조): 앞의 둘은 값이
+			// 비어 있거나 이름이 어긋난 것이라 화면에 뜨면 사람이 고칠 수 있다.
+			// 이쪽은 값이 **차 있는 채로 틀린다** — 원장에 그럴듯한 행이 남고,
+			// 그 행이 틀렸다는 사실은 어느 화면에도 안 뜬다.
+			id.HarnessConflict = found
+		case id.SessionEnv != EnvSessionID && id.CCSessionID != "":
 			// (가) claude 가 아닌 축에서 값이 나왔다 — 이 창은 사실상 다른 하네스인데
 			// 선언이 없다. 카드의 하네스가 「미상」으로 남는다는 사실을 말해야 한다.
 			id.Warnings = append(id.Warnings,
 				"하네스 선언이 없는데 세션 id 가 "+id.SessionEnv+" 에서 나왔다 — "+
 					"이 창은 claude 가 아닌 것으로 보이나 카드의 하네스는 「미상」으로 남는다. "+
 					"설치물이 --harness 를 실어야 한다")
-		} else if id.CCSessionID == "" {
+		case id.CCSessionID == "":
 			// (나) 아무 축에서도 못 찾았다 — 무엇을 찾았는지 이름으로 말한다.
 			// 결손 목록은 첫 후보의 이름만 싣기 때문이다.
 			id.Warnings = append(id.Warnings,
@@ -160,15 +234,17 @@ func ResolveIdentityAs(harness string, get func(string) (string, bool), cwd stri
 		}
 	default:
 		// 모르는 이름을 조용히 무시하면 오타 하나가 「미상」으로 접혀 안 보인다.
-		id.SessionEnv = EnvSessionID
 		id.Warnings = append(id.Warnings,
 			"모르는 하네스 이름이다: "+clip(harness, 40)+" — 아는 것은 "+
 				strings.Join(HarnessNames(), "·")+" 뿐이다. 「미상」으로 진행한다")
-		for _, h := range harnessProbeOrder {
-			if v, ok := get(harnessSessionEnv[h]); ok && strings.TrimSpace(v) != "" {
-				id.CCSessionID, id.SessionEnv = strings.TrimSpace(v), harnessSessionEnv[h]
-				break
-			}
+		// ★ 오타는 선언이 **아니다** — 「미상」으로 접히므로 위의 `harness == ""` 와
+		// 같은 자리로 떨어진다. 그래서 훑기도 부딪힘 판정도 **같은 것**을 쓴다:
+		// 여기에 사본을 두면 오타 하나로 봉인이 통째로 열리고, 그 구멍은
+		// 어떤 시험도 안 깨서 조용하다.
+		var found []string
+		id.CCSessionID, id.SessionEnv, found = ProbeSession(get)
+		if len(found) > 1 {
+			id.HarnessConflict = found
 		}
 	}
 	if id.CCSessionID == "" {
@@ -255,7 +331,7 @@ func ProjectIDFor(projectDir, cwd string) string {
 // 거절당한 도구만 보면 "이 도구가 원래 안 되나"로 읽히고, 되는 도구(board·alloc)의 결과는
 // 정체 없이 나온 값이라는 사실이 화면에서 사라진다.
 func (id Identity) Banner() string {
-	if len(id.Missing) == 0 && len(id.Warnings) == 0 {
+	if len(id.Missing) == 0 && len(id.Warnings) == 0 && len(id.HarnessConflict) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -284,6 +360,18 @@ func (id Identity) Banner() string {
 			b.WriteString("   안 되는 것: pick·note·add·finish·land·label — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
 		}
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
+	}
+	// ★ 부딪힘은 결손과 **급이 다르다** — 결손은 값이 없는 것이고 이쪽은 값이 둘이다.
+	// 그래서 위 절과 합치지 않는다: "관측되지 않은 축" 목록에 이 축을 끼워 넣으면
+	// 관측이 **됐다는** 사실 자체가 화면에서 사라진다.
+	if len(id.HarnessConflict) > 0 {
+		fmt.Fprintf(&b, "⚠ 하네스가 부딪힌다 — %s 가 동시에 관측됐는데 선언이 없다\n",
+			strings.Join(id.HarnessConflict, " · "))
+		b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
+		b.WriteString("   안 되는 것: pick·note·add·finish·land·label — " +
+			"이 카드가 어느 창의 것인지 정할 수 없다.\n")
+		b.WriteString("   고치는 법: --harness " + strings.Join(HarnessNames(), "|") +
+			" 를 실어라. 선언이 관측을 이긴다.\n")
 	}
 	for _, w := range id.Warnings {
 		fmt.Fprintf(&b, "⚠ %s\n", w)
@@ -351,6 +439,16 @@ func GateTool(tool string, id Identity) (ok bool, reason string) {
 		// 그 자리에서 거짓이 된다. 관측한 이름(id.SessionEnv)을 부른다.
 		return false, fmt.Sprintf("%s 를 못 읽어 세션 정체가 없다 — %s 는 원장에 세션 id 로 행을 남기므로 "+
 			"익명으로 진행하면 그 행이 거짓이 된다. 지어내지 않는다", id.SessionEnvName(), tool)
+	}
+	// ★ 값이 **비어서** 막는 위 갈래와 달리 이쪽은 값이 **차 있는데 틀릴 수 있어서** 막는다.
+	// 훑기가 첫 후보를 집었으나 그 선택에는 근거가 없고, 틀린 귀속은 원장에 그럴듯한
+	// 행으로 남아 어느 화면에도 안 뜬다 — 그래서 경고가 아니라 거절이다(판단 01M1DKJA…).
+	//
+	// 오늘 이 갈래에 걸리는 실행은 0건이다: codex 훅 다섯은 전부 --harness codex 를 싣고,
+	// Claude 의 MCP 에는 CODEX_SESSION_ID 가 애초에 없다. 봉인이 먼저 서고, 그 다음에
+	// codex-fd-cli-not-installed 가 맨손 경로를 연다 — 순서가 판정의 일부다.
+	if r := HarnessConflictReason(id.HarnessConflict, tool, id.SessionEnvName()); r != "" {
+		return false, r
 	}
 	if !filepath.IsAbs(id.Worktree) {
 		return false, fmt.Sprintf("워크트리 절대경로가 없다(관측값 %q) — "+

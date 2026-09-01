@@ -374,7 +374,8 @@ codex sessions can land on the same board. Overlap prescriptions seeing both har
 fd setup --install-codex
 ```
 
-It installs two things — the fixed-path wrapper `~/.local/bin/fd-hook` and `~/.codex/hooks.json`.
+It installs three things — the fixed-path wrapper `~/.local/bin/fd-hook`, **`fd` itself
+(`~/.local/bin/fd`)**, and `~/.codex/hooks.json`.
 **It never overwrites an existing `hooks.json`.** If one is there, it prints what to add and stops, so you merge by hand.
 
 #### ★ And you must open the TUI once
@@ -438,32 +439,38 @@ Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know wha
 | From codex | Today |
 |---|---|
 | Hooks — session card · footprints · overlap prescriptions · banner | ✅ works |
-| Terminal `fd` | ⚠️ **`fd` is not installed yet** — workaround below |
-| Response tail (overlap/unacked) · `finish --followups` · `land --resource` | ❌ not in the CLI yet |
+| Terminal `fd` | ✅ installed — **you still add it to PATH** (below) |
+| Response tail (overlap/unacked) | ✅ on every write command |
+| `pick --leave` · `finish --followups` · `land --resource` | ✅ present |
+| Prescription syntax | ✅ codex cards get `fd …`, not MCP call syntax |
 | The 8 MCP tools | ❌ **deliberately not built** (design ruling) |
 
-**Plainly: the codex side is finished only up to hooks.** Session cards, footprints and overlap all
-work, but `fd setup --install-codex` does not install the `fd` command itself — it installs the
-`fd-hook` wrapper and `hooks.json`, and nothing else. An earlier version of this document claimed
-"Terminal `fd` ✅"; **that was false.**
+##### You add it to PATH — that is the one manual step
 
-##### How to use it right now
-
-Call the wrapper by absolute path — it forwards its arguments verbatim.
+`fd setup --install-codex` installs `~/.local/bin/fd`, but **that directory is not on this machine's
+clean login-shell PATH** (measured 2026-08-31: none of its 20 entries). So the installer prints this
+line for you:
 
 ```bash
-~/.local/bin/fd-hook status
-~/.local/bin/fd-hook note --kind decision --title "…"
+export PATH="$HOME/.local/bin:$PATH"   # put it in ~/.zshrc etc.
 ```
 
-For convenience, alias it or widen your PATH:
+Before you do, the absolute path already works:
 
 ```bash
-alias fd=~/.local/bin/fd-hook          # or
-export PATH="$HOME/.local/bin:$PATH"   # in ~/.zshrc, etc.
+~/.local/bin/fd board
+~/.local/bin/fd note --kind decision --title "…" --body -
 ```
 
-> ⚠️ The name `fd` collides with `fd-find` (the find replacement). If you use that, pick another alias.
+> ⚠️ The name `fd` collides with `fd-find` (the find replacement). If that one comes first on your
+> PATH, that one runs — `fd doctor`'s "codex 창의 fd" axis names **the exact path that wins**. Alias
+> ours under another name, or put `~/.local/bin` first.
+
+##### The installed `fd` follows upgrades
+
+It is the **same script** as the wrapper — it picks the highest installed version under
+`~/.claude/plugins/cache/*/flightdeck/*/bin/fd` and execs it. So a plugin upgrade needs no
+reinstall, and hook trust survives (the command string never changes).
 
 ##### Why MCP is not built
 

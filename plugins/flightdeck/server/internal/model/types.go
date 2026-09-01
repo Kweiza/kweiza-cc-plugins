@@ -7,7 +7,10 @@
 // 즉 이 파일과 schema.sql 은 **서로를 검사한다**. 한쪽만 고치면 시험이 빨간불을 낸다.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 열거값 — schema.sql 의 CHECK 와 문자열이 정확히 일치해야 한다
@@ -150,6 +153,38 @@ type Session struct {
 	State       SessionState
 	BlockedWhy  string
 	OpenedAt    time.Time
+
+	// Harness 는 이 카드를 연 도구다(claude·codex). **선언에서만 온다**(--harness).
+	//
+	// ★ 빈 값이 「미상」이고, 그것을 claude 로 접지 않는다 — 환경으로는 못 가르기
+	// 때문이다(중첩 실행이 양방향으로 거짓말한다). 원장에서는 NULL 로 산다.
+	//
+	// ★ **3중키에 안 들어간다.** 좌표가 아니라 속성이다 — 키에 넣으면 표기 하나가
+	// 바뀔 때 같은 세션이 다른 카드가 된다.
+	Harness string
+}
+
+// 하네스 이름 — 정체가 **어느 도구**에서 왔는가(DESIGN 「14. 하네스 축」).
+//
+// ★ 자리가 여기인 이유: 소비자가 세 패키지다 — mcpsrv(환경 축을 고른다) · judge(처방
+// 문법을 고른다) · store/render(화면에 찍는다). judge 는 mcpsrv 를 import 할 수 없고
+// (역방향 의존이다) model 은 아무것도 import 하지 않으므로, 셋이 함께 볼 수 있는 자리는
+// 여기 하나뿐이다. 값을 두 벌로 두면 한쪽만 고쳐진 날 그 어긋남이 조용하다.
+const (
+	HarnessClaude = "claude"
+	HarnessCodex  = "codex"
+)
+
+// HarnessLabel 은 화면에 찍을 하네스 이름이다. 선언이 없으면 「미상」이다.
+//
+// ★ 문자열이 mcpsrv 의 Identity.HarnessLabel 과 **같아야 한다.** 한쪽은 관측 직후의
+// 배너가, 다른 쪽은 원장을 읽은 보드가 쓰는데 두 화면이 같은 상태를 다르게 부르면
+// 사람이 그것을 두 가지 일로 읽는다.
+func (s Session) HarnessLabel() string {
+	if strings.TrimSpace(s.Harness) == "" {
+		return "미상"
+	}
+	return s.Harness
 }
 
 type Workspace struct {

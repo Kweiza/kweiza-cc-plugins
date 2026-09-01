@@ -42,6 +42,18 @@ import (
 // 안 쓴다(재개는 관측이지 재선언이 아니다 — opened_at 을 갱신하면 "언제부터 열려
 // 있었나"가 통째로 사라진다).
 func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string, at time.Time) (model.Session, bool, error) {
+	return t.OpenSessionAs(project, machineID, worktree, ccSessionID, label, "", at)
+}
+
+// OpenSessionAs 는 **선언된 하네스와 함께** 세션을 연다.
+//
+// OpenSession 이 이것의 얇은 껍데기인 이유는 mcpsrv 의 ResolveIdentity/ResolveIdentityAs
+// 와 같다 — 같은 판정을 두 벌로 만들면 반드시 어긋나므로 본체는 하나다. 그래서 기존
+// 호출부(legacy 적용·훅·CLI)가 하나도 안 깨진다.
+//
+// ★ harness 가 비면 「미상」이고, **그때 기존 값을 지우지 않는다**(아래 병합 규칙).
+func (t *Tx) OpenSessionAs(project, machineID, worktree, ccSessionID, label, harness string, at time.Time) (model.Session, bool, error) {
+	harness = strings.TrimSpace(harness)
 	if project == "" || machineID == "" || worktree == "" || ccSessionID == "" {
 		return model.Session{}, false, fmt.Errorf(
 			"세션 3중키와 프로젝트는 전부 필요하다(project=%q machine=%q worktree=%q cc_session=%q)",
@@ -57,6 +69,19 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 				return model.Session{}, false, fmt.Errorf("세션 label 갱신 실패(id=%q): %w", existing.ID, err)
 			}
 			existing.Label = label
+		}
+		// ★ 하네스 병합 — **선언은 덮어쓰고, 미선언은 기존 값을 안 지운다.**
+		//
+		// 미선언이 지우게 두면 codex 카드의 하네스가 다음 신호 한 번에 사라진다:
+		// 지금 함대는 Claude 쪽 설치물이 --harness 를 아직 안 싣는 상태로 돌아가고,
+		// 그 소실은 어느 화면에도 안 뜬다. 관측이 늘어난 것만 기록하고, 관측이
+		// 없는 것으로 있던 관측을 지우지 않는다.
+		if harness != "" && harness != existing.Harness {
+			if _, err := t.tx.ExecContext(t.ctx,
+				`UPDATE session SET harness = ? WHERE id = ?`, harness, existing.ID); err != nil {
+				return model.Session{}, false, fmt.Errorf("세션 harness 갱신 실패(id=%q): %w", existing.ID, err)
+			}
+			existing.Harness = harness
 		}
 		// ★ 닫힌 카드를 다시 열면 **살아난다.** 이 자리가 없으면 닫기를 넣는 순간
 		// 살아서 일하는 세션이 보드에서 사라진다 — /clear 는 카드를 닫고 곧바로
@@ -90,14 +115,15 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 		Label:       label,
 		State:       model.SessionActive,
 		OpenedAt:    atStamp(at),
+		Harness:     harness,
 	}
 	// UNIQUE 위반은 그대로 올린다. 여기 오는 유일한 경로는 위 조회 이후 남이 같은
 	// 3중키를 넣은 것인데, 이 트랜잭션은 BEGIN IMMEDIATE 라 그 창이 없다.
 	if _, err := t.tx.ExecContext(t.ctx, `
-		INSERT INTO session(id, project, machine_id, worktree, cc_session_id, label, state, blocked_why, opened_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+		INSERT INTO session(id, project, machine_id, worktree, cc_session_id, label, state, blocked_why, opened_at, harness)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
 		s.ID, s.Project, s.MachineID, s.Worktree, s.CCSessionID, nullStr(s.Label),
-		string(s.State), fmtTime(s.OpenedAt)); err != nil {
+		string(s.State), fmtTime(s.OpenedAt), nullStr(s.Harness)); err != nil {
 		return model.Session{}, false, writeErr(err, writeTarget{
 			Target: TargetSession, Project: project, ID: s.ID,
 			RefHint: fmt.Sprintf("프로젝트 %s · 머신 %s", clip(project, 64), clip(machineID, 64)),
@@ -109,27 +135,32 @@ func (t *Tx) OpenSession(project, machineID, worktree, ccSessionID, label string
 
 // OpenSession 은 단발 트랜잭션으로 감싼 것이다.
 func (s *Store) OpenSession(ctx context.Context, project, machineID, worktree, ccSessionID, label string, at time.Time) (model.Session, bool, error) {
+	return s.OpenSessionAs(ctx, project, machineID, worktree, ccSessionID, label, "", at)
+}
+
+// OpenSessionAs 는 선언된 하네스와 함께 여는 단발 트랜잭션이다.
+func (s *Store) OpenSessionAs(ctx context.Context, project, machineID, worktree, ccSessionID, label, harness string, at time.Time) (model.Session, bool, error) {
 	var out model.Session
 	var created bool
 	err := s.Tx(ctx, func(t *Tx) error {
 		var e error
-		out, created, e = t.OpenSession(project, machineID, worktree, ccSessionID, label, at)
+		out, created, e = t.OpenSessionAs(project, machineID, worktree, ccSessionID, label, harness, at)
 		return e
 	})
 	return out, created, err
 }
 
-const sessionCols = `id, project, machine_id, worktree, cc_session_id, label, state, blocked_why, opened_at`
+const sessionCols = `id, project, machine_id, worktree, cc_session_id, label, state, blocked_why, opened_at, harness`
 
 func scanSession(sc interface{ Scan(...any) error }) (model.Session, error) {
 	var s model.Session
-	var label, why sql.NullString
+	var label, why, harness sql.NullString
 	var opened, state string
 	if err := sc.Scan(&s.ID, &s.Project, &s.MachineID, &s.Worktree, &s.CCSessionID,
-		&label, &state, &why, &opened); err != nil {
+		&label, &state, &why, &opened, &harness); err != nil {
 		return s, err
 	}
-	s.Label, s.BlockedWhy = str(label), str(why)
+	s.Label, s.BlockedWhy, s.Harness = str(label), str(why), str(harness)
 	s.State = model.SessionState(state)
 	var err error
 	if s.OpenedAt, err = parseTime(opened); err != nil {

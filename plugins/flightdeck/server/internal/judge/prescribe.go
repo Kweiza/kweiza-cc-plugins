@@ -144,7 +144,12 @@ type ClaimView struct {
 type PrescribeInput struct {
 	Now       time.Time
 	SessionID string
-	Claims    []ClaimView
+	// Harness 는 이 대화가 **어느 도구의 것인가**다(claude·codex). 처방문의 도구 호출
+	// 표기를 고르는 데만 쓴다 — 판정(무엇을 처방할까)에는 안 들어간다.
+	//
+	// ★ 빈 값은 「미상」이고 MCP 문법을 쓴다. 그 근거는 syntaxFor 에 적혀 있다.
+	Harness string
+	Claims  []ClaimView
 	// Closed 는 이 구간에 이 세션이 **제대로 끝낸** 항목과 그 선언 경로다.
 	//
 	// ★ 왜 별도 축인가. finish 는 선점을 반납하므로 그 직후 Claims 가 빈다. 그러면
@@ -417,6 +422,7 @@ func FoldPrescriptions(ps []Prescription) (shown []Prescription, folded int) {
 // 레인이 그 주기로 돈다는 뜻이 아니다. 실제 회전은 위의 69.6초로 훅 주기와 같은 자릿수다.
 // 대기만 생기면 그 창 안에 턴이 끝날 확률은 충분히 크다.
 func laneTurnPrescription(in PrescribeInput) (Prescription, bool) {
+	sx := syntaxFor(in.Harness)
 	if in.LaneTurnRow <= 0 {
 		return Prescription{}, false
 	}
@@ -429,15 +435,16 @@ func laneTurnPrescription(in PrescribeInput) (Prescription, bool) {
 		Reason: fmt.Sprintf("랜딩 줄 맨 앞이 이 세션이고 레인을 쥔 사람이 없다(줄 행 %d)", in.LaneTurnRow),
 		Text: fmt.Sprintf(
 			"랜딩 레인 차례가 왔다 — 줄 맨 앞이 너고(줄 행 %d) 레인을 쥔 사람이 없다.\n"+
-				"  → land() 로 레인을 쥐고 랜딩을 시작해라. 끝나면 land(result='ok') 로 보고하고 반납한다.\n"+
+				"  → "+sx.Land+" 로 레인을 쥐고 랜딩을 시작해라. 끝나면 "+sx.LandOK+" 로 보고하고 반납한다.\n"+
 				"  → 차례를 흘리면 레인은 빈 채로 남는다 — 뒤에 선 세션 전원이 그동안 못 움직인다.\n"+
-				"  → 랜딩할 것이 없어졌으면 land(leave='사유') 로 줄에서 빠져라. 그것도 뒤를 푼다.",
+				"  → 랜딩할 것이 없어졌으면 "+sx.LandLeave+" 로 줄에서 빠져라. 그것도 뒤를 푼다.",
 			in.LaneTurnRow),
 	}, true
 }
 
 // ② 남과 경로가 겹치기 시작했다 — 상대마다 1회.
 func overlapPrescriptions(in PrescribeInput) []Prescription {
+	sx := syntaxFor(in.Harness)
 	others := append([]LiveSession(nil), in.Others...)
 	// 순서를 고정한다 — 같은 입력에 같은 출력이어야 시험이 순서를 단정할 수 있다.
 	sort.Slice(others, func(i, j int) bool { return others[i].ID < others[j].ID })
@@ -462,7 +469,7 @@ func overlapPrescriptions(in PrescribeInput) []Prescription {
 				mine, o.ID, theirs, len(pairs)),
 			Text: fmt.Sprintf(
 				"%s 를 만졌는데 세션 %s%s 도 %s 를 잡고 있다.\n"+
-					"  → note(kind='ask', body='무엇을 왜 잡는가') 로 의도를 남겨라. "+
+					"  → "+sx.NoteAsk+" 로 의도를 남겨라. "+
 					"그 세션의 다음 프롬프트에 배달된다.",
 				mine, o.ID, labelSuffix(o.Label), theirs),
 		})
@@ -489,6 +496,7 @@ func sameConversation(a, b string) bool {
 // ★ 선언 경로가 하나도 없으면 이 축은 **안 돈다.** 빈 선언에 대고 "밖"을 판정할 수 없고,
 // 빈 선언을 "전부 밖"으로 접으면 paths 를 안 적은 항목 하나가 첫 턴에 처방을 쏟는다.
 func outsidePrescriptions(in PrescribeInput) []Prescription {
+	sx := syntaxFor(in.Harness)
 	declared := declaredPaths(in.Claims)
 	if len(declared) == 0 {
 		return nil
@@ -508,8 +516,8 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 			Reason: fmt.Sprintf("%s 는 선점 항목 %s 의 선언 경로(%s) 밖이다", p, ids, strings.Join(declared, " ")),
 			Text: fmt.Sprintf(
 				"%s 는 선점한 %s 가 선언한 경로 밖이다 — 남이 보는 겹침 판정의 입력이 낡았다.\n"+
-					"  → 같은 작업이면 note(kind='decision') 으로 범위가 왜 늘었는지 남겨라.\n"+
-					"  → 별개 작업이면 add(id=…, title=…, body=…, paths=['%s']) 로 항목을 만들어라.",
+					"  → 같은 작업이면 "+sx.NoteDecide+" 으로 범위가 왜 늘었는지 남겨라.\n"+
+					"  → 별개 작업이면 "+sx.AddWithPath+" 로 항목을 만들어라.",
 				p, ids, p),
 		})
 	}
@@ -545,6 +553,7 @@ func outsidePrescriptions(in PrescribeInput) []Prescription {
 // 처방의 값어치는 "틀리지 않는다"가 아니라 **"고칠 자리를 가리킨다"** 이고, 맞는 처방이
 // 틀린 증거를 들고 오면 그 다음부터 처방 전체가 안 읽힌다(설계 §4 의 상시 점등과 같은 종착).
 func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
+	sx := syntaxFor(in.Harness)
 	if len(in.Claims) > 0 || len(in.SiblingClaims) > 0 || len(in.WorkspaceClaims) > 0 ||
 		len(in.TurnPaths) == 0 || suppressed(in, PrescribeUnclaimed) {
 		return Prescription{}, false
@@ -566,8 +575,8 @@ func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 				ids, len(uncovered), len(in.TurnPaths)),
 			Text: fmt.Sprintf(
 				"끝낸 항목 %s 가 선언하지 않은 %s 를 만졌다 — 그 자리는 큐에도 카드에도 없다.\n"+
-					"  → 같은 작업의 남은 자리면 note(kind='decision') 으로 범위가 왜 늘었는지 남겨라.\n"+
-					"  → 별개 작업이면 add(id=…, title=…, body=…, paths=[…]) 로 항목을 세우고 집어라.",
+					"  → 같은 작업의 남은 자리면 "+sx.NoteDecide+" 으로 범위가 왜 늘었는지 남겨라.\n"+
+					"  → 별개 작업이면 "+sx.Add+" 로 항목을 세우고 집어라.",
 				ids, strings.Join(clipList(uncovered, 3), ", ")),
 		}, true
 	}
@@ -578,7 +587,7 @@ func unclaimedPrescription(in PrescribeInput) (Prescription, bool) {
 		Reason: fmt.Sprintf("선점 0건인데 경로 %d개를 편집했다", len(in.TurnPaths)),
 		Text: fmt.Sprintf(
 			"항목을 선점하지 않고 %s 를 고치고 있다 — 큐에도 카드에도 무엇을 하는지가 없다.\n"+
-				"  → pick(item_id=…) 로 집거나, 큐 밖 작업이면 note(kind='decision') 으로 "+
+				"  → "+sx.Pick+" 로 집거나, 큐 밖 작업이면 "+sx.NoteDecide+" 으로 "+
 				"무엇을 왜 하는지 남겨라.",
 			strings.Join(clipList(in.TurnPaths, 3), ", ")),
 	}, true
@@ -687,6 +696,7 @@ func comparablePath(p string) bool {
 
 // ⑤ 오래 일했는데 판단이 0건.
 func silentPrescription(in PrescribeInput) (Prescription, bool) {
+	sx := syntaxFor(in.Harness)
 	reason, ok := silentReason(in)
 	if !ok || suppressed(in, PrescribeSilent) {
 		return Prescription{}, false
@@ -695,7 +705,7 @@ func silentPrescription(in PrescribeInput) (Prescription, bool) {
 		Key:    PrescribeSilent,
 		Reason: reason,
 		Text: "일한 뒤로 판단이 하나도 안 남았다 — 판단은 원리적으로 파생 불가한 유일한 자산이다(설계 §5).\n" +
-			"  → note(kind='decision', body='무엇을 정했고 무엇을 기각했나') 로 남겨라.",
+			"  → " + sx.NoteDecideW + " 로 남겨라.",
 	}, true
 }
 

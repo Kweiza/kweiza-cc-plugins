@@ -55,6 +55,15 @@ type CodexState struct {
 	WrapperPath string // 고정 경로 래퍼가 있어야 할 자리
 	WrapperOK   bool   // 그 자리에 실행 가능한 파일이 있나
 	NetDisabled bool   // CODEX_SANDBOX_NETWORK_DISABLED=1 — 이면 fd 가 서버에 통째로 못 붙는다
+
+	// ── `fd` 그 자체 ────────────────────────────────────────────────────────
+	//
+	// ★ 축이 셋인 이유: "fd 가 안 된다"의 원인이 셋이고 **처방이 전부 다르다.**
+	// 하나로 접으면 화면이 "안 된다"만 말하고 사람은 셋을 다 뒤진다.
+	CLIPath       string // 깔려야 할 자리(래퍼 옆)
+	CLIOK         bool   // 그 자리에 실행 가능한 파일이 있나
+	CLIOnPath     bool   // 그 디렉토리가 PATH 에 있나
+	CLIShadowedBy string // PATH 에서 `fd` 를 **먼저** 잡는 다른 것(fd-find 충돌). 없으면 빈 문자열
 }
 
 // codexHookCommands 는 hooks.json 에서 훅 명령 문자열을 전부 뽑는다. 순수 함수다.
@@ -202,7 +211,35 @@ func CodexAxes(st CodexState) []service.DoctorAxis {
 	}
 	axes = append(axes, wrapAxis)
 
-	// ── ⑤ 샌드박스 네트워크 ────────────────────────────────────────────────
+	// ── ⑤ `fd` 그 자체 ─────────────────────────────────────────────────────
+	//
+	// ★ 래퍼 축과 다른 질문이다. 래퍼는 **훅이** 부르는 절대경로라 PATH 와 무관하지만,
+	// 이 축은 **사람이 이름으로** 부르는 것이라 PATH 가 전부다. 둘을 한 축으로 접으면
+	// "훅은 도는데 손으로는 못 부른다"는 오늘의 실제 상태가 화면에서 사라진다.
+	cliAxis := service.DoctorAxis{
+		Name:   "codex 창의 fd",
+		Detail: "codex 창에서 사람이 손으로 부르는 통로. 없으면 보드도 큐도 판단도 부를 방법이 없다",
+	}
+	switch {
+	case !st.CLIOK:
+		cliAxis.Detail = "없다(" + clip(st.CLIPath, 120) + ") — `fd setup` 이 깐다. " + cliAxis.Detail
+	case st.CLIShadowedBy != "":
+		// 깔려 있어도 **다른 fd 가 먼저 잡히면** 사람은 그것을 부르고 있다.
+		// fd-find(rust) 가 흔한 상대다 — 그쪽은 파일 검색기라 인자가 통째로 다르다.
+		cliAxis.Detail = "**" + clip(st.CLIShadowedBy, 100) + " 가 먼저 잡힌다** — " +
+			"`fd` 를 쳐도 그쪽이 돈다(fd-find 라면 파일 검색기다). " +
+			"별칭을 쓰거나 " + clip(filepath.Dir(st.CLIPath), 80) + " 를 PATH 앞에 둬라"
+	case !st.CLIOnPath:
+		cliAxis.Detail = "깔렸으나 " + clip(filepath.Dir(st.CLIPath), 80) + " 가 PATH 에 없다 — " +
+			"이름으로는 못 부른다. 절대경로로 부르거나 PATH 에 더해라"
+		cliAxis.Value = clip(st.CLIPath, 140)
+	default:
+		cliAxis.Observed = true
+		cliAxis.Value = clip(st.CLIPath, 140) + " · PATH 에 있다"
+	}
+	axes = append(axes, cliAxis)
+
+	// ── ⑥ 샌드박스 네트워크 ────────────────────────────────────────────────
 	//
 	// ★ 환경 축(CODEX_SANDBOX_NETWORK_DISABLED)은 service.ProbePlatform 이 이미 잰다.
 	// 여기서 또 재지 않고 **처방만** 얹는다 — 같은 사실을 두 줄로 내면 사람이 둘 중
@@ -255,7 +292,43 @@ func (a *App) observeCodex() CodexState {
 	if v, ok := a.env("CODEX_SANDBOX_NETWORK_DISABLED"); ok && strings.TrimSpace(v) == "1" {
 		st.NetDisabled = true
 	}
+
+	// `fd` 그 자체 — 셋을 따로 잰다.
+	st.CLIPath = CodexCLIPath(home)
+	if fi, err := os.Stat(st.CLIPath); err == nil && fi.Mode()&0o111 != 0 {
+		st.CLIOK = true
+	}
+	pathRaw, _ := a.env("PATH")
+	dir := filepath.Dir(st.CLIPath)
+	for _, p := range filepath.SplitList(pathRaw) {
+		if p == "" {
+			continue
+		}
+		if filepath.Clean(p) == filepath.Clean(dir) {
+			st.CLIOnPath = true
+			break
+		}
+		// ★ **우리 자리보다 앞에서** fd 를 잡는 것만 가림이다. 뒤에 있는 것은 안 가린다 —
+		// 그 구분이 없으면 fd-find 를 깐 사람 전원에게 거짓 경보가 뜬다.
+		cand := filepath.Join(p, "fd")
+		if fi, err := os.Stat(cand); err == nil && fi.Mode()&0o111 != 0 && st.CLIShadowedBy == "" {
+			st.CLIShadowedBy = cand
+		}
+	}
 	return st
+}
+
+// CodexCLIPath 는 `fd` 그 자체가 놓일 자리다 — **래퍼 바로 옆**이다.
+//
+// ★ 왜 래퍼와 같은 디렉토리인가: PATH 안내가 한 줄로 끝나야 한다. 둘이 갈리면
+// "무엇을 PATH 에 넣어야 하나"가 두 답이 되고, 사람은 둘 중 하나만 한다.
+//
+// ★ 왜 래퍼와 **같은 스크립트**를 심나: 그 스크립트가 설치본 중 가장 높은 판을 골라
+// exec 한다(assets/fd-hook). 버전이 박힌 경로를 심으면 판올림마다 낡고, 낡은 것이
+// 도는 동안 아무 화면도 그 사실을 안 말한다 — 이 레포가 19시간·115커밋만큼 낡은
+// 수동 빌드로 돈 적이 있다.
+func CodexCLIPath(home string) string {
+	return filepath.Join(home, ".local", "bin", "fd")
 }
 
 // CodexWrapperPath 는 고정 경로 래퍼가 놓일 자리다.
@@ -329,6 +402,22 @@ func (a *App) InstallCodex(out io.Writer) int {
 	}
 	fmt.Fprintf(out, "✓ 래퍼 %s\n", wrapper)
 
+	// ── ①-b `fd` 그 자체 ────────────────────────────────────────────────────
+	//
+	// ★ **같은 스크립트**를 심는다. 그것이 설치본 중 가장 높은 판을 골라 exec 하므로
+	// 판올림이 자동으로 따라온다 — 버전 박힌 경로를 심으면 낡고, 낡은 채로 도는 동안
+	// 아무 화면도 그 사실을 안 말한다.
+	//
+	// ★ 그리고 **이것을 까는 것은 `--harness` 없는 호출 경로를 여는 일**이다. 그 봉인
+	// (중첩 기동에서 두 세션 축이 동시에 차면 거절)이 먼저 서 있어야 한다 —
+	// identity-harness-nesting-gate 가 그 선행이고, 같은 묶음에서 이미 섰다.
+	cli := CodexCLIPath(home)
+	if err := os.WriteFile(cli, codexWrapperScript, 0o755); err != nil {
+		fmt.Fprintf(out, "fd 를 못 썼다(%s): %v\n", cli, err)
+		return 1
+	}
+	fmt.Fprintf(out, "✓ fd %s\n", cli)
+
 	// ── ② hooks.json ────────────────────────────────────────────────────────
 	//
 	// ★ **있으면 안 덮는다.** 사용자의 다른 훅이 거기 있을 수 있고, 덮으면 복구 경로가 0이다.
@@ -387,7 +476,25 @@ func RenderCodexNextSteps(st CodexState) string {
 		b.WriteString("     ! 지금 이 프로세스에서 CODEX_SANDBOX_NETWORK_DISABLED=1 이 관측된다.\n")
 	}
 
-	b.WriteString("  3. 확인: codex 세션을 새로 열고 `fd board` 에 그 세션 카드가 뜨는지 봐라.\n")
+	// ★ **PATH 를 말해야 한다.** 안 말하면 `fd` 를 깔아 놓고도 "명령을 못 찾겠다"에서
+	// 끝난다 — 이 머신의 깨끗한 로그인 셸 PATH 20개 항목 어디에도 ~/.local/bin 이 없다
+	// (2026-08-31 실측). 안 되는 것만 적고 우회로를 안 적으면 문서가 사용자를 버린다.
+	dir := filepath.Dir(st.CLIPath)
+	switch {
+	case st.CLIShadowedBy != "":
+		b.WriteString("  3. **`fd` 이름이 이미 다른 것에 잡혀 있다** — " + st.CLIShadowedBy + " 가 먼저다.\n")
+		b.WriteString("     그것이 fd-find(파일 검색기)라면 인자가 통째로 다르다. 둘 중 하나를 골라라:\n")
+		b.WriteString("     $ export PATH=\"" + dir + ":$PATH\"        # 이쪽을 앞에 둔다\n")
+		b.WriteString("     $ alias fdk=" + st.CLIPath + "   # 또는 다른 이름으로 부른다\n")
+	case !st.CLIOnPath:
+		b.WriteString("  3. **PATH 에 " + dir + " 를 더해라** — 안 그러면 `fd` 를 이름으로 못 부른다.\n")
+		b.WriteString("     $ export PATH=\"" + dir + ":$PATH\"   # ~/.zshrc 에도 넣어라\n")
+		b.WriteString("     지금 당장은 절대경로로 부를 수 있다: $ " + st.CLIPath + " board\n")
+	default:
+		b.WriteString("  3. ✓ `fd` 가 PATH 에 있다(" + dir + ").\n")
+	}
+
+	b.WriteString("  4. 확인: codex 세션을 새로 열고 `fd board` 에 그 세션 카드가 뜨는지 봐라.\n")
 	b.WriteString("     `fd doctor` 의 ■ codex 절이 네 축을 이름으로 낸다.\n")
 	return b.String()
 }

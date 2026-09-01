@@ -47,8 +47,8 @@ import (
 // 상한 자체는 있어야 한다 — 없으면 깨진 스트림 하나가 메모리를 통째로 먹는다.
 const maxFrameBytes = 4 << 20 // 4MiB
 
-// tailNoteLimit 은 꼬리에 싣는 알림 수다. 넘치면 board 로 간다.
-const tailNoteLimit = 3
+// TailNoteLimit 은 꼬리에 싣는 알림 수다. 넘치면 board 로 간다.
+const TailNoteLimit = 3
 
 // Server 는 stdio MCP 서버 하나다.
 type Server struct {
@@ -628,6 +628,7 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 		Hostname:    s.id.Hostname,
 		Worktree:    s.id.Worktree,
 		CCSessionID: cc,
+		Harness:     s.id.Harness,
 	})
 	// 서버가 죽었어도 이 머신에 캐시된 마지막 세션이 있으면 그 좌표로 진행한다 —
 	// 여기서 끊으면 아웃박스에 쌓아야 할 판단까지 함께 죽는다(설계 §7 L1 의 open 처방).
@@ -1174,7 +1175,7 @@ func (s *Server) tail(ctx context.Context, o tailOpts) string {
 	}
 	if o.haveNote {
 		// 이 도구가 이미 읽어 온 것이다. 같은 값을 다시 부르지 않는다.
-		in.Notes, in.NotesObserved = FilterNotes(o.notes, s.currentSession(), tailNoteLimit), true
+		in.Notes, in.NotesObserved = FilterNotes(o.notes, s.currentSession(), TailNoteLimit), true
 		return RenderTail(in)
 	}
 	notes, err := s.recentNotes(ctx)
@@ -1208,7 +1209,7 @@ func (s *Server) recentNotes(ctx context.Context) ([]model.Judgment, error) {
 	if err != nil {
 		return nil, err
 	}
-	return FilterNotes(all, s.currentSession(), tailNoteLimit), nil
+	return FilterNotes(all, s.currentSession(), TailNoteLimit), nil
 }
 
 func (s *Server) currentSession() string {

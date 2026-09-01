@@ -158,7 +158,11 @@ func (a *App) runOpen(ctx context.Context, args []string, out io.Writer) int {
 		return 2
 	}
 	a.cli.Flush(ctx)
-	cc := a.ccSessionID(*session)
+	cc, why := a.sessionAxis(*session, "open")
+	if why != "" {
+		fmt.Fprintln(out, why)
+		return 1
+	}
 	if cc == "" {
 		fmt.Fprintf(out, "%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다). 지어내지 않는다.\n", a.sessionEnvName())
 		return 1
@@ -181,6 +185,7 @@ func (a *App) runOpen(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "이미 쥐고 있는 항목: %s\n", strings.Join(res.Claims, " "))
 	}
 	fmt.Fprintln(out, mcpsrv.FormatFreshness(res.Derived))
+	a.printTail(ctx, out)
 	return 0
 }
 
@@ -256,6 +261,7 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(out, mcpsrv.RenderNote(nr))
+	a.printTail(ctx, out)
 	return 0
 }
 
@@ -291,6 +297,7 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(out, mcpsrv.RenderPick(res, a.now()))
+	a.printTail(ctx, out)
 	return 0
 }
 
@@ -309,6 +316,10 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("pick")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	// ★ **반납은 닫기가 아니다.** 항목은 open 으로 살아 돌아가고 id·이력·after 가 남는다.
+	// 이 손잡이가 없으면 사람이 finish(dropped) 로 때우는데, 그러면 id 가 바뀌어 이력이
+	// 끊기고 일 없이 닫힌 항목 하나가 큐 수지에 완료로 쌓인다.
+	leave := fs.String("leave", "", "내 선점을 놓는 사유(필수). 항목 id 를 함께 주면 그 하나만, 안 주면 쥔 전부를 놓는다")
 	itemIDs, rest := TakeLeadingPositionals(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -338,6 +349,11 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	// 워크트리 명령이 나오는, 이 태스크가 닫으려던 바로 그 모양이다. 길이를 재기
 	// 전에 반드시 다듬어 걸러낸다.
 	itemIDs = nonBlankPositionals(itemIDs)
+	// ★ 반납 갈래는 항목 id 검사보다 **앞**이다 — id 없이 부르는 것이 정상 용법이기 때문이다
+	// (쥔 전부를 놓는다). 뒤에 두면 `fd pick --leave "사유"` 가 "집을 항목을 줘라"로 거절된다.
+	if flagsSet(fs)["leave"] {
+		return a.leaveClaim(ctx, *session, itemIDs, *leave, out)
+	}
 	if len(itemIDs) == 0 {
 		fmt.Fprintln(out, "집을 항목 id 를 줘라: fd pick <item-id> [<item-id>…] — 여럿이면 첫째가 선두(브랜치)다")
 		return 2
@@ -364,6 +380,7 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(out, mcpsrv.RenderPick(pr, a.now()))
+	defer a.printTail(ctx, out)
 	// ★ **보낸 것과 돌아온 것을 대조한다.** 여기까지 오면 HTTP 는 200 이었지만
 	// 그것은 "요청한 id 를 전부 다뤘다"를 뜻하지 않는다 — item_ids 를 모르는 구서버는
 	// 그 필드를 조용히 버리고 경로의 선두 하나만 집는다(양쪽 api_version 이 "1" 이라
@@ -452,6 +469,11 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	title := fs.String("title", "", "판단 제목")
 	body := fs.String("body", "", "핸드오프 "+bodyFlagHelp)
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
+	// ★ 왜 JSON 인가. 후속은 중첩 구조다(paths·labels·after 배열) — 평평한 반복 플래그로는
+	// after 의 세 갈래(item·sha·job)를 표현할 수 없고, 표현 못 하는 축은 조용히 사라진다.
+	// stdin 은 --body 가 이미 쓰므로(`--body -`) 여기서 또 요구할 수 없다.
+	followups := fs.String("followups", "",
+		`이번에 나온 후속(JSON 배열). 예: [{"id":"x","title":"t","body":"b","paths":["a.go"]}]`)
 	closeSession := fs.Bool("close", false, "항목을 끝낸 뒤 이 세션도 닫는다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
@@ -471,6 +493,16 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, service.HandoffGuidance)
 		return 2
 	}
+	// ★ **서버를 치기 전에** 판정한다. 깨진 JSON 을 조용히 버리고 진행하면 사람은 후속을
+	// 등록했다고 믿은 채 항목이 닫히고, 그 후속은 어디에도 없다 — 이 도구에서 가장 비싼
+	// 종류의 침묵이다. 그래서 여기서 멈추고 항목은 열린 채로 둔다.
+	ups, ferr := parseFollowups(*followups)
+	if ferr != nil {
+		fmt.Fprintf(out, "followups 를 못 읽었다: %v\n", ferr)
+		fmt.Fprintln(out, `JSON 배열이어야 한다. 예: --followups '[{"id":"x","title":"t","body":"b"}]'`)
+		fmt.Fprintln(out, "항목은 닫지 않았다 — 고쳐서 다시 불러라.")
+		return 2
+	}
 	sess, err := a.sessionID(ctx, *session)
 	if err != nil {
 		fmt.Fprintf(out, "마무리하지 못했다: %v\n", err)
@@ -479,7 +511,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, "finish", "/api/v1/items/"+urlPath(itemID)+"/finish", finishReq{
 		Project: a.proj.ID, SessionID: sess, Outcome: *outcome,
-		Title: *title, Body: text, CloseReason: *closeReason,
+		Title: *title, Body: text, CloseReason: *closeReason, Followups: ups,
 	})
 	if err != nil {
 		fmt.Fprintf(out, "마무리하지 못했다: %v\n", err)
@@ -491,6 +523,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(out, mcpsrv.RenderFinish(fr))
+	defer a.printTail(ctx, out)
 
 	// ★ 호출 둘이다(항목 finish → 세션 close). 한 트랜잭션이 아니므로 **끝났는데 못 닫은
 	// 상태를 그대로 낸다** — 둘 다 성공한 척하면 다음 사람이 보드에서 이 카드를 보고
@@ -576,7 +609,11 @@ func (a *App) runClose(ctx context.Context, args []string, out io.Writer) int {
 		return a.closeCard(ctx, sess.ID, claims, *why, out)
 	}
 
-	cc := a.ccSessionID(*session)
+	cc, conflict := a.sessionAxis(*session, "close")
+	if conflict != "" {
+		fmt.Fprintln(out, conflict)
+		return 1
+	}
 	if cc == "" {
 		fmt.Fprintf(out, "%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다).\n", a.sessionEnvName())
 		return 1
@@ -688,6 +725,10 @@ func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 	fail := fs.String("fail", "", "검증이 깨져 반납한다 — 사유를 함께 준다")
 	leave := fs.String("leave", "", "줄에서 스스로 빠진다 — 사유를 함께 준다")
 	ok := fs.Bool("ok", false, "다 쓰고 반납한다(랜딩됐다는 뜻이 아니다 — 레인을 놓았다는 뜻이다)")
+	// 자원 이름은 **자유 문자열**이다 — 열거가 아니다(env:dell · db:staging 처럼 함대가 정한다).
+	// 비면 서버가 "landing" 하나로 본다.
+	var resources stringList
+	fs.Var(&resources, "resource", "줄을 설 자원(반복 가능). 비면 landing — 줄 서기(기본 모드)에만 쓴다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -711,7 +752,14 @@ func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 		return 2
 	}
 
-	cmd, req := CmdLandAcquire, landReq{Mode: api.LandModeAcquire}
+	cmd, req := CmdLandAcquire, landReq{Mode: api.LandModeAcquire, Resources: resources}
+	// ★ 다른 모드에 --resource 를 주면 **거절한다.** 조용히 버리면 사람은 자원을 걸었다고
+	// 믿는데 실제로는 아무 자원도 안 걸린다 — 그 어긋남은 남이 그 자원을 함께 잡을 때까지
+	// 안 보인다. 인자를 받되 버리는 표면은 이 레포가 이미 한 번 겪었다(landReq.Resources 주석).
+	if len(resources) > 0 && (chose["ok"] || chose["fail"] || chose["leave"]) {
+		fmt.Fprintln(out, "--resource 는 줄을 설 때만 쓴다 — 반납·이탈에는 걸 자원이 없다.")
+		return 2
+	}
 	switch {
 	case chose["ok"]:
 		cmd = CmdLandReport
@@ -750,6 +798,7 @@ func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(out, strings.TrimRight(mcpsrv.RenderLand(lr, a.now()), "\n"))
+	defer a.printTail(ctx, out)
 	// ★ 렌더는 MCP 도구와 **공유**한다(같은 사실을 두 벌로 그리지 않는다). 그 대가로
 	//   차례 안내가 도구 인자 이름(result·leave)으로 적혀 있어 이 셸에서는 부를 수 없는
 	//   이름이다 — 없는 손잡이를 가리키는 문구는 이 레포가 결함으로 분류하는 부류라,
@@ -1659,11 +1708,66 @@ func legacyBinLeftovers(dirs []string) []legacyBin {
 // 머신 축을 훅·CLI 는 상태 디렉토리의 파일에서, MCP 는 hostname 에서 만들어
 // 한 Claude 세션이 보드에 카드 세 장으로 떴다. 저장층은 내내 옳았고 클라이언트가 갈렸다.
 // 지금은 MachineID 가 고정 자리를 쓰고 mcpsrv 가 주입을 받는다(env.go · mcp.go).
+// parseFollowups 는 --followups 의 JSON 배열을 읽는다. 순수 함수다.
+//
+// 빈 문자열은 **없음**이지 오류가 아니다 — 후속이 없는 마무리가 정상이다.
+func parseFollowups(raw string) ([]followupReq, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []followupReq
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// leaveClaim 은 `fd pick --leave` 다 — **이 세션이 자기 선점을 놓는다.**
+//
+// ★ `fd claim release` 와 다르다. 저쪽은 **남의**(죽은 세션의) 선점을 사람이 회수하는
+// 표면이고 손잡이가 항목 id 다. 이쪽은 자기 것이라 세션 좌표가 필요하고, 항목 id 는
+// 선택이다(안 주면 쥔 전부).
+//
+// 사유가 비었는지는 **서버가 판정한다.** 사본을 여기 두면 두 벌이 표류한다
+// (claim release 가 같은 규율을 적어 뒀다).
+func (a *App) leaveClaim(ctx context.Context, fromFlag string, itemIDs []string, reason string, out io.Writer) int {
+	a.cli.Flush(ctx)
+	sess, err := a.sessionID(ctx, fromFlag)
+	if err != nil {
+		fmt.Fprintf(out, "반납하지 못했다: %v\n", err)
+		return 1
+	}
+	a.cli.Session = sess
+	item := ""
+	if len(itemIDs) > 0 {
+		item = itemIDs[0]
+	}
+	res, err := a.cli.Write(ctx, CmdClaimLeave, claimLeavePath(), claimLeaveReq{
+		Project: a.proj.ID, SessionID: sess, ItemID: item, Reason: reason,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "반납하지 못했다: %v\n", err)
+		return 1
+	}
+	var lr service.ClaimLeaveResult
+	if err := json.Unmarshal(res.Body, &lr); err != nil {
+		fmt.Fprintf(out, "반납은 됐으나 응답 해석 실패: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, mcpsrv.RenderLeave(lr))
+	a.printTail(ctx, out)
+	return 0
+}
+
 func (a *App) sessionID(ctx context.Context, fromFlag string) (string, error) {
 	if v, ok := a.env("FD_SESSION"); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v), nil
 	}
-	cc := a.ccSessionID(fromFlag)
+	cc, why := a.sessionAxis(fromFlag, "이 명령")
+	if why != "" {
+		return "", fmt.Errorf("%s", why)
+	}
 	if cc == "" {
 		return "", fmt.Errorf("%s 를 못 읽었다 — 그 탐지가 깨진 것이다(fd doctor 가 그 축을 잰다)", a.sessionEnvName())
 	}

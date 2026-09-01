@@ -131,24 +131,40 @@ func homeDir(get func(string) (string, bool)) string {
 // ★ **인자로 만들지 않는다**(설계 §13). MCP stdio 서버 환경의 CLAUDE_CODE_SESSION_ID 이고
 // 훅은 stdin 페이로드의 session_id 다. 파생 가능한 값에 파라미터를 두면 틀린 값이 들어온다.
 func (a *App) ccSessionID(fromHook string) string {
+	cc, _ := a.sessionAxis(fromHook, "이 명령")
+	return cc
+}
+
+// sessionAxis 는 이 실행의 세션 id 와, **못 쓰는 경우의 사유**다.
+//
+// ★ 사유를 함께 내는 이유: 세션 축이 안 서는 경우가 둘인데 **문장이 서로 다르다.**
+// 못 읽은 것(탐지가 깨졌다)과 둘이 동시에 읽힌 것(어느 창인지 모른다)은 다른 일이고,
+// 후자에 "못 읽었다"를 찍으면 사람을 **없는 결함으로** 보낸다 — 축은 읽혔고, 둘인 것이 문제다.
+//
+// ★ **훑기를 여기서 다시 짜지 마라.** 옛 코드가 [EnvSessionID, EnvCodexSessionID] 를
+// 하드코딩으로 순회하는 사본을 들고 있었고, 그래서 mcpsrv 에 관문을 세워도 맨손 CLI 는
+// 그대로 뚫렸다. identity.go 가 "이 파일이 유일한 정체의 원천"이라 선언했으므로
+// 판정은 mcpsrv.ProbeSession 하나에서만 나온다.
+func (a *App) sessionAxis(fromHook, what string) (cc, why string) {
 	if s := strings.TrimSpace(fromHook); s != "" {
-		return s
+		// 훅 페이로드의 session_id 는 **관측이 아니라 배달**이다 — 환경이 둘이든 셋이든
+		// 이 값이 정본이므로 부딪힘 판정에 걸리지 않는다.
+		return s, ""
 	}
 	// ★ 환경 갈래는 **하네스별로 이름이 다르다**(DESIGN 「14. 하네스 축」).
-	// 선언이 있으면 그 이름만 보고, 없으면 아는 이름들을 순서대로 훑는다 —
-	// 훑는 것은 값을 찾는 일이지 하네스를 정하는 일이 아니다.
+	// 선언이 있으면 그 이름만 본다 — 선언이 관측을 이긴다.
 	if name := mcpsrv.SessionEnvFor(a.harness); name != "" {
 		if v, ok := a.env(name); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
+			return strings.TrimSpace(v), ""
 		}
-		return ""
+		return "", ""
 	}
-	for _, name := range []string{mcpsrv.EnvSessionID, mcpsrv.EnvCodexSessionID} {
-		if v, ok := a.env(name); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
+	// 선언이 없다 — 훑되, 몇 개가 찼는지를 함께 본다.
+	sid, picked, found := mcpsrv.ProbeSession(a.env)
+	if r := mcpsrv.HarnessConflictReason(found, what, picked); r != "" {
+		return "", r
 	}
-	return ""
+	return sid, ""
 }
 
 // sessionEnvName 은 이 실행이 세션 id 를 찾는 환경변수 이름이다.
@@ -162,6 +178,57 @@ func (a *App) sessionEnvName() string {
 	return mcpsrv.EnvSessionID
 }
 
+// tail 은 CLI 응답 꼬리다 — **미확인 알림과 정체 사유.**
+//
+// ★ 왜 CLI 에도 있어야 하나. Tail 을 채우는 자리가 mcpsrv 하나뿐이라, MCP 표면이 없는
+// 창(codex 는 오늘 훅 전용이다)에서는 **남이 남긴 ask·blocked 가 영영 안 보인다.**
+// 조율은 그 알림을 읽는 데서 시작하므로, 꼬리가 없다는 것은 그 창이 조율 밖에 있다는
+// 뜻이다 — 보드에는 멀쩡히 떠 있으면서.
+//
+// 렌더는 mcpsrv.RenderTail 을 **그대로** 쓴다. 사본을 만들면 두 화면이 같은 사실을
+// 다르게 말하게 되고, 그 어긋남은 아무 시험도 안 깬다.
+func (a *App) tail(ctx context.Context) string {
+	in := mcpsrv.TailInput{Banner: a.notice, Now: a.now()}
+	notes, err := a.recentNotes(ctx)
+	if err != nil {
+		// 못 읽었으면 **못 읽었다고 한다.** 조용히 비우면 "알림 없음"과 구별되지 않는다.
+		in.NotesError = clip(err.Error(), 300)
+	} else {
+		in.Notes, in.NotesObserved = notes, true
+	}
+	return mcpsrv.RenderTail(in)
+}
+
+// printTail 은 본문 뒤에 꼬리를 잇는다. 꼬리가 비면 아무것도 안 찍는다.
+func (a *App) printTail(ctx context.Context, out io.Writer) {
+	if t := strings.TrimSpace(a.tail(ctx)); t != "" {
+		fmt.Fprintln(out, "\n── 꼬리 ──")
+		fmt.Fprintln(out, t)
+	}
+}
+
+// recentNotes 는 **다른** 세션이 남긴 최근 ask·blocked 다.
+//
+// 저장 계층을 직접 안 읽는다 — 클라이언트는 서버 머신이 아닐 수 있다(설계 원칙 ③).
+// 자기 세션 것을 빼는 것과 상한은 mcpsrv.FilterNotes 가 쥔다: 같은 판정을 여기 다시
+// 쓰면 두 벌이 표류한다.
+func (a *App) recentNotes(ctx context.Context) ([]model.Judgment, error) {
+	if strings.TrimSpace(a.proj.ID) == "" {
+		return nil, nil
+	}
+	rr, err := a.cli.Read(ctx, fmt.Sprintf("/api/v1/notices?project=%s&limit=20", urlValue(a.proj.ID)))
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Notes []model.Judgment `json:"notes"`
+	}
+	if uerr := json.Unmarshal(rr.Body, &v); uerr != nil {
+		return nil, fmt.Errorf("알림 응답 해석 실패: %w", uerr)
+	}
+	return mcpsrv.FilterNotes(v.Notes, a.cli.Session, mcpsrv.TailNoteLimit), nil
+}
+
 const sessionCachePath = "/local/session"
 
 // OpenSession 은 세션을 열고 결과를 낸다. 미도달이면 **캐시된 마지막 세션**을 낸다.
@@ -172,6 +239,7 @@ func (a *App) OpenSession(ctx context.Context, ccSession, label string) (res ser
 	return a.openSession(ctx, openReq{
 		Project: a.proj.ID, ProjectPath: a.proj.Path, MachineID: a.machine,
 		Hostname: a.host, Worktree: a.proj.Worktree, CCSessionID: ccSession, Label: label,
+		Harness: a.harness,
 	})
 }
 
