@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -62,8 +63,16 @@ func TestGofmtGateCoversTheWholeModuleIncludingTests(t *testing.T) {
 	if len(offenders) > 0 {
 		// 고칠 때: gofmt -w 출력이 godoc 코드 블록의 산문을 가르면, 문장을 안 쪼개는
 		// 다른 형식(대개 여분 공백 제거)을 골라라 — 182664a 가 값을 치르고 얻은 판단이다.
-		t.Fatalf("gofmt 위반 %d개 — 랜딩 전에 gofmt -w 하라(파일 %d개를 봤다):\n%s",
-			len(offenders), walked, joinLines(offenders))
+		// ★ **판정자를 함께 찍는다.** 이 관문의 정본은 「gofmt」가 아니라 **이 시험을 돌린
+		// 툴체인의** gofmt 이고, 그 답이 판마다 다르다(2026-09-02 실측: go1.27 이 다중값
+		// return 의 복합 리터럴 들여쓰기를 바꿨다 — CL 752220, Fixes #7195).
+		// 판을 안 찍으면 리눅스에서 빨간 것을 본 사람이 `gofmt -w` 를 누르고, 그러면 맥이
+		// 되돌린다 — 두 머신이 서로 밀어내는 핑퐁이 여기서 시작된다.
+		// 갈리는 자리 자체는 옆의 gofmt_era_split_gate_test.go 가 판 무관하게 막는다.
+		t.Fatalf("gofmt 위반 %d개 — 랜딩 전에 gofmt -w 하라(파일 %d개를 봤다).\n"+
+			"★ 누르기 전에 판을 봐라: 이 판정은 %s 가 한 것이고, 이 관문은 **판마다 답이 다르다**.\n"+
+			"  다른 판을 쓰는 머신에서 같은 커밋이 초록일 수 있다 — 그때 gofmt -w 는 고침이 아니라 핑퐁이다.\n%s",
+			len(offenders), walked, runtime.Version(), joinLines(offenders))
 	}
 }
 

@@ -154,7 +154,12 @@ func pickAxisIndent(ln string) int {
 
 // pickAxisDominating 은 emit 줄에 닿으려면 반드시 지나친 줄들을 낸다(emit 부터 거꾸로).
 //
-// gofmt 는 블록 깊이를 탭으로 정확히 표현한다. emit 줄보다 얕아지는 지점마다 허용 깊이를
+// gofmt 는 블록 깊이를 탭으로 정확히 표현한다 — **단, 그 깊이가 판 의존이다.**
+// go1.27 이 다중값 return 의 복합 리터럴 들여쓰기를 바꿨다(Fixes #7195). 이 훑기가 그런
+// 자리에 닿으면 **빨개지는 게 아니라 조용히 눈이 먼다** — 지배 관계를 잘못 세고도 초록이다.
+// 오늘 이 훑기 대상에 갈림 자리는 0건이지만 그것은 설계가 아니라 운이다
+// (갈림 자체는 gofmt_era_split_gate_test.go 가 모듈 전체에서 막는다).
+// emit 줄보다 얕아지는 지점마다 허용 깊이를
 // 낮추면 남는 것은 emit 을 감싸는 블록들의 앞부분 — 즉 emit 을 실행했다면 반드시 실행된
 // 줄들이다. 더 얕은 블록의 형제 가지(if 의 다른 갈래)는 깊이로 걸러진다.
 func pickAxisDominating(lines []string, emit int) []string {

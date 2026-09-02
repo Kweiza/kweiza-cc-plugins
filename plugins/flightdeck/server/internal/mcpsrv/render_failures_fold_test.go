@@ -17,15 +17,17 @@ import (
 // 다른 것은 하위 명령(`status --porcelain -z` vs `diff --numstat …`)뿐이다.
 func deadWorktreeFailures(sess, path string) (service.DerivedFailure, service.DerivedFailure) {
 	stderr := fmt.Sprintf("status 128: fatal: cannot change to '%s': No such file or directory", path)
-	return service.DerivedFailure{
-			Axis: "uncommitted:" + sess,
-			Detail: fmt.Sprintf("미커밋 경로 관측 실패(%s): git -C %s status --porcelain -z: %s",
-				path, path, stderr),
-		}, service.DerivedFailure{
-			Axis: "uncommitted-delta:" + sess,
-			Detail: fmt.Sprintf("미커밋 규모 관측 실패(%s): git -C %s diff --numstat -z --no-renames HEAD --: %s",
-				path, path, stderr),
-		}
+	paths := service.DerivedFailure{
+		Axis: "uncommitted:" + sess,
+		Detail: fmt.Sprintf("미커밋 경로 관측 실패(%s): git -C %s status --porcelain -z: %s",
+			path, path, stderr),
+	}
+	delta := service.DerivedFailure{
+		Axis: "uncommitted-delta:" + sess,
+		Detail: fmt.Sprintf("미커밋 규모 관측 실패(%s): git -C %s diff --numstat -z --no-renames HEAD --: %s",
+			path, path, stderr),
+	}
+	return paths, delta
 }
 
 const deadPath = "/home/u/repo/.flightdeck/worktrees/fd-lane-turn-machinery-is-dead-remove-it"
@@ -104,13 +106,15 @@ func TestDifferentSessionsDoNotFold(t *testing.T) {
 // 닿는다** — 실제로 각 검사를 하나씩 무력화하는 변이를 넣었을 때 전 스위트가 초록이었다.
 // 그래서 축을 갈라 겨눈다: 아래 둘은 한 번에 조건 하나씩만 어긴다.
 func twinWith(sess, path, tail string) (service.DerivedFailure, service.DerivedFailure) {
-	return service.DerivedFailure{
-			Axis:   "uncommitted:" + sess,
-			Detail: fmt.Sprintf("미커밋 경로 관측 실패(%s): git -C %s status --porcelain -z: %s", path, path, tail),
-		}, service.DerivedFailure{
-			Axis:   "uncommitted-delta:" + sess,
-			Detail: fmt.Sprintf("미커밋 규모 관측 실패(%s): git -C %s diff --numstat -z: %s", path, path, tail),
-		}
+	paths := service.DerivedFailure{
+		Axis:   "uncommitted:" + sess,
+		Detail: fmt.Sprintf("미커밋 경로 관측 실패(%s): git -C %s status --porcelain -z: %s", path, path, tail),
+	}
+	delta := service.DerivedFailure{
+		Axis:   "uncommitted-delta:" + sess,
+		Detail: fmt.Sprintf("미커밋 규모 관측 실패(%s): git -C %s diff --numstat -z: %s", path, path, tail),
+	}
+	return paths, delta
 }
 
 func renderTwo(t *testing.T, a, b service.DerivedFailure) string {
