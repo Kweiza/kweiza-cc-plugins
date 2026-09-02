@@ -1,5 +1,5 @@
 {
   "name": "flightdeck",
   "description": "Parallel session coordination — one self-hosted service (Docker) that many Claude Code and codex sessions across machines register with: shared session board, work queue, merge queue, and a live dashboard. Replaces per-repo shell scripts and exclusive locks.",
-  "version": "0.34.1"
+  "version": "0.34.2"
 }
