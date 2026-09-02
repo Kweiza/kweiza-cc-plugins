@@ -60,6 +60,13 @@ func TestCodexHooksTemplateIsWiredAsDesigned(t *testing.T) {
 	// "관문의 무출력은 통과가 아니다"의 거울상이다 — 여기서는 무출력을 **미발화**로 읽었고,
 	// 그 오독 하나가 훅 하나를 판 넷에 걸쳐 안 싣게 만들었다. 발화를 재려면 로그가 아니라
 	// **훅 자신**에 프로브를 심어라.
+	//
+	// ★★ **다만 그 발화는 codex 판에 달렸다(2026-09-02 리눅스 실측).** `0.137.0` 에는
+	// 이 이벤트가 **아예 없다** — 바이너리에 `session_end` 가 어떤 표기로도 0건이고
+	// (대조군 `session_start` 는 11건), 훅에 실어도 프로브에 한 번도 안 잡힌다.
+	// **그래도 여기서 요구하는 것이 옳다**: 같은 판에 이 항목이 든 hooks.json 을 줘도
+	// 나머지 다섯이 전부 정상 발화한다(통째 거부가 아니라 조용한 무시다). 안 실으면
+	// 0.151 사용자가 카드를 못 닫고, 실으면 0.137 사용자는 그 훅만 안 돈다 — 후자가 싸다.
 	want := map[string]bool{
 		"SessionStart": true, "UserPromptSubmit": true, "PostToolUse": true,
 		"PreCompact": true, "Stop": true, "SessionEnd": true,
