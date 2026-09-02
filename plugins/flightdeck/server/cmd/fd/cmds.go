@@ -473,7 +473,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	// after 의 세 갈래(item·sha·job)를 표현할 수 없고, 표현 못 하는 축은 조용히 사라진다.
 	// stdin 은 --body 가 이미 쓰므로(`--body -`) 여기서 또 요구할 수 없다.
 	followups := fs.String("followups", "",
-		`이번에 나온 후속(JSON 배열). 예: [{"id":"x","title":"t","body":"b","paths":["a.go"]}]`)
+		`이번에 나온 후속(JSON 배열, 또는 @<파일경로>). 예: [{"id":"x","title":"t","body":"b","paths":["a.go"]}]`)
 	closeSession := fs.Bool("close", false, "항목을 끝낸 뒤 이 세션도 닫는다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	itemID, rest := TakeFirstPositional(args)
@@ -500,6 +500,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	if ferr != nil {
 		fmt.Fprintf(out, "followups 를 못 읽었다: %v\n", ferr)
 		fmt.Fprintln(out, `JSON 배열이어야 한다. 예: --followups '[{"id":"x","title":"t","body":"b"}]'`)
+		fmt.Fprintln(out, "본문이 길거나 줄바꿈·따옴표가 섞이면 파일에 쓰고 --followups @<경로> 로 줘라 — 셸 인자로 나르면 셸이 먼저 깨뜨린다.")
 		fmt.Fprintln(out, "항목은 닫지 않았다 — 고쳐서 다시 불러라.")
 		return 2
 	}
@@ -1726,13 +1727,33 @@ func legacyBinLeftovers(dirs []string) []legacyBin {
 // 머신 축을 훅·CLI 는 상태 디렉토리의 파일에서, MCP 는 hostname 에서 만들어
 // 한 Claude 세션이 보드에 카드 세 장으로 떴다. 저장층은 내내 옳았고 클라이언트가 갈렸다.
 // 지금은 MachineID 가 고정 자리를 쓰고 mcpsrv 가 주입을 받는다(env.go · mcp.go).
-// parseFollowups 는 --followups 의 JSON 배열을 읽는다. 순수 함수다.
+// parseFollowups 는 --followups 의 값을 읽는다. `@<경로>` 면 그 파일에서 읽는다.
 //
 // 빈 문자열은 **없음**이지 오류가 아니다 — 후속이 없는 마무리가 정상이다.
+//
+// ★ `@<경로>` 가 있는 이유는 `--body -` 가 stdin 인 이유와 같다. 이 저장소의 후속
+// 본문은 수백자에 줄바꿈·따옴표·백틱이 섞이고, 그것을 셸 인자 하나로 나르면 **셸이
+// 먼저 깨뜨린다.** 그러면 (옳게도) 거절당하고, 거절당한 사람은 `fd add` 로 흘러가
+// 판단 연결을 잃는다 — 이 손잡이가 막으려던 바로 그 대체 경로다. stdin 은 `--body`
+// 가 이미 쓰므로 이쪽은 파일이어야 한다.
+//
+// 파일을 못 읽으면 **빈 목록으로 접지 않고 오류를 낸다.** 접으면 경로 오타 하나로
+// 후속을 잃은 채 항목이 닫힌다 — 깨진 JSON 과 정확히 같은 종류의 침묵이다.
 func parseFollowups(raw string) ([]followupReq, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
+	}
+	if path, ok := strings.CutPrefix(raw, "@"); ok {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("후속 파일을 못 읽었다: %w", err)
+		}
+		// 빈 파일은 "후속 없음"이 아니다 — `@` 를 준 것은 무언가를 실으려던 것이다.
+		// 조용히 없음으로 접으면 그 의도가 화면 어디에도 안 남는다.
+		if raw = strings.TrimSpace(string(b)); raw == "" {
+			return nil, fmt.Errorf("후속 파일이 비어 있다: %s", path)
+		}
 	}
 	var out []followupReq
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {

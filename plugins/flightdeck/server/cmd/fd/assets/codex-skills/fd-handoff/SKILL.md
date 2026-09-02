@@ -1,15 +1,15 @@
 ---
 name: fd-handoff
-description: Wrap up work and hand it off. Judgment saved + item closed + resources released, in one call. "핸드오프" · "마무리" · "세션 넘긴다" · use when the work is done.
+description: Wrap up work and hand it off. Judgment saved + followups registered + item closed + resources released, in one call. "핸드오프" · "마무리" · "세션 넘긴다" · use when the work is done.
 ---
 
 # 마무리
 
 **codex 판이다.** 이 창에는 flightdeck MCP 도구가 없다 — `fd` 터미널 명령이 전부다.
-(Claude 창의 같은 이름 스킬은 `finish(...)` 도구 호출과 `followups` 인자를 가르친다. 여기엔 둘 다 없다.)
+(Claude 창의 같은 이름 스킬은 `finish(...)` 도구 호출로 같은 일을 한다. 여기서는 같은 것을 `fd finish` 로 한다.)
 
-명령은 `fd finish` 하나다. **판단 저장·종료·자원 반납이 한 트랜잭션**이라 지킬 순서가 없다 —
-판단은 남았는데 항목이 열려 있는 상태로 끝날 수 없다.
+명령은 `fd finish` 하나다. **판단 저장·후속 등록·종료·자원 반납이 한 트랜잭션**이라 지킬 순서가 없다 —
+판단은 남았는데 항목이 열려 있거나, 항목은 닫혔는데 후속이 안 실린 상태로 끝날 수 없다.
 
 ## 한 번에 부른다
 
@@ -36,18 +36,32 @@ EOF
 git log 와 diff 가 이미 아는 것(무엇을 바꿨나)은 적지 마라.
 여기 적을 것은 **다른 어디에도 안 남는 것** — 판단의 근거다.
 
-## ★ 후속: 이 창에는 `followups` 가 없다
+## 후속은 트리아지가 먼저, 그리고 같은 호출에 싣는다
 
-Claude 판은 `finish(followups: [...])` 로 후속을 판단과 **한 트랜잭션에** 싣는다.
-**CLI 에는 그 인자가 없다.** 그래서 이 창에서 후속을 만들면 `fd add` 로 따로 만들게 되고,
-그때 **판단과의 연결이 안 붙는다** — 다음 세션의 `fd pick` 이 그 항목을 집어도 "왜 이게 생겼나"를 못 받는다.
+**본문이 곧 패치인 후속은 후속이 아니다 — 이 세션의 일이다.** 지금 하고 마무리를 미뤄라.
 
-그러므로 이 창에서는:
+남겨야 하는 것만 `--followups` 로 **판단과 같은 트랜잭션에** 싣는다. 그래야 판단 링크가 붙어
+다음 세션의 `fd pick` 이 그 항목과 함께 「왜 이게 생겼나」를 받는다.
+나중에 `fd add` 로 따로 만들면 **그 연결은 영영 못 산다.**
 
-1. **본문이 곧 패치인 후속은 만들지 마라 — 지금 해라.** 이건 두 판 공통 규율이고, 여기서는 더 강하다.
-2. 그래도 남겨야 하면 `fd add --id … --title … --body …` 로 만들고,
-   **판단 본문에 그 id 를 적어라.** 연결을 못 사는 대신 사람이 읽을 실을 남기는 것이다.
-3. 연결이 꼭 필요하면 **Claude 창에서 마무리해라.** 못 하는 것을 하는 척하지 않는다.
+```
+cat > /tmp/followups.json <<'JSON'
+[{"id": "…", "title": "…", "body": "…", "paths": ["…"], "labels": []}]
+JSON
+
+fd finish <집은 항목 id> --outcome done --title "<한 줄>" \
+  --followups @/tmp/followups.json \
+  --body - <<'EOF'
+<위의 넷>
+EOF
+```
+
+★ **`@<파일>` 로 줘라.** 후속 본문은 길고 줄바꿈·따옴표가 섞인다 — JSON 을 셸 인자로
+직접 나르면 셸이 먼저 깨뜨리고, 깨진 JSON 은 (옳게도) 거절된다. 그 거절이 사람을
+`fd add` 로 밀어내고, 그때 연결이 끊긴다. `--body -` 가 stdin 을 이미 쓰므로 이쪽은 파일이다.
+
+**이미 있는 항목은 `id` 만 준다** — 새로 만들지 않고 판단에 **잇는다**.
+(이 선점 뒤 내가 만든 열린 항목만이다.)
 
 ## 세션은 마지막에 닫는다
 

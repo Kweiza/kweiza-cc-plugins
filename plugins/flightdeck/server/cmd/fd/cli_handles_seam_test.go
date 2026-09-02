@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,5 +150,88 @@ func TestLandTakesResources(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("줄을 섰는데 화면이 자원 %q 를 안 낸다 — 무엇을 쥐었는지가 안 보이면 조율이 안 된다:\n%s", want, out)
 		}
+	}
+}
+
+// ② ' fd finish --followups @<파일> — **본문을 셸 인자로 나르지 않는 경로.**
+//
+// ★ 왜 이것이 장식이 아닌가. 이 저장소의 후속 본문은 수백자에 줄바꿈·따옴표·백틱이
+// 섞인다. 그것을 `--followups '<JSON>'` 한 인자로 나르면 셸이 먼저 깨뜨리고, 깨진
+// JSON 은 (옳게도) 거절되므로 **사람은 후속을 못 싣고 결국 `fd add` 로 흘러간다** —
+// 판단 연결이 끊기는 그 대체 경로다. `--body -` 가 stdin 인 것과 같은 이유가 여기에도
+// 있고, stdin 은 `--body` 가 이미 쓰므로 이쪽은 파일이어야 한다.
+func TestFinishReadsFollowupsFromAFile(t *testing.T) {
+	h := newHarness(t)
+	myClaim(t, h, "h-finish-file")
+
+	p := filepath.Join(t.TempDir(), "followups.json")
+	if err := os.WriteFile(p, []byte(
+		`[{"id":"h-followup-file","title":"파일에서 왔다","body":"줄바꿈\n과 \"따옴표\" 가 섞인 본문","paths":["x/y.go"]}]`,
+	), 0o600); err != nil {
+		t.Fatalf("후속 파일을 못 썼다: %v", err)
+	}
+
+	code, out := h.run("", "finish", "h-finish-file",
+		"--outcome", "done", "--title", "끝냈다", "--body", "본문",
+		"--followups", "@"+p)
+	if code != 0 {
+		t.Fatalf("finish --followups @파일 이 %d 로 끝났다:\n%s", code, out)
+	}
+	it, err := h.st.GetItem(context.Background(), h.project, "h-followup-file")
+	if err != nil {
+		t.Fatalf("후속 항목이 원장에 없다: %v", err)
+	}
+	if !strings.Contains(it.Body, "\n") || !strings.Contains(it.Body, `"따옴표"`) {
+		t.Fatalf("후속 본문이 %q 다 — 줄바꿈·따옴표가 파일 경로를 못 건넜다", it.Body)
+	}
+}
+
+// 없는 파일은 **조용히 비우지 않고** 거절한다.
+//
+// ★ 비우고 진행하면 `--followups` 를 준 사람은 후속을 실었다고 믿은 채 항목이 닫힌다.
+// 깨진 JSON 과 정확히 같은 종류의 침묵이고, 오타 하나로 늘 일어난다.
+func TestFinishRefusesAMissingFollowupsFile(t *testing.T) {
+	h := newHarness(t)
+	myClaim(t, h, "h-finish-nofile")
+
+	code, out := h.run("", "finish", "h-finish-nofile",
+		"--outcome", "done", "--title", "t", "--body", "b",
+		"--followups", "@"+filepath.Join(t.TempDir(), "없는파일.json"))
+	if code == 0 {
+		t.Fatalf("없는 파일인데 성공했다:\n%s", out)
+	}
+	if got := itemState(t, h, "h-finish-nofile"); got == model.ItemDone {
+		t.Fatal("후속 파일을 못 읽었는데 항목이 닫혔다 — 후속을 잃은 채 마무리된다")
+	}
+	if !strings.Contains(out, "followups") && !strings.Contains(out, "후속") {
+		t.Fatalf("거절 사유가 무엇이 틀렸는지 안 말한다:\n%s", out)
+	}
+}
+
+// 빈 파일도 거절한다 — `@` 를 준 것은 무언가를 실으려던 것이다.
+//
+// ★ "후속 없음"으로 접으면 heredoc 이 빗나가 0바이트가 된 흔한 사고가 **성공으로**
+// 보인다. 후속을 실었다고 믿은 채 항목이 닫히고, 그 후속은 어디에도 없다.
+func TestFinishRefusesAnEmptyFollowupsFile(t *testing.T) {
+	h := newHarness(t)
+	myClaim(t, h, "h-finish-emptyfile")
+
+	p := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(p, []byte("   \n"), 0o600); err != nil {
+		t.Fatalf("빈 파일을 못 썼다: %v", err)
+	}
+	code, out := h.run("", "finish", "h-finish-emptyfile",
+		"--outcome", "done", "--title", "t", "--body", "b", "--followups", "@"+p)
+	if code == 0 {
+		t.Fatalf("빈 후속 파일인데 성공했다:\n%s", out)
+	}
+	if got := itemState(t, h, "h-finish-emptyfile"); got == model.ItemDone {
+		t.Fatal("후속 파일이 비었는데 항목이 닫혔다 — 실으려던 것을 잃은 채 마무리된다")
+	}
+	// ★ 거절만으로는 부족하다. 관문을 빼도 JSON 파서가 "unexpected end of JSON input"
+	// 으로 **대신** 거절하기 때문이다 — 옆 축이 잡으면 이 시험이 재려던 주장은 미검증이고,
+	// 사람은 파일이 비었다는 것을 화면 어디에서도 못 읽는다. 그래서 진단까지 내려가 문다.
+	if !strings.Contains(out, "비어 있다") || !strings.Contains(out, p) {
+		t.Fatalf("거절이 **무엇이** 비었는지를 안 말한다 — 경로 오타와 빈 heredoc 이 같은 화면을 낸다:\n%s", out)
 	}
 }
