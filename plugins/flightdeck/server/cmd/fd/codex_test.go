@@ -289,3 +289,87 @@ func TestCodexAxesGradesTheSilence(t *testing.T) {
 		}
 	})
 }
+
+// ── 신뢰가 「항목 존재」로 초록이 되던 자리 ────────────────────────────────
+//
+// ★ 2026-09-02 사건: `0.34.0` 이 훅 예산을 2→5 로 올렸더니 codex 가 **예산이 바뀐 훅만**
+// 조용히 건너뛰었다(SessionStart·PostToolUse 는 예산이 그대로라 계속 돌았다). 그런데
+// `fd doctor` 는 `✓ 신뢰됨` 을, `fd setup` 은 `✓ 훅 신뢰는 이미 박혀 있다` 를 냈다 —
+// **방금 자기가 깨뜨린 것을 그렇게 말했다.** 저장된 `trusted_hash` 는 승인 시점의 값이라
+// 파일을 고쳐도 안 바뀌기 때문이다.
+//
+// 아래 셋은 그 화면들이 **한계를 말하는지**를 문다. 해시 재현으로 고치지 않는 이유는
+// `c5e4aa5` 기각 ① 그대로다 — 규칙을 베끼면 codex 가 그것을 바꾸는 날 우리가 조용히 거짓이 된다.
+
+// TestTrustAxisDoesNotClaimTheHooksAreLive 는 신뢰 축이 **못 재는 것을 못 잰다고** 하는지 문다.
+func TestTrustAxisDoesNotClaimTheHooksAreLive(t *testing.T) {
+	st := CodexState{
+		Present: true, HooksPath: "/h/.codex/hooks.json",
+		HooksRaw:  `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"/h/.local/bin/fd-hook\" hook session-start --harness codex","timeout":10}]}]}}`,
+		ConfigRaw: `[hooks.state."/h/.codex/hooks.json:session_start:0:0"]` + "\ntrusted_hash = \"sha256:abc\"\n",
+	}
+	var trust service.DoctorAxis
+	for _, ax := range CodexAxes(st) {
+		if ax.Name == "codex 훅 신뢰" {
+			trust = ax
+		}
+	}
+	if trust.Name == "" {
+		t.Fatal("신뢰 축이 없다")
+	}
+	if !trust.Observed {
+		t.Fatalf("항목이 있는데 ✗ 로 났다: %q", trust.Detail)
+	}
+	// ★ 값이 "신뢰됨" 에서 끝나면 안 된다 — 그것이 훅이 도는 것으로 읽힌다.
+	if !strings.Contains(trust.Value, "못 잰다") {
+		t.Errorf("신뢰 축이 한계를 안 말한다 — 「항목이 있다」를 「훅이 돈다」로 읽게 된다:\n  %q", trust.Value)
+	}
+	if !strings.Contains(trust.Value, "재승인") {
+		t.Errorf("파일을 고쳤을 때 무엇이 필요한지 안 말한다: %q", trust.Value)
+	}
+}
+
+// TestPinAxisDoesNotPromiseNoReapprovalOnUpgrade 는 「판올림해도 재승인이 없다」가
+// **경로 축에 한정된 주장**임을 화면이 말하는지 문다. 그 한정어가 빠지면 거짓이다.
+func TestPinAxisDoesNotPromiseNoReapprovalOnUpgrade(t *testing.T) {
+	st := CodexState{
+		Present: true, HooksPath: "/h/.codex/hooks.json",
+		HooksRaw: `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"/h/.local/bin/fd-hook\" hook stop --harness codex","timeout":5}]}]}}`,
+	}
+	var pin service.DoctorAxis
+	for _, ax := range CodexAxes(st) {
+		if ax.Name == "codex 훅 명령" {
+			pin = ax
+		}
+	}
+	if !pin.Observed {
+		t.Fatalf("고정 경로인데 ✗ 로 났다: %q", pin.Detail)
+	}
+	if !strings.Contains(pin.Value, "경로 때문에는") {
+		t.Errorf("한정어가 없다 — 「판올림해도 재승인이 없다」는 hooks.json 내용이 바뀌면 거짓이다:\n  %q", pin.Value)
+	}
+}
+
+// TestNextStepsAskForReapprovalWhenItJustWroteHooks 는 setup 이 **방금 쓴 파일**에 대해
+// 재승인을 요구하는지 문다. 이 갈래가 없으면 사용자는 훅이 죽은 줄 모른다.
+func TestNextStepsAskForReapprovalWhenItJustWroteHooks(t *testing.T) {
+	trusted := CodexState{
+		Present: true, HooksPath: "/h/.codex/hooks.json",
+		ConfigRaw: `[hooks.state."/h/.codex/hooks.json:stop:0:0"]` + "\ntrusted_hash = \"sha256:abc\"\n",
+	}
+	// ① 이번에 안 썼다 → 이미 박혀 있다고 해도 된다
+	if got := RenderCodexNextSteps(trusted, false); !strings.Contains(got, "이미 박혀 있다") {
+		t.Errorf("파일을 안 건드렸는데 재승인을 요구한다:\n%s", got)
+	}
+	// ② 이번에 썼다 → **신뢰 항목이 있어도** 재승인을 요구해야 한다
+	got := RenderCodexNextSteps(trusted, true)
+	if strings.Contains(got, "이미 박혀 있다") {
+		t.Errorf("hooks.json 을 방금 썼는데 「이미 박혀 있다」고 한다 — 방금 자기가 깨뜨린 것이다:\n%s", got)
+	}
+	if !strings.Contains(got, "다시 신뢰해라") {
+		t.Errorf("새로 쓴 뒤 재승인 안내가 없다:\n%s", got)
+	}
+	if !strings.Contains(got, "timeout") {
+		t.Errorf("예산 한 칸으로도 깨진다는 사실을 안 말한다 — 그것이 이 사건의 원인이었다:\n%s", got)
+	}
+}

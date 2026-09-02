@@ -113,6 +113,16 @@ func codexHookCommands(raw string) (cmds []string, ok bool) {
 // 확인한 형식 문자열: `hooks.state."…".trusted_hash`). TOML 파서를 안 쓴다 — 이 판정에
 // 필요한 것은 **그 경로로 시작하는 키가 하나라도 있나**뿐이고, 그러자고 의존성을 하나
 // 늘리면 이 레포의 의존성 목록(sqlite·x/sys 둘뿐)이 이 축 하나 때문에 커진다.
+//
+// ★★ **이 함수가 답하지 않는 것을 알아라: 「항목이 있다」는 「지금 파일과 맞는다」가 아니다.**
+// 저장된 `trusted_hash` 는 **승인 시점의 값**이라 그 뒤 hooks.json 을 고쳐도 안 바뀐다.
+// 2026-09-02 실측: 훅의 `timeout` 만 바꿔도(2→5) codex 는 그 훅을 **조용히 건너뛴다** —
+// 예산이 그대로인 훅은 계속 돌고 바뀐 훅만 죽어서, 화면상 "일부만 도는" 모양이 된다.
+// 그때도 이 함수는 true 다. **그러므로 이 값을 「훅이 지금 돈다」로 읽으면 안 된다.**
+//
+// ★ 해시 재현은 여전히 **안 한다**(`c5e4aa5` 기각 ①). 규칙을 베끼면 codex 가 그것을 바꾸는
+// 날 우리가 조용히 거짓이 된다 — 이 축이 통째로 싸우는 병과 같은 모양이다.
+// 대신 **못 재는 것을 못 잰다고 화면에 적는다**(아래 CodexAxes 의 신뢰 축).
 func codexTrusted(configRaw, hooksPath string) bool {
 	if strings.TrimSpace(configRaw) == "" || strings.TrimSpace(hooksPath) == "" {
 		return false
@@ -122,7 +132,8 @@ func codexTrusted(configRaw, hooksPath string) bool {
 
 // codexVersionedCommand 는 명령이 **버전이 든 경로**를 부르는지 본다. 순수 함수다.
 //
-// ★ 이것이 이 항목의 핵심 주장이다. 신뢰 해시는 명령 문자열만 보므로, 명령이
+// ★ 이것이 이 항목의 핵심 주장이다. 신뢰 해시가 명령 문자열을 보므로(그것만은 아니다 —
+// timeout 도 본다, 2026-09-02 실측), 명령이
 // `${CLAUDE_PLUGIN_ROOT}/bin/fd`(=`…/plugins/cache/<마켓>/flightdeck/<버전>/bin/fd`)면
 // **fd 판올림마다 TUI 재승인**이고, 재승인 전까지 훅은 조용히 안 돈다.
 func codexVersionedCommand(cmd string) bool {
@@ -173,7 +184,11 @@ func CodexAxes(st CodexState) []service.DoctorAxis {
 	if hooksAxis.Observed {
 		if codexTrusted(st.ConfigRaw, st.HooksPath) {
 			trustAxis.Observed = true
-			trustAxis.Value = "신뢰됨(config.toml 에 항목이 있다)"
+			// ★ **「항목이 있다」까지만 말한다.** 그 해시가 지금 파일과 맞는지는 이 도구가
+			// 안 잰다(codexTrusted 주석). 여기서 "신뢰됨" 으로 끝내면 훅이 죽어 있는데
+			// 초록이 뜨는 자리가 된다 — 실제로 0.34.0 에서 그렇게 났다.
+			trustAxis.Value = "항목이 있다 — 다만 **그 해시가 지금 hooks.json 과 맞는지는 이 도구가 못 잰다**. " +
+				"파일을 고쳤다면(예산 한 칸이라도) 그 훅은 재승인 전까지 조용히 안 돈다"
 		} else {
 			trustAxis.Detail = "**아직 신뢰를 안 받았다 — 지금 훅은 조용히 안 돈다.** " +
 				"codex TUI 를 한 번 띄워 \"Hooks need review\" 를 통과시켜라. " + trustAxis.Detail
@@ -186,8 +201,8 @@ func CodexAxes(st CodexState) []service.DoctorAxis {
 	// ── ③ 명령이 고정 경로인가 — 판올림을 넘기는가 ──────────────────────────
 	pinAxis := service.DoctorAxis{
 		Name: "codex 훅 명령",
-		Detail: "신뢰 해시는 **명령 문자열만** 본다. 버전이 든 경로를 부르면 fd 판올림마다 " +
-			"TUI 재승인이고, 그때까지 훅은 조용히 안 돈다",
+		Detail: "신뢰 해시는 훅 정의를 본다(**명령만이 아니라 timeout 도** — 2026-09-02 실측). " +
+			"버전이 든 경로를 부르면 fd 판올림마다 TUI 재승인이고, 그때까지 훅은 조용히 안 돈다",
 	}
 	if hooksAxis.Observed {
 		var bad []string
@@ -198,7 +213,10 @@ func CodexAxes(st CodexState) []service.DoctorAxis {
 		}
 		if len(bad) == 0 {
 			pinAxis.Observed = true
-			pinAxis.Value = "고정 경로 — 판올림해도 재승인이 없다"
+			// ★ **「경로 때문에는」이 빠지면 거짓이 된다.** 고정 경로가 막는 것은
+			// *경로가 바뀌어서* 생기는 재승인뿐이다. 판올림이 hooks.json 의 **내용**을
+			// 바꾸면(예산 포함) 그 훅들은 여전히 재승인이다 — 0.34.0 이 그 경우였다.
+			pinAxis.Value = "고정 경로 — **경로 때문에는** 재승인이 없다(판올림이 hooks.json 내용을 바꾸면 그 훅은 재승인이다)"
 		} else {
 			pinAxis.Detail = fmt.Sprintf("**훅 %d건이 버전 든 경로를 부른다** — 다음 판올림에 조용히 죽는다: %s · ",
 				len(bad), clip(bad[0], 120)) + pinAxis.Detail
@@ -447,8 +465,12 @@ func (a *App) InstallCodex(out io.Writer) int {
 
 	// ── ① 고정 경로 래퍼 ────────────────────────────────────────────────────
 	//
-	// ★ 래퍼는 **덮어써도 된다.** 신뢰 해시는 명령 문자열만 보므로 이 파일의 내용이 바뀌어도
-	// 신뢰가 안 깨진다(2026-08-30 실측: 원복하면 스크립트를 통째로 갈아도 다시 신뢰된다).
+	// ★ 래퍼는 **덮어써도 된다.** 신뢰 해시는 훅 정의만 보고 **그것이 가리키는 파일의 내용은
+	// 안 보므로** 이 파일이 바뀌어도 신뢰가 안 깨진다(2026-08-30 실측: 원복하면 스크립트를
+	// 통째로 갈아도 다시 신뢰된다).
+	//
+	// ★ 반대로 **hooks.json 쪽은 한 칸만 달라도 깨진다** — 명령뿐 아니라 `timeout` 도 해시에
+	// 들어간다(2026-09-02 실측). 이 둘을 섞어 「내용이 바뀌어도 괜찮다」로 읽지 마라.
 	// 오히려 판올림 때 여기가 갱신돼야 새 판을 고르는 규칙이 산다.
 	wrapper := CodexWrapperPath(home)
 	if err := os.MkdirAll(filepath.Dir(wrapper), 0o755); err != nil {
@@ -482,9 +504,24 @@ func (a *App) InstallCodex(out io.Writer) int {
 	// ★ **있으면 안 덮는다.** 사용자의 다른 훅이 거기 있을 수 있고, 덮으면 복구 경로가 0이다.
 	// 대신 무엇을 넣어야 하는지 그대로 찍어서 사람이 병합하게 한다.
 	want := RenderCodexHooks(codexHooksTemplate, wrapper)
+	wroteHooks := false
 	if strings.TrimSpace(st.HooksRaw) != "" {
 		if strings.Contains(st.HooksRaw, wrapper) {
-			fmt.Fprintf(out, "✓ hooks.json 에 이미 이 래퍼가 실려 있다 (%s) — 안 건드렸다\n", st.HooksPath)
+			// ★ **래퍼가 있다고 최신인 것이 아니다.** 앞선 판은 여기서 "안 건드렸다"만 찍고
+			// 끝냈는데, 그러면 **템플릿이 개선돼도 영영 반영되지 않고 그 사실이 침묵한다.**
+			// 2026-09-02 실측: 0.34.0 이 예산을 2→5 로 올렸는데 setup 을 다시 돌려도 파일은
+			// 옛 값 그대로였고 화면은 ✓ 였다. 덮지는 않되(사용자의 다른 훅이 있을 수 있다)
+			// **다르면 다르다고 말한다.**
+			if strings.TrimSpace(st.HooksRaw) == strings.TrimSpace(want) {
+				fmt.Fprintf(out, "✓ hooks.json 이 이 판의 템플릿과 같다 (%s) — 건드릴 것이 없다\n", st.HooksPath)
+			} else {
+				fmt.Fprintf(out, "! hooks.json 에 이 래퍼는 실려 있는데 **내용이 이 판의 템플릿과 다르다** (%s) — 안 덮었다.\n", st.HooksPath)
+				fmt.Fprintln(out, "  당신이 손본 것일 수도, 이 판이 훅·예산을 바꾼 것일 수도 있다. 덮으면 되돌릴 길이 없어 그대로 뒀다.")
+				fmt.Fprintln(out, "  ★ 예산(timeout)이 다르면 **그 훅은 재승인 전까지 조용히 안 돈다** — 값 하나로도 그렇다.")
+				fmt.Fprintln(out, "  이 판이 기대하는 것:")
+				fmt.Fprintln(out, indentBlock(want, "    "))
+				fmt.Fprintf(out, "  당신의 다른 훅이 없다면 그 파일을 지우고 다시 부르면 새로 깔린다: rm %s\n", st.HooksPath)
+			}
 		} else {
 			fmt.Fprintf(out, "! hooks.json 이 이미 있다 (%s) — **안 덮었다.**\n", st.HooksPath)
 			fmt.Fprintln(out, "  거기 당신의 다른 훅이 있을 수 있고 덮으면 되돌릴 길이 없다.")
@@ -502,6 +539,7 @@ func (a *App) InstallCodex(out io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(out, "✓ hooks.json %s\n", st.HooksPath)
+		wroteHooks = true
 	}
 
 	// ── ③ codex 판 스킬 ─────────────────────────────────────────────────────
@@ -511,26 +549,41 @@ func (a *App) InstallCodex(out io.Writer) int {
 	// 실패조차 안 나므로 무엇이 틀렸는지 아무도 모른다.
 	InstallCodexSkills(home, out)
 
-	fmt.Fprint(out, RenderCodexNextSteps(a.observeCodex()))
+	fmt.Fprint(out, RenderCodexNextSteps(a.observeCodex(), wroteHooks))
 	return 0
 }
 
 // RenderCodexNextSteps 는 설치 뒤 **사람이 해야 하는 것**을 낸다. 순수 함수다.
 //
+// ★ `wroteHooks` 는 **이번 호출에서 hooks.json 을 실제로 썼는가**다. 이 인자가 없던 판은
+// 신뢰 안내를 `codexTrusted()` 로만 갈랐고, 그 함수는 「항목이 있나」만 보므로
+// **방금 자기가 깨뜨린 신뢰를 「이미 박혀 있다」고 말했다**(2026-09-02 실측). 파일을 새로
+// 쓴 순간 그 내용의 해시는 저장된 값과 갈릴 수 있고, 그것을 아는 것은 이 호출부뿐이다.
+//
 // ★ 신뢰를 자동으로 박지 않는다. 그것은 사용자가 눌러야 하는 관문이고, 도구가 대신 누르면
 // 그 관문이 존재할 이유가 없어진다.
-func RenderCodexNextSteps(st CodexState) string {
+func RenderCodexNextSteps(st CodexState, wroteHooks bool) string {
 	var b strings.Builder
 	b.WriteString("\n■ 이제 사람이 해야 하는 것\n")
 
-	if !codexTrusted(st.ConfigRaw, st.HooksPath) {
+	switch {
+	case !codexTrusted(st.ConfigRaw, st.HooksPath):
 		b.WriteString("  1. **codex TUI 를 한 번 띄워 훅을 신뢰해라** — \"Hooks need review\" 를 통과시켜야 한다.\n")
 		b.WriteString("     $ codex\n")
 		b.WriteString("     ★ 이것을 안 하면 codex 는 훅을 **조용히 건너뛴다**. 로그에 한 줄도 안 남고,\n")
 		b.WriteString("       보드에 codex 카드가 영영 안 뜬다. 자동으로 박지 않는 이유는 이것이\n")
 		b.WriteString("       당신이 눌러야 하는 관문이기 때문이다.\n")
-	} else {
-		b.WriteString("  1. ✓ 훅 신뢰는 이미 박혀 있다(config.toml).\n")
+	case wroteHooks:
+		// ★ 신뢰 항목은 있지만 **이번에 파일을 새로 썼다.** 내용이 한 글자라도 달라졌으면
+		// 그 훅은 재승인 전까지 안 돈다 — 그리고 그 사실을 여기 말고는 아무도 안 말한다.
+		b.WriteString("  1. **codex TUI 를 한 번 띄워 훅을 다시 신뢰해라** — 이번에 hooks.json 을 새로 썼다.\n")
+		b.WriteString("     $ codex\n")
+		b.WriteString("     ★ 신뢰 항목은 config.toml 에 있지만 그것은 **승인 시점의 해시**다.\n")
+		b.WriteString("       내용이 바뀐 훅은 **그 훅만** 조용히 안 돈다 — 예산(timeout) 한 칸이라도\n")
+		b.WriteString("       다르면 그렇다(2026-09-02 실측: 2→5 로 바꾼 훅 둘이 죽고 안 바꾼 것은 돌았다).\n")
+		b.WriteString("       그래서 화면은 「일부만 도는」 모양이 되고, 그것이 제일 읽기 어렵다.\n")
+	default:
+		b.WriteString("  1. ✓ 훅 신뢰는 이미 박혀 있다(config.toml) — 이번에 hooks.json 을 안 건드렸다.\n")
 	}
 
 	b.WriteString("  2. **샌드박스 네트워크를 열어라** — codex 기본값은 네트워크를 끊고,\n")
