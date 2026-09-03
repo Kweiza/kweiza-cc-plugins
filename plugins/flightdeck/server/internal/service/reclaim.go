@@ -223,6 +223,13 @@ func (s *Service) LeaveClaim(ctx context.Context, in LeaveInput) (ClaimLeaveResu
 			Reason:   "반납 사유가 비었다",
 			Guidance: "왜 안 했는지를 적어라 — 기한 미충족·막힘·판정 변경 중 무엇인가. 이 문장이 다음 사람의 유일한 단서다."}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   반납은 «내 선점»에만 걸리므로 아래 LiveClaim 이 이미 남의 것을 막는다. 그래도 여기서
+	//   보는 이유는 **명부 밖 이름의 거절 문면이 달라야** 해서다: 「그런 선점이 없다」와
+	//   「그 프로젝트가 이 워크스페이스의 것이 아니다」는 사람이 할 일이 다르다.
+	if err := s.GateTargetProject(ctx, sessionID, project); err != nil {
+		return ClaimLeaveResult{}, err
+	}
 
 	// 대상 후보는 트랜잭션 **밖**에서 읽는다(회수가 신호를 밖에서 읽는 것과 같은 이유 —
 	// 쓰기 잠금을 쥔 채 커넥션 풀을 기다리면 그 대기가 다른 쓰기 전부를 세운다).

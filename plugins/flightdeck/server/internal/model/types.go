@@ -127,6 +127,22 @@ type Project struct {
 	ArchivedAt time.Time
 }
 
+// WorkspaceMember 는 루트 프로젝트가 선언한 멤버 레포 하나다(증분 014).
+//
+// ★ 이 타입이 model 에 사는 이유는 **세 계층이 같은 값을 나르기 때문**이다:
+// judge 가 커밋된 `.flightdeck.yaml` 에서 뜯고(ParseWorkspace), store 가 캐시 표에
+// 넣고, service 가 절대경로로 풀어 git 을 읽는다. 계층마다 제 타입을 두면 그 사이
+// 변환이 세 벌 생기고, 변환은 필드를 하나 빠뜨려도 컴파일이 통과한다.
+//
+// Path 는 **루트 상대**다 — 절대경로를 담지 않는 근거는 증분 014 의 머리말에 있다.
+type WorkspaceMember struct {
+	// Project 는 멤버 레포의 프로젝트 id 다. 파일에서 비어 오면 Path 의 마지막 마디로
+	// 채워지는데, 그 채움은 **judge.MemberProjectID 한 자리**에서만 일어난다 —
+	// 이 구조체가 store 에 닿을 때는 이미 채워져 있다(빈 값은 저장하지 않는다).
+	Project string
+	Path    string
+}
+
 type Machine struct {
 	ID        string
 	Hostname  string
@@ -248,6 +264,13 @@ type After struct {
 	Item string
 	Job  string
 	SHA  string
+	// Project 는 **Item 이 어느 프로젝트의 것인가**다(증분 015). 비면 이 항목과 같은
+	// 프로젝트이고, 증분 이전의 모든 선행이 그 상태다 — 그래서 빈 값이 곧 기존 동작이다.
+	//
+	// ★ Job·SHA 에는 안 쓴다. sha 는 전역 유일하고(커밋 해시), 잡은 Tier B 라 아직
+	// 프로젝트를 넘는 형태가 없다. 세 축에 다 붙이면 안 쓰는 두 축이 「채워도 되나」라는
+	// 질문을 만들고, 그 질문의 답이 코드 어디에도 없게 된다.
+	Project string
 }
 
 type Claim struct {

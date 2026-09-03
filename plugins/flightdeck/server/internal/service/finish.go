@@ -37,6 +37,14 @@ type FollowupInput struct {
 	Paths  []string
 	Labels []string
 	After  []model.After
+	// Project 는 이 후속을 **어느 프로젝트에 만드나**다. 비면 마무리하는 항목과 같은
+	// 프로젝트이고, 워크스페이스가 아닌 전건이 그 상태다.
+	//
+	// ★ 판단과의 링크(followup_created)는 프로젝트를 넘어 이어진다 — 총괄 항목의 판단이
+	// 멤버 레포의 세부 항목을 가리키는 것이 다중 레포 배치의 기본 작업 형태이고,
+	// 그 링크가 끊기면 「왜 이 항목이 생겼나」의 답이 사라진다(judgment_link.target_project
+	// 가 증분 009 에서 같은 결함을 고쳤다).
+	Project string
 }
 
 // FinishInput 은 마무리 한 번의 인자다.
@@ -173,6 +181,11 @@ func JudgeFinish(outcome model.ItemState, itemID, body, closeReason string) Fini
 // 항목은 닫혔는데 후속이 안 들어간 상태는 만들어지지 않는다 —
 // 그 반쪽 상태가 기존 도구에서 "핸드오프는 했는데 후속이 유입되지 않은" 결함이었다.
 func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, error) {
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return FinishResult{}, err
+	}
 	if v := JudgeFinish(in.Outcome, in.ItemID, in.Body, in.CloseReason); !v.OK {
 		s.logFinishRefused(ctx, in, GateJudge)
 		s.log.WarnContext(ctx, "마무리 거절",
@@ -324,16 +337,20 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		//   어긋난 것은 건너뛰고 원장에 남긴다 — 자격 거절은 tx 진입 전에 이미 끝났다.
 		creates := make([]model.Item, 0, len(plan.Create))
 		for _, c := range plan.Create {
-			if _, err := t.GetItem(in.Project, c.Item.ID); err == nil {
+			// ★ **c.Project 로 본다 — in.Project 가 아니다.** 후속이 멤버 레포로 갈 수
+			//   있고(증분 015), 여기서 요청 프로젝트로 존재를 물으면 «남의 레포에 같은
+			//   id 가 있나»를 엉뚱한 곳에서 묻게 된다. 그러면 이미 있는 항목 위에 덮어
+			//   쓰려다 아래 AddItem 의 중복 갈래로 빠지고, 그 이벤트는 원인을 틀리게 적는다.
+			if _, err := t.GetItem(c.Project, c.Item.ID); err == nil {
 				out.SkippedFollowups = append(out.SkippedFollowups, c.Item.ID)
-				t.LogEvent("item.followup_skipped", in.Project, in.SessionID, map[string]any{
+				t.LogEvent("item.followup_skipped", c.Project, in.SessionID, map[string]any{
 					"item": c.Item.ID,
 					"why":  "분류 뒤 이 트랜잭션 사이에 같은 id 의 항목이 생겼다 — 판단을 지키려고 이 후속만 건너뛴다",
 				})
 				continue
 			}
 			creates = append(creates, model.Item{
-				Project: in.Project, ID: c.Item.ID, Title: c.Item.Title, Body: c.Item.Body,
+				Project: c.Project, ID: c.Item.ID, Title: c.Item.Title, Body: c.Item.Body,
 				Paths: c.Item.Paths, Labels: c.Item.Labels, State: model.ItemOpen,
 				After: c.Item.After, CreatedAt: now,
 			})
@@ -378,7 +395,17 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// dedupeLinks 를 지나는 이유는 그 함수 주석에 있다(겹치면 판단이 통째로 사라진다).
 		links := append([]model.JudgmentLink{{TargetKind: "item", TargetID: in.ItemID}}, in.Links...)
 		for _, it := range creates {
-			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: it.ID})
+			// ★ **교차 프로젝트 링크는 target_project 를 채운다**(증분 009). 안 채우면
+			//   읽는 쪽이 판단 자신의 project 로 잘라서, 멤버 레포에 만든 후속을 집는
+			//   세션에게 「왜 이것이 생겼나」가 영영 안 보인다 — 그 침묵이 009 를 만든
+			//   결함 자체다. 같은 프로젝트면 비운다(옛 링크 4240건과 같은 모양).
+			tp := ""
+			if it.Project != in.Project {
+				tp = it.Project
+			}
+			links = append(links, model.JudgmentLink{
+				TargetKind: "item", TargetID: it.ID, TargetProject: tp,
+			})
 		}
 		for _, id := range linked {
 			links = append(links, model.JudgmentLink{TargetKind: "item", TargetID: id})
@@ -432,7 +459,10 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 			// 한 kind 로 접으면 그 둘을 가를 축이 원장에서 사라진다. 술어를 가르는 자리는
 			// followupCandidates 이고, 그 짝을 시험 둘이 잠근다
 			// (finish_followup_created_eligibility_test.go).
-			t.LogEvent(followupCreatedEvent, in.Project, in.SessionID, map[string]any{
+			// ★ **이벤트의 project 는 항목이 앉은 곳이다.** 자격 조회(sessionSpawnedOpen)가
+			//   프로젝트로 자르므로, 여기에 요청 프로젝트를 적으면 멤버 레포에 만든 후속이
+			//   그 레포에서는 「이 세션이 만든 적 없는 항목」이 된다.
+			t.LogEvent(followupCreatedEvent, it.Project, in.SessionID, map[string]any{
 				"item": it.ID,
 				"why":  "이 마무리의 followups 로 만들었다 — 다음 마무리에서 이을 수 있다",
 			})
@@ -554,14 +584,23 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 	// 뒤져야 한다. (앞 판 주석은 "FreshnessOf 가 failures>0 을 git 축 Stale 로 접는다"를
 	// 이유로 댔는데, 그것은 reads>0 인 Board 이야기다 — 마무리는 git 읽기가 0이라
 	// FreshnessOf 가 어차피 db·낡음을 내고, 아래 GetItem 은 실제로 derive 에 고백한다.)
-	if held, herr := s.st.ClaimedItems(ctx, in.SessionID); herr != nil {
+	// ★ **ClaimedItemsLabeled 다.** 이 목록은 화면에 그대로 실려(「아직 N건 쥐고 있다」)
+	//   사람이 읽고 다음 행동을 정한다. 다른 프로젝트의 선점이 이름만 나오면 그 항목을
+	//   자기 큐에서 찾다가 못 찾는다 — 선점 조회 자체는 원래부터 프로젝트 무관이라
+	//   **세어지기는 했다**. 세는 것과 어디 있는지 말하는 것은 다르다.
+	if held, herr := s.st.ClaimedItemsLabeled(ctx, in.SessionID); herr != nil {
 		s.log.WarnContext(ctx, "마무리 뒤 남은 선점 조회 실패 — 응답은 그 축을 안 낸다",
 			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
 			"error", herr.Error())
 	} else {
+		// ★ 방금 닫은 것을 뺄 때 **두 표기를 다 본다.** 라벨 목록은 다른 프로젝트일 때만
+		//   접두가 붙으므로, 이 마무리가 교차 프로젝트였으면(project 인자) 그 항목은
+		//   `프로젝트/항목` 으로 온다. id 만 비교하면 방금 닫은 것이 「아직 쥐고 있다」로
+		//   화면에 남는다.
+		closedLabel := in.Project + "/" + in.ItemID
 		rest := make([]string, 0, len(held))
 		for _, id := range held {
-			if id == in.ItemID {
+			if id == in.ItemID || id == closedLabel {
 				continue // 방금 닫은 것. FinishItem 이 반납했으면 애초에 안 오지만, 두 번 세지 않는다
 			}
 			rest = append(rest, id)

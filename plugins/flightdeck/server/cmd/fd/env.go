@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/window"
 )
 
@@ -588,25 +589,18 @@ func MainRepoRoot(gitCommonDir string) string {
 
 // ProjectIDFromPath 는 경로에서 기본 프로젝트 id 를 만든다. 순수 함수다.
 //
+// ★ **정본은 judge 다 — 여기는 위임이다.** 서버도 같은 규칙으로 id 를 지어야 하기
+// 때문이다: 워크스페이스 명부의 멤버가 `project` 를 생략하면 서버가 그 경로의 마지막
+// 마디로 id 를 짓는데(judge.MemberProjectID), 그 문자열이 **이 함수가 그 레포에서 내는
+// 값과 한 글자라도 다르면** 같은 레포가 프로젝트 둘로 갈린다. 그 어긋남은 오류를 안
+// 내고 「멤버가 등록됐는데 그 레포 세션이 안 붙는다」로만 나타난다.
+//
+// 이름을 여기 남기는 이유는 호출부(resolveProject)와 시험이 이 좌표를 쓰기 때문이다 —
+// 껍데기 한 줄이 정본의 자리를 옮긴 사실을 이 주석으로 못박는다.
+//
 // 항목 id 와 달리 이 값은 셸·git ref 로 나가지 않지만, URL 질의 문자열과 파일 이름으로는
 // 나가므로 경계 문자를 걷어낸다.
-func ProjectIDFromPath(p string) string {
-	base := filepath.Base(filepath.Clean(strings.TrimSpace(p)))
-	if base == "." || base == string(filepath.Separator) || base == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range base {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return strings.Trim(b.String(), "-.")
-}
+func ProjectIDFromPath(p string) string { return judge.ProjectIDFromPath(p) }
 
 // resolveProject 는 cwd 에서 프로젝트 좌표를 읽는다.
 //

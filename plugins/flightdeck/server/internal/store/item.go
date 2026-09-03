@@ -210,9 +210,17 @@ func (t *Tx) addAfter(project, itemID string, a model.After) error {
 	if err := ValidateAfter(a); err != nil {
 		return err
 	}
+	// ★ dep_project 는 **자기 프로젝트면 NULL 이다**(증분 015). 값을 채워도 되지만
+	//   그러면 같은 사실이 두 표현(NULL·자기이름)을 갖고, 읽는 쪽의 COALESCE 가 둘 다
+	//   통과시켜서 어긋남이 안 드러난다 — 009(judgment_link.target_project)와 같은 관례다.
+	depProject := a.Project
+	if depProject == project {
+		depProject = ""
+	}
 	if _, err := t.tx.ExecContext(t.ctx, `
-		INSERT INTO item_after(project, item_id, dep_item, dep_job, dep_sha) VALUES (?, ?, ?, ?, ?)`,
-		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA)); err != nil {
+		INSERT INTO item_after(project, item_id, dep_item, dep_job, dep_sha, dep_project)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA), nullStr(depProject)); err != nil {
 		return writeErr(err, writeTarget{
 			Target: TargetItemAfter, Project: project, ID: itemID,
 			RefHint: fmt.Sprintf("항목 %s/%s", clip(project, 64), clip(itemID, 64)),
@@ -241,10 +249,17 @@ func (t *Tx) RemoveAfter(project, itemID string, a model.After, sessionID string
 		return err
 	}
 	// `IS` 로 비교한다 — 세 칸 중 둘은 NULL 이고 `=` 는 NULL 에 대해 NULL(거짓)을 낸다.
+	// dep_project 도 대조에 넣는다 — 안 넣으면 같은 id 를 가진 **두 프로젝트의 선행**이
+	// 한 번의 cut 으로 함께 사라진다. 그 손실은 조용하다(둘 다 지워도 RowsAffected 는 양수다).
+	depProject := a.Project
+	if depProject == project {
+		depProject = ""
+	}
 	res, err := t.tx.ExecContext(t.ctx, `
 		DELETE FROM item_after
-		WHERE project = ? AND item_id = ? AND dep_item IS ? AND dep_job IS ? AND dep_sha IS ?`,
-		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA))
+		WHERE project = ? AND item_id = ? AND dep_item IS ? AND dep_job IS ? AND dep_sha IS ?
+		  AND dep_project IS ?`,
+		project, itemID, nullStr(a.Item), nullStr(a.Job), nullStr(a.SHA), nullStr(depProject))
 	if err != nil {
 		return fmt.Errorf("선행 조건 절단 실패(project=%q item=%q): %w",
 			clip(project, 64), clip(itemID, 64), err)
@@ -301,12 +316,22 @@ func (s *Store) RemoveAfter(ctx context.Context, project, itemID string, a model
 // 있다**: DROP TABLE 은 migrate_guard_test.go 의 neverExempt 라 사유 예외로 못 열고,
 // 그 길은 `fd migrate [--to N]` / `--rollback` 신설이 먼저다(store.go 마이그레이션 절).
 // 그 표가 다시 채워지지 않는지는 TestItemDependentsStaysRetired 가 쓰기 경로를 태워 지킨다.
+//
+// ★ **교차 프로젝트 참조도 센다(증분 015).** 다른 프로젝트의 항목이 `dep_project` 로
+// 이 항목을 가리킬 수 있고, 그 관계는 이 항목이 폐기되면 **똑같이 영구 미충족**이 된다.
+// 안 세면 그 항목들이 폐기 관문에 안 걸려, 멤버 레포의 세부 항목을 닫는 순간 총괄 항목이
+// 조용히 굶는다 — 관문이 지키려는 것이 정확히 그 침묵이다.
+//
+// 판정은 `COALESCE(a.dep_project, a.project) = ?` 하나다: NULL 이면 같은 프로젝트라는
+// 증분 015 의 관례를 그대로 읽는다(009 가 target_project 에 쓴 것과 같은 어법).
 func (s *Store) Dependents(ctx context.Context, project, itemID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT a.item_id) FROM item_after a
-		JOIN item i ON i.project = a.project AND i.id = a.item_id
-		WHERE a.project = ? AND a.dep_item = ? AND i.state IN ('open', 'claimed')`,
+		SELECT COUNT(*) FROM (
+		  SELECT DISTINCT a.project, a.item_id FROM item_after a
+		  JOIN item i ON i.project = a.project AND i.id = a.item_id
+		  WHERE COALESCE(a.dep_project, a.project) = ? AND a.dep_item = ?
+		    AND i.state IN ('open', 'claimed'))`,
 		project, itemID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("종속 수 조회 실패(project=%q item=%q): %w",
@@ -328,11 +353,17 @@ func (s *Store) Dependents(ctx context.Context, project, itemID string) (int, er
 //
 // 순서는 id 순이다 — 거절 문구에 그대로 실리므로 같은 상태에 같은 문장이어야 한다.
 func (s *Store) DependentItems(ctx context.Context, project, itemID string) ([]string, error) {
+	// ★ **교차 프로젝트 참조는 `프로젝트/항목` 으로 낸다.** 이 목록은 거절 문구에 그대로
+	//   실리는데, id 만 내면 사람이 자기 큐에서 그 이름을 찾다가 못 찾는다 — 그 항목은
+	//   다른 레포에 있다. 같은 프로젝트면 지금까지와 **글자 그대로 같은** 문자열이다.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT a.item_id FROM item_after a
+		SELECT DISTINCT
+		  CASE WHEN a.project = ? THEN a.item_id ELSE a.project || '/' || a.item_id END AS name
+		FROM item_after a
 		JOIN item i ON i.project = a.project AND i.id = a.item_id
-		WHERE a.project = ? AND a.dep_item = ? AND i.state IN ('open', 'claimed')
-		ORDER BY a.item_id`, project, itemID)
+		WHERE COALESCE(a.dep_project, a.project) = ? AND a.dep_item = ?
+		  AND i.state IN ('open', 'claimed')
+		ORDER BY name`, project, project, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("종속 항목 조회 실패(project=%q item=%q): %w",
 			clip(project, 64), clip(itemID, 64), err)
@@ -420,7 +451,7 @@ func afterOf(ctx context.Context, q dbtx, project, itemID string) ([]model.After
 	// 기대게 되고, 그러면 되쓰기 산출물의 줄 순서가 판 바뀔 때 조용히 흔들린다 —
 	// 원본과 diff 로 대조하는 것이 그 산출물의 존재 이유라 순서가 곧 계약이다.
 	rows, err := q.QueryContext(ctx,
-		`SELECT dep_item, dep_job, dep_sha FROM item_after
+		`SELECT dep_item, dep_job, dep_sha, dep_project FROM item_after
 		 WHERE project = ? AND item_id = ? ORDER BY rowid`,
 		project, itemID)
 	if err != nil {
@@ -431,11 +462,14 @@ func afterOf(ctx context.Context, q dbtx, project, itemID string) ([]model.After
 
 	var out []model.After
 	for rows.Next() {
-		var di, dj, ds sql.NullString
-		if err := rows.Scan(&di, &dj, &ds); err != nil {
+		var di, dj, ds, dp sql.NullString
+		if err := rows.Scan(&di, &dj, &ds, &dp); err != nil {
 			return nil, fmt.Errorf("선행 조건 행 해석 실패: %w", err)
 		}
-		out = append(out, model.After{Item: str(di), Job: str(dj), SHA: str(ds)})
+		// ★ NULL 을 **자기 프로젝트로 펴지 않는다.** 빈 값이 곧 「같은 프로젝트」이고
+		//   (judge.AfterItemKey 가 그 계약을 읽는다), 여기서 채우면 증분 이전의 모든 행이
+		//   갑자기 «명시된» 것이 되어 그 둘을 구분할 축이 사라진다.
+		out = append(out, model.After{Item: str(di), Job: str(dj), SHA: str(ds), Project: str(dp)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("선행 조건 순회 실패: %w", err)
@@ -1242,6 +1276,76 @@ func (s *Store) ClaimedItems(ctx context.Context, sessionID string) ([]string, e
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("선점 목록 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// ClaimedRefs 는 이 세션이 쥔 선점을 **프로젝트와 함께** 낸다.
+//
+// ★★ **이 함수가 없어서 교차 프로젝트 선점의 항목이 처방에서 통째로 빠졌다.**
+// 선점 조회는 원래부터 프로젝트 무관인데(키가 session_id 하나다), 그 id 로 항목을 읽는
+// 쪽은 **세션의 프로젝트**에서 찾았다. 루트 카드가 멤버 레포에 남긴 선점은 그 조회가
+// 실패해 경고 로그 한 줄만 남기고 건너뛰어졌다 — 즉 「선점을 쥔 채 세션이 끝난다」는
+// 처방이 그 선점에 대해서만 **원리적으로 안 났다**. fd 가 세운 원칙(죽은 선점은 사람이
+// 판정해서 푼다)이 정확히 그 자리에서 안 섰다.
+//
+// 항목 id 순으로 정렬한다 — 처방 문면에 그대로 실리므로 같은 상태에 같은 문장이어야 한다.
+func (s *Store) ClaimedRefs(ctx context.Context, sessionID string) ([]model.Claim, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project, item_id FROM claim
+		 WHERE session_id = ? AND released_at IS NULL ORDER BY item_id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("선점 좌표 조회 실패(session_id=%q): %w", clip(sessionID, 64), err)
+	}
+	defer rows.Close()
+	var out []model.Claim
+	for rows.Next() {
+		var c model.Claim
+		if err := rows.Scan(&c.Project, &c.ItemID); err != nil {
+			return nil, fmt.Errorf("선점 좌표 행 해석 실패: %w", err)
+		}
+		c.SessionID = sessionID
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("선점 좌표 순회 실패: %w", err)
+	}
+	return out, nil
+}
+
+// ClaimedItemsLabeled 는 이 세션이 쥔 선점을 **화면 표기**로 낸다.
+//
+// ★ **ClaimedItems 와 짝이지만 쓰임이 다르다.** 저쪽은 기계 축이다 — 반납(LeaveClaim)이
+// 그 값을 항목 id 로 그대로 쓰므로 접두가 붙으면 «그런 항목이 없다»가 된다. 이쪽은
+// 사람이 읽는 축이라, 다른 프로젝트의 선점이면 `프로젝트/항목` 으로 찍는다.
+//
+// ★ **왜 필요한가.** 선점 조회는 원래부터 프로젝트 무관이었다(키가 session_id 하나다).
+// 그래서 루트 카드가 멤버 레포에 남긴 선점은 **세어지기는 했다** — 다만 이름만 나와서,
+// 그 항목을 자기 큐에서 찾던 사람이 못 찾았다. 세는 것과 어디 있는지 말하는 것은 다르다.
+//
+// ★ 접두는 **갈릴 때만** 붙는다. 단일 레포에서는 지금까지와 글자 그대로 같은 문자열이라
+// (Dependents·DependentItems 가 쓰는 것과 같은 어법) 옛 처방 문면이 안 바뀐다.
+func (s *Store) ClaimedItemsLabeled(ctx context.Context, sessionID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT CASE WHEN c.project = se.project THEN c.item_id
+		            ELSE c.project || '/' || c.item_id END AS name
+		FROM claim c JOIN session se ON se.id = c.session_id
+		WHERE c.session_id = ? AND c.released_at IS NULL
+		ORDER BY name`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("선점 표기 조회 실패(session_id=%q): %w", clip(sessionID, 64), err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("선점 표기 행 해석 실패: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("선점 표기 순회 실패: %w", err)
 	}
 	return out, nil
 }

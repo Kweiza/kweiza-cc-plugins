@@ -363,6 +363,13 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if b := splitBanner(v.Splits); b != "" {
 		head = append(head, b)
 	}
+	// ★ **워크스페이스 배너는 옵션과 무관하게 언제나 나간다.** 루트 세션이 19개 레포를
+	//   관장한다는 사실이 화면에 없으면, 그 세션은 자기가 자기 레포 하나만 보고 있다고
+	//   읽는다 — 그 오독이 이 항목 전체가 없애려는 것이다.
+	//   워크스페이스가 아니면 이 줄 자체가 없다(없는 축에 「해당 없음」을 안 붙인다).
+	if b := workspaceBanner(v); b != "" {
+		head = append(head, b)
+	}
 
 	ranked := rankCards(v, claimed, opt.Self, now)
 	blocks := make([]string, 0, len(ranked))
@@ -424,6 +431,7 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	} else {
 		foot = append(foot, boardBriefFoot(v)...)
 	}
+	foot = append(foot, renderMembers(v)...)
 	// 레인 절 — v.Lane 이 nil 이면 이 조회가 레인을 안 읽은 것이라 아예 안 찍는다.
 	// 읽었으면(0건이어도) 반드시 한 줄을 낸다 — renderLane 이 그 0건 문장에
 	// "질의는 돌았다"를 적어 nil(안 읽음)과 빈 슬라이스(질의는 돌았는데 아무도 없음)를 가른다
@@ -613,6 +621,113 @@ func splitBanner(reports []judge.SplitReport) string {
 		"⚠ 대화 %d개의 카드가 상하위 경로로 갈렸다 — 그 카드를 연 클라이언트에서 "+
 			"워크트리 정규화(4de4b21)가 안 돈다. 정규화가 도는 판은 이 모양을 만들 수 없다.",
 		len(ccs))
+}
+
+// renderWorkspaceQueues 는 형제 프로젝트들의 큐 미리보기다.
+//
+// ★★ **첫 줄이 「추천이 아니다」를 말한다.** 이 절의 유일한 위험은 읽는 쪽이 이 목록을
+// 추천으로 읽고 선행이 안 풀린 항목을 집으러 가는 것이다 — 적격 판정(선행 충족·경로
+// 겹침·자원·기아 가중)이 여기 하나도 안 들어 있기 때문이다(service.WorkspaceQueue 의
+// 머리말에 그 판정의 전문이 있다). 그 한계를 절 끝에 각주로 달면 목록을 읽고 바로
+// 움직이는 세션은 못 본다.
+//
+// ★ 티클러 수를 **따로** 낸다. 「열림 7건」의 대부분이 티클러면 그 레포는 붐비는 것이
+// 아니라 기다리는 것이고, 그 차이가 어디로 갈지를 바꾼다.
+func renderWorkspaceQueues(qs []service.WorkspaceQueue) string {
+	if len(qs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n워크스페이스 형제 큐 — **추천이 아니다**" +
+		"(적격 판정을 안 돌렸다: 선행·겹침·자원·기아를 안 봤다). " +
+		"고른 뒤 pick(project: <그 이름>) 이 진짜 추천을 낸다\n")
+	for _, q := range qs {
+		if q.Detail != "" {
+			fmt.Fprintf(&b, "  · %s — ! %s\n", q.Project, q.Detail)
+			continue
+		}
+		line := fmt.Sprintf("  · %s — 열림 %d건", q.Project, q.Open)
+		if q.Ticklers > 0 {
+			line += fmt.Sprintf("(그중 티클러 %d)", q.Ticklers)
+		}
+		if q.Oldest != nil {
+			line += fmt.Sprintf(" · 최고령 %s — %s", q.Oldest.ID, clip(q.Oldest.Title, 60))
+		} else if q.Open > 0 {
+			line += " · 전부 티클러다"
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+// renderMembers 는 멤버 프로젝트별 한 줄 요약이다. 안 물었으면(nil) 아무것도 안 낸다.
+//
+// ★ **프로젝트당 한 줄이다.** 멤버가 19개라 카드로 내면 한 화면을 넘고, 넘은 화면은
+// 아무도 안 읽는다. 이 절이 답하는 질문은 「지금 어느 레포가 붐비나」 하나이고,
+// 그 다음은 `board(project: <그 레포>)` 가 지금까지의 보드 전부를 낸다.
+//
+// ★ **0을 안 접는다.** 세션 0·큐 0인 멤버도 줄을 낸다 — 없는 줄은 「조용하다」가 아니라
+// 「명부에서 빠졌나?」로 읽히고, 그 오독을 푸는 데 사람이 파일을 열어 봐야 한다.
+//
+// ★ **자른 것을 말한다**(MembersOmitted). 조용히 자르면 20번째 레포에서 도는 세션이
+// 화면에서 통째로 사라지고 그 부재는 아무 표시도 안 남긴다.
+func renderMembers(v service.BoardView) []string {
+	if v.Members == nil {
+		return nil
+	}
+	if len(v.Members) == 0 {
+		return []string{"워크스페이스 멤버 요약: 낼 것이 없다(이 프로젝트가 명부의 전부다)"}
+	}
+	out := make([]string, 0, len(v.Members)+2)
+	out = append(out, fmt.Sprintf("워크스페이스 멤버 %d건 — 프로젝트당 한 줄이다"+
+		"(저장소 파생은 안 읽었다: 브랜치를 보려면 board(project: <이름>))", len(v.Members)))
+	for _, m := range v.Members {
+		line := fmt.Sprintf("  · %s — 세션 %d · 선점 %d · 큐 열림 %d",
+			m.Project, m.Sessions, m.Claims, m.OpenItems)
+		if len(m.Held) > 0 {
+			line += " · 자원 " + strings.Join(m.Held, ", ")
+		}
+		if m.Detail != "" {
+			line += " · ! " + m.Detail
+		}
+		out = append(out, line)
+	}
+	if v.MembersOmitted > 0 {
+		out = append(out, fmt.Sprintf("  %d 프로젝트 더 — 이 화면의 상한(%d)을 넘어 안 냈다"+
+			". 그 이름은 board(project: <이름>) 로 하나씩 본다",
+			v.MembersOmitted, service.MaxMemberSummaries))
+	}
+	return out
+}
+
+// workspaceBanner 는 「이 프로젝트가 여러 레포를 관장한다」는 한 줄이다.
+//
+// ★ **수를 화면에서 센다**(명부의 길이). 서버가 센 값을 따로 받아 찍으면 두 수가 갈릴
+// 자리가 하나 생기고, 갈린 수는 오류를 안 낸다 — splitBanner 가 같은 이유로 그룹이
+// 아니라 대화를 센다.
+//
+// ★ **루트에서 볼 때와 멤버에서 볼 때 문장이 다르다.** 같은 명부인데 서 있는 자리가
+// 다르고, 그 자리가 곧 「지금 무엇을 할 수 있나」를 가른다: 루트는 멤버 전부에 항목을
+// 걸 수 있고, 멤버는 자기 것과 형제의 자원 배타만 본다. 한 문장으로 뭉개면 멤버 세션이
+// 자기가 19개를 관장한다고 읽는다.
+//
+// ★ 요약을 **안 낸** 상태에서도 낸다. 이 줄의 일은 "여기 더 있다"를 말하는 것이고,
+// 그 다음 화면(workspace:true)으로 가는 손잡이를 함께 준다.
+func workspaceBanner(v service.BoardView) string {
+	r := v.Workspace
+	if !r.Active() {
+		return ""
+	}
+	n := len(r.Members)
+	if v.Project.ID == r.Root {
+		s := fmt.Sprintf("워크스페이스 루트 · 멤버 %d건 — 이 보드는 %s 것만이다", n, v.Project.ID)
+		if v.Members == nil {
+			s += ". 멤버까지 한 화면으로: board(workspace: true)"
+		}
+		return s
+	}
+	return fmt.Sprintf("워크스페이스 %s 의 멤버 %d건 중 하나 — 배타 자원은 그 %d건과 함께 줄을 선다",
+		r.Root, n, n)
 }
 
 // lastSignal 은 신호 넷 중 가장 최근 시각이다. 없으면 제로값이다.
@@ -895,7 +1010,7 @@ func boardBriefFoot(v service.BoardView) []string {
 	} else {
 		out = append(out, "큐 열림 0건")
 	}
-	out = append(out, "자원 점유: "+heldOrNoneLine(v.Held))
+	out = append(out, "자원 점유: "+heldOrNoneLineFor(v.Held, v.Project.ID))
 	return out
 }
 
@@ -909,7 +1024,7 @@ func boardDetailFoot(v service.BoardView) []string {
 		}
 		out = append(out, line)
 	}
-	out = append(out, "자원 점유: "+heldOrNoneLine(v.Held))
+	out = append(out, "자원 점유: "+heldOrNoneLineFor(v.Held, v.Project.ID))
 
 	if len(v.Blocked) > 0 {
 		out = append(out, fmt.Sprintf("막힘 %d건", len(v.Blocked)))
@@ -1164,22 +1279,39 @@ func resourceLaneWarns(rl service.ResourceLane) bool {
 // 그러니 0건은 **「아무도 안 쥐었다」와 「걸 자리가 없다」를 겸하면 안 된다.** 이 제품이
 // 반복해 맞은 실패가 「없는 축을 조용히 빼는 것」이고(web/query.go:18) 이 줄이 그 실패의
 // 실물 1건이다.
-func heldOrNoneLine(held []model.ResourceHold) string {
+func heldOrNoneLine(held []model.ResourceHold) string { return heldOrNoneLineFor(held, "") }
+
+func heldOrNoneLineFor(held []model.ResourceHold, self string) string {
 	if len(held) == 0 {
 		return "0건 — 아무도 안 쥐었다는 뜻이지 걸 자리가 없다는 뜻이 아니다. " +
 			`자원명은 자유 문자열이다: land(resources:["env:dell"])`
 	}
-	return heldLine(held)
+	return heldLineFor(held, self)
 }
 
+// heldLine 은 자원 점유를 한 줄로 낸다.
+//
+// ★ **프로젝트를 찍는다 — 다만 갈릴 때만.** 워크스페이스에서 배타 자원은 루트 스코프로
+// 접히므로(judge.ScopeResource) 멤버 보드에 뜬 `env:dell` 행의 project 는 루트다.
+// 안 찍으면 그 줄이 «이 프로젝트가 잡았다»로 읽히는데, 실제로 잡은 것은 형제일 수 있다.
+// 단일 레포에서는 전부 자기 프로젝트라 이 접두가 안 붙는다 — 안 갈리는 값을 매 줄에
+// 찍으면 그것은 정보가 아니라 소음이다.
 func heldLine(held []model.ResourceHold) string {
+	return heldLineFor(held, "")
+}
+
+func heldLineFor(held []model.ResourceHold, self string) string {
 	parts := make([]string, 0, len(held))
 	for _, h := range held {
 		holder := ShortID(h.SessionID)
 		if h.SessionID == "" {
 			holder = "job:" + h.JobID
 		}
-		parts = append(parts, fmt.Sprintf("%s ← %s", h.Resource, holder))
+		name := h.Resource
+		if self != "" && h.Project != "" && h.Project != self {
+			name = h.Project + "/" + h.Resource
+		}
+		parts = append(parts, fmt.Sprintf("%s ← %s", name, holder))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -1272,6 +1404,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 	} else {
 		b.WriteString("큐 열림 수가 이 응답에 없다 — 서버 판이 이 축을 안 내거나 세지 못했다\n")
 	}
+	b.WriteString(renderWorkspaceQueues(r.WorkspaceQueues))
 
 	if r.Item != nil {
 		it := *r.Item

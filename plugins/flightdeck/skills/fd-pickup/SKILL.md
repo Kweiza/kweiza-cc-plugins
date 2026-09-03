@@ -14,7 +14,7 @@ board
 ```
 
 You get **claimed work** (only cards holding a claim) · activity badges · last signal and its age · paths · unacknowledged items.
-There is no "dead" marker. Only age — the call is a human's.
+There is no "dead" marker. Only age — the call is a human's. If the banner says `워크스페이스`, this repo is **not** the whole queue — every tool takes `project`, and the banner names the next call; follow it (the responses carry which names are legal and what the sibling queues are **not**).
 
 ## 2. Choose what to pick
 

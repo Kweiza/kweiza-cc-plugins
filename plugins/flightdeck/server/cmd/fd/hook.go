@@ -480,7 +480,10 @@ func (a *App) hookSessionStart(ctx context.Context, p HookPayload, out io.Writer
 	// (바로 위 주석이 그 자리를 가리킨다).
 	a.pruneBinCache()
 
-	v, boardBanner, berr := a.Board(ctx, in.SessionID)
+	// ★ 훅 배너는 **자기 프로젝트만** 본다(BoardQuery 제로값). 세션 시작마다 형제 큐까지
+	//   끌어오면 그 화면이 멤버 수만큼 길어지고, 배너는 사람이 안 부른 자리라 길어지면
+	//   그대로 소음이 된다 — 워크스페이스 한 줄은 RenderBoard 의 배너가 이미 낸다.
+	v, boardBanner, berr := a.Board(ctx, in.SessionID, BoardQuery{})
 	if berr != nil {
 		a.log.Error("훅에서 보드 조회 실패", "mode", "session-start", "error", berr.Error())
 		if in.Banner == "" && boardBanner != "" {
@@ -562,7 +565,8 @@ func (a *App) hookUserPrompt(ctx context.Context, p HookPayload, out io.Writer) 
 	if sess == "" {
 		return
 	}
-	v, _, err := a.Board(ctx, sess)
+	// 자기 프로젝트만이다 — 위 SessionStart 갈래와 같은 판정(프롬프트마다 도는 자리다).
+	v, _, err := a.Board(ctx, sess, BoardQuery{})
 	if err != nil {
 		a.log.Warn("프롬프트 훅에서 보드 조회 실패", "error", err.Error())
 		return

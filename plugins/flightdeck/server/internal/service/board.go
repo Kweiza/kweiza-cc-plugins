@@ -31,6 +31,13 @@ type BoardOptions struct {
 	IncludeNotes bool
 	// NoteLimit 는 IncludeNotes 일 때 종류별로 가져올 판단 수다. 0 이면 20.
 	NoteLimit int
+	// Workspace 는 **멤버 프로젝트의 요약을 함께** 낸다(기본 false).
+	//
+	// ★ 기본값을 안 바꾼다. 루트 세션의 첫 board 가 멤버 수만큼 길어지면 아무도 안 읽고,
+	//   무엇보다 fd-pickup 스킬의 첫 호출이 board 라 기본값이 바뀌면 **단일 레포 프로젝트
+	//   전건의 화면이 바뀐다**. 배너의 「워크스페이스 N 멤버」 한 줄은 이 옵션과 무관하게
+	//   언제나 나간다 — 그 한 줄이 "여기 더 있다"를 말하는 자리다.
+	Workspace bool
 }
 
 // SessionCard 는 세션 하나의 보드 표시분이다.
@@ -177,7 +184,54 @@ type BoardView struct {
 	// 없어서, 창 밖까지 파생하면 세션 수만큼 터진다.
 	// 표시 계층이 이 사실을 말해야 한다: 이 줄은 "무엇이 잠겼나"만 답하고 파생 축은 모른다.
 	OutsideClaims []model.SessionView `json:"outside_claims,omitempty"`
+	// Workspace 는 이 프로젝트가 속한 워크스페이스의 명부다. 제로값이면 단일 레포다.
+	// **배너 한 줄(「워크스페이스 N 멤버」)이 이 값에서 나오고, 그 줄은 옵션과 무관하게
+	// 언제나 나간다** — 없는 것을 없다고 말하는 것과, 있는 것을 안 보여 주면서 말도 안
+	// 하는 것은 다르다.
+	Workspace judge.Roster `json:"workspace,omitzero"`
+	// Members 는 BoardOptions.Workspace 일 때만 채워지는 멤버별 한 줄 요약이다.
+	// nil 과 빈 슬라이스를 가른다 — nil 은 "안 물었다", 빈 것은 "물었는데 멤버가 없다".
+	Members []MemberSummary `json:"members,omitempty"`
+	// MembersOmitted 는 상한을 넘어 안 낸 멤버 수다. **조용히 자르지 않는다.**
+	MembersOmitted int `json:"members_omitted,omitempty"`
+	// SiblingLive 는 **형제 프로젝트의 살아 있는 세션**이다 — 겹침 판정 전용이고
+	// 카드로는 안 나간다.
+	//
+	// ★★ **왜 카드가 아닌가.** 이 목록의 유일한 소비자는 겹침(judge.OverlapsWithLive)이고,
+	// 카드로 내면 루트 보드가 멤버 수만큼 길어진다(그 화면은 Members 의 한 줄 요약이 낸다).
+	// 그런데 겹침은 **길이와 무관하게** 필요하다: 같은 파일을 두 레포 좌표에서 만지는 것이
+	// 이 배치의 가장 흔한 사고이고, 그것을 못 보면 이 도구의 존재 이유가 사라진다.
+	//
+	// ★ 경로는 **이 프로젝트의 좌표로 옮겨져 있다**(judge.Roster.PathAsSeenFrom).
+	// 옮길 수 없는 경로(다른 멤버의 파일)는 아예 안 실린다 — 억지로 문자열을 맞추면
+	// 서로 무관한 두 레포의 같은 상대경로가 겹침으로 뜨고, 그 오탐이 축 전체를 죽인다.
+	//
+	// ★ Delta 는 비어 있다. 규모는 저장소 파생이라 카드당 호출 2~5회인데, 형제까지
+	// 파생하면 보드 한 번이 저장소를 수십 번 친다 — 겹침의 본체는 «누가 무엇을 만지나»이고
+	// 규모는 정렬용 부가 정보다(SortOverlapsBySize 가 못 읽은 것을 맨 위로 올린다).
+	SiblingLive []judge.LiveSession `json:"sibling_live,omitempty"`
 	Derived
+}
+
+// MemberSummary 는 멤버 프로젝트 하나의 한 줄 요약이다.
+//
+// ★ **git 파생이 없다.** 세션 카드 하나에 붙는 파생은 저장소 호출 2~5회고 캐시가 없어서,
+// 멤버 19개에 그것을 돌리면 보드 한 번이 저장소를 백 번 친다. 이 줄이 답하는 질문은
+// 「지금 어느 레포가 붐비나」이고 그 답에는 브랜치가 필요 없다 — 필요해지면 그 멤버를
+// `board(project:)` 로 따로 열면 된다(그쪽은 지금까지의 보드 전부를 낸다).
+//
+// ★ 못 읽은 축은 Detail 에 남긴다. 수를 0으로 접으면 「조용한 레포」와 「못 센 레포」가
+// 화면에서 같아진다 — 이 파일이 OutOfWindow·Splits 에서 이미 두 번 지킨 규율이다.
+type MemberSummary struct {
+	Project string `json:"project"`
+	// Sessions 는 **창 안에** 신호가 있던 세션 수다(생존 판정이 아니다 — 표시 구간이다).
+	Sessions int `json:"sessions"`
+	// Claims 는 그 세션들이 쥔 선점 수다. 창 밖 세션의 선점은 여기 안 센다 —
+	// 그 축은 자기 프로젝트 보드의 OutsideClaims 가 이름으로 낸다.
+	Claims    int      `json:"claims"`
+	OpenItems int      `json:"open_items"`
+	Held      []string `json:"held,omitempty"` // 잡고 있는 자원 이름
+	Detail    string   `json:"detail,omitempty"`
 }
 
 // Board 는 살아 있는 세션과 그들이 만지는 경로를 낸다.
@@ -188,6 +242,13 @@ type BoardView struct {
 func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (BoardView, error) {
 	now := s.now()
 	d := &derive{}
+
+	// ★ 워크스페이스 관문 — 남의 프로젝트 보드를 읽는 것도 경계를 넘는 일이다.
+	//   읽기만 열어 두면 「board 는 되는데 pick 은 안 된다」가 되어 규칙이 도구마다
+	//   다른 것으로 읽힌다(service/workspace.go 의 GateTargetProject).
+	if err := s.GateTargetProject(ctx, opt.Self, project); err != nil {
+		return BoardView{}, err
+	}
 
 	proj, err := s.st.GetProject(ctx, project)
 	if err != nil {
@@ -306,12 +367,47 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	if view.Held, err = s.st.ListHeld(ctx, project); err != nil {
 		return BoardView{}, err
 	}
+	// ★ **워크스페이스 스코프의 점유를 함께 낸다.** 멤버 세션이 잡은 배타 자원은 행의
+	//   project 가 **루트**라(judge.ScopeResource) 이 프로젝트 이름으로는 안 걸린다 —
+	//   안 더하면 「내가 방금 잡은 env:dell 이 내 보드에 없다」가 된다. 그 침묵은
+	//   자원 축을 통째로 못 믿게 만든다.
+	//
+	// ★ 중복은 안 난다: 같은 (project, resource) 는 부분 유니크 인덱스가 하나로 막고,
+	//   여기서 더하는 것은 **다른 project 값**의 행이다. 루트 세션이 이 함수를 부르면
+	//   scopes 가 한 자리뿐이라 이 갈래 자체가 안 돈다.
+	for _, sc := range s.laneScopes(ctx, project) {
+		if sc == project {
+			continue
+		}
+		extra, herr := s.st.ListHeld(ctx, sc)
+		if herr != nil {
+			d.fail("held:"+sc, herr)
+			continue
+		}
+		view.Held = append(view.Held, extra...)
+	}
 	// 레인 — 항상 채운다. LandingLane 은 지금까지 비시험 호출자가 0건이었고(TestLandingQueueHasAProductionReader
 	// 가 그 축을 잠근다), 이 한 줄이 그 표를 "저장만 하고 아무도 안 읽는 표"에서 꺼낸다.
 	if lane, err := s.LandingLane(ctx, project); err != nil {
 		return BoardView{}, err
 	} else {
 		view.Lane = &lane
+	}
+
+	// ★ 명부는 **언제나** 읽는다(옵션과 무관하다). 배너 한 줄이 여기서 나오고, 그 줄이
+	//   없으면 루트 세션은 자기가 19개 레포를 관장한다는 사실을 화면에서 못 본다.
+	//   조회 두 번이고 저장소를 안 친다 — 이 함수가 이미 하는 일에 비하면 무시할 값이다.
+	if roster, rerr := s.Roster(ctx, project); rerr != nil {
+		d.fail("workspace", rerr)
+	} else {
+		view.Workspace = roster
+		if opt.Workspace {
+			view.Members, view.MembersOmitted = s.memberSummaries(ctx, roster, project, s.cut(now, window), d)
+		}
+		// ★ **옵션과 무관하게 채운다.** 겹침은 사람이 물어서 보는 축이 아니라
+		//   **묻지 않아도 떠야 하는** 축이다 — 그 경고가 뜨는 순간이 곧 조율이 필요한
+		//   순간이고, 그때 세션은 board(workspace:true) 를 부를 이유를 아직 모른다.
+		view.SiblingLive = s.siblingLive(ctx, roster, project, s.cut(now, window), d)
 	}
 
 	view.Derived = d.result(now)

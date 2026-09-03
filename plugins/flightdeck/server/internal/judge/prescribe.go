@@ -138,6 +138,21 @@ const (
 type ClaimView struct {
 	ItemID string
 	Paths  []string
+	// Project 는 이 선점이 **어느 프로젝트에 서 있나**다. 세션 자신의 프로젝트면 비어
+	// 있고, 다른 프로젝트(워크스페이스 멤버)면 그 이름이 온다.
+	//
+	// ★ **비어 있는 것이 「자기 것」이다.** 채우면 단일 레포에서도 문면에 프로젝트가
+	// 붙고, 그러면 옛 처방 문장이 전건 바뀐다 — 그 변화는 정보가 아니라 소음이다
+	// (store 의 ClaimedItemsLabeled·DependentItems 가 같은 어법을 쓴다).
+	Project string
+}
+
+// Label 은 처방 문면에 실을 이름이다. 다른 프로젝트면 `프로젝트/항목` 이다.
+func (c ClaimView) Label() string {
+	if c.Project == "" {
+		return c.ItemID
+	}
+	return c.Project + "/" + c.ItemID
 }
 
 // PrescribeInput 은 처방 판정에 필요한 전부다. I/O 도 상태도 없다.
@@ -750,10 +765,16 @@ func declaredPaths(claims []ClaimView) []string {
 	return out
 }
 
+// claimIDs 는 처방 문면에 실을 선점 이름들이다.
+//
+// ★ **Label() 을 쓴다 — ItemID 가 아니다.** 다른 프로젝트의 선점이면 `프로젝트/항목` 이
+// 나온다: 그 이름만 찍으면 사람이 자기 큐에서 찾다가 못 찾고, 「그런 항목 없다」로
+// 읽는다. 같은 프로젝트면 Label() 이 ItemID 를 그대로 내므로 단일 레포의 문면은
+// 한 글자도 안 바뀐다.
 func claimIDs(claims []ClaimView) string {
 	ids := make([]string, 0, len(claims))
 	for _, c := range claims {
-		ids = append(ids, c.ItemID)
+		ids = append(ids, c.Label())
 	}
 	return strings.Join(ids, ", ")
 }

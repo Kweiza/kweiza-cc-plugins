@@ -70,6 +70,22 @@ const (
 	AfterBadState   = "after-bad-state"   // 열거에 없는 상태 문자열 — 스키마와 코드가 어긋났다
 )
 
+// AfterItemKey 는 AfterFacts.ItemStates 의 키다. 순수 함수다.
+//
+// ★ **빈 Project 는 접두를 안 붙인다.** 증분 015 이전의 모든 선행이 그 상태이고,
+// 그 행들의 키가 바뀌면 이미 저장된 판정이 통째로 «조회하지 않았다»가 된다.
+// 즉 이 함수의 계약은 「같은 프로젝트면 예전과 **같은 문자열**」이다.
+//
+// ★ 채우는 쪽(service)과 읽는 쪽(여기)이 **같은 함수**를 쓴다. 두 자리에서 각자
+// 문자열을 조립하면 한쪽만 고쳐지고, 어긋난 키는 오류가 아니라 「조회하지 않았다」로
+// 나타난다 — 기다리면 풀린다고 믿게 만드는 그 모양이다.
+func AfterItemKey(a model.After) string {
+	if a.Project == "" {
+		return a.Item
+	}
+	return a.Project + "/" + a.Item
+}
+
 // AfterSatisfied 는 선행 조건이 전부 충족됐는지 판정한다.
 //
 // 미충족 사유를 **전부** 돌려준다. 첫 사유에서 끊으면 "하나 풀었더니 또 하나"가 반복되고,
@@ -103,9 +119,13 @@ func afterOneReason(a model.After, f AfterFacts) string {
 
 	switch {
 	case a.Item != "":
-		st, known := f.ItemStates[a.Item]
+		// ★ 사유 문면에는 **키**를 찍는다(AfterItemKey). 교차 프로젝트 선행이면
+		//   `멤버레포/항목id` 가 되어, 읽는 쪽이 어느 레포를 기다리는지 문장에서 안다 —
+		//   id 만 찍으면 같은 이름의 남의 항목과 구별이 안 된다.
+		key := AfterItemKey(a)
+		st, known := f.ItemStates[key]
 		if !known {
-			return fmt.Sprintf("%s: dep_item=%s 의 상태를 조회하지 않았다", AfterUnknown, a.Item)
+			return fmt.Sprintf("%s: dep_item=%s 의 상태를 조회하지 않았다", AfterUnknown, key)
 		}
 		switch st {
 		case model.ItemDone:
@@ -113,11 +133,11 @@ func afterOneReason(a model.After, f AfterFacts) string {
 		case model.ItemDropped:
 			// 기다림의 끝이 없다. 이 사유를 "아직"과 같은 코드로 내면 항목이 영구히 굶는다.
 			return fmt.Sprintf("%s: dep_item=%s 이(가) 폐기됐다 — 기다려도 안 풀린다. 선행을 고쳐라",
-				AfterDroppedDep, a.Item)
+				AfterDroppedDep, key)
 		case model.ItemOpen, model.ItemClaimed:
-			return fmt.Sprintf("%s: dep_item=%s state=%s", AfterUnmetItem, a.Item, st)
+			return fmt.Sprintf("%s: dep_item=%s state=%s", AfterUnmetItem, key, st)
 		default:
-			return fmt.Sprintf("%s: dep_item=%s 의 상태 %q 가 열거에 없다", AfterBadState, a.Item, string(st))
+			return fmt.Sprintf("%s: dep_item=%s 의 상태 %q 가 열거에 없다", AfterBadState, key, string(st))
 		}
 
 	case a.Job != "":

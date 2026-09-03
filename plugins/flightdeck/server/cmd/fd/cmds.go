@@ -121,6 +121,10 @@ func nonBlankPositionals(ids []string) []string {
 // runStatus 는 `fd status` 다. 서버 상태 배너 + 보드.
 func (a *App) runStatus(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("status")
+	// ★ `--project` 는 워크스페이스 멤버의 보드를 연다. 명부 밖 이름은 **서버가** 거절한다
+	//   — 이 프로세스는 명부를 안 본다(App.TargetProject 의 주석).
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트의 보드를 본다(비면 이 세션의 것)")
+	workspace := fs.Bool("workspace", false, "형제 프로젝트의 한 줄 요약(세션·선점·큐·자원)을 함께 낸다")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -137,7 +141,7 @@ func (a *App) runStatus(ctx context.Context, args []string, out io.Writer) int {
 	if serr != nil {
 		a.log.Warn("status: 세션 좌표를 못 얻었다", "reason", clip(serr.Error(), 200))
 	}
-	v, staleBanner, err := a.Board(ctx, self)
+	v, staleBanner, err := a.Board(ctx, self, BoardQuery{Project: *project, Workspace: *workspace})
 	if err != nil {
 		if staleBanner != "" && banner == "" {
 			fmt.Fprintln(out, staleBanner)
@@ -269,6 +273,8 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("next")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
+	workspace := fs.Bool("workspace", false, "형제 프로젝트의 큐 미리보기를 함께 낸다 — **추천이 아니다**(적격 판정을 안 돌린다)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -278,7 +284,8 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "추천을 못 받았다: %v\n", err)
 		return 1
 	}
-	path := fmt.Sprintf("/api/v1/items/next?project=%s&session_id=%s", urlValue(a.proj.ID), urlValue(sess))
+	path := fmt.Sprintf("/api/v1/items/next?project=%s&session_id=%s&workspace=%t",
+		urlValue(a.TargetProject(*project)), urlValue(sess), *workspace)
 	rr, err := a.cli.Read(ctx, path)
 	if err != nil {
 		if rr.Banner != "" {
@@ -316,6 +323,7 @@ func (a *App) runNext(ctx context.Context, args []string, out io.Writer) int {
 func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("pick")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
 	// ★ **반납은 닫기가 아니다.** 항목은 open 으로 살아 돌아가고 id·이력·after 가 남는다.
 	// 이 손잡이가 없으면 사람이 finish(dropped) 로 때우는데, 그러면 id 가 바뀌어 이력이
 	// 끊기고 일 없이 닫힌 항목 하나가 큐 수지에 완료로 쌓인다.
@@ -365,7 +373,7 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	a.cli.Session = sess
-	req := claimReq{Project: a.proj.ID, SessionID: sess}
+	req := claimReq{Project: a.TargetProject(*project), SessionID: sess}
 	if len(itemIDs) > 1 {
 		req.ItemIDs = itemIDs // 선두 포함 전체 순서 — 경로는 선두(itemIDs[0])로 보낸다
 	}
@@ -401,6 +409,7 @@ func (a *App) runPick(ctx context.Context, args []string, out io.Writer) int {
 func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("add")
 	id := fs.String("id", "", "항목 id(브랜치 이름·워크트리 디렉토리로 그대로 쓰인다)")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
 	title := fs.String("title", "", "제목")
 	body := fs.String("body", "", bodyFlagHelp)
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
@@ -425,7 +434,7 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	sess, _ := a.sessionID(ctx, *session)
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, "add", "/api/v1/items", addReq{
-		Project: a.proj.ID, SessionID: sess, ID: *id, Title: *title, Body: text,
+		Project: a.TargetProject(*project), SessionID: sess, ID: *id, Title: *title, Body: text,
 		Paths: paths, Labels: labels, After: after,
 	})
 	if err != nil {
@@ -466,6 +475,7 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("finish")
 	outcome := fs.String("outcome", "done", "done|dropped")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
 	title := fs.String("title", "", "판단 제목")
 	body := fs.String("body", "", "핸드오프 "+bodyFlagHelp)
 	closeReason := fs.String("close-reason", "", "dropped 면 필수")
@@ -511,7 +521,7 @@ func (a *App) runFinish(ctx context.Context, args []string, out io.Writer) int {
 	}
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, "finish", "/api/v1/items/"+urlPath(itemID)+"/finish", finishReq{
-		Project: a.proj.ID, SessionID: sess, Outcome: *outcome,
+		Project: a.TargetProject(*project), SessionID: sess, Outcome: *outcome,
 		Title: *title, Body: text, CloseReason: *closeReason, Followups: ups,
 	})
 	if err != nil {
@@ -723,6 +733,7 @@ func LandExitCode(state string) int {
 // "플래그를 줬는가"뿐이다.
 func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("land")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
 	fail := fs.String("fail", "", "검증이 깨져 반납한다 — 사유를 함께 준다")
 	leave := fs.String("leave", "", "줄에서 스스로 빠진다 — 사유를 함께 준다")
 	ok := fs.Bool("ok", false, "다 쓰고 반납한다(랜딩됐다는 뜻이 아니다 — 레인을 놓았다는 뜻이다)")
@@ -780,7 +791,7 @@ func (a *App) runLand(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	a.cli.Session = sess
-	req.Project, req.SessionID = a.proj.ID, sess
+	req.Project, req.SessionID = a.TargetProject(*project), sess
 
 	res, err := a.cli.Write(ctx, cmd, landingPath, req)
 	if err != nil {
@@ -955,6 +966,7 @@ func (a *App) runLaneWait(ctx context.Context, args []string, out io.Writer) int
 // 시각을 미는 것 하나다 — 실행 로직 자체는 사본이 아니다(runLaneWait 는 이 함수를 그대로 부른다).
 func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer, d laneWaitDeps) int {
 	fs := newFlagSet("lane wait")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트의 줄에 선다(비면 이 세션의 것)")
 	var resources stringList
 	fs.Var(&resources, "resource", "줄을 설 자원(반복 가능). 비면 landing")
 	timeout := fs.Duration("timeout", 9*time.Minute, "이 시간까지 차례가 안 오면 1로 끝낸다(다시 부르면 이어진다)")
@@ -974,7 +986,7 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 	a.cli.Session = sess
 	acquire := func() (service.LandResult, bool) {
 		res, err := a.cli.Write(ctx, CmdLandAcquire, landingPath, landReq{
-			Project: a.proj.ID, SessionID: sess, Mode: api.LandModeAcquire, Resources: resources,
+			Project: a.TargetProject(*project), SessionID: sess, Mode: api.LandModeAcquire, Resources: resources,
 		})
 		if err != nil || !res.Sent {
 			if err != nil {
@@ -1013,7 +1025,7 @@ func (a *App) runLaneWaitWith(ctx context.Context, args []string, out io.Writer,
 			return 1
 		}
 		d.sleep(wait)
-		body, rerr := a.cli.ReadFresh(ctx, landingQueuePath+"?project="+urlValue(a.proj.ID))
+		body, rerr := a.cli.ReadFresh(ctx, landingQueuePath+"?project="+urlValue(a.TargetProject(*project)))
 		if rerr != nil {
 			fmt.Fprintf(out, "줄을 읽지 못했다(%v) — 서버가 살아 있어야 대기가 성립한다. 캐시로는 판정하지 않는다.\n", rerr)
 			return 1
@@ -2011,9 +2023,12 @@ func (a *App) runMove(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "제목: %s\n", got.Item.Title)
 	}
 	if got.CrossRefs > 0 {
-		// 막지 않고 알린다 — 막으면 오등록을 되돌릴 길이 다시 0이 된다.
-		fmt.Fprintf(out, "주의: 옛 프로젝트에 남은 항목 %d건이 이 항목을 선행으로 가리킨다. "+
-			"그 관계는 프로젝트를 넘어 표현되지 않으므로 확인해라.\n", got.CrossRefs)
+		// ★ **문구가 뒤집혔다(증분 015).** 옛 문구는 "그 관계는 프로젝트를 넘어 표현되지
+		//   않으므로 확인해라"였다 — 그때는 실제로 죽었다. 이제 이동이 그 참조를 새
+		//   프로젝트로 다시 쓰므로 이 수는 **살린 건수**다. 옛 문구를 남겨 두면 사람이
+		//   멀쩡한 관계를 고치러 간다.
+		fmt.Fprintf(out, "옛 프로젝트에 남은 항목 %d건이 이 항목을 선행으로 가리켰고, "+
+			"그 참조를 새 프로젝트로 다시 썼다(관계가 따라왔다).\n", got.CrossRefs)
 	}
 	return 0
 }
@@ -2026,6 +2041,7 @@ const labelHelp = "fd label <item-id> --add <꼬리표> --rm <꼬리표>  — �
 // 같은 좁기다. 본문·제목·선행의 사후 수정은 DESIGN §11 이 "안 만든다"로 판정했다.
 func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("label")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
 	var add, rm stringList
 	fs.Var(&add, "add", "더할 꼬리표(반복 지정 가능). 'tickler' 만 굶김 축에서 빠진다")
 	fs.Var(&rm, "rm", "뺄 꼬리표(반복 지정 가능)")
@@ -2053,7 +2069,7 @@ func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
 	sess, _ := a.sessionID(ctx, *session)
 	a.cli.Session = sess
 	res, err := a.cli.Write(ctx, CmdLabel, labelPath(itemID), labelReq{
-		Project: a.proj.ID, SessionID: sess, Add: add, Rm: rm,
+		Project: a.TargetProject(*project), SessionID: sess, Add: add, Rm: rm,
 	})
 	if err != nil {
 		fmt.Fprintf(out, "꼬리표를 못 고쳤다: %v\n", err)

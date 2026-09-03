@@ -32,10 +32,10 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           fd serve 의 자동 갱신이 자식으로 부르고, 거절을
                                           손으로 재현할 때 같은 명령을 쓴다
 
-  fd status                               서버 상태 배너 + 보드
+  fd status [--workspace]                 서버 상태 배너 + 보드(--workspace 면 멤버 요약도)
   fd open [--label …]                     세션 등록(재호출은 재개다)
   fd beat --kind prompt|tool|mcp [--path] 생존 신호
-  fd next                                 추천 1건 + 탈락 사유 전부. **선점하지 않는다**
+  fd next [--workspace]                   추천 1건 + 탈락 사유 전부. **선점하지 않는다**
   fd pick <item-id> [<item-id>…]          선점(여럿이면 첫째가 선두 · 오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
   fd finish <item-id> --body … [--close]  판단+후속+종료+반납을 한 번에. --close 면 세션도 닫는다
@@ -58,6 +58,11 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd project rm --project <id> --reason … 잔해 프로젝트를 원장에서 지운다(--yes 없이는 세기만 한다)
   fd alloc <counter>                      원자 발번
   fd doctor                               이 머신과 서버의 축을 실제로 잰다
+
+  --project <이름>                        워크스페이스 멤버 레포에 건다(status·next·pick·add·
+                                          finish·land·label·lane wait). 루트 레포의
+                                          .flightdeck.yaml 의 workspace 명부에 있는 이름만 받고
+                                          그 밖은 거절한다 — 명부는 **커밋돼야** 읽힌다
 
   fd import --from-code <레포> [--from-docs <레포>] [--apply]
                                           옛 도구 산출물을 옮긴다. **기본값은 예행**이고

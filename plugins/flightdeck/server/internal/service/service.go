@@ -137,6 +137,11 @@ type GitReader interface {
 	UncommittedDelta(ctx context.Context, worktree string) (map[string]model.LineDelta, error)
 	AheadBehind(ctx context.Context, ref, base string) (ahead, behind int, err error)
 	Ancestry(ctx context.Context, sha, tip string) (judge.AncestryResult, error)
+	// FileAt 은 **커밋된** 파일을 읽는다(작업 트리가 아니다 — gitreader/file.go 의 머리말).
+	// 워크스페이스 명부가 이 문으로만 들어온다: 설계 §8 의 "대상 ref 의 파일에서 읽는다".
+	// 경로가 그 ref 에 없으면 gitreader.ErrFileNotInRef 로 감싼 오류를 낸다 —
+	// 그 부재는 정상 상태(단일 레포 프로젝트 전건)라 호출부가 조용히 지나간다.
+	FileAt(ctx context.Context, ref, path string) ([]byte, error)
 }
 
 // GitFactory 는 저장소 경로 하나를 읽는 리더를 만든다.

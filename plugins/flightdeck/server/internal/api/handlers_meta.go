@@ -329,11 +329,19 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("bad_note_limit", "note_limit 이 정수가 아니다", "예: note_limit=20"))
 		return
 	}
+	// ★ 기본값 false 다. 이 축을 켜면 응답이 멤버 수만큼 길어지고, 그 화면은 루트
+	//   세션이 **일부러** 물었을 때만 뜻이 있다(service.BoardOptions.Workspace).
+	workspace, err := queryBool(r, "workspace", false)
+	if err != nil {
+		s.writeError(w, r, badRequest("bad_workspace", "workspace 가 불리언이 아니다", "예: workspace=true"))
+		return
+	}
 	self := strings.TrimSpace(r.URL.Query().Get("self"))
 	infoFrom(r.Context()).setSession(self)
 
 	view, err := s.svc.Board(r.Context(), project, service.BoardOptions{
 		Window: window, Self: self, IncludeQueue: queue, IncludeNotes: notes, NoteLimit: limit,
+		Workspace: workspace,
 	})
 	if err != nil {
 		s.fail(w, r, err)

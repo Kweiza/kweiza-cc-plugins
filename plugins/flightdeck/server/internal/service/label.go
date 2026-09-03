@@ -65,6 +65,11 @@ func (s *Service) SetLabels(ctx context.Context, in LabelInput) (LabelResult, er
 			Guidance: "요청 본문의 project 를 채워라. CLI 는 `.flightdeck.yaml` 의 프로젝트를 자동으로 싣는다.",
 		}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return res, err
+	}
 	if in.ItemID == "" {
 		return res, &RefusedError{
 			What:     "label",

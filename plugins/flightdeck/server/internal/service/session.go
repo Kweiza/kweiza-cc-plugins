@@ -51,6 +51,12 @@ type SessionResult struct {
 	Branch  string        `json:"branch"` // 파생. 못 읽었으면 빈 문자열이고 Failures 에 사유가 있다
 	HeadSHA string        `json:"head_sha"`
 	Claims  []string      `json:"claims,omitempty"` // 이 세션이 이미 쥐고 있는 항목(재개 경로의 첫 줄)
+	// Workspace 는 이 프로젝트가 속한 워크스페이스의 명부다. 워크스페이스가 아니면
+	// 제로값이고, 그때 이 축을 읽는 자리가 전부 지금까지와 같이 돈다(judge.Roster.Active).
+	Workspace judge.Roster `json:"workspace,omitzero"`
+	// WorkspaceDetail 은 **명부를 어떻게 알았나**다. 언제나 채운다 — 「등록했는데 안
+	// 붙는다」를 사람이 스스로 짚으려면 안 바꾼 이유가 화면에 있어야 한다.
+	WorkspaceDetail string `json:"workspace_detail,omitempty"`
 	Derived
 }
 
@@ -355,15 +361,37 @@ func (s *Service) OpenSession(ctx context.Context, in OpenSessionInput) (Session
 			"worktree", clip(in.Worktree, 200), "reason", RenderDivergence(divergences))
 	}
 
-	claims, err := s.st.ClaimedItems(ctx, sess.ID)
+	// ★ **라벨 목록이다**(ClaimedItemsLabeled). 이 값은 재개 경로의 첫 줄로 화면에
+	//   그대로 실린다 — 루트 카드가 멤버 레포에 쥔 선점이 이름만 나오면 그 항목을
+	//   자기 큐에서 찾다가 못 찾는다. 같은 프로젝트면 지금까지와 같은 문자열이다.
+	claims, err := s.st.ClaimedItemsLabeled(ctx, sess.ID)
 	if err != nil {
 		// 선점 목록은 조정 정보라 파생이 아니다. 실패는 그대로 올린다.
 		return res, err
 	}
 
+	// ★ **명부 갱신은 커밋 뒤다.** SetWorkspaceSHA 가 project 행을 UPDATE 하므로 그 행이
+	//   이미 있어야 하고(자동 등록이 위 트랜잭션 안이다), 무엇보다 이 축이 실패해도
+	//   세션은 열려야 한다 — 조정의 본체(누가 살아 있나)는 명부 없이도 성립한다.
+	//
+	// ★ **git 을 새로 안 친다.** 위 ① 이 이미 Refs() 를 돌렸고 기본 브랜치의 sha 가 그
+	//   결과 안에 있다. 그 sha 가 마지막으로 읽은 것과 같으면 파일도 안 읽는다 —
+	//   그래서 이 갈래의 평시 비용은 조회 두 번이다(refreshWorkspace 의 머리말).
+	//
+	// ★ **오류를 올리지 않고 사유를 싣는다.** 명부를 못 읽은 것은 배너가 말할 사실이지
+	//   세션을 막을 사실이 아니다. 그 판정이 뒤집히면 `.flightdeck.yaml` 오타 하나가
+	//   그 레포의 전 세션을 못 열게 만든다.
+	_, wsDetail := s.refreshWorkspace(ctx, proj, s.git(proj.Path), refSHA(refs, proj.DefaultBranch))
+	roster, rerr := s.Roster(ctx, proj.ID)
+	if rerr != nil {
+		s.log.WarnContext(ctx, "워크스페이스 명부 조회 실패 — 없는 것으로 진행한다",
+			"project", clip(proj.ID, 64), "error", rerr.Error())
+	}
+
 	res = SessionResult{
 		Session: sess, Created: created, Project: proj,
 		Branch: branch, HeadSHA: head, Claims: claims,
+		Workspace: roster, WorkspaceDetail: wsDetail,
 		Derived: d.result(now),
 	}
 	s.log.InfoContext(ctx, "세션 열림",
@@ -687,7 +715,11 @@ func (s *Service) SessionByID(ctx context.Context, id string) (model.Session, []
 	if err != nil {
 		return model.Session{}, nil, err
 	}
-	claims, err := s.st.ClaimedItems(ctx, sess.ID)
+	// ★ **라벨 목록이다**(ClaimedItemsLabeled). 이 값은 `fd close` 의 거절 문면에 실려
+	//   사람이 무엇을 먼저 끝내야 하는지 읽는 자리다 — 다른 프로젝트의 선점이 이름만
+	//   나오면 그 항목을 자기 큐에서 찾다가 못 찾는다. 개수는 같으므로 닫기 판정은
+	//   한 글자도 안 바뀐다.
+	claims, err := s.st.ClaimedItemsLabeled(ctx, sess.ID)
 	if err != nil {
 		// 선점 목록은 조정 정보라 파생이 아니다. 못 세면 그대로 올린다 —
 		// 여기서 빈 목록으로 접으면 호출자가 "선점 0건"으로 읽고 카드를 닫는다.

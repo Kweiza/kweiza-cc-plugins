@@ -86,6 +86,7 @@ func TestDeclaredTablesMatchDesign(t *testing.T) {
 		"machine",
 		"pick_eval",
 		"project",
+		"project_member", // 증분 014 — 루트가 멤버 프로젝트 명부를 갖는다
 		"ref_state",
 		"resource_hold",
 		"schema_version", // CREATE TABLE IF NOT EXISTS — 순진한 패턴이 놓치는 그 한 줄

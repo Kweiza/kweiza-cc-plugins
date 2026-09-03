@@ -125,6 +125,13 @@ func undoNonIdempotentMigrations(t *testing.T, exec func(string) (sql.Result, er
 		`ALTER TABLE judgment_link DROP COLUMN target_project`,
 		// 013 · session.harness
 		`ALTER TABLE session DROP COLUMN harness`,
+		// 014 · project_member(표 + 인덱스). 인덱스를 먼저 걷는다 — DROP TABLE 이
+		//       인덱스를 함께 지우지만, 순서를 반대로 두면 다음 사람이 "표를 지웠으니
+		//       인덱스 줄은 없어도 되겠지"로 읽고 015 의 짝에서 같은 실수를 한다.
+		`DROP INDEX IF EXISTS project_member_by_member`,
+		`DROP TABLE IF EXISTS project_member`,
+		// 015 · item_after.dep_project
+		`ALTER TABLE item_after DROP COLUMN dep_project`,
 		// 011 · item_dependents 를 **되살린다**(schema.sql 의 v1 정의 그대로).
 		`CREATE TABLE IF NOT EXISTS item_dependents (
   project TEXT NOT NULL,

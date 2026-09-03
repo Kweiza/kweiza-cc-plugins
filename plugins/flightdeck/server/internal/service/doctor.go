@@ -78,12 +78,32 @@ type ProjectAxis struct {
 	Detail    string `json:"detail"`
 }
 
+// WorkspaceAxis 는 멤버 레포 하나의 도달성이다.
+//
+// ★ **왜 ProjectAxis 로 안 접나.** 그쪽은 「원장에 등록된 프로젝트가 읽히나」이고 이쪽은
+// 「루트가 **선언한** 경로가 읽히나」다. 멤버는 아직 원장에 없을 수 있고(그 레포에서
+// 세션이 한 번도 안 열렸으면), 그때 ProjectAxis 는 그 이름을 아예 모른다 —
+// 정확히 「등록했는데 아무 말도 없다」가 되는 자리다.
+type WorkspaceAxis struct {
+	Root     string `json:"root"`
+	Member   string `json:"member"`
+	Path     string `json:"path"` // 절대경로. 루트 경로 + 명부의 상대 경로
+	Readable bool   `json:"readable"`
+	// Registered 는 이 멤버가 **원장에 프로젝트로 있나**다. 선언과 관측은 다른 사실이라
+	// 갈라서 낸다 — false 가 결함은 아니다(아직 안 열린 레포다).
+	Registered bool   `json:"registered"`
+	Detail     string `json:"detail"` // 무엇을 재서 무엇을 봤나. 항상 채운다
+}
+
 // DoctorReport 는 진단 한 벌이다.
 type DoctorReport struct {
 	At       time.Time     `json:"at"`
 	Health   Health        `json:"health"`
 	Platform []DoctorAxis  `json:"platform"`
 	Projects []ProjectAxis `json:"projects"`
+	// Workspaces 는 명부가 선언한 멤버들이다. 워크스페이스가 없으면 비어 있고,
+	// 그 부재는 결함이 아니라 「단일 레포 프로젝트뿐이다」라는 답이다.
+	Workspaces []WorkspaceAxis `json:"workspaces,omitempty"`
 }
 
 // platformAxes 는 §13 이 기대는 플랫폼 축의 목록이다.
@@ -174,6 +194,7 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		}
 		rep.Projects = append(rep.Projects, axis)
 	}
+	rep.Workspaces = s.workspaceAxes(ctx, projects)
 
 	missing := 0
 	for _, a := range rep.Platform {

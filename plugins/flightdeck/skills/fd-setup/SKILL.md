@@ -52,8 +52,28 @@ After saving, you must relay **"Claude Code 를 다시 시작해야 훅·MCP 가
 once at startup and that is all — without this sentence, the user hits "I set it up and it
 does not work".
 
+## 6. If this repo is a root that holds other repos
+
+Only when the user says so — **never scan** (sub-directories that look like repos include worktrees and
+other people's clones). Ask which repos it manages, write the block into the root's `.flightdeck.yaml`,
+and relay the three silent failures:
+
+```yaml
+workspace:
+  members:
+    - project: search-api          # omit and the last path segment becomes the id
+      path: context-platform-search-api
+```
+
+1. **Commit it.** The server reads the committed file, not the working tree.
+2. Block style only — flow (`{members: […]}`), tabs, absolute paths and paths outside the root are
+   **refused with a reason**, never folded to zero members.
+3. `fd status` must now print `워크스페이스 루트 · 멤버 N건`; if not, the session response says why
+   (file missing · block missing · parse failure) — read it out. In a container the member paths must
+   sit inside the mounted tree (`FD_REPOS`) or that member's branch stays `?(못 읽음)`.
+
 ## What it does not do
 
 Installing without approval · commands not in the plan · pretending success on Windows ·
 writing config files directly (`fd setup` owns the format) · starting another server when
-one is already running.
+one is already running · **discovering workspace members by scanning** (they are declared).

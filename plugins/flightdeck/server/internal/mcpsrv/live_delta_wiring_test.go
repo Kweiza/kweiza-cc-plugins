@@ -3,6 +3,7 @@ package mcpsrv
 import (
 	"testing"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/service"
 )
@@ -35,7 +36,7 @@ func TestLiveOfCarriesPathDeltaIntoLiveSession(t *testing.T) {
 		},
 	}
 
-	got := liveOf([]service.SessionCard{c})
+	got := liveOf(service.BoardView{Sessions: []service.SessionCard{c}})
 	if len(got) != 1 {
 		t.Fatalf("%d건, 원하는 것 1건", len(got))
 	}
@@ -50,5 +51,28 @@ func TestLiveOfCarriesPathDeltaIntoLiveSession(t *testing.T) {
 	// 키 부재다). 있으면 liveOf 가 규모를 조작해 낸 것이다.
 	if _, ok := got[0].Delta["other.go"]; ok {
 		t.Fatalf("liveOf 가 못 잰 경로에 규모 키를 만들어 냈다 — 0 과 '못 읽었다'가 섞였다")
+	}
+}
+
+// 형제 프로젝트의 세션이 겹침 목록에 **들어간다**.
+//
+// ★ 이것이 없으면 워크스페이스에서 같은 파일을 두 레포 좌표에서 만지는 겹침이
+// 원리적으로 안 보인다 — 좌표계가 달라서지 안 겹쳐서가 아니다. 서버가 이미 이
+// 프로젝트의 좌표로 옮겨 실으므로, 이 계층이 하는 일은 **버리지 않는 것** 하나다.
+func TestLiveOfIncludesSiblingSessions(t *testing.T) {
+	view := service.BoardView{
+		Sessions: []service.SessionCard{{View: model.SessionView{
+			Session: model.Session{ID: "mine"}, Paths: []string{"a.go"},
+		}}},
+		SiblingLive: []judge.LiveSession{{ID: "sib", Label: "형제", Paths: []string{"b.go"}}},
+	}
+	got := liveOf(view)
+	if len(got) != 2 {
+		t.Fatalf("%d건 — 자기 1 + 형제 1 이어야 한다: %+v", len(got), got)
+	}
+	// 자기 레포가 먼저다 — 지금 손대는 파일이 먼저 보여야 한다(동점일 때만 사는 순서지만,
+	// 그 의도가 코드에 있으면 시험도 그것을 지킨다).
+	if got[0].ID != "mine" || got[1].ID != "sib" {
+		t.Fatalf("순서=%s,%s — 자기 카드가 먼저여야 한다", got[0].ID, got[1].ID)
 	}
 }

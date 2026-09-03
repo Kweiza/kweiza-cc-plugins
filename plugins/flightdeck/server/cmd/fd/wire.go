@@ -20,6 +20,9 @@ type afterWire struct {
 	Item string `json:"item,omitempty"`
 	Job  string `json:"job,omitempty"`
 	SHA  string `json:"sha,omitempty"`
+	// Project 는 선행 항목이 사는 프로젝트다(증분 015). 비면 이 항목과 같은 프로젝트라
+	// `omitempty` 로 키째 빠진다 — 옛 서버가 받아도 지금까지와 같은 요청이다.
+	Project string `json:"project,omitempty"`
 }
 
 // linkWire 는 판단 링크다. 위와 같은 이유로 따로 있다.
@@ -73,6 +76,9 @@ type followupReq struct {
 	Paths  []string    `json:"paths,omitempty"`
 	Labels []string    `json:"labels,omitempty"`
 	After  []afterWire `json:"after,omitempty"`
+	// Project 는 이 후속이 만들어질 프로젝트다. 비면 키째 빠진다 — 옛 서버가 받아도
+	// 지금까지와 같은 요청이다(afterWire.Project 와 같은 규율).
+	Project string `json:"project,omitempty"`
 }
 
 type finishReq struct {

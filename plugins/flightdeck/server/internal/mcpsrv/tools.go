@@ -47,11 +47,27 @@ func afterSchema() map[string]any {
 		"type":        "array",
 		"description": "선행 조건. 항목 하나에 item·sha·job 중 정확히 하나만 채운다(브랜치 이름은 못 쓴다)",
 		"items": obj(map[string]any{
-			"item": str("미랜딩 선행 항목 id"),
-			"sha":  str("이미 랜딩된 커밋 sha"),
-			"job":  str("선행 잡 id (Tier B)"),
+			"item":    str("미랜딩 선행 항목 id"),
+			"sha":     str("이미 랜딩된 커밋 sha"),
+			"job":     str("선행 잡 id (Tier B)"),
+			"project": str("선행 항목이 **다른 프로젝트**의 것일 때만 쓴다(워크스페이스 멤버). 비면 이 항목과 같은 프로젝트다"),
 		}),
 	}
+}
+
+// projectArg 는 «다른 프로젝트에 쓴다»는 선택 인자다.
+//
+// ★ **여섯 도구가 같은 문장을 쓴다.** 도구마다 다르게 적으면 세션이 그 차이를 뜻으로
+// 읽고(「board 의 project 는 다른 건가?」) 실제로는 같은 해석 함수 하나가 답한다.
+// 문장이 한 자리에 있으면 규칙이 바뀔 때 여섯이 함께 움직인다.
+//
+// ★ note 의 `item_project` 와 **낱말을 안 합친다.** 그쪽은 「그 항목이 어디 있나」를
+// 서버가 찾아 주는 축이고 이쪽은 「어디에 쓸까」를 지목하는 축이라, 못 찾았을 때의
+// 행동이 정반대다(탐색 vs 거절). 같은 이름을 주면 그 비대칭이 화면에서 사라진다.
+func projectArg() map[string]any {
+	return str("**워크스페이스 멤버 프로젝트**에 이 호출을 건다. 비면 이 세션의 프로젝트다. " +
+		"멤버 명부(루트 레포의 .flightdeck.yaml)에 없는 이름은 거절한다 — " +
+		"오타가 조용히 새 프로젝트를 만드는 것을 막는다")
 }
 
 func followupSchema() map[string]any {
@@ -59,12 +75,13 @@ func followupSchema() map[string]any {
 		"type":        "array",
 		"description": "이번에 나온 후속. 같은 호출에 넣으면 판단에 이어진다",
 		"items": obj(map[string]any{
-			"id":     str("항목 id — 브랜치 이름이 된다. **이미 있는 id 면 만들지 않고 잇는다**(이 세션이 이 선점 뒤 만든 열린 항목만 — 없는 id 면 새로 만드니 제목·본문이 필요하다)"),
-			"title":  str("한 줄 제목. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
-			"body":   str("무엇을 해야 하는가. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
-			"paths":  strArr("이 항목이 건드릴 경로"),
-			"labels": strArr("표시 전용 꼬리표. 'tickler' 만 굶김 축에서 빠진다"),
-			"after":  afterSchema(),
+			"id":      str("항목 id — 브랜치 이름이 된다. **이미 있는 id 면 만들지 않고 잇는다**(이 세션이 이 선점 뒤 만든 열린 항목만 — 없는 id 면 새로 만드니 제목·본문이 필요하다)"),
+			"title":   str("한 줄 제목. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
+			"body":    str("무엇을 해야 하는가. 새로 만들 때만 쓴다 — 이미 있는 id 면 안 읽는다"),
+			"paths":   strArr("이 항목이 건드릴 경로"),
+			"labels":  strArr("표시 전용 꼬리표. 'tickler' 만 굶김 축에서 빠진다"),
+			"after":   afterSchema(),
+			"project": str("후속을 **다른 프로젝트**에 만든다(워크스페이스 멤버). 비면 이 항목과 같은 프로젝트다 — 판단과의 링크는 프로젝트를 넘어 이어진다"),
 		}, "id"),
 	}
 }
@@ -77,6 +94,10 @@ var tools = []Tool{
 		InputSchema: obj(map[string]any{
 			"detail": map[string]any{"type": "boolean",
 				"description": "전 세션·전 경로·큐 목록·막힘/요청 판단까지 낸다(기본 false)"},
+			"project": projectArg(),
+			"workspace": map[string]any{"type": "boolean",
+				"description": "워크스페이스 멤버들의 한 줄 요약(세션·선점·큐·자원)을 함께 낸다(기본 false). " +
+					"저장소 파생은 안 읽는다 — 브랜치가 필요하면 그 멤버를 project 로 따로 열어라"},
 		}),
 	},
 	{
@@ -93,6 +114,10 @@ var tools = []Tool{
 			//   반납은 둘 다 leave 다. 이름을 갈라 두면 같은 판정이 두 이름으로 읽힌다.
 			"leave": str("내 선점을 놓는 사유(필수). 항목은 open 으로 돌아가고 id·이력이 산다. " +
 				"item_id 를 함께 주면 그 하나만, 안 주면 내가 쥔 전부를 놓는다"),
+			"project": projectArg(),
+			"workspace": map[string]any{"type": "boolean",
+				"description": "추천 후보를 워크스페이스 전체에서 뽑는다(기본 false — 자기 프로젝트만). " +
+					"선점에는 안 쓴다: 집을 때는 project 로 어느 멤버인지 못박아라"},
 		}),
 	},
 	{
@@ -119,12 +144,13 @@ var tools = []Tool{
 		Name:        "add",
 		Description: "큐 항목을 만든다. id 가 그대로 브랜치 이름이 된다.",
 		InputSchema: obj(map[string]any{
-			"id":     str("항목 id — [A-Za-z0-9._/-] 만. 브랜치·워크트리 이름으로 그대로 나간다"),
-			"title":  str("한 줄 제목"),
-			"body":   str("무엇을 해야 하는가. 비면 거절한다"),
-			"paths":  strArr("이 항목이 건드릴 경로(겹침 판정의 축)"),
-			"labels": strArr("표시 전용 꼬리표. 배제 판정에 안 쓴다 — 'tickler' 하나만 굶김 축(집계·기아 가중)에서 빠진다"),
-			"after":  afterSchema(),
+			"id":      str("항목 id — [A-Za-z0-9._/-] 만. 브랜치·워크트리 이름으로 그대로 나간다"),
+			"title":   str("한 줄 제목"),
+			"body":    str("무엇을 해야 하는가. 비면 거절한다"),
+			"paths":   strArr("이 항목이 건드릴 경로(겹침 판정의 축)"),
+			"labels":  strArr("표시 전용 꼬리표. 배제 판정에 안 쓴다 — 'tickler' 하나만 굶김 축(집계·기아 가중)에서 빠진다"),
+			"after":   afterSchema(),
+			"project": projectArg(),
 		}, "id", "title", "body"),
 	},
 	{
@@ -137,6 +163,7 @@ var tools = []Tool{
 			"title":        str("한 줄 제목"),
 			"close_reason": str("outcome=dropped 면 필수"),
 			"followups":    followupSchema(),
+			"project":      projectArg(),
 		}, "item_id", "outcome", "body"),
 	},
 	{
@@ -160,6 +187,7 @@ var tools = []Tool{
 				"파일을 안 고쳐서 경로 겹침이 못 보는 배타(스테이징·배포 대상·전용기)가 " +
 				"이 축의 자리다. fd 가 아는 이름은 landing 과 path:<경로> 둘뿐이고 " +
 				"나머지 <종류>:<이름> 은 프로젝트가 정한다(예: env:dell)"),
+			"project": projectArg(),
 		}),
 	},
 	{
@@ -169,6 +197,7 @@ var tools = []Tool{
 			"item_id": str("꼬리표를 고칠 항목 id"),
 			"add":     strArr("더할 꼬리표. 'tickler' 는 기한까지 늙는 항목을 굶김 축에서 뺀다"),
 			"rm":      strArr("뺄 꼬리표"),
+			"project": projectArg(),
 		}, "item_id"),
 	},
 }
@@ -204,7 +233,9 @@ func KnownTool(name string) bool {
 // "메인 트리의 지금 HEAD"가 남의 랜딩 sha 로 박히던 결함이었다.
 
 type boardArgs struct {
-	Detail bool `json:"detail"`
+	Detail    bool   `json:"detail"`
+	Project   string `json:"project"`
+	Workspace bool   `json:"workspace"`
 }
 
 type pickArgs struct {
@@ -212,6 +243,8 @@ type pickArgs struct {
 	ItemIDs     []string `json:"item_ids"`
 	StealReason string   `json:"steal_reason"`
 	Leave       string   `json:"leave"`
+	Project     string   `json:"project"`
+	Workspace   bool     `json:"workspace"`
 }
 
 type noteArgs struct {
@@ -224,27 +257,30 @@ type noteArgs struct {
 }
 
 type afterArgs struct {
-	Item string `json:"item"`
-	SHA  string `json:"sha"`
-	Job  string `json:"job"`
+	Item    string `json:"item"`
+	SHA     string `json:"sha"`
+	Job     string `json:"job"`
+	Project string `json:"project"`
 }
 
 type addArgs struct {
-	ID     string      `json:"id"`
-	Title  string      `json:"title"`
-	Body   string      `json:"body"`
-	Paths  []string    `json:"paths"`
-	Labels []string    `json:"labels"`
-	After  []afterArgs `json:"after"`
+	ID      string      `json:"id"`
+	Title   string      `json:"title"`
+	Body    string      `json:"body"`
+	Paths   []string    `json:"paths"`
+	Labels  []string    `json:"labels"`
+	After   []afterArgs `json:"after"`
+	Project string      `json:"project"`
 }
 
 type followupArgs struct {
-	ID     string      `json:"id"`
-	Title  string      `json:"title"`
-	Body   string      `json:"body"`
-	Paths  []string    `json:"paths"`
-	Labels []string    `json:"labels"`
-	After  []afterArgs `json:"after"`
+	ID      string      `json:"id"`
+	Title   string      `json:"title"`
+	Body    string      `json:"body"`
+	Paths   []string    `json:"paths"`
+	Labels  []string    `json:"labels"`
+	After   []afterArgs `json:"after"`
+	Project string      `json:"project"`
 }
 
 type finishArgs struct {
@@ -254,6 +290,7 @@ type finishArgs struct {
 	Title       string         `json:"title"`
 	CloseReason string         `json:"close_reason"`
 	Followups   []followupArgs `json:"followups"`
+	Project     string         `json:"project"`
 }
 
 type allocArgs struct {
@@ -277,10 +314,12 @@ type landArgs struct {
 	Leave     string   `json:"leave"`
 	Release   string   `json:"release"`
 	Resources []string `json:"resources"`
+	Project   string   `json:"project"`
 }
 
 type labelArgs struct {
-	ItemID string   `json:"item_id"`
-	Add    []string `json:"add"`
-	Rm     []string `json:"rm"`
+	ItemID  string   `json:"item_id"`
+	Add     []string `json:"add"`
+	Rm      []string `json:"rm"`
+	Project string   `json:"project"`
 }

@@ -110,26 +110,43 @@ func (t *Tx) MoveItem(project, itemID, toProject, sessionID string) error {
 		"item": clip(itemID, 100), "from": clip(project, 64), "to": clip(toProject, 64),
 	})
 
-	// 선행으로 **가리켜지는** 쪽도 같은 프로젝트 안에서만 표현된다.
-	// 옮기고 나면 옛 프로젝트에 남은 항목이 이 항목을 dep_item 으로 가리킬 수 있는데,
-	// 그 관계는 스키마가 표현하지 못한다. 지우지 않고 그대로 두되 호출부가 경고한다.
 	return nil
 }
 
-// DependentsAcross 는 **다른 프로젝트에 남는** 선행 참조를 센다.
+// RewriteDepProject 는 이 항목을 가리키던 선행 참조를 **새 프로젝트로 다시 쓴다**(증분 015).
 //
-// 이동을 막지는 않는다 — 막으면 오등록을 되돌릴 길이 다시 0이 된다. 대신 몇 건이
-// 끊기는지 호출부가 사람에게 말할 수 있게 한다. 침묵하면 그 관계가 조용히 죽는다.
-func (t *Tx) DependentsAcross(project, itemID string) (int, error) {
-	var n int
-	err := t.tx.QueryRowContext(t.ctx,
-		`SELECT COUNT(*) FROM item_after WHERE dep_item = ? AND project = ?`, itemID, project).Scan(&n)
+// ★ **이 함수가 있기 전에는 그 관계가 죽었다.** 옛 프로젝트에 남은 항목이 옮겨 간 항목을
+// dep_item 으로 가리키면 그 참조는 같은 프로젝트 안에서만 해석돼, 이동 직후부터
+// 「그 항목이 큐에 없다」(after-unknown)가 됐다. 막지 않고 수만 세어 알렸던 것이
+// MoveResult.CrossRefs 이고, 이제 그 수는 **다시 쓴 건수**가 된다.
+//
+// ★ **dep_project 가 비어 있던 행만 고친다.** 이미 다른 프로젝트를 명시한 행은 이 항목을
+// 가리키는 것이 아니다 — 같은 id 를 가진 남의 항목을 가리킨다(항목 id 는 프로젝트마다
+// 독립이다). 그것까지 고치면 이 이동이 무관한 관계를 조용히 옮긴다.
+//
+// ★ **자기 자신은 안 고친다.** 옮겨 간 항목이 스스로를 선행으로 가리키는 행(스키마가
+// 막지 않는다)은 이동과 함께 새 프로젝트로 따라갔으므로 이미 자기 프로젝트다.
+func (t *Tx) RewriteDepProject(fromProject, itemID, toProject string) (int, error) {
+	res, err := t.tx.ExecContext(t.ctx, `
+		UPDATE item_after SET dep_project = ?
+		WHERE dep_item = ? AND project = ? AND dep_project IS NULL AND item_id <> ?`,
+		toProject, itemID, fromProject, itemID)
 	if err != nil {
-		return 0, fmt.Errorf("선행 참조 조회 실패(project=%q id=%q): %w",
-			clip(project, 64), clip(itemID, 64), err)
+		return 0, fmt.Errorf("선행 참조 다시 쓰기 실패(project=%q id=%q → %q): %w",
+			clip(fromProject, 64), clip(itemID, 64), clip(toProject, 64), err)
 	}
-	return n, nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("선행 참조 다시 쓰기 결과 확인 실패(project=%q id=%q): %w",
+			clip(fromProject, 64), clip(itemID, 64), err)
+	}
+	return int(n), nil
 }
+
+// ★ **DependentsAcross 는 걷었다(증분 015).** 그 함수는 "옮기면 몇 건이 표현 불가가
+// 되나"를 셌는데, 이제 그 관계는 표현 가능하고 RewriteDepProject 가 **다시 쓴다**.
+// 세기만 하는 함수를 남겨 두면 다음 사람이 그 수를 "끊긴 건수"로 읽고, 실제로는
+// 아무것도 안 끊긴 이동에 경고를 붙인다 — 그 오독이 이 축의 유일한 위험이다.
 
 // MoveItem 은 판정 → 이동을 한 트랜잭션으로 감싼 것이다.
 //
@@ -162,12 +179,19 @@ func (s *Store) MoveItem(ctx context.Context, project, itemID, toProject, sessio
 		if v := JudgeMove(found, project, toProject, holder, targetFound); !v.OK {
 			return &MoveRefusedError{Project: project, ItemID: itemID, To: toProject, Reason: v.Reason}
 		}
-		n, derr := t.DependentsAcross(project, itemID)
+		if err := t.MoveItem(project, itemID, toProject, sessionID); err != nil {
+			return err
+		}
+		// ★ **이동 뒤에 다시 쓴다.** 순서가 뒤바뀌면 아직 옛 프로젝트에 있는 항목을
+		//   가리키는 참조에 새 프로젝트를 적게 되고, 그 사이 이동이 거절되면 원장에
+		//   가리킬 곳 없는 참조가 남는다. 같은 트랜잭션이라 둘은 함께 커밋되거나 함께
+		//   롤백된다.
+		n, derr := t.RewriteDepProject(project, itemID, toProject)
 		if derr != nil {
 			return derr
 		}
 		crossRefs = n
-		return t.MoveItem(project, itemID, toProject, sessionID)
+		return nil
 	})
 	return crossRefs, err
 }

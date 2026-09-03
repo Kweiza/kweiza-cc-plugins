@@ -221,8 +221,8 @@ func (b *mcpBackend) Beat(ctx context.Context, sessionID string, kind model.Sign
 
 func (b *mcpBackend) Board(ctx context.Context, project string, opt service.BoardOptions) (service.BoardView, error) {
 	var v service.BoardView
-	path := fmt.Sprintf("/api/v1/dashboard.json?project=%s&self=%s&queue=%t&notes=%t",
-		urlValue(project), urlValue(opt.Self), opt.IncludeQueue, opt.IncludeNotes)
+	path := fmt.Sprintf("/api/v1/dashboard.json?project=%s&self=%s&queue=%t&notes=%t&workspace=%t",
+		urlValue(project), urlValue(opt.Self), opt.IncludeQueue, opt.IncludeNotes, opt.Workspace)
 	if opt.Window > 0 {
 		path += "&window=" + urlValue(opt.Window.String())
 	}
@@ -265,8 +265,8 @@ func (b *mcpBackend) Pick(ctx context.Context, in service.PickInput) (service.Pi
 	// 인자 없는 pick 은 **추천**이라 읽기다(GET /items/next 는 선점하지 않는다).
 	// 인자 있는 pick 만 쓰기이고, 그것이 오프라인에서 거절되는 축이다.
 	if strings.TrimSpace(in.ItemID) == "" {
-		path := fmt.Sprintf("/api/v1/items/next?project=%s&session_id=%s",
-			urlValue(in.Project), urlValue(in.SessionID))
+		path := fmt.Sprintf("/api/v1/items/next?project=%s&session_id=%s&workspace=%t",
+			urlValue(in.Project), urlValue(in.SessionID), in.Workspace)
 		raw, deg, err := b.read(ctx, "pick", "next", path)
 		if err != nil {
 			return r, err
@@ -343,6 +343,7 @@ func (b *mcpBackend) Finish(ctx context.Context, in service.FinishInput) (servic
 		fs = append(fs, followupReq{
 			ID: f.ID, Title: f.Title, Body: f.Body,
 			Paths: f.Paths, Labels: f.Labels, After: toAfterWire(f.After),
+			Project: f.Project,
 		})
 	}
 	// ★ 공유 상태를 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절을 보라.
@@ -508,7 +509,7 @@ func toAfterWire(in []model.After) []afterWire {
 	}
 	out := make([]afterWire, 0, len(in))
 	for _, a := range in {
-		out = append(out, afterWire{Item: a.Item, Job: a.Job, SHA: a.SHA})
+		out = append(out, afterWire{Item: a.Item, Job: a.Job, SHA: a.SHA, Project: a.Project})
 	}
 	return out
 }

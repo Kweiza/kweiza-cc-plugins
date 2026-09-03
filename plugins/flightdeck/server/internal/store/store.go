@@ -68,9 +68,15 @@ var migrationRecoverSwallowedLinks string
 //go:embed migrations/013_session_harness.sql
 var migrationSessionHarness string
 
+//go:embed migrations/014_workspace_members.sql
+var migrationWorkspaceMembers string
+
+//go:embed migrations/015_item_after_dep_project.sql
+var migrationItemAfterDepProject string
+
 // SchemaVersion 은 **이 바이너리가 아는** 스키마 버전이다.
 // DB 가 이보다 높으면 연다는 것 자체가 조용히 망가지는 경로이므로 거절한다.
-const SchemaVersion = 13
+const SchemaVersion = 15
 
 // BaseSchemaVersion 은 schema.sql 하나가 만드는 버전이다.
 //
@@ -104,6 +110,8 @@ var migrations = []Migration{
 	{To: 11, Name: "죽은 표 item_dependents 를 걷는다", SQL: migrationDropItemDependents},
 	{To: 12, Name: "삼킴으로 죽은 판단 링크 21행을 되살린다", SQL: migrationRecoverSwallowedLinks},
 	{To: 13, Name: "세션이 하네스를 싣는다", SQL: migrationSessionHarness},
+	{To: 14, Name: "루트가 멤버 프로젝트 명부를 갖는다", SQL: migrationWorkspaceMembers},
+	{To: 15, Name: "선행이 프로젝트를 넘는다", SQL: migrationItemAfterDepProject},
 }
 
 // timeLayout 은 저장용 시각 표기다.

@@ -653,6 +653,22 @@ func (s *Server) ensureSession(ctx context.Context) (string, error) {
 // 도구
 // ─────────────────────────────────────────────────────────────────────────────
 
+// target 은 이 호출이 쓸 프로젝트다 — `project` 인자가 있으면 그것, 없으면 이 세션의 것.
+//
+// ★ **여기서 검증하지 않는다.** 명부는 원장에 있고 이 계층은 원장을 안 본다. 아는 이름
+// 목록의 사본을 여기 두면 그것이 곧 표류하고, 표류한 관문은 오타를 통과시키거나 멀쩡한
+// 이름을 막는다 — 둘 다 조용하다. 검증은 서비스 진입점 하나가 한다
+// (service.GateTargetProject) — MCP·REST·CLI 세 표면이 같은 관문을 지나는 자리다.
+//
+// ★ 그래서 이 함수는 **고르기만** 한다. 거절 문면·명부 열거·「워크스페이스가 아니다」
+// 갈래는 전부 그 관문이 낸다.
+func (s *Server) target(explicit string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		return p
+	}
+	return s.id.ProjectID
+}
+
 func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
 	var a boardArgs
 	if err := decodeArgs(raw, &a); err != nil {
@@ -661,10 +677,11 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 	// ★ IncludeNotes 는 detail 과 무관하게 항상 참이다. 꼬리의 알림 축이 이 응답에서 오고,
 	//   따로 부르면 같은 보드를 두 번 파생하게 된다(git 을 두 번 훑는다).
 	//   기본(brief) 표시에는 이 필드가 안 실리므로 출력은 그대로다 — boardBriefFoot 이 그 증거다.
-	view, err := s.be.Board(ctx, s.id.ProjectID, service.BoardOptions{
+	view, err := s.be.Board(ctx, s.target(a.Project), service.BoardOptions{
 		Self:         sessionID,
 		IncludeQueue: true,
 		IncludeNotes: true,
+		Workspace:    a.Workspace,
 	})
 	notice := ""
 	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) {
@@ -714,7 +731,7 @@ func (s *Server) toolBoard(ctx context.Context, sessionID string, raw json.RawMe
 		// self 는 위에서 이미 구한 openedIdentity 다 — 이 프로세스가 **실제로 연 카드**의
 		// 좌표라, 표류 배너가 쓰는 것과 같은 기준점이다. 둘이 갈리면 배너는 "갈렸다"고
 		// 하는데 겹침은 형제를 못 빼는 상태가 된다.
-		overlaps: judge.OverlapsWithLive(mine, liveOf(view.Sessions), sessionID, self.CCSessionID),
+		overlaps: judge.OverlapsWithLive(mine, liveOf(view), sessionID, self.CCSessionID),
 		observed: true,
 		notes:    notes,
 		haveNote: true,
@@ -767,8 +784,15 @@ func liveIdentitiesOf(cards []service.SessionCard) []LiveIdentity {
 	return out
 }
 
-func liveOf(cards []service.SessionCard) []judge.LiveSession {
-	out := make([]judge.LiveSession, 0, len(cards))
+// liveOf 는 겹침 판정에 넘길 살아 있는 세션 목록이다.
+//
+// ★ **형제 프로젝트의 세션을 함께 낸다**(view.SiblingLive). 워크스페이스에서는 같은
+// 파일을 두 레포 좌표에서 만지는 것이 가장 흔한 사고이고, 자기 프로젝트만 보면 그
+// 겹침이 **원리적으로** 안 보인다 — 좌표계가 다르기 때문이지 겹치지 않아서가 아니다.
+// 형제 쪽 경로는 서버가 이미 이 프로젝트의 좌표로 옮겨 실었다.
+func liveOf(view service.BoardView) []judge.LiveSession {
+	cards := view.Sessions
+	out := make([]judge.LiveSession, 0, len(cards)+len(view.SiblingLive))
 	for _, c := range cards {
 		out = append(out, judge.LiveSession{
 			ID: c.View.Session.ID, Label: c.View.Session.Label, Paths: c.View.Paths,
@@ -780,6 +804,10 @@ func liveOf(cards []service.SessionCard) []judge.LiveSession {
 			CCSessionID: c.View.Session.CCSessionID,
 		})
 	}
+	// ★ 뒤에 붙인다 — 앞에 두면 같은 규모의 겹침에서 형제가 먼저 뜬다. 자기 레포의
+	//   겹침이 먼저 보여야 한다: 그쪽이 지금 손대는 파일이다(정렬 자체는
+	//   SortOverlapsBySize 가 규모로 다시 세우므로 이 순서는 동점일 때만 산다).
+	out = append(out, view.SiblingLive...)
 	return out
 }
 
@@ -817,7 +845,7 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 					"하나만 놓으려면 item_id 와 함께 줘라."), tailOpts{}), true)
 		}
 		res, err := s.be.LeaveClaim(ctx, service.LeaveInput{
-			Project: s.id.ProjectID, SessionID: sessionID,
+			Project: s.target(a.Project), SessionID: sessionID,
 			ItemID: strings.TrimSpace(a.ItemID), Reason: strings.TrimSpace(a.Leave),
 		})
 		if err != nil {
@@ -838,8 +866,9 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 	}
 
 	res, err := s.be.Pick(ctx, service.PickInput{
-		Project: s.id.ProjectID, SessionID: sessionID,
+		Project: s.target(a.Project), SessionID: sessionID,
 		ItemID: strings.TrimSpace(a.ItemID), ItemIDs: a.ItemIDs,
+		Workspace: a.Workspace,
 	})
 	// 추천(item_id 없음)은 읽기라 캐시 처방이 온다. 값을 버리지 않고 배너와 함께 낸다 —
 	// 다만 **선점은 아무것도 안 됐다**는 사실을 그 배너가 말한다(선점의 처방은 거절이다).
@@ -901,7 +930,7 @@ func (s *Server) toolAdd(ctx context.Context, sessionID string, raw json.RawMess
 		return textResult(s.withTail(ctx, s.errText("add", err), tailOpts{}), true)
 	}
 	it, err := s.be.AddItem(ctx, service.AddItemInput{
-		Project: s.id.ProjectID, SessionID: sessionID,
+		Project: s.target(a.Project), SessionID: sessionID,
 		ID: strings.TrimSpace(a.ID), Title: a.Title, Body: a.Body,
 		Paths: a.Paths, Labels: a.Labels, After: toAfter(a.After),
 	})
@@ -941,10 +970,11 @@ func (s *Server) toolFinish(ctx context.Context, sessionID string, raw json.RawM
 		fs = append(fs, service.FollowupInput{
 			ID: strings.TrimSpace(f.ID), Title: f.Title, Body: f.Body,
 			Paths: f.Paths, Labels: f.Labels, After: toAfter(f.After),
+			Project: strings.TrimSpace(f.Project),
 		})
 	}
 	res, err := s.be.Finish(ctx, service.FinishInput{
-		Project: s.id.ProjectID, SessionID: sessionID,
+		Project: s.target(a.Project), SessionID: sessionID,
 		ItemID:  strings.TrimSpace(a.ItemID),
 		Outcome: model.ItemState(strings.TrimSpace(a.Outcome)),
 		Title:   a.Title, Body: a.Body, CloseReason: a.CloseReason,
@@ -1025,16 +1055,16 @@ func (s *Server) toolLand(ctx context.Context, sessionID string, raw json.RawMes
 			"한 번에 하나만 해라: 레인을 반납하려면 result, 줄에서 완전히 빠지려면 leave."), tailOpts{}), true)
 	case result != "":
 		res, err = s.be.LandReport(ctx, service.LandReportInput{
-			Project: s.id.ProjectID, SessionID: sessionID,
+			Project: s.target(a.Project), SessionID: sessionID,
 			Kind: model.LandingLeftKind(result), Detail: a.Detail,
 		})
 	case leave != "":
 		res, err = s.be.LandLeave(ctx, service.LandLeaveInput{
-			Project: s.id.ProjectID, SessionID: sessionID, Detail: leave,
+			Project: s.target(a.Project), SessionID: sessionID, Detail: leave,
 		})
 	default:
 		res, err = s.be.Land(ctx, service.LandInput{
-			Project: s.id.ProjectID, SessionID: sessionID, Resources: a.Resources,
+			Project: s.target(a.Project), SessionID: sessionID, Resources: a.Resources,
 		})
 	}
 	if err != nil {
@@ -1055,7 +1085,7 @@ func (s *Server) toolLabel(ctx context.Context, sessionID string, raw json.RawMe
 		return textResult(s.withTail(ctx, s.errText("label", err), tailOpts{}), true)
 	}
 	res, err := s.be.SetLabels(ctx, service.LabelInput{
-		Project: s.id.ProjectID, SessionID: sessionID,
+		Project: s.target(a.Project), SessionID: sessionID,
 		ItemID: strings.TrimSpace(a.ItemID), Add: a.Add, Rm: a.Rm,
 	})
 	if err != nil {
@@ -1076,9 +1106,10 @@ func toAfter(in []afterArgs) []model.After {
 	out := make([]model.After, 0, len(in))
 	for _, a := range in {
 		out = append(out, model.After{
-			Item: strings.TrimSpace(a.Item),
-			Job:  strings.TrimSpace(a.Job),
-			SHA:  strings.TrimSpace(a.SHA),
+			Item:    strings.TrimSpace(a.Item),
+			Job:     strings.TrimSpace(a.Job),
+			SHA:     strings.TrimSpace(a.SHA),
+			Project: strings.TrimSpace(a.Project),
 		})
 	}
 	return out

@@ -20,6 +20,8 @@ type afterInput struct {
 	Item string `json:"item"`
 	Job  string `json:"job"`
 	SHA  string `json:"sha"`
+	// Project 는 **선행 항목이 사는 프로젝트**다(증분 015). 비면 이 항목과 같다.
+	Project string `json:"project"`
 }
 
 func toAfter(in []afterInput) []model.After {
@@ -28,7 +30,7 @@ func toAfter(in []afterInput) []model.After {
 	}
 	out := make([]model.After, 0, len(in))
 	for _, a := range in {
-		out = append(out, model.After{Item: a.Item, Job: a.Job, SHA: a.SHA})
+		out = append(out, model.After{Item: a.Item, Job: a.Job, SHA: a.SHA, Project: a.Project})
 	}
 	return out
 }
@@ -64,8 +66,17 @@ func (s *server) handleNextItem(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// ★ 형제 큐 미리보기. 기본값 false 이고, 켜도 **추천은 이 프로젝트의 것 하나**다
+	//   (service.PickResult.WorkspaceQueues 의 머리말 — 프로젝트를 넘어 순위를 섞지 않는다).
+	workspace, werr := queryBool(r, "workspace", false)
+	if werr != nil {
+		s.writeError(w, r, badRequest("bad_workspace", "workspace 가 불리언이 아니다", "예: workspace=true"))
+		return
+	}
 	infoFrom(r.Context()).setSession(sessionID)
-	res, err := s.svc.Pick(r.Context(), service.PickInput{Project: project, SessionID: sessionID})
+	res, err := s.svc.Pick(r.Context(), service.PickInput{
+		Project: project, SessionID: sessionID, Workspace: workspace,
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -248,6 +259,8 @@ type followupRequest struct {
 	Paths  []string     `json:"paths"`
 	Labels []string     `json:"labels"`
 	After  []afterInput `json:"after"`
+	// Project 는 이 후속이 만들어질 프로젝트다(증분 015). 비면 마무리하는 항목과 같다.
+	Project string `json:"project"`
 }
 
 type finishRequest struct {
@@ -279,7 +292,7 @@ func (s *server) handleFinishItem(w http.ResponseWriter, r *http.Request) {
 	for _, f := range req.Followups {
 		in.Followups = append(in.Followups, service.FollowupInput{
 			ID: f.ID, Title: f.Title, Body: f.Body,
-			Paths: f.Paths, Labels: f.Labels, After: toAfter(f.After),
+			Paths: f.Paths, Labels: f.Labels, After: toAfter(f.After), Project: f.Project,
 		})
 	}
 	res, err := s.svc.Finish(r.Context(), in)

@@ -178,19 +178,31 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 	}
 
 	// 선점 항목과 각자의 선언 경로.
-	claimed, err := s.st.ClaimedItems(ctx, sessionID)
+	// ★ **ClaimedRefs 다 — ClaimedItems 가 아니다.** 선점은 프로젝트를 넘을 수 있고
+	//   (루트 카드가 멤버 레포의 항목을 집는다), 그때 항목을 세션의 프로젝트에서 찾으면
+	//   조회가 실패해 그 선점이 처방에서 통째로 빠진다. 그 함수의 머리말에 전문이 있다.
+	claimed, err := s.st.ClaimedRefs(ctx, sessionID)
 	if err != nil {
 		return PrescribeResult{}, err
 	}
-	for _, id := range claimed {
-		it, err := s.st.GetItem(ctx, sess.Project, id)
+	for _, c := range claimed {
+		it, err := s.st.GetItem(ctx, c.Project, c.ItemID)
 		if err != nil {
 			// 항목을 못 읽는 것은 처방을 못 낼 이유가 아니다. 조용히 접지 않고 남긴다.
 			s.log.WarnContext(ctx, "처방: 선점 항목을 못 읽었다",
-				"session_id", sessionID, "item", id, "error", err.Error())
+				"session_id", sessionID, "project", c.Project, "item", c.ItemID, "error", err.Error())
 			continue
 		}
-		in.Claims = append(in.Claims, judge.ClaimView{ItemID: it.ID, Paths: it.Paths})
+		// 다른 프로젝트일 때만 이름을 싣는다 — 단일 레포의 문면은 한 글자도 안 바뀐다.
+		cv := judge.ClaimView{ItemID: it.ID, Paths: it.Paths}
+		if c.Project != sess.Project {
+			cv.Project = c.Project
+			// ★ **경로는 안 싣는다.** 그 경로는 저 레포의 좌표계라, 이 세션의 발자국과
+			//   비교하면(judge 의 outside 축) 전부 «선언 밖»으로 세어진다 — 형제 선점
+			//   축이 GetItem 을 아예 안 부르는 것과 같은 논거다.
+			cv.Paths = nil
+		}
+		in.Claims = append(in.Claims, cv)
 	}
 
 	// 같은 대화의 **다른 카드**가 쥔 선점. 규율이 지시하는 `git worktree add` 가 카드를
@@ -294,6 +306,21 @@ func (s *Service) Prescriptions(ctx context.Context, sessionID string) (Prescrib
 			// 남으로 보고 **자기 자신과 조율하라**는 처방을 낸다.
 			CCSessionID: v.Session.CCSessionID,
 		})
+	}
+
+	// ★ **형제 프로젝트의 세션도 «남»이다.** 워크스페이스에서는 같은 파일을 두 레포
+	//   좌표에서 만지는 것이 가장 흔한 사고인데, 자기 프로젝트만 보면 그 겹침이
+	//   원리적으로 안 보인다(좌표계가 달라서지 안 겹쳐서가 아니다). 이 줄이 없으면
+	//   겹침 처방이 «양쪽»에 나지 않고 한쪽에서만 침묵한다.
+	//
+	// ★ 명부를 못 읽으면 **형제 없이 진행한다.** 처방은 턴마다 도는 자리라 여기서
+	//   오류를 올리면 명부 조회가 한 번 실패할 때 처방 전체가 사라진다 — 겹침 하나를
+	//   놓치는 것보다 나쁘다.
+	if r, rerr := s.Roster(ctx, sess.Project); rerr != nil {
+		s.log.WarnContext(ctx, "처방: 워크스페이스 명부 조회 실패 — 형제 없이 진행한다",
+			"project", clip(sess.Project, 64), "error", rerr.Error())
+	} else if sib := s.siblingLive(ctx, r, sess.Project, s.cut(in.Now, s.window), &derive{}); len(sib) > 0 {
+		in.Others = append(in.Others, sib...)
 	}
 
 	// 랜딩 줄의 차례. 0 이면 차례가 아니고, 그 판정을 하는 자리는 아래 하나다.

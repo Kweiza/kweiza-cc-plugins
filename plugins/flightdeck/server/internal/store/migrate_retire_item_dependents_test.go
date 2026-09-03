@@ -41,13 +41,19 @@ func TestMigration010EmptiesItemDependentsAndKeepsItemAfter(t *testing.T) {
 
 	// 간선 둘을 건다. 하나는 열린 항목, 하나는 닫힌 항목에서 온다 —
 	// 그 비대칭이 "표가 답하던 질문"과 "읽는 쪽이 묻던 질문"을 갈라놓는 그 지점이다.
-	if err := s.Tx(ctx, func(tx *Tx) error {
-		if err := tx.AddAfter("P", "waiter-open", model.After{Item: "dep"}); err != nil {
-			return err
+	// ★ **AddAfter 를 안 쓴다 — 손으로 심는다.** 이 시험은 스키마 9판 DB 를 여는데,
+	//   그 판에는 dep_project 칼럼이 없다(증분 015 가 만든다). AddAfter 는 **지금 코드**라
+	//   그 칼럼에 쓰고, 9판 DB 에서는 "no such column" 으로 죽는다.
+	//
+	//   운영에서는 그 조합이 불가능하다 — Open 이 판 불일치를 거절한다. 이 시험만
+	//   openRaw 로 그 관문을 우회하므로(위 ★), 옛 판의 모양은 **그 판의 SQL 로** 심는
+	//   것이 맞다. 여기서 AddAfter 를 쓰면 이 픽스처가 앞으로 증분마다 깨진다.
+	for _, w := range []string{"waiter-open", "waiter-done"} {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO item_after(project, item_id, dep_item) VALUES (?, ?, ?)`,
+			"P", w, "dep"); err != nil {
+			t.Fatalf("선행 등록 실패(%s): %v", w, err)
 		}
-		return tx.AddAfter("P", "waiter-done", model.After{Item: "dep"})
-	}); err != nil {
-		t.Fatalf("선행 등록 실패: %v", err)
 	}
 	if err := s.SetItemState(ctx, "P", "waiter-done", model.ItemDone, "끝"); err != nil {
 		t.Fatalf("항목 종료 실패: %v", err)
@@ -67,7 +73,18 @@ func TestMigration010EmptiesItemDependentsAndKeepsItemAfter(t *testing.T) {
 	}
 
 	// 그 갈림을 여기서 못박는다 — 이것이 표를 죽인 이유고, 되돌리기 질의가 무엇을 되살리는지의 정의다.
-	if live, err := s.Dependents(ctx, "P", "dep"); err != nil || live != 1 {
+	//
+	// ★ **Store.Dependents 를 안 쓴다 — 그 판의 SQL 로 센다.** 이 DB 는 곧 9판으로
+	//   되돌려지는데(아래 prev), 지금 코드의 그 함수는 dep_project 를 읽는다(증분 015).
+	//   9판에는 그 칼럼이 없어 "no such column" 으로 죽는다. 위 선행 심기가 같은 이유로
+	//   손 SQL 인 것과 같은 판정이다: 옛 판의 모양은 그 판의 SQL 로 재고, 그래야 이
+	//   픽스처가 앞으로 증분마다 안 깨진다.
+	var live int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT a.item_id) FROM item_after a
+		JOIN item i ON i.project = a.project AND i.id = a.item_id
+		WHERE a.project = 'P' AND a.dep_item = 'dep' AND i.state IN ('open','claimed')`).
+		Scan(&live); err != nil || live != 1 {
 		t.Fatalf("전제가 깨졌다 — 파생 종속 수가 %d 다(err=%v). 살아 있는 것은 waiter-open 하나라 1 이어야 한다", live, err)
 	}
 

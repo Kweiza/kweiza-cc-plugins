@@ -293,9 +293,19 @@ func dedupeLinks(links []model.JudgmentLink) []model.JudgmentLink {
 
 // followupCreate 는 "새로 만들 후속"이다. Index 는 **요청에서 몇 번째였나**(1-based) —
 // 분류로 순서가 갈려도 오류 문구가 요청 좌표를 잃지 않게 나른다.
+//
+// ★ Project 는 이 후속이 앉을 프로젝트다 — 요청이 비웠으면 마무리하는 항목의 것으로
+// 이미 채워져 있다(followupProject). 여기서 다시 «비면 기본값» 판정을 하지 않는다:
+// 같은 판정이 두 자리에 있으면 한쪽만 고쳐지고, 그 어긋남은 후속이 엉뚱한 레포에
+// 생기는 것으로만 나타난다.
 type followupCreate struct {
 	Index int
 	Item  FollowupInput
+	// Project 는 이 후속이 앉을 프로젝트다 — 요청이 비웠으면 마무리하는 항목의 것으로
+	// **이미 채워져 있다**(followupProject). 여기서 다시 «비면 기본값» 판정을 하지 않는다:
+	// 같은 판정이 두 자리에 있으면 한쪽만 고쳐지고, 그 어긋남은 후속이 엉뚱한 레포에
+	// 생기는 것으로만 나타난다.
+	Project string
 }
 
 // followupPlan 은 이번 마무리의 후속을 만들 것과 이을 것으로 가른 결과다.
@@ -307,6 +317,17 @@ type followupPlan struct {
 	Create   []followupCreate
 	Link     []string
 	Eligible []string
+}
+
+// followupProject 는 후속 하나가 만들어질 프로젝트다.
+//
+// 비면 마무리하는 항목과 같다 — 워크스페이스가 아닌 전건이 그 상태이고, 그래서 이
+// 함수가 있어도 기존 동작은 한 글자도 안 바뀐다.
+func followupProject(in FinishInput, f FollowupInput) string {
+	if p := strings.TrimSpace(f.Project); p != "" {
+		return p
+	}
+	return in.Project
 }
 
 // classifyFollowups 는 후속마다 만들기·잇기·거절 중 하나를 고른다.
@@ -330,11 +351,32 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 		canLink[id] = true
 	}
 	for i, f := range in.Followups {
-		if canLink[f.ID] {
+		fp := followupProject(in, f)
+		// ★ **잇기는 자기 프로젝트만이다.** 잇기의 자격은 「이 세션이 이 선점 뒤에 만든
+		//   열린 항목」인데(sessionSpawnedOpen) 그 조회는 이 프로젝트의 원장을 본다.
+		//   교차 프로젝트로 넓히려면 그 술어부터 넓혀야 하고, 그것은 이 항목의 축이 아니다
+		//   — 여기서 그냥 통과시키면 **남의 프로젝트의 같은 id 가 내 판단에 이어진다**.
+		//   그래서 대상 프로젝트가 다르면 잇기 후보에서 아예 뺀다(아래 거절이 이름을 댄다).
+		if fp == in.Project && canLink[f.ID] {
 			plan.Link = append(plan.Link, f.ID)
 			continue
 		}
-		exists, itemObserved := s.itemExists(ctx, in.Project, f.ID)
+		// ★ 워크스페이스 관문 — 명부 밖 프로젝트를 지목한 후속은 여기서 끊긴다.
+		//   통과시키면 오타 하나가 프로젝트를 만들고, 그 프로젝트에 후속이 한 건 앉는다.
+		if fp != in.Project {
+			if err := s.GateTargetProject(ctx, in.SessionID, fp); err != nil {
+				var ref *RefusedError
+				if errors.As(err, &ref) {
+					return followupPlan{}, &RefusedError{What: "finish",
+						Reason:   fmt.Sprintf("%d번째 후속(%s)의 project: %s", i+1, clip(f.ID, 64), ref.Reason),
+						Guidance: ref.Guidance}
+				}
+				return followupPlan{}, &RefusedError{What: "finish",
+					Reason: fmt.Sprintf("%d번째 후속(%s)의 프로젝트를 판정하지 못했다: %s",
+						i+1, clip(f.ID, 64), clip(err.Error(), 160))}
+			}
+		}
+		exists, itemObserved := s.itemExists(ctx, fp, f.ID)
 		switch {
 		case !itemObserved:
 			// ★ **fail-closed 다 — 아래 있음/없음 갈래와 반대 방향.** sessionSpawnedOpen 의
@@ -350,7 +392,7 @@ func (s *Service) classifyFollowups(ctx context.Context, in FinishInput) (follow
 		case exists:
 			return followupPlan{}, refuseIneligibleFollowup(i+1, f.ID, in.ItemID, eligible, observed)
 		default:
-			plan.Create = append(plan.Create, followupCreate{Index: i + 1, Item: f})
+			plan.Create = append(plan.Create, followupCreate{Index: i + 1, Item: f, Project: fp})
 		}
 	}
 	return plan, nil

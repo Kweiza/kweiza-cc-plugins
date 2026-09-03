@@ -38,6 +38,12 @@ type PickInput struct {
 	SessionID string
 	ItemID    string   // 비면 추천, 있으면 단독 선점
 	ItemIDs   []string // 묶음 선점. **첫째가 선두**이고 그 id 가 브랜치가 된다
+	// Workspace 는 **형제 프로젝트의 큐를 함께** 본다(추천 경로에서만 뜻이 있다).
+	//
+	// ★ 선점에는 안 쓴다. 집을 때는 어느 멤버인지가 Project 로 못박혀야 하고, 그
+	// 못박음이 브랜치·워크트리 경로를 정한다 — 「워크스페이스에서 아무거나 집는다」는
+	// 그 좌표를 서버가 임의로 고른다는 뜻이 된다.
+	Workspace bool
 }
 
 // PickResult 는 pick 한 번의 결과다.
@@ -84,6 +90,20 @@ type PickResult struct {
 	//  2. 오프라인 캐시에는 스키마 버전축이 없다 — 이 필드가 생기기 전에 굳은 next 응답이
 	//     그대로 재생된다. nil 이면 "이 응답은 그 축을 안 낸다"로 정확히 읽힌다.
 	QueueOpen *int `json:"queue_open,omitempty"`
+
+	// WorkspaceQueues 는 형제 프로젝트들의 큐 미리보기다(pick(workspace:true) 에서만).
+	//
+	// ★ **이것은 추천이 아니다.** 그 사실이 이 필드의 전부라, 이름도 «다음 후보»가 아니라
+	// «큐»다. 적격 판정(선행 충족·경로 겹침·자원·기아 가중)은 그 프로젝트의 살아 있는
+	// 세션과 저장소 파생을 읽어야 나오는데, 멤버 19개에 그것을 돌리면 추천 한 번이
+	// 저장소를 수십 번 친다 — pick 은 픽업 절차의 두 번째 호출이라 그 비용이 곧 첫
+	// 명령의 체감 속도다.
+	//
+	// ★ **그리고 섞지 않는다.** 프로젝트를 넘어 하나를 고르려면 큐들의 나이를 같은
+	// 자로 재야 하는데, 큐마다 재생산 속도가 달라서 그 정규화 자체가 근거 없는 값이 된다.
+	// 그래서 여기 실리는 것은 「어느 레포에 무엇이 얼마나 쌓였나」뿐이고, 고르는 것은
+	// 그 화면을 읽는 쪽이다 — 골랐으면 pick(project: <그 멤버>) 가 진짜 추천을 낸다.
+	WorkspaceQueues []WorkspaceQueue `json:"workspace_queues,omitempty"`
 
 	// PathCheck 는 이 항목이 선언한 경로가 이 프로젝트에 실재하는가다.
 	//
@@ -327,6 +347,11 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 		return PickResult{}, &RefusedError{What: "pick",
 			Reason: "item_ids 에 쓸 수 있는 항목 id 가 없다"}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return PickResult{}, err
+	}
 	proj, err := s.st.GetProject(ctx, in.Project)
 	if err != nil {
 		return PickResult{}, err
@@ -336,6 +361,13 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 		return PickResult{}, err
 	}
 	live := liveFor(cards)
+	// ★ 형제 프로젝트의 세션도 겹침 후보다 — 처방 경로와 같은 판정, 같은 이유다
+	//   (service/prescribe.go 의 그 자리). 명부를 못 읽으면 형제 없이 간다.
+	if r, rerr := s.Roster(ctx, proj.ID); rerr != nil {
+		d.fail("workspace", rerr)
+	} else {
+		live = append(live, s.siblingLive(ctx, r, proj.ID, s.cut(now, 0), d)...)
+	}
 	selfCC := selfCCOf(cards, in.SessionID)
 
 	var res PickResult
@@ -1006,6 +1038,15 @@ func (s *Service) pickRecommend(ctx context.Context, proj model.Project, in Pick
 	}, sib)
 
 	res := PickResult{Rejected: rejected, Scope: scope, QueueOpen: &openCount}
+	// ★ 형제 큐는 **추천을 고른 뒤에** 붙인다. 이 값은 순위에 하나도 안 들어가고
+	//   (WorkspaceQueues 의 머리말), 그 무관함이 코드 순서로도 보여야 한다.
+	if in.Workspace {
+		if r, rerr := s.Roster(ctx, proj.ID); rerr != nil {
+			d.fail("workspace-queues", rerr)
+		} else {
+			res.WorkspaceQueues = s.workspaceQueues(ctx, r, proj.ID)
+		}
+	}
 	eval := model.PickEval{Project: proj.ID, SessionID: in.SessionID, Rejected: rejected}
 	if best != nil {
 		eval.Picked = best.Lead.Item.ID
@@ -1233,10 +1274,14 @@ func afterVerdictFrom(item model.Item, facts judge.AfterFacts, inCall []string) 
 		}
 	}
 	for _, a := range item.After {
-		if a.Item == "" || !sibling[a.Item] {
+		// ★ **같은 프로젝트의 선행만 «함께 집는다»가 될 수 있다.** inCall 은 이 호출이
+		//   집는 항목 id 목록인데 그 호출은 프로젝트 하나에 걸리므로(pick 의 Project),
+		//   다른 프로젝트의 같은 id 를 여기서 맞추면 **남의 항목을 내가 함께 집는다**고
+		//   화면이 거짓말한다. 교차 프로젝트 선행은 그 프로젝트에서 따로 집어야 한다.
+		if a.Item == "" || a.Project != "" || !sibling[a.Item] {
 			continue
 		}
-		if st, known := facts.ItemStates[a.Item]; !known || st != model.ItemDone {
+		if st, known := facts.ItemStates[judge.AfterItemKey(a)]; !known || st != model.ItemDone {
 			v.WithInCall = append(v.WithInCall, a.Item)
 		}
 	}
@@ -1262,22 +1307,32 @@ func (s *Service) afterFacts(ctx context.Context, proj model.Project, cands []ju
 		for _, a := range c.Item.After {
 			switch {
 			case a.Item != "":
-				if _, done := f.ItemStates[a.Item]; done {
+				// ★ 키는 **judge 와 같은 함수**로 만든다(AfterItemKey). 여기서 문자열을
+				//   직접 조립하면 한쪽만 고쳐지고, 어긋난 키는 오류가 아니라 「조회하지
+				//   않았다」로 나타난다 — 기다리면 풀린다고 믿게 만드는 그 모양이다.
+				key := judge.AfterItemKey(a)
+				if _, done := f.ItemStates[key]; done {
 					continue
 				}
-				dep, err := s.st.GetItem(ctx, proj.ID, a.Item)
+				// ★ 선행이 **다른 프로젝트**의 것이면 거기서 읽는다(증분 015). 빈 값은
+				//   자기 프로젝트라, 워크스페이스가 아닌 전건이 지금까지와 같은 질의를 탄다.
+				depProject := proj.ID
+				if a.Project != "" {
+					depProject = a.Project
+				}
+				dep, err := s.st.GetItem(ctx, depProject, a.Item)
 				if errors.Is(err, store.ErrNotFound) {
 					// 키를 안 넣는다 → after-unknown. 그리고 그 사실을 표면에 낸다:
 					// 존재하지 않는 선행은 "기다리면 풀린다"가 아니라 오타다.
-					d.note("after-item:"+clip(a.Item, 64),
-						fmt.Sprintf("항목 %s 의 선행 %s 가 큐에 없다 — 오타이거나 지워졌다", c.Item.ID, a.Item))
+					d.note("after-item:"+clip(key, 96),
+						fmt.Sprintf("항목 %s 의 선행 %s 가 큐에 없다 — 오타이거나 지워졌다", c.Item.ID, key))
 					continue
 				}
 				if err != nil {
-					d.fail("after-item:"+clip(a.Item, 64), err)
+					d.fail("after-item:"+clip(key, 96), err)
 					continue
 				}
-				f.ItemStates[a.Item] = dep.State
+				f.ItemStates[key] = dep.State
 
 			case a.Job != "":
 				// 잡은 Tier B 다. 조회하지 않았다는 사실을 그대로 둔다(키 부재 = after-unknown).
@@ -1409,6 +1464,11 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 	if err := ValidateItemID(in.ID); err != nil {
 		return model.Item{}, &RefusedError{What: "add", Reason: err.Error(),
 			Guidance: "항목 id 는 브랜치 이름과 워크트리 디렉토리 이름으로 그대로 쓰인다."}
+	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return model.Item{}, err
 	}
 	if strings.TrimSpace(in.Title) == "" {
 		return model.Item{}, &RefusedError{What: "add", Reason: "제목이 비었다"}

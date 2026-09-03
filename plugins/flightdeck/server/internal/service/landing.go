@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
 	"github.com/kweiza/flightdeck/internal/store"
 )
@@ -69,6 +70,20 @@ type LandResult struct {
 	Holder    *LaneHolder   `json:"holder,omitempty"`    // waiting 일 때 앞사람(blockers[0] 의 점유자와 같은 포인터)
 	Resources []string      `json:"resources,omitempty"` // 이 land 가 선 자원 집합(정렬)
 	Blockers  []LaneBlocker `json:"blockers,omitempty"`  // waiting 일 때 나를 막는 자원들
+	// Scope 는 이 줄 행이 실제로 선 **프로젝트**다. 워크스페이스가 아니면 요청의
+	// project 와 같고, 배타 자원이면 루트가 된다(judge.ScopeResource).
+	//
+	// ★ 채우는 이유: 이 값이 없으면 «내 줄이 어디 있나»를 응답만 보고 못 판정한다.
+	// 멤버 세션의 랜딩 레인은 자기 프로젝트에, env:dell 은 루트에 있어서 같은 세션의
+	// 두 land 호출이 서로 다른 큐를 만지는데, 화면이 그것을 안 말하면 «왜 순번이
+	// 이상한가»를 사람이 원장을 열어야 안다.
+	Scope string `json:"scope,omitempty"`
+	// OtherScopes 는 **다른 스코프에도 내 살아 있는 줄 행이 남아 있다**는 사실이다.
+	//
+	// ★ 보고·이탈은 한 번에 한 줄만 닫는다(행마다 자원 집합이 다르고, 두 줄을 한 호출로
+	// 닫으면 어느 것을 닫았는지가 응답에서 사라진다). 남은 것을 침묵하면 그 줄은
+	// 세션이 끝날 때까지 살아 있고, 그 상태는 어느 화면에도 안 뜬다.
+	OtherScopes []string `json:"other_scopes,omitempty"`
 }
 
 // LaneBlocker 는 waiting 일 때 나를 막는 자원 하나다.
@@ -164,6 +179,11 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return LandResult{}, err
+	}
 	// ★ 정정(2026-08-12, 리뷰 Important #2) — 빈 값 판정은 **정규화 전** 원본으로 한다.
 	// normalizeResources 뒤엔 빈 입력도 항상 {LaneResource} 가 되어 판정 자체가 불가능해진다.
 	// 이 값은 아래 재진입 대조에서 쓴다: 호출자가 자원을 아예 안 준 재진입(맨몸 `fd lane
@@ -183,6 +203,16 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 					"공백·한글이 든 경로는 이 축의 자원이 될 수 없다."}
 		}
 	}
+	// ★ **자원 스코프를 여기서 정한다.** 워크스페이스가 있으면 배타 자원(`landing`·`path:`
+	//   외)은 루트 프로젝트 스코프로 접힌다 — 멤버 둘이 같은 스테이징을 동시에 잡는 것을
+	//   막는 유일한 축이다(judge.ScopeResource 의 머리말).
+	//
+	// ★ **한 줄에 두 스코프를 못 담는다.** 줄 행은 자원 집합 하나에 행 하나이고 그 행의
+	//   project 는 하나다. 섞인 요청을 어느 쪽으로 접어도 틀리므로(judge.ScopeSet) 거절한다.
+	scope, serr := s.resourceScope(ctx, in.Project, resources)
+	if serr != nil {
+		return LandResult{}, serr
+	}
 	// ★ 시각을 **한 번만** 잡아 줄 서기와 취득 둘에 같은 값을 넘긴다.
 	//   ① 저장층이 각자 실시계를 찍으면 화면(주입된 시계로 now 를 잡는다)과 갈려
 	//      대기·획득 두 경과가 통째로 거짓이 된다 — 이 함수가 그 시계의 유일한 출처다.
@@ -196,7 +226,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 		t.LogEvent("lane.land", in.Project, in.SessionID,
 			map[string]any{"mode": "acquire", "resources": len(resources)})
 
-		mine, err := t.EnqueueLanding(in.Project, in.SessionID, resources, now)
+		mine, err := t.EnqueueLanding(scope, in.SessionID, resources, now)
 		if err != nil {
 			return err
 		}
@@ -219,7 +249,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 					Guidance: "집합을 바꾸려면 land(leave:\"사유\") 로 빠진 뒤 다시 서라 — 순번은 잃는다(맨 뒤)."}
 			}
 		}
-		out = LandResult{State: "waiting", RowID: mine.ID, Resources: mine.Resources}
+		out = LandResult{State: "waiting", RowID: mine.ID, Resources: mine.Resources, Scope: scope}
 
 		// all-or-nothing 판정: 모든 자원에서 (내 행이 최선두) 그리고 (빈 레인이거나 내가 점유자).
 		// tx 가 _txlock=immediate 로 직렬화되므로 판정과 취득 사이에 남이 못 끼어든다.
@@ -227,11 +257,11 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 		var blockers []LaneBlocker
 		heldByMe := map[string]bool{}
 		for _, r := range mine.Resources {
-			front, ferr := t.FrontLandingRowFor(in.Project, r)
+			front, ferr := t.FrontLandingRowFor(scope, r)
 			if ferr != nil {
 				return ferr // 방금 넣었으므로 ErrNotFound 는 불가능하다
 			}
-			held, herr := t.HeldBy(in.Project, r)
+			held, herr := t.HeldBy(scope, r)
 			switch {
 			case herr == nil && held.SessionID == in.SessionID:
 				heldByMe[r] = true // 재진입 — 이미 내 것이다. front 와 무관하게 통과다
@@ -257,7 +287,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 				if heldByMe[r] {
 					continue // 재확인이지 부여가 아니다 — grant 를 다시 세지 않는 기존 규율
 				}
-				if _, aerr := t.AcquireResource(in.Project, r, store.Holder{SessionID: in.SessionID}, now); aerr != nil {
+				if _, aerr := t.AcquireResource(scope, r, store.Holder{SessionID: in.SessionID}, now); aerr != nil {
 					return aerr // 판정 직후라 ResourceHeldError 는 어긋남뿐이다 — 그대로 올려 롤백한다
 				}
 			}
@@ -272,7 +302,7 @@ func (s *Service) Land(ctx context.Context, in LandInput) (LandResult, error) {
 
 		// 자원별 순번을 채운다. Position(대표값)은 최악 순번이다.
 		for i := range blockers {
-			pos, perr := s.resourcePosition(t, in.Project, blockers[i].Resource, mine.ID)
+			pos, perr := s.resourcePosition(t, scope, blockers[i].Resource, mine.ID)
 			if perr != nil {
 				return perr
 			}
@@ -351,6 +381,11 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land report", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return LandResult{}, err
+	}
 	if in.Kind != model.LandingLeftOK && in.Kind != model.LandingLeftFail {
 		return LandResult{}, &RefusedError{What: "land report",
 			Reason: fmt.Sprintf("보고 종류는 ok 또는 fail 이어야 한다(받은 값 %q)", clip(string(in.Kind), 32)),
@@ -363,14 +398,19 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 			Guidance: "다음 사람이 \"다시 서면 통과할 종류인가\"에 답할 수 있어야 한다 — 한 줄이면 된다."}
 	}
 
+	// ★ **어느 스코프의 줄인가를 먼저 정한다.** 워크스페이스에서는 내 줄 행이 자기
+	//   프로젝트(랜딩)에 있을 수도 루트(배타 자원)에 있을 수도 있다 — 한 자리만 보면
+	//   나머지 한 자리의 줄이 영영 안 닫히고, 그 상태가 「내 레인이 아니다」라는
+	//   정상적으로 보이는 문장으로 나온다(laneScopes 의 머리말).
+	scope, others := s.pickLaneScope(ctx, in.Project, in.SessionID)
 	var out LandResult
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
-		t.LogEvent("lane.report", in.Project, in.SessionID, map[string]any{
+		t.LogEvent("lane.report", scope, in.SessionID, map[string]any{
 			"mode": string(in.Kind), "bytes": len(in.Detail),
 		})
 
 		// 내 살아 있는 줄 행을 먼저 읽는다 — 이 행의 자원 집합이 반납 대상이다.
-		row, rerr := t.LiveLandingRow(in.Project, in.SessionID)
+		row, rerr := t.LiveLandingRow(scope, in.SessionID)
 		switch {
 		case rerr == nil:
 			out.RowID, out.Resources = row.ID, row.Resources
@@ -381,7 +421,7 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 			// 행 번호를 전제하므로 복구 수단이 sqlite3 직접 UPDATE 뿐이 된다.
 			// 기존 hold-without-row 갈래의 자가치유 규율을 자원 집합판으로 복원한 것이
 			// 이 갈래다.
-			held, herr := t.ListHeld(in.Project)
+			held, herr := t.ListHeld(scope)
 			if herr != nil {
 				return herr
 			}
@@ -390,16 +430,16 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 				if h.SessionID != in.SessionID {
 					continue
 				}
-				if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+				if err := t.ReleaseResource(scope, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
 					return err
 				}
 				mineCount++
 			}
 			if mineCount == 0 {
 				// 행도 없고 쥔 것도 없다 — 회수됐거나 선 적이 없다. 사실만 답한다.
-				return s.laneNotMine(t, in.Project, in.SessionID, &out)
+				return s.laneNotMine(t, scope, in.SessionID, &out)
 			}
-			t.LogEvent("lane.divergent", in.Project, in.SessionID,
+			t.LogEvent("lane.divergent", scope, in.SessionID,
 				map[string]any{"mode": "report", "state": "hold-without-row", "count": mineCount})
 			out.State = "released"
 			return nil
@@ -409,12 +449,12 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 		// 행 자원 중 내가 쥔 것을 전부 반납한다. 하나도 안 쥐었으면 "내 레인이 아니다"다.
 		mineCount := 0
 		for _, r := range row.Resources {
-			held, herr := t.HeldBy(in.Project, r)
+			held, herr := t.HeldBy(scope, r)
 			if herr != nil && !errors.Is(herr, store.ErrNotFound) {
 				return herr
 			}
 			if herr == nil && held.SessionID == in.SessionID {
-				if err := t.ReleaseResource(in.Project, r, store.Holder{SessionID: in.SessionID}); err != nil {
+				if err := t.ReleaseResource(scope, r, store.Holder{SessionID: in.SessionID}); err != nil {
 					return err
 				}
 				mineCount++
@@ -422,29 +462,30 @@ func (s *Service) LandReport(ctx context.Context, in LandReportInput) (LandResul
 		}
 		if mineCount == 0 {
 			// 줄엔 있는데 아무것도 안 쥐었다 = 아직 차례가 아니거나 회수됐다.
-			return s.laneNotMine(t, in.Project, in.SessionID, &out)
+			return s.laneNotMine(t, scope, in.SessionID, &out)
 		}
 		if mineCount < len(row.Resources) {
 			// all-or-nothing 이 지켜졌다면 없는 모양이다 — 어긋남을 원장에 남기고 계속한다
 			// (기존 lane.divergent 규율: 여기서 멈추면 아무도 못 잡는 레인이 남는다).
-			t.LogEvent("lane.divergent", in.Project, in.SessionID,
+			t.LogEvent("lane.divergent", scope, in.SessionID,
 				map[string]any{"mode": "report", "state": "partial-hold", "count": mineCount})
 		}
-		if err := t.CloseLandingRowBySession(in.Project, in.SessionID, in.Kind, in.Detail); err != nil {
+		if err := t.CloseLandingRowBySession(scope, in.SessionID, in.Kind, in.Detail); err != nil {
 			return err
 		}
 		out.State = "released"
 		return nil
 	})
+	out.Scope, out.OtherScopes = scope, others
 	if err != nil {
-		s.logFail(ctx, "lane.report", in.Project, in.SessionID, err, failAbout{Mode: string(in.Kind)})
+		s.logFail(ctx, "lane.report", scope, in.SessionID, err, failAbout{Mode: string(in.Kind)})
 		s.log.ErrorContext(ctx, "랜딩 보고 실패",
-			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"project", clip(scope, 64), "session_id", clip(in.SessionID, 64),
 			"mode", string(in.Kind), "error", err.Error())
 		return LandResult{}, err
 	}
 	s.log.InfoContext(ctx, "랜딩 보고",
-		"project", in.Project, "session_id", in.SessionID,
+		"project", scope, "session_id", in.SessionID,
 		"mode", string(in.Kind), "state", out.State)
 	return out, nil
 }
@@ -466,16 +507,23 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 	if strings.TrimSpace(in.Project) == "" || strings.TrimSpace(in.SessionID) == "" {
 		return LandResult{}, &RefusedError{What: "land leave", Reason: "프로젝트나 세션 좌표가 비었다"}
 	}
+	// ★ 워크스페이스 관문 — 대상 프로젝트가 이 세션이 쓸 수 있는 곳인가(service/workspace.go).
+	//   명부 밖 이름은 여기서 끊긴다: 통과시키면 오타 하나가 프로젝트를 하나 만든다.
+	if err := s.GateTargetProject(ctx, in.SessionID, in.Project); err != nil {
+		return LandResult{}, err
+	}
 	if err := store.ValidateLandingLeave(model.LandingLeftLeave, in.Detail); err != nil {
 		return LandResult{}, &RefusedError{What: "land leave", Reason: err.Error(),
 			Guidance: "왜 줄에서 빠지는지 한 줄이면 된다 — 사유 없는 이탈은 나중에 되짚을 수 없다."}
 	}
 
+	// LandReport 와 같은 판정이다 — 내 줄이 자기 프로젝트에 있을 수도 루트에 있을 수도 있다.
+	scope, others := s.pickLaneScope(ctx, in.Project, in.SessionID)
 	var out LandResult
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
-		t.LogEvent("lane.leave", in.Project, in.SessionID, map[string]any{"bytes": len(in.Detail)})
+		t.LogEvent("lane.leave", scope, in.SessionID, map[string]any{"bytes": len(in.Detail)})
 
-		row, rerr := t.LiveLandingRow(in.Project, in.SessionID)
+		row, rerr := t.LiveLandingRow(scope, in.SessionID)
 		switch {
 		case rerr == nil:
 			out.RowID, out.Resources = row.ID, row.Resources
@@ -485,7 +533,7 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 			// 반납한다** — 점유는 있는데 행이 없는 것은 두 표가 어긋난 상태이고
 			// (LandReport 의 같은 갈래 참고), 여기서 안 놓으면 그 자원의 프로그램적
 			// 탈출구가 leave 쪽에서도 사라진다.
-			held, herr := t.ListHeld(in.Project)
+			held, herr := t.ListHeld(scope)
 			if herr != nil {
 				return herr
 			}
@@ -494,13 +542,13 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 				if h.SessionID != in.SessionID {
 					continue
 				}
-				if err := t.ReleaseResource(in.Project, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
+				if err := t.ReleaseResource(scope, h.Resource, store.Holder{SessionID: in.SessionID}); err != nil {
 					return err
 				}
 				mineCount++
 			}
 			if mineCount > 0 {
-				t.LogEvent("lane.divergent", in.Project, in.SessionID,
+				t.LogEvent("lane.divergent", scope, in.SessionID,
 					map[string]any{"mode": "leave", "state": "hold-without-row", "count": mineCount})
 			}
 			// mineCount==0 이면 행도 없고 쥔 것도 없다 — 기존 멱등 통과 그대로
@@ -512,10 +560,10 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 		// 행의 자원 중 내가 쥔 것을 전부 반납한다(행이 없으면 range 가 안 돈다 —
 		// 위 ErrNotFound 갈래가 그 경우를 이미 처리했다).
 		for _, r := range row.Resources {
-			held, herr := t.HeldBy(in.Project, r)
+			held, herr := t.HeldBy(scope, r)
 			switch {
 			case herr == nil && held.SessionID == in.SessionID:
-				if err := t.ReleaseResource(in.Project, r, store.Holder{SessionID: in.SessionID}); err != nil {
+				if err := t.ReleaseResource(scope, r, store.Holder{SessionID: in.SessionID}); err != nil {
 					return err
 				}
 			case herr == nil, errors.Is(herr, store.ErrNotFound):
@@ -525,16 +573,17 @@ func (s *Service) LandLeave(ctx context.Context, in LandLeaveInput) (LandResult,
 			}
 		}
 
-		if err := t.CloseLandingRowBySession(in.Project, in.SessionID, model.LandingLeftLeave, in.Detail); err != nil {
+		if err := t.CloseLandingRowBySession(scope, in.SessionID, model.LandingLeftLeave, in.Detail); err != nil {
 			return err
 		}
 		out.State = "left"
 		return nil
 	})
+	out.Scope, out.OtherScopes = scope, others
 	if err != nil {
-		s.logFail(ctx, "lane.leave", in.Project, in.SessionID, err, failAbout{})
+		s.logFail(ctx, "lane.leave", scope, in.SessionID, err, failAbout{})
 		s.log.ErrorContext(ctx, "랜딩 줄 이탈 실패",
-			"project", clip(in.Project, 64), "session_id", clip(in.SessionID, 64),
+			"project", clip(scope, 64), "session_id", clip(in.SessionID, 64),
 			"error", err.Error())
 		return LandResult{}, err
 	}
@@ -835,6 +884,87 @@ func (s *Service) resourcePosition(t *store.Tx, project, resource string, rowID 
 }
 
 // normalizeResources 는 빈 집합을 {landing} 으로 접고 정렬·중복 제거한다. 순수 함수다.
+// resourceScope 는 자원 집합 하나가 설 프로젝트 스코프다.
+//
+// 워크스페이스가 없으면 항등이다(이 프로젝트 그대로) — 단일 레포 전건이 그 갈래로 온다.
+//
+// ★ **섞인 집합은 거절한다.** 접는 방법이 둘 다 틀리기 때문이다(judge.ScopeSet 의 머리말).
+// 거절 문면이 두 부류를 이름으로 대고, 처방은 "따로 서라"다 — 순번을 잃지 않는 유일한
+// 길이 애초에 안 섞는 것이다.
+func (s *Service) resourceScope(ctx context.Context, project string, resources []string) (string, error) {
+	r, err := s.Roster(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	if !r.Active() {
+		return project, nil
+	}
+	scope, mixed := judge.ScopeSet(resources, project, r.Root)
+	if len(mixed) > 0 {
+		return "", &RefusedError{What: "land",
+			Reason: fmt.Sprintf("한 줄에 스코프가 다른 자원을 섞었다: %s", strings.Join(mixed, " ")),
+			Guidance: "랜딩 레인(landing)과 path: 는 **레포별**이고, 그 밖의 자원은 워크스페이스 " +
+				r.Root + " 하나다. 두 부류는 서로 다른 줄이라 한 행에 못 담는다 — 따로 서라."}
+	}
+	return scope, nil
+}
+
+// laneScopes 는 이 세션의 줄 행이 있을 수 있는 프로젝트들이다 — 가까운 것부터.
+//
+// ★ **이 함수가 필요한 이유**: 보고·이탈은 자원을 안 받고 「내 살아 있는 행」을 찾는데,
+// 워크스페이스에서는 그 행이 자기 프로젝트에 있을 수도(landing) 루트에 있을 수도(env:dell)
+// 있다. 한 자리만 보면 나머지 한 자리의 줄이 **영영 안 닫힌다** — 그리고 그 상태는
+// 「내 레인이 아니다」라는 정상적으로 보이는 문장으로 나온다.
+//
+// ★ 순서가 있다: 자기 프로젝트가 먼저다. 랜딩 레인이 훨씬 잦고, 두 자리에 동시에 행이
+// 있는 것은 정상이라(랜딩 하나 + 자원 하나) 먼저 찾은 것을 쓰는 것이 아니라 **둘 다**
+// 훑어야 하는 자리도 있다 — 호출부가 그 차이를 정한다.
+func (s *Service) laneScopes(ctx context.Context, project string) []string {
+	r, err := s.Roster(ctx, project)
+	if err != nil || !r.Active() || r.Root == project {
+		return []string{project}
+	}
+	return []string{project, r.Root}
+}
+
+// pickLaneScope 는 보고·이탈이 **어느 스코프의 줄을 닫을지** 정한다.
+//
+// 반환은 (고른 스코프, 다른 스코프에도 남아 있는 줄들)이다.
+//
+// ★ **한 번에 한 줄만 닫는다.** 행마다 자원 집합이 다르고, 두 줄을 한 호출로 닫으면
+// 어느 것을 닫았는지가 응답에서 사라진다 — 「반납했다」가 무엇을 반납한 것인지 모르는
+// 문장이 된다. 대신 남은 줄을 **이름으로** 낸다(LandResult.OtherScopes).
+//
+// ★ **자기 프로젝트가 먼저다.** 랜딩 레인이 훨씬 잦고, 그 줄은 이 세션의 브랜치와
+// 직접 묶여 있다. 루트 스코프의 자원(스테이징 등)은 대개 명시적으로 잡고 명시적으로
+// 놓는 축이라 뒤에 와도 잃는 것이 없다.
+//
+// ★ 조회가 실패하면 **요청한 프로젝트를 그대로 쓴다.** 여기서 오류를 올리면 명부를
+// 못 읽는 순간 반납 자체가 막히고, 그러면 자원이 영영 안 풀린다 — 이 함수의 목적과
+// 정반대다.
+func (s *Service) pickLaneScope(ctx context.Context, project, sessionID string) (string, []string) {
+	scopes := s.laneScopes(ctx, project)
+	if len(scopes) == 1 {
+		return scopes[0], nil
+	}
+	var live []string
+	for _, sc := range scopes {
+		if _, err := s.st.LiveLandingRow(ctx, sc, sessionID); err == nil {
+			live = append(live, sc)
+		}
+	}
+	switch len(live) {
+	case 0:
+		// 어디에도 줄이 없다. 요청한 프로젝트로 진행한다 — 그 갈래의 hold-without-row
+		// 자가치유가 거기서 돈다(이 세션이 자원을 쥐었는데 행이 없는 경우).
+		return project, nil
+	case 1:
+		return live[0], nil
+	default:
+		return live[0], live[1:]
+	}
+}
+
 func normalizeResources(in []string) []string {
 	if len(in) == 0 {
 		return []string{LaneResource}

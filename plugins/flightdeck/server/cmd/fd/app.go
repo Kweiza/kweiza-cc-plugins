@@ -450,13 +450,37 @@ func (a *App) SessionByID(ctx context.Context, id string) (model.Session, []stri
 // 서버와 같은 상수를 쓴다 — 두 벌로 두면 스큐 배너가 자기 자신을 못 본다.
 const clientAPIVersion = service.APIVersion
 
+// BoardQuery 는 `fd status` 가 보드에 거는 선택 축이다.
+//
+// ★ 구조체로 받는 이유: 인자가 둘 다 «있으면 바꾸고 없으면 그대로»라 위치 인자로 두면
+// 호출부가 `a.Board(ctx, self, "", false)` 처럼 뜻 없는 제로값을 두 개 적게 된다.
+type BoardQuery struct {
+	// Project 는 볼 프로젝트다. 비면 이 세션의 것이다 — 값이 있으면 서버가 워크스페이스
+	// 명부로 검증한다(명부 밖 이름은 거절이다: service.GateTargetProject).
+	Project string
+	// Workspace 는 형제 프로젝트의 한 줄 요약을 함께 받는다.
+	Workspace bool
+}
+
+// TargetProject 는 이 호출이 쓸 프로젝트다 — 인자가 이기고, 비면 이 세션의 것이다.
+//
+// ★ **검증하지 않는다.** 명부는 서버에 있고 이 프로세스는 그것을 안 본다. 여기서
+// 아는 이름 목록의 사본을 들면 그것이 곧 표류한다 — mcpsrv.Server.target 과 같은 판정이고
+// 같은 이유다. 거절 문면은 서버의 관문 하나가 낸다.
+func (a *App) TargetProject(explicit string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		return p
+	}
+	return a.proj.ID
+}
+
 // Board 는 보드 한 장이다. 미도달이면 캐시 + 배너다.
 //
 // 경로가 `/api/v1/dashboard.json` 인 이유: 설계 §6 의 REST 표에 board 라는 표면이 없다.
 // 화면 한 장분의 값을 내는 그 엔드포인트가 보드의 정본이다.
-func (a *App) Board(ctx context.Context, self string) (v service.BoardView, banner string, err error) {
-	path := fmt.Sprintf("/api/v1/dashboard.json?project=%s&self=%s",
-		urlValue(a.proj.ID), urlValue(self))
+func (a *App) Board(ctx context.Context, self string, opt BoardQuery) (v service.BoardView, banner string, err error) {
+	path := fmt.Sprintf("/api/v1/dashboard.json?project=%s&self=%s&workspace=%t",
+		urlValue(a.TargetProject(opt.Project)), urlValue(self), opt.Workspace)
 	rr, rerr := a.cli.Read(ctx, path)
 	if rerr != nil {
 		return v, rr.Banner, rerr
