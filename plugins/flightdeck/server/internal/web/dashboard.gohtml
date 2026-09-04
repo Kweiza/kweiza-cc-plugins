@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-{{/* SSE 가 없어도 페이지가 성립한다 — 스크립트가 없으면 이 메타 리프레시가 폴백이다.
-     스크립트가 있으면 아래 <script> 가 SSE 를 걸고, 실패하면 같은 주기로 새로고침한다. */}}
-<noscript><meta http-equiv="refresh" content="{{.Refresh}}"></noscript>
 <style>
 :root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1c1b19; --dim:#5f5c56; --line:#e0ddd6;
         --card:#ffffff; --warn:#8a5a00; --crit:#8f1d1d; --ok:#1f6b3a; --accent:#2f5fb3; }
@@ -33,6 +30,8 @@ section { margin:18px 0; padding:12px 14px; background:var(--card);
 .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
 .err { color:var(--crit); font-size:13px; margin:6px 0; }
 .notice { color:var(--ok); font-size:13px; margin:6px 0; }
+.update-status { position:fixed; right:18px; bottom:14px; z-index:10; max-width:520px; margin:0;
+                 padding:8px 10px; background:var(--card); border:1px solid var(--crit); border-radius:5px; }
 .empty { color:var(--dim); font-size:13px; margin:8px 0; }
 .tier { color:var(--dim); font-size:12px; margin:4px 0 8px; }
 nav a { color:var(--accent); margin-right:10px; text-decoration:none; }
@@ -92,6 +91,10 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 </head>
 <body>
 
+{{/* 자동 갱신은 이 루트만 바꾼다. 스크립트는 밖에 남아서 EventSource 를 하나만 유지한다.
+     JS 가 없으면 이 정적 화면이 그대로 남는다 — 문서 전체를 자동 탐색하는 폴백은 없다. */}}
+<div id="dashboard" data-refresh="{{.Refresh}}" data-sse-path="{{.SSEPath}}"
+     data-sse-project="{{.Project.ID}}">
 <header>
   <h1>{{.Title}}</h1>
   <div class="derived">{{.Now}} · {{.HealthLine}} · 디스크: <span class="lv-{{.Disk.Level}}">{{.Disk.Text}}</span></div>
@@ -217,7 +220,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
       <select name="item" required {{if not .Live.Targets}}disabled{{end}}>
         {{/* 제목과 종료 선언을 **뒤에** 붙인다. `{{.ItemID}} ← ` 접두는 actions_test.go 가
              선점의 생사를 재는 자리라(회수 전/후 두 번) 그 모양을 안 건드린다. */}}
-        {{range .Live.Targets}}<option value="{{.ItemID}}">{{.ItemID}} ← {{.Holder}} ({{.Live}}{{if .Since}}, {{.Since}}부터{{end}}){{with .Title}} · {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
+        {{range .Live.Targets}}<option value="{{.ItemID}}" data-revision="{{.Revision}}">{{.ItemID}} ← {{.Holder}} ({{.Live}}{{if .Since}}, {{.Since}}부터{{end}}){{with .Title}} · {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
         {{if not .Live.Targets}}<option>회수할 선점이 없다</option>{{end}}
       </select>
     </label>
@@ -308,7 +311,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>폐기할 항목
       <select name="item" required {{if not .Queue.Targets}}disabled{{end}}>
-        {{range .Queue.Targets}}<option value="{{.ID}}">{{.ID}}{{with .Title}} — {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
+        {{range .Queue.Targets}}<option value="{{.ID}}" data-revision="{{.Revision}}">{{.ID}}{{with .Title}} — {{.}}{{end}}{{with .CloseDeclared}} · {{template "declText" .}}{{end}}</option>{{end}}
         {{if not .Queue.Targets}}<option>폐기할 항목이 없다</option>{{end}}
       </select>
     </label>
@@ -378,7 +381,7 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
     <input type="hidden" name="project" value="{{.Project.ID}}">
     <label>회수할 줄 행
       <select name="item" required {{if not .Landing.Lane}}disabled{{end}}>
-        {{range .Landing.Lane}}{{if not .Missing}}<option value="{{.RowID}}">{{.RowID}} ← {{.Session}} ({{if .Holder}}점유 중, {{.Held}}{{else}}대기 {{.Waiting}}{{end}})</option>{{end}}{{end}}
+        {{range .Landing.Lane}}{{if not .Missing}}<option value="{{.RowID}}" data-revision="{{.Revision}}">{{.RowID}} ← {{.Session}} ({{if .Holder}}점유 중, {{.Held}}{{else}}대기 {{.Waiting}}{{end}})</option>{{end}}{{end}}
         {{if not .Landing.Lane}}<option>회수할 줄 행이 없다</option>{{end}}
       </select>
     </label>
@@ -473,49 +476,320 @@ button[disabled] { cursor:not-allowed; opacity:.55; }
 
 </main>
 {{end}}
+</div>
+<p id="dashboard-update-status" class="err update-status" role="status" aria-live="polite" hidden></p>
 
 <script>
-// 자동 갱신: SSE 가 있으면 SSE, 없으면 시간 폴백. 스크립트가 아예 안 돌면 <noscript> 의 메타 리프레시가 받는다.
+// 자동 갱신은 문서를 다시 탐색하지 않는다. SSE 는 무효화 신호만 받고, 현재 URL 에서
+// 새 데이터를 읽어 #dashboard 하나를 바꾼다. 주기 조회는 SSE 유실과 나이 표기를 되맞춘다.
 (function () {
-  var ms = {{.Refresh}} * 1000;
-  var path = "{{.SSEPath}}";
-  function later() { window.setTimeout(function () { window.location.reload(); }, ms); }
-  if (!path || !window.EventSource) { later(); return; }
-  var es, opened = false;
-  try { es = new EventSource(path); } catch (e) { later(); return; }
-  es.onopen = function () { opened = true; };
-  es.onmessage = function () { window.location.reload(); };
-  es.onerror = function () {
-    // 열린 적이 없으면 서버에 SSE 가 없는 것이다 — 끊고 폴백으로 넘어간다.
-    if (!opened) { es.close(); later(); }
-  };
-})();
-</script>
-<script>
-// 접기 — 5건씩 연다. 스크립트가 안 돌면 <noscript> 가 전부 펴므로 정보가 사라지지 않는다.
-(function () {
+  "use strict";
+
+  var ROOT_ID = "dashboard";
   var STEP = 5;
-  document.querySelectorAll('.fold').forEach(function (box) {
-    var rows = Array.prototype.slice.call(box.querySelectorAll('.fold-row'));
-    if (rows.length <= STEP) { return; }
-    rows.forEach(function (r, i) { if (i >= STEP) { r.hidden = true; } });
-    var btn = document.createElement('button');
-    btn.type = 'button'; btn.className = 'more';
-    var shown = STEP;
-    function label() {
-      var left = rows.length - shown;
-      btn.textContent = left > 0 ? '더보기 ' + Math.min(STEP, left) + '건 (남은 ' + left + '건)' : '';
-      btn.hidden = left <= 0;
-    }
-    btn.addEventListener('click', function () {
-      rows.slice(shown, shown + STEP).forEach(function (r) { r.hidden = false; });
-      shown = Math.min(shown + STEP, rows.length);
-      label();
+  var BURST_DELAY = 500;
+  var inFlight = false;
+  var pending = false;
+  var updateTimer = 0;
+  var pollTimer = 0;
+  var pollMS = 0;
+  var source = null;
+  var sourceKey = "";
+  var composing = false;
+  var retryAfter = 0;
+
+  function list(nodes) {
+    return Array.prototype.slice.call(nodes);
+  }
+
+  function root() {
+    return document.getElementById(ROOT_ID);
+  }
+
+  function setUpdateStatus(message) {
+    var status = document.getElementById("dashboard-update-status");
+    status.textContent = message || "";
+    status.hidden = !message;
+  }
+
+  function scopeKey(node, selector) {
+    var scope = node.closest("section, header") || root();
+    var prefix = scope.id || scope.tagName.toLowerCase();
+    return prefix + ":" + list(scope.querySelectorAll(selector)).indexOf(node);
+  }
+
+  function foldKey(box) {
+    return scopeKey(box, ".fold");
+  }
+
+  function formStateKey(form) {
+    var action = (form.getAttribute("action") || "").split("?")[0];
+    return form.method + ":" + action + ":" + form.className;
+  }
+
+  // 폼 action 의 key 쿼리는 새 렌더의 멱등 키라 복원하지 않는다. 사용자가 바꿀 수 있는
+  // 값만 action 경로+필드 이름으로 잇는다. hidden project 도 새 렌더 값을 그대로 쓴다.
+  function editableControls(box) {
+    var out = [];
+    list(box.querySelectorAll("form")).forEach(function (form) {
+      var formKey = formStateKey(form);
+      var seen = {};
+      list(form.querySelectorAll("input, select, textarea")).forEach(function (control) {
+        var type = (control.getAttribute("type") || "").toLowerCase();
+        if (["hidden", "submit", "button", "reset", "image", "file"].indexOf(type) >= 0) { return; }
+        var base = control.tagName + ":" + type + ":" + (control.name || "");
+        var ordinal = seen[base] || 0;
+        seen[base] = ordinal + 1;
+        out.push({form: formKey, key: formKey + ":" + base + ":" + ordinal, node: control});
+      });
     });
-    label();
-    var anchor = box.tagName === 'TBODY' ? box.closest('table') : box;
-    anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+    return out;
+  }
+
+  function captureUIState(box) {
+    var state = {controls: {}, forms: {}, details: {}, folds: {}, active: ""};
+    var active = document.activeElement;
+    list(box.querySelectorAll("form.write")).forEach(function (form) {
+      var target = form.querySelector('select[name="item"]');
+      var option = target && target.selectedIndex >= 0 ? target.options[target.selectedIndex] : null;
+      state.forms[formStateKey(form)] = {
+        target: option ? option.value : "",
+        revision: option ? option.dataset.revision || "" : ""
+      };
+    });
+    editableControls(box).forEach(function (entry) {
+      var control = entry.node;
+      var value = {
+        value: control.value,
+        checked: control.checked,
+        selected: control.tagName === "SELECT" ?
+          list(control.options).filter(function (option) { return option.selected; })
+            .map(function (option) { return option.value; }) : []
+      };
+      if (control === active) {
+        state.active = entry.key;
+        if (typeof control.selectionStart === "number") {
+          value.selectionStart = control.selectionStart;
+          value.selectionEnd = control.selectionEnd;
+        }
+      }
+      state.controls[entry.key] = value;
+    });
+    list(box.querySelectorAll("details")).forEach(function (details) {
+      state.details[scopeKey(details, "details")] = details.open;
+    });
+    list(box.querySelectorAll(".fold")).forEach(function (fold) {
+      state.folds[foldKey(fold)] = list(fold.querySelectorAll(".fold-row"))
+        .filter(function (row) { return !row.hidden; }).length;
+    });
+    return state;
+  }
+
+  function restoreUIState(box, state) {
+    var active = null;
+    var activeValue = null;
+    var safeForms = {};
+    list(box.querySelectorAll("form")).forEach(function (form) {
+      var key = formStateKey(form);
+      if (!form.classList.contains("write")) { safeForms[key] = true; return; }
+      var saved = state.forms[key];
+      var options = list(form.querySelectorAll('select[name="item"] option'));
+      safeForms[key] = !!saved && !!saved.revision && options.some(function (option) {
+        return option.value === saved.target && option.dataset.revision === saved.revision;
+      });
+    });
+    editableControls(box).forEach(function (entry) {
+      // 회수·폐기 폼은 선택 대상의 원시 지문까지 같을 때만 한 단위로 복원한다.
+      // 대상이 사라지거나 점유자·선점 시각·신호가 바뀌면 사유와 포커스도 함께 버린다.
+      if (!safeForms[entry.form]) { return; }
+      var saved = state.controls[entry.key];
+      if (!saved) { return; }
+      var control = entry.node;
+      if (control.tagName === "SELECT") {
+        var found = list(control.options).some(function (option) {
+          return saved.selected.indexOf(option.value) >= 0;
+        });
+        if (found) {
+          list(control.options).forEach(function (option) {
+            option.selected = saved.selected.indexOf(option.value) >= 0;
+          });
+        }
+      } else if (control.type === "checkbox" || control.type === "radio") {
+        control.checked = saved.checked;
+      } else {
+        control.value = saved.value;
+      }
+      if (entry.key === state.active) {
+        active = control;
+        activeValue = saved;
+      }
+    });
+    list(box.querySelectorAll("details")).forEach(function (details) {
+      var key = scopeKey(details, "details");
+      if (Object.prototype.hasOwnProperty.call(state.details, key)) {
+        details.open = state.details[key];
+      }
+    });
+    if (active) {
+      try { active.focus({preventScroll: true}); } catch (e) { active.focus(); }
+      if (typeof activeValue.selectionStart === "number" && active.setSelectionRange) {
+        active.setSelectionRange(activeValue.selectionStart, activeValue.selectionEnd);
+      }
+    }
+  }
+
+  // 접기 — 새 동적 루트에도 다시 건다. savedCounts 가 있으면 사용자가 연 행 수를 잇는다.
+  // JS 가 없으면 행을 숨기지 않으므로 정보는 전부 남는다.
+  function setupFolds(box, savedCounts) {
+    list(box.querySelectorAll(".fold")).forEach(function (fold) {
+      if (fold.dataset.foldReady) { return; }
+      fold.dataset.foldReady = "true";
+      var rows = list(fold.querySelectorAll(".fold-row"));
+      if (rows.length <= STEP) { return; }
+      var saved = savedCounts && savedCounts[foldKey(fold)];
+      var shown = Math.min(rows.length, Math.max(STEP, saved || STEP));
+      rows.forEach(function (row, index) { row.hidden = index >= shown; });
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "more";
+      function label() {
+        var left = rows.length - shown;
+        button.textContent = left > 0 ?
+          "더보기 " + Math.min(STEP, left) + "건 (남은 " + left + "건)" : "";
+        button.hidden = left <= 0;
+      }
+      button.addEventListener("click", function () {
+        rows.slice(shown, shown + STEP).forEach(function (row) { row.hidden = false; });
+        shown = Math.min(shown + STEP, rows.length);
+        label();
+      });
+      label();
+      var anchor = fold.tagName === "TBODY" ? fold.closest("table") : fold;
+      anchor.parentNode.insertBefore(button, anchor.nextSibling);
+    });
+  }
+
+  function configOf(box) {
+    var seconds = Number(box.dataset.refresh);
+    return {
+      refresh: isFinite(seconds) && seconds > 0 ? seconds * 1000 : 30000,
+      path: box.dataset.ssePath || "",
+      project: box.dataset.sseProject || ""
+    };
+  }
+
+  function syncSource(config) {
+    var key = config.path + "\n" + config.project;
+    if (key === sourceKey) { return; }
+    if (source) { source.close(); source = null; }
+    sourceKey = key;
+    if (!config.path || !window.EventSource) { return; }
+    try {
+      var eventURL = new URL(config.path, window.location.href);
+      // 본문은 현재 프로젝트의 사건만 즉시 받는다. 다른 프로젝트 때문에 바뀌는 헤더 탐색 줄은
+      // 아래 주기 조회가 최대 refresh 뒤에 맞춘다. project 가 비면 전 사건을 받아 빈 서버도 깨어난다.
+      if (config.project) { eventURL.searchParams.set("project", config.project); }
+      var path = eventURL.toString();
+      var es = new EventSource(path);
+      source = es;
+      es.onmessage = function () { scheduleUpdate(); };
+    } catch (e) {
+      // 주기적 부분 갱신이 계속 받는다. 다음 렌더에서 설정이 바뀌면 다시 연결한다.
+      sourceKey = "";
+    }
+  }
+
+  function schedulePoll() {
+    if (pollTimer || pollMS <= 0) { return; }
+    pollTimer = window.setTimeout(function () {
+      pollTimer = 0;
+      scheduleUpdate(0);
+      schedulePoll();
+    }, pollMS);
+  }
+
+  function syncConfig() {
+    var config = configOf(root());
+    if (pollMS !== config.refresh) {
+      pollMS = config.refresh;
+      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
+    }
+    schedulePoll();
+    syncSource(config);
+  }
+
+  // 첫 사건 뒤 짧게 기다리는 leading/trailing throttle 이다. 타이머를 매 사건마다
+  // 되감지 않으므로 사건이 계속 와도 굶지 않고, fetch 는 언제나 하나만 돈다.
+  function scheduleUpdate(delay) {
+    pending = true;
+    if (inFlight || updateTimer) { return; }
+    var wait = typeof delay === "number" ? delay : BURST_DELAY;
+    wait = Math.max(wait, retryAfter - Date.now());
+    updateTimer = window.setTimeout(function () {
+      updateTimer = 0;
+      updateDashboard();
+    }, wait);
+  }
+
+  function replaceDashboard(markup) {
+    if (composing) { pending = true; return; }
+    var fresh = new DOMParser().parseFromString(markup, "text/html");
+    var current = root();
+    var next = fresh.getElementById(ROOT_ID);
+    if (!current || !next) { throw new Error("dashboard root missing"); }
+    var state = captureUIState(current);
+    current.replaceWith(next);
+    document.title = fresh.title;
+    setupFolds(next, state.folds);
+    restoreUIState(next, state);
+    syncConfig();
+  }
+
+  function updateDashboard() {
+    if (inFlight) { return; }
+    if (composing) { scheduleUpdate(); return; }
+    pending = false;
+    inFlight = true;
+    function finished(ok) {
+      inFlight = false;
+      // 서버가 HTML 을 못 낼 때도 SSE 사건마다 초당 두 번씩 재시도하면 원래의 폭주를
+      // 다른 모양으로 되살린다. 실패 뒤에는 적어도 주기 조회 간격만큼 물러난다.
+      retryAfter = ok ? 0 : Date.now() + pollMS;
+      setUpdateStatus(ok ? "" : "자동 갱신 실패 — 표시된 데이터가 낡았을 수 있다. 연결·로그인을 확인하라. " +
+        Math.ceil(pollMS / 1000) + "초 뒤 다시 시도한다.");
+      if (pending) { scheduleUpdate(); }
+    }
+    fetch(window.location.href, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: {Accept: "text/html"}
+    }).then(function (response) {
+      var contentType = response.headers.get("Content-Type") || "";
+      // 없는 프로젝트의 404도 대시보드가 의도해 그린 한 장이다. 그것까지 받으면 프로젝트가
+      // 사라지거나 새로 생긴 뒤의 탐색 줄도 제자리에서 맞춰진다. 인증·서버 오류는 받지 않는다.
+      if ((!response.ok && response.status !== 404) || contentType.indexOf("text/html") < 0) {
+        throw new Error("dashboard update rejected");
+      }
+      return response.text();
+    }).then(replaceDashboard).then(function () { finished(true); }, function () { finished(false); });
+  }
+
+  document.addEventListener("compositionstart", function (event) {
+    if (root().contains(event.target)) { composing = true; }
   });
+  document.addEventListener("compositionend", function () {
+    composing = false;
+    if (pending) { scheduleUpdate(0); }
+  });
+
+  var elementAPI = window.Element && window.Element.prototype;
+  if (!window.fetch || !window.DOMParser || !window.URL || !elementAPI ||
+      !elementAPI.closest || !elementAPI.replaceWith) {
+    setUpdateStatus("이 브라우저는 제자리 데이터 갱신을 지원하지 않는다 — 정적 화면을 그대로 둔다.");
+    return;
+  }
+  setupFolds(root(), {});
+  syncConfig();
 })();
 </script>
 </body>

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -124,6 +125,9 @@ type ClaimTarget struct {
 	Holder string
 	Since  string
 	Live   string // 그 세션이 창 안에 있나 — 판정이 아니라 사실 표기다
+	// Revision 은 이 회수 대상의 의미가 같은지 부분 갱신 전후에 대조하는 지문이다.
+	// 표시 나이는 매 렌더마다 바뀌므로 넣지 않고, 카드의 원자료 여섯 축을 전부 넣는다.
+	Revision string
 
 	// CloseDeclared 는 ItemRow 와 **같은 규약**이다(빈 문자열=선언 없음, CloseDeclUnread=못 읽음).
 	// 여기서 다시 계산하지 않고 ItemRow 에서 그대로 옮긴다 — 두 자리에서 따로 세면
@@ -156,6 +160,9 @@ type ItemRow struct {
 	Dependents int
 	Holder     string
 	Since      string
+	// Revision 은 쓰기 폼이 선택+사유를 복원해도 되는지 판정하는 원시 지문이다.
+	// 같은 id 를 닫고 다시 만들거나, 선점 상태·점유자가 바뀌면 반드시 달라진다.
+	Revision string
 
 	// CloseDeclared 는 이 항목을 닫으려다 롤백된 선언의 표기다(format.go 의 CloseDeclaredLabel).
 	//
@@ -293,6 +300,9 @@ type LaneRow struct {
 	Holder  bool   // 지금 레인을 쥐고 있나
 	Held    string // 획득 경과. 점유자만 채운다
 	Missing bool   // 점유자인데 줄에 행이 없다(정합 어긋남) — 회수 번호가 없는 행이다
+	// Revision 은 행·세션·대기 시작·점유 전환·마지막 신호의 원시 지문이다.
+	// 사람이 본 대상이 달라졌으면 작성 중인 회수 사유를 새 대상에 옮기지 않는다.
+	Revision string
 }
 
 // HoldRow 는 자원 점유 한 줄이다.
@@ -414,7 +424,8 @@ type Page struct {
 // 폐기를 누를 때 같은 키가 되어, 두 번째가 첫 번째의 재시도로 접힌다.
 //
 // 렌더 시각을 쓰는 이유: 더블클릭은 같은 장이라 같은 키 → 접힌다.
-// 새로고침하면 새 장이라 새 키 → 다시 눌린다. 멱등이 원래 원하는 의미 그대로다.
+// 새 렌더(수동 탐색·자동 부분 갱신)는 새 장이라 새 키 → 다시 눌린다. 멱등이 원래 원하는
+// 의미 그대로다. 부분 갱신은 폼 action 을 복원하지 않아 새 키를 그대로 살린다.
 func (p Page) WriteKey(kind string) string {
 	return "web:" + kind + ":" + strconv.FormatInt(p.RenderedAt, 10)
 }
@@ -966,18 +977,50 @@ func (h *handler) itemRow(ctx context.Context, st *store.Store, it model.Item,
 	} else {
 		r.Dependents = n
 	}
+	// item 전체를 넣는다. 제목·본문·경로·라벨·선행 중 하나가 바뀌어 사람이 본 폐기
+	// 근거가 달라져도 예전 사유를 복원하면 안 된다. 표시 나이 대신 원시 시각을 쓴다.
+	r.Revision = revisionOf(struct {
+		Item          model.Item
+		Holder        string
+		ClaimedAt     time.Time
+		CloseDeclared string
+		Dependents    int
+	}{it, holder, since, r.CloseDeclared, r.Dependents})
 	return r
+}
+
+// revisionOf 는 자동 부분 갱신 전후의 의미 대조용이다. JSON 은 map 키를 정렬하므로
+// 신호·경로 규모 map 의 순회 순서가 달라도 같은 사실은 같은 지문을 낸다. 이 화면 모델에
+// 넣는 타입은 전부 JSON 가능하고 순환 포인터가 없다.
+func revisionOf(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		// 도달하면 복원을 허용하지 않는 서로 다른 값이어야 한다. 오류 전문도 지문 입력으로
+		// 넣어 빈 문자열 하나로 모든 실패를 같은 대상으로 접지 않는다.
+		b = []byte(fmt.Sprintf("revision unavailable: %T: %v", v, err))
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
 
 // claimTargets 는 회수 폼의 선택지를 만든다.
 func (q QueuePanel) claimTargets(board service.BoardView) []ClaimTarget {
-	live := map[string]string{}
+	type liveFact struct {
+		label    string
+		revision string
+	}
+	live := map[string]liveFact{}
 	for _, c := range board.Sessions {
 		label := c.View.Session.Label
 		if label == "" {
 			label = short(c.View.Session.ID)
 		}
-		live[c.View.Session.ID] = label
+		// SessionCard 전체가 화면의 회수 근거다: 신호·발자국·브랜치·ahead·파생 실패와
+		// 세션 상태. 한 축만 빼면 그 축이 바뀐 뒤에도 옛 사유가 새 사실 위에 남는다.
+		live[c.View.Session.ID] = liveFact{label: label, revision: revisionOf(c)}
+	}
+	outside := map[string]string{}
+	for _, view := range board.OutsideClaims {
+		outside[view.Session.ID] = revisionOf(view)
 	}
 	var out []ClaimTarget
 	for _, it := range q.Items {
@@ -987,9 +1030,11 @@ func (q QueuePanel) claimTargets(board service.BoardView) []ClaimTarget {
 		// ★ 여기서 다시 계산하지 않는다. ItemRow 가 정본이고 이 줄은 옮기기만 한다 —
 		//   두 표면이 같은 이름으로 다른 사실을 내는 것이 이 항목이 고치는 병이다.
 		t := ClaimTarget{ItemID: it.ID, Title: it.Title, Holder: it.Holder, Since: it.Since,
-			Live: "창 밖 세션", CloseDeclared: it.CloseDeclared}
-		if label, ok := live[it.Holder]; ok {
-			t.Holder, t.Live = label, "창 안 세션"
+			Live: "창 밖 세션", CloseDeclared: it.CloseDeclared,
+			Revision: revisionOf([]string{it.Revision, "outside", outside[it.Holder]})}
+		if fact, ok := live[it.Holder]; ok {
+			t.Holder, t.Live = fact.label, "창 안 세션"
+			t.Revision = revisionOf([]string{it.Revision, "inside", fact.revision})
 		}
 		out = append(out, t)
 	}
@@ -1090,15 +1135,24 @@ func (h *handler) fillLane(ctx context.Context, pan *LandingPanel, project strin
 		res := LaneResourcePanel{Resource: rl.Resource}
 		holderSeen := false
 		for _, e := range rl.Entries {
+			lastSignalRevision := "none"
+			if e.LastSignalAt != nil {
+				lastSignalRevision = e.LastSignalAt.UTC().Format(time.RFC3339Nano)
+			}
 			row := LaneRow{
 				RowID:   e.RowID,
 				Session: e.SessionID,
 				Waiting: Age(now.Sub(e.EnqueuedAt)),
 				Signal:  signalAge(now, e.LastSignalAt),
+				Revision: fmt.Sprintf("%d|%s|%s|%s|waiting", e.RowID, e.SessionID,
+					e.EnqueuedAt.UTC().Format(time.RFC3339Nano), lastSignalRevision),
 			}
 			if rl.Holder != nil && rl.Holder.SessionID == e.SessionID {
 				row.Holder = true
 				row.Held = Age(now.Sub(rl.Holder.AcquiredAt))
+				row.Revision = fmt.Sprintf("%d|%s|%s|%s|held|%s", e.RowID, e.SessionID,
+					e.EnqueuedAt.UTC().Format(time.RFC3339Nano), lastSignalRevision,
+					rl.Holder.AcquiredAt.UTC().Format(time.RFC3339Nano))
 				holderSeen = true
 			}
 			res.Rows = append(res.Rows, row)

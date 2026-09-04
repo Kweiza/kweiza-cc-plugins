@@ -63,7 +63,8 @@ func claimed(t *testing.T) (*fixture, string) {
 	//   (폐기 폼에도 같은 id 의 option 이 있으므로 **회수 폼의 줄 모양**으로 단정한다.
 	//   그 줄 모양에 더해 ① 안에서 재면 두 표면이 두 축으로 갈린다)
 	_, html := f.get("")
-	if !strings.Contains(nowSectionOf(t, html), `<option value="t5-a">t5-a ←`) {
+	if !strings.Contains(nowSectionOf(t, html), `<option value="t5-a" data-revision="`) ||
+		!strings.Contains(nowSectionOf(t, html), `">t5-a ←`) {
 		t.Fatalf("전제 실패 — 선점이 회수 대상으로 화면에 없다")
 	}
 	return f, sess.ID
@@ -85,7 +86,7 @@ func TestReclaimWithoutReasonIsRefusedAndClaimSurvives(t *testing.T) {
 	}
 	// 그리고 선점은 그대로 살아 있다 — 회수 폼(①)에서 잰다.
 	_, html := f.get("")
-	mustContain(t, nowSectionOf(t, html), `<option value="t5-a">t5-a ←`, "거절됐는데 선점이 사라졌다")
+	mustContain(t, nowSectionOf(t, html), `<option value="t5-a" data-revision="`, "거절됐는데 선점이 사라졌다")
 }
 
 func TestReclaimReleasesClaimAndLeavesJudgment(t *testing.T) {

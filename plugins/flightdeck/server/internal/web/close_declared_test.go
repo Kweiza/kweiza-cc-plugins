@@ -78,8 +78,9 @@ func TestReclaimFormNamesTheRolledBackFinish(t *testing.T) {
 
 	// 전제 — 그 항목이 회수 대상으로 실제로 올라와 있다. 안 올라와 있으면 아래 단정들은
 	// "표기가 붙었다"가 아니라 "줄이 애초에 없다"를 통과시킨다.
-	mustContain(t, now, `<option value="it-rolled">it-rolled ←`,
+	mustContain(t, now, `<option value="it-rolled" data-revision="`,
 		"전제 실패 — 선점이 회수 폼에 없다")
+	mustContain(t, now, `">it-rolled ←`, "전제 실패 — 회수 선택지가 다른 항목을 가리킨다")
 
 	mustContain(t, now, "종료 선언 최소 1건",
 		"회수 폼이 롤백된 마무리를 침묵한다 — 이 줄이 그것을 말할 마지막 자리다")

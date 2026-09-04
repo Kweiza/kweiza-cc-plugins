@@ -220,6 +220,26 @@ func TestLanePanelOffersReclaimPerRow(t *testing.T) {
 	for _, want := range []string{`value="1"`, `value="2"`} {
 		mustContain(t, lane, want, "줄 행 "+want+" 을 회수 대상으로 고를 수 없다")
 	}
+	mustContain(t, lane, `value="1" data-revision="`, "점유 줄의 의미 지문이 없다")
+	mustContain(t, lane, `value="2" data-revision="`, "대기 줄의 의미 지문이 없다")
+}
+
+func TestLaneRevisionHandlesSessionWithoutAnySignal(t *testing.T) {
+	f := newFixture(t).withRepo("feat")
+	session := f.openSession("cc-no-signal", "신호 없는 줄")
+	if _, err := f.svc.Land(context.Background(), service.LandInput{
+		Project: testProject, SessionID: session.ID,
+	}); err != nil {
+		t.Fatalf("줄 서기 실패: %v", err)
+	}
+
+	code, html := f.get("?project=" + testProject)
+	if code != http.StatusOK {
+		t.Fatalf("화면이 %d 다", code)
+	}
+	lane := laneSectionOf(t, html)
+	mustContain(t, lane, `data-revision="`, "신호 없는 줄에도 의미 지문이 없다")
+	mustContain(t, lane, `|none|held|`, "신호 부재가 원시 지문에서 다른 상태와 구분되지 않는다")
 }
 
 // TestLaneReleaseFromScreenLeavesTheHumanJudgment 는 화면 회수가 **CLI 와 같은 함수**를

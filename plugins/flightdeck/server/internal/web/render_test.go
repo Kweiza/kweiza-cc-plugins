@@ -529,7 +529,7 @@ func TestWriteFormsAreAtMostFourAndAllRequireReason(t *testing.T) {
 	// ★ ① 안에서 재야 한다. 같은 `<option value="t5-a">` 가 ③의 폐기 폼에도 있어서
 	//    페이지 전체에 걸면 회수 폼이 그 항목을 통째로 빠뜨려도 폐기 폼이 이 단정을
 	//    혼자 만족시킨다 — 이 시험이 재려는 것은 정확히 회수 폼이다.
-	mustContain(t, nowSectionOf(t, html), `<option value="t5-a">`, "회수 대상이 회수 폼에 없다")
+	mustContain(t, nowSectionOf(t, html), `<option value="t5-a" data-revision="`, "회수 대상이 회수 폼에 없다")
 }
 
 func TestQueueShowsRejectionDistributionAndDependencies(t *testing.T) {
@@ -639,6 +639,8 @@ func TestUnknownProjectIs404AndNamesIt(t *testing.T) {
 	// 페이지 전체가 맞다 — 404 응답에는 절이 아예 없다(템플릿이 다르다).
 	mustContain(t, html, "등록돼 있지 않다", "왜 비었는지를 말하지 않았다")
 	mustContain(t, html, testProject, "고를 수 있는 프로젝트 목록이 없다")
+	mustContain(t, html, `id="dashboard"`, "404 화면에는 부분 갱신 루트가 없다")
+	mustContain(t, html, `data-sse-project=""`, "없는 프로젝트 id 로 SSE 를 걸러 새 프로젝트를 놓친다")
 }
 
 func TestNoProjectsPageStillRenders(t *testing.T) {
@@ -651,9 +653,11 @@ func TestNoProjectsPageStillRenders(t *testing.T) {
 	// 안 내므로 절 자체가 존재하지 않는다.
 	mustContain(t, html, "등록된 프로젝트가 없다", "빈 서버가 아무 말도 안 했다")
 	mustContain(t, html, "<html", "페이지가 깨졌다")
+	mustContain(t, html, `id="dashboard"`, "빈 서버 화면에는 부분 갱신 루트가 없다")
+	mustContain(t, html, `data-sse-project=""`, "빈 서버가 SSE 를 존재하지 않는 프로젝트로 거른다")
 }
 
-func TestAutoRefreshHasSSEAndMetaFallback(t *testing.T) {
+func TestAutoUpdateReplacesDashboardDataWithoutReloadingTheDocument(t *testing.T) {
 	f := newFixture(t).withRepo("feat")
 	f.openSession("cc-1", "트랙2")
 
@@ -661,23 +665,54 @@ func TestAutoRefreshHasSSEAndMetaFallback(t *testing.T) {
 	// ★ 이 시험 전체가 **페이지 전체여야 한다**. 재는 것이 <head> 와 </main> 뒤의
 	//    <script>·<style> 이라 여섯 절 중 어디에도 속하지 않는다 — 절로 좁히면
 	//    sectionOf 가 이 문자열들을 원리적으로 못 본다.
-	// SSE 가 있으면 SSE.
+	// SSE 는 변화 알림만 받고, 현재 URL 의 새 화면을 비동기로 읽어 동적 루트만 바꾼다.
 	mustContain(t, html, "new EventSource(path)", "SSE 경로가 없다")
-	mustContain(t, html, `var path = "events";`, "SSE 엔드포인트가 페이지에 없다")
+	mustContain(t, html, `data-sse-path="events"`, "SSE 엔드포인트가 동적 루트에 없다")
+	mustContain(t, html, `id="dashboard"`, "데이터만 교체할 동적 루트가 없다")
+	mustContain(t, html, "fetch(window.location.href", "현재 화면을 비동기로 다시 읽지 않는다")
+	mustContain(t, html, "new DOMParser()", "새 화면에서 동적 루트를 꺼낼 파서가 없다")
+	mustContain(t, html, "current.replaceWith(next)", "문서가 아니라 동적 루트만 교체하지 않는다")
+	mustNotContain(t, html, "location.reload", "자동 갱신이 문서 전체를 다시 불러온다")
+	mustNotContain(t, html, `http-equiv="refresh"`, "JS 없는 갈래가 문서 전체를 다시 불러온다")
+	for _, navigation := range []string{"location.assign(", "location.replace("} {
+		mustNotContain(t, html, navigation, "자동 갱신이 새 문서로 탐색한다")
+	}
+	if got := strings.Count(html, `id="dashboard"`); got != 1 {
+		t.Fatalf("부분 갱신 루트가 %d개다, 기대 1", got)
+	}
+
+	// 한 프로젝트를 보고 있으면 그 프로젝트의 변화만 받는다. 빈 project 의 전역 사건은
+	// 허브가 그대로 배달하므로 서버 전체 사건을 잃지 않는다.
+	mustContain(t, html, `data-sse-project="`+testProject+`"`, "SSE 프로젝트 필터의 입력이 없다")
+	mustContain(t, html, `searchParams.set("project", config.project)`, "SSE 가 전 프로젝트를 구독한다")
+	mustContain(t, html, `response.status !== 404`, "의도한 404 대시보드가 부분 갱신에서 버려진다")
 	// ★ **상대경로여야 한다.** 문자열이 아니라 그 성질을 단정한다 —
 	// 절대경로면 리버스 프록시의 경로 접두 뒤에서 브라우저가 원점의 /events 를 찾아가
 	// 구독이 조용히 실패하고, 그러면 화면은 뜨는데 영원히 안 갱신된다
-	// (스트림이 안 열렸으니 메타 리프레시 폴백도 안 켜진다).
-	mustNotContain(t, html, `var path = "\/`, "SSE 경로가 절대경로다 — 경로 접두 뒤에서 구독이 죽는다")
-	// 없으면(스크립트가 아예 안 돌면) 메타 리프레시 폴백.
-	mustContain(t, html, `<noscript><meta http-equiv="refresh" content="7">`,
-		"스크립트 없이도 갱신되는 폴백이 없다")
+	// (스트림이 안 열렸으면 아래의 비동기 시간 폴백이 받는다).
+	mustNotContain(t, html, `data-sse-path="/`, "SSE 경로가 절대경로다 — 경로 접두 뒤에서 구독이 죽는다")
+
+	// 10개 세션이 연속으로 신호를 보내도 요청은 한 번에 하나이고, 그 사이에 온 사건은
+	// pending 한 번으로 접혀야 한다. 폼 입력·포커스·펼침도 동적 루트 교체를 견딘다.
+	for _, seam := range []string{"inFlight", "pending", "captureUIState", "restoreUIState", "setupFolds"} {
+		mustContain(t, html, seam, "연속 사건 또는 로컬 UI 상태를 다루는 이음매가 없다")
+	}
+	mustContain(t, html, `option.dataset.revision === saved.revision`,
+		"쓰기 폼이 선택 대상의 의미가 같은지 확인하지 않는다")
+	mustContain(t, html, `if (!safeForms[entry.form]) { return; }`,
+		"대상이 바뀐 쓰기 폼의 사유·포커스를 함께 버리지 않는다")
+	mustContain(t, html, `retryAfter = ok ? 0 : Date.now() + pollMS`,
+		"부분 갱신 실패가 SSE 사건마다 빠르게 재시도되는 것을 막지 않는다")
+	mustContain(t, html, `id="dashboard-update-status"`, "부분 갱신 실패를 알릴 자리가 없다")
+	mustContain(t, html, "표시된 데이터가 낡았을 수 있다", "부분 갱신 실패가 낡은 화면임을 말하지 않는다")
+	mustContain(t, html, `!window.fetch || !window.DOMParser || !window.URL`,
+		"부분 갱신 API가 없는 브라우저에서 스크립트가 중간 상태로 죽는다")
 	// 외부 의존이 없다 — 자족적이어야 한다.
 	for _, bad := range []string{"http://", "https://", "<link", "cdn"} {
 		mustNotContain(t, html, bad, "자족적이어야 한다(CDN·외부 폰트·외부 스타일 금지)")
 	}
 
-	// SSE 를 안 거는 배치에서도 페이지는 성립한다.
+	// SSE 를 안 거는 배치에서도 같은 부분 갱신을 시간 폴백으로 실행하고 페이지는 성립한다.
 	h2 := New(f.svc, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), WithSSEPath(""))
 	rec := httptest.NewRecorder()
 	h2.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -685,9 +720,36 @@ func TestAutoRefreshHasSSEAndMetaFallback(t *testing.T) {
 		t.Fatalf("SSE 없는 배치에서 status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	mustContain(t, body, `var path = "";`, "SSE 를 안 거는 설정이 페이지에 안 나타났다")
-	mustContain(t, body, "http-equiv=\"refresh\"", "SSE 가 없으면 메타 리프레시가 받아야 한다")
+	mustContain(t, body, `data-sse-path=""`, "SSE 를 안 거는 설정이 페이지에 안 나타났다")
+	mustContain(t, body, "schedulePoll", "SSE 가 없을 때의 비동기 시간 폴백이 없다")
+	mustNotContain(t, body, "location.reload", "SSE 없는 배치가 문서 전체를 다시 불러온다")
 	mustContain(t, body, "① 지금", "SSE 가 없다고 페이지가 반쪽이 됐다")
+}
+
+func TestClaimTargetRevisionChangesWhenItsBackingSessionChanges(t *testing.T) {
+	at := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	queue := QueuePanel{Items: []ItemRow{{ID: "item-a", Holder: "session-a", Revision: "claim-a"}}}
+	board := service.BoardView{Sessions: []service.SessionCard{{
+		View: model.SessionView{
+			Session: model.Session{ID: "session-a", Label: "작업 A"},
+			Signals: map[model.SignalKind]time.Time{model.SignalTool: at},
+		},
+	}}}
+
+	first := queue.claimTargets(board)
+	if len(first) != 1 || first[0].Revision == "" {
+		t.Fatalf("선점 대상 지문 = %#v, 기대 비어 있지 않은 한 건", first)
+	}
+	board.Sessions[0].View.Signals[model.SignalTool] = at.Add(time.Second)
+	second := queue.claimTargets(board)
+	if first[0].Revision == second[0].Revision {
+		t.Fatalf("대상 세션의 신호가 바뀌었는데 지문이 그대로다: %q", first[0].Revision)
+	}
+	board.Sessions = nil
+	outside := queue.claimTargets(board)
+	if second[0].Revision == outside[0].Revision {
+		t.Fatalf("대상이 창 밖으로 바뀌었는데 지문이 그대로다: %q", second[0].Revision)
+	}
 }
 
 func TestDarkAndLightBothStyled(t *testing.T) {

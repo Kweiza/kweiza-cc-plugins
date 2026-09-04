@@ -29,18 +29,19 @@ var tpl = template.Must(template.New("dashboard.gohtml").Funcs(template.FuncMap{
 var loginTpl = template.Must(template.New("login.gohtml").ParseFS(files, "login.gohtml"))
 
 const (
-	// defaultRefresh 는 SSE 가 없을 때의 폴백 주기(초)다.
-	// 짧게 잡으면 읽는 도중에 화면이 사라지고, 길게 잡으면 조정 화면이 낡는다.
+	// defaultRefresh 는 SSE 유실까지 되맞추는 주기적 부분 갱신 간격(초)이다.
+	// 짧게 잡으면 파생 조회가 불어나고, 길게 잡으면 조정 화면이 낡는다. 브라우저는
+	// 이 간격에도 문서를 다시 탐색하지 않고 대시보드 데이터 루트만 바꾼다.
 	defaultRefresh = 30
 
 	// defaultSSEPath 는 서버의 SSE 엔드포인트다(설계 §2 의 GET /events).
-	// **없어도 페이지가 성립한다** — 붙지 않으면 폴백 주기로 새로고침한다.
+	// **없어도 페이지가 성립한다** — 붙지 않으면 주기 조회만으로 데이터 루트를 바꾼다.
 	//
 	// ★ **상대경로다.** 절대경로(`/events`)로 두면 이 화면이 리버스 프록시의
 	// 경로 접두(`/dcp-dev-board/` 같은 것) 뒤에 놓였을 때 브라우저가 원점의 `/events` 를
 	// 찾아가고, 프록시는 그 경로를 모르므로 구독이 조용히 실패한다.
-	// 그러면 **화면은 멀쩡히 뜨는데 영원히 안 갱신되고**, 스트림이 안 열렸으니
-	// 메타 리프레시 폴백도 안 켜진다 — 이 화면이 앞서 한 번 죽었던 바로 그 모양이다.
+	// 그러면 실시간 알림이 조용히 죽고 주기 조회 때만 뒤늦게 맞춰진다 — 화면이 앞서 한 번
+	// 영원히 멈췄던 바로 그 경로다. 주기 조회가 있어도 이 회귀를 늦은 갱신으로 숨기면 안 된다.
 	//
 	// 이 페이지의 폼·링크는 이미 전부 상대경로다(`./`·`actions/drop`·`?project=`).
 	// SSE 만 절대경로면 **같은 페이지 안에서 두 규칙이 공존**하게 되고, 그 비대칭이 결함이었다.
@@ -80,7 +81,7 @@ func WithClock(f func() time.Time) Option {
 	}
 }
 
-// WithRefresh 는 폴백 새로고침 주기(초)를 바꾼다. 0 이하는 무시한다.
+// WithRefresh 는 주기적 부분 갱신 간격(초)을 바꾼다. 0 이하는 무시한다.
 func WithRefresh(sec int) Option {
 	return func(h *handler) {
 		if sec > 0 {
@@ -90,7 +91,7 @@ func WithRefresh(sec int) Option {
 }
 
 // WithSSEPath 는 SSE 경로를 바꾼다. **빈 문자열이면 SSE 를 아예 안 건다** —
-// 그때도 페이지는 폴백 주기로 새로고침하며 그대로 성립한다.
+// 그때도 페이지는 주기적으로 데이터를 다시 읽되 문서 자체는 그대로 둔다.
 func WithSSEPath(p string) Option {
 	return func(h *handler) { h.ssePath = p }
 }
