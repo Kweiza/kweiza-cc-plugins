@@ -45,6 +45,14 @@ func RenderAmend(res service.AmendResult) string {
 			case hasFailureAxis(res.Derived, "overlaps"):
 				b.WriteString("겹침: 이 수정으로 겹치게 된 세션을 **못 셌다** — 0이라는 뜻이 아니다. " +
 					"`board` 가 그 축을 다시 읽는다\n")
+			case hasFailureAxis(res.Derived, "workspace"):
+				// ★ 셋째 상태 — **덜 쟀다.** "못 셌다"(overlaps 축 실패)와는 다른 사실이다:
+				// 이 프로젝트 안의 겹침 계산 자체는 성공했다(res.Overlaps 가 그 값이다).
+				// 다만 형제 프로젝트 명부(workspace 축)를 못 읽어 형제 세션이 판정에
+				// 못 들어갔다 — 0 도 못 셈도 아닌 제3의 사실이라 "없음"을 내면 형제
+				// 쪽에서 실제로 부딪히는 세션이 있어도 화면은 "안전하다"고 말한다.
+				fmt.Fprintf(&b, "겹침: 이 프로젝트 안에서 찾은 겹침은 %d건이다 — %s\n",
+					len(res.Overlaps), overlapsPartialNote)
 			case len(res.Overlaps) == 0:
 				b.WriteString("겹침: 지금 이 경로를 만지는 다른 세션은 없다\n")
 			default:

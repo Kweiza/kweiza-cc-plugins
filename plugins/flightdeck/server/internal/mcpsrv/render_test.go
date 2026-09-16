@@ -98,6 +98,51 @@ func TestRenderTailSeparatesZeroFromUnobserved(t *testing.T) {
 	}
 }
 
+// TestRenderTailAddsPartialNoteWithoutHidingTheRealCount 는 **셋째 상태**(덜 쟀다)를
+// RenderTail 한 자리에서 잰다. TestRenderTailSeparatesZeroFromUnobserved 가 이미 잠근
+// 둘(0건·안 읽음)과 나란히, OverlapsPartial 이 그 둘의 기존 문구를 안 바꾸면서 세 번째
+// 사실을 **덧붙이는지**를 본다 — 지우거나 바꿔치기하면 위 시험이 먼저 빨개진다.
+func TestRenderTailAddsPartialNoteWithoutHidingTheRealCount(t *testing.T) {
+	// 이 프로젝트 안에서는 0건이지만 형제를 못 봤다 — "없음"과 "덜 쟀다"가 함께 선다.
+	partialZero := RenderTail(TailInput{
+		Now: t0, NotesObserved: true, OverlapsObserved: true, OverlapsPartial: true,
+	})
+	if !strings.Contains(partialZero, "겹침: 없음") {
+		t.Fatalf("이 프로젝트 안의 진짜 0건 문구가 사라졌다:\n%s", partialZero)
+	}
+	if !strings.Contains(partialZero, "형제 프로젝트는 못 봤다") {
+		t.Fatalf("덜 쟀다는 사실이 안 붙었다:\n%s", partialZero)
+	}
+
+	// 이 프로젝트 안에서 1건을 찾았는데 형제를 못 봤다 — 목록과 캐벗이 함께 선다.
+	partialN := RenderTail(TailInput{
+		Now: t0, NotesObserved: true, OverlapsObserved: true, OverlapsPartial: true,
+		Overlaps: []judge.Overlap{{SessionID: "01ABCDEFGH", Label: "트랙2",
+			Pairs: [][2]string{{"shared/x.go", "shared/x.go"}}}},
+	})
+	if !strings.Contains(partialN, "겹침 1건") {
+		t.Fatalf("이 프로젝트 안에서 찾은 개수가 사라졌다:\n%s", partialN)
+	}
+	if !strings.Contains(partialN, "형제 프로젝트는 못 봤다") {
+		t.Fatalf("덜 쟀다는 사실이 안 붙었다:\n%s", partialN)
+	}
+
+	// Partial 이 거짓이면(기존 두 상태) 새 줄이 전혀 안 붙는다 — 회귀 방지.
+	complete := RenderTail(TailInput{Now: t0, NotesObserved: true, OverlapsObserved: true})
+	if strings.Contains(complete, "형제 프로젝트는 못 봤다") {
+		t.Fatalf("OverlapsPartial 이 거짓인데 덜 쟀다 문구가 나왔다:\n%s", complete)
+	}
+
+	// 완전히 못 읽었을 때(observed:false)는 Partial 을 켜도 그 문구가 안 나온다 —
+	// 범위를 잴 값 자체가 없다(완전 실패가 우선한다).
+	unobservedPartial := RenderTail(TailInput{
+		Now: t0, NotesObserved: true, OverlapsObserved: false, OverlapsPartial: true,
+	})
+	if strings.Contains(unobservedPartial, "형제 프로젝트는 못 봤다") {
+		t.Fatalf("완전 못 읽음인데 덜 쟀다 문구까지 나왔다 — 상태가 안 갈린다:\n%s", unobservedPartial)
+	}
+}
+
 func TestTailShowsTheirChangeSize(t *testing.T) {
 	out := RenderTail(TailInput{
 		NotesObserved:    true,

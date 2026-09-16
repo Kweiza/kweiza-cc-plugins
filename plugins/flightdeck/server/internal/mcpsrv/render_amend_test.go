@@ -116,6 +116,36 @@ func TestRenderAmendSaysOverlapUnknown(t *testing.T) {
 	}
 }
 
+// TestRenderAmendSaysOverlapPartialWhenWorkspaceFails 는 **셋째 상태**(덜 쟀다)를 잰다.
+//
+// "못 셌다"(overlaps 축 실패)와 다른 사실이다 — 이 프로젝트 안의 겹침 계산은
+// 성공했다(res.Overlaps 가 실제 값 1건이다). 다만 명부(workspace 축) 조회가
+// 실패해 형제 프로젝트는 판정에 못 들어갔다. 세 상태가 서로 다른 문장인지를
+// 실문구로 잠근다 — "못 셌다"·"세션 1개와 경로가 겹친다"·"다른 세션은 없다" 중
+// 어느 것도 이 상태의 문장과 안 겹쳐야 한다(그러면서도 이 프로젝트 것의 개수(1)는
+// 실려야 한다 — 셌다는 사실 자체를 숨기면 안 된다).
+func TestRenderAmendSaysOverlapPartialWhenWorkspaceFails(t *testing.T) {
+	res := service.AmendResult{
+		Item: model.Item{ID: "i1", Paths: []string{"shared/x.go"}}, Rev: 1, Changed: []string{"paths"},
+		Overlaps: []judge.Overlap{{SessionID: "01OTHERSESSION"}},
+	}
+	res.Failures = append(res.Failures, service.DerivedFailure{Axis: "workspace", Detail: "명부 조회 실패"})
+	got := RenderAmend(res)
+
+	if !strings.Contains(got, "형제 프로젝트는 못 봤다") {
+		t.Errorf("덜 쟀다는 사실을 안 말한다:\n%s", got)
+	}
+	if !strings.Contains(got, "1건") {
+		t.Errorf("이 프로젝트 안에서 셌다는 개수를 안 말한다:\n%s", got)
+	}
+	if strings.Contains(got, "못 셌다") {
+		t.Errorf("덜 쟀다인데 완전히 못 센 것처럼 말한다(첫째 상태와 안 갈린다):\n%s", got)
+	}
+	if strings.Contains(got, "세션 1개와 경로가 겹친다") || strings.Contains(got, "지금 이 경로를 만지는 다른 세션은 없다") {
+		t.Errorf("덜 쟀다인데 완전히 관측한 것처럼 말한다(둘째 상태와 안 갈린다):\n%s", got)
+	}
+}
+
 // TestRenderAmendSaysPathsExcludedFromOverlapAxis 는 경로를 빈 목록으로 고쳤을 때
 // (paths 축은 바뀌었지만 결과가 0개인 경우) 그 사실을 RenderAdd 와 같은 문구로
 // 말하는지 본다(리뷰 I-4).

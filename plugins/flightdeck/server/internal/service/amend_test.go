@@ -261,6 +261,61 @@ func TestAmendOverlapsDeriveFailureUsesTheOverlapsAxis(t *testing.T) {
 	}
 }
 
+// TestAmendOverlapsPartialWhenRosterFails 는 **셋째 상태**(덜 쟀다)의 전제를 잠근다:
+// 명부(Roster) 조회만 실패시키면 — sessionCards 는 멀쩡하므로 — 이 프로젝트 안의
+// 겹침 계산은 그대로 성공하고, Derived.Failures 에는 "workspace" 만 서고 "overlaps"는
+// 안 선다. 이 전제가 깨지면(둘 다 서거나 둘 다 안 서면) 렌더 층이 "못 셌다"와
+// "덜 쟀다"를 가를 신호 자체가 없어진다.
+//
+// 실패는 실물로 만든다: project_member 표를 지운다. Roster→WorkspaceMembers 가 그
+// 표를 직접 질의해서 표가 없으면 하드 에러가 난다. signal 표는 안 건드리므로
+// sessionCards(→ ListLive)는 그대로 성공하고, 이 프로젝트 안의 실제 겹침 하나를
+// 미리 만들어 그 값이 안 사라지는지까지 함께 잰다.
+func TestAmendOverlapsPartialWhenRosterFails(t *testing.T) {
+	s, st := newSvc(t)
+	repo := newRepo(t)
+	openSession(t, s, "p1", repo, repo, "cc-seed", "")
+	mustAddItem(t, st, model.Item{Project: "p1", ID: "i1", Title: "t", Body: "b", Paths: []string{"old/"}})
+
+	// 이 프로젝트 안에 실제 겹침 하나를 만든다 — 형제를 못 봐도 이 프로젝트 것은
+	// 그대로 세어야 한다는 것이 이 시험의 핵심이다.
+	other := openSession(t, s, "p1", repo, repo, "cc-other", "")
+	if err := s.Beat(ctx(), other.Session.ID, model.SignalTool, []string{"shared/x.go"}); err != nil {
+		t.Fatalf("남 세션 신호 실패: %v", err)
+	}
+
+	if _, err := st.DB().ExecContext(ctx(), "DROP TABLE project_member"); err != nil {
+		t.Fatalf("project_member 표 제거 실패: %v", err)
+	}
+
+	paths := []string{"shared/x.go"}
+	res, err := s.AmendItem(ctx(), AmendInput{
+		Project: "p1", ItemID: "i1", Paths: &paths, Reason: "명부 조회 실패 시연",
+	})
+	if err != nil {
+		t.Fatalf("쓰기까지 실패했다 — 파생 실패가 결과를 죽이면 안 된다: %v", err)
+	}
+	if len(res.Overlaps) != 1 {
+		t.Fatalf("이 프로젝트 안의 겹침 자체를 못 셌다 — 명부 실패는 형제만 놓쳐야 한다: %+v", res.Overlaps)
+	}
+	var haveWorkspace, haveOverlaps bool
+	for _, f := range res.Derived.Failures {
+		switch f.Axis {
+		case "workspace":
+			haveWorkspace = true
+		case "overlaps":
+			haveOverlaps = true
+		}
+	}
+	if !haveWorkspace {
+		t.Fatalf("명부 조회가 실패했는데 workspace 축이 안 잡혔다: %+v", res.Derived.Failures)
+	}
+	if haveOverlaps {
+		t.Fatalf("이 프로젝트 계산은 성공했는데 overlaps 축까지 실패로 잡혔다 — "+
+			"그러면 렌더가 '덜 쟀다'가 아니라 '완전히 못 셌다'로 읽는다: %+v", res.Derived.Failures)
+	}
+}
+
 // TestAmendSkipsOverlapComputationWhenPathsAreEmptied 는 새 경로가 **빈 목록**이면
 // 겹침 계산 자체를 안 돌리는지 본다(재리뷰 4번째 상태, 2026-09-16).
 //

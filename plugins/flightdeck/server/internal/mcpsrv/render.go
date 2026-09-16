@@ -2246,7 +2246,22 @@ type TailInput struct {
 	Overlaps         []judge.Overlap
 	OverlapsObserved bool
 	OverlapsNote     string // 안 읽었으면 왜 안 읽었나
+
+	// OverlapsPartial 은 **셋째 상태**다 — 0(진짜 없음)도 못 잼(!OverlapsObserved)도
+	// 아니라 **덜 쟀다**: 이 프로젝트 안의 겹침은(Overlaps 에 실린 그대로) 셌지만
+	// 명부(workspace 축) 조회가 실패해 형제 프로젝트의 세션은 판정에 못 들어갔다.
+	//
+	// ★ OverlapsObserved 와 **독립**이다 — 관측은 했다(그래서 true), 다만 범위가
+	// 이 프로젝트로 좁혀졌을 뿐이다. Overlaps 목록·"없음" 줄은 그대로 내고(거짓이
+	// 아니다, 이 범위 안에서는 사실이다), 그 아래에 범위가 좁았다는 사실만 덧붙인다 —
+	// 기존 두 문구("없음"·"N건")를 바꾸면 그 문구를 실문구로 잠근 시험들이 깨진다.
+	OverlapsPartial bool
 }
+
+// overlapsPartialNote 는 "덜 쟀다"(OverlapsPartial) 상태의 공통 사유문이다.
+// RenderTail 의 기본값과 RenderAmend 의 본문이 같은 문구를 쓴다 — 문구가 갈리면
+// 본문과 꼬리가 같은 사실을 다르게 말하는 것처럼 읽힌다(리뷰 I-1 과 같은 이유).
+const overlapsPartialNote = "형제 프로젝트는 못 봤다(명부 조회 실패, workspace 축) — 이 프로젝트 것만 셌다, 덜 쟀다"
 
 // tailOverlapLimit 은 꼬리가 **줄을 내는** 겹침 세션 수다. 건수는 머리줄이 전부 센다.
 //
@@ -2347,6 +2362,12 @@ func RenderTail(in TailInput) string {
 			lines = append(lines, fmt.Sprintf("  · %s %s: %s",
 				ShortID(o.SessionID), label, strings.Join(pairs, ", ")))
 		}
+	}
+	// ★ 셋째 상태는 위 switch 의 **바깥**에 있다 — "없음"이든 "N건"이든 둘 다
+	// 이 프로젝트 범위 안에서는 사실이라 그 줄을 지우거나 바꾸지 않는다. 못 잼
+	// (!in.OverlapsObserved) 일 때는 애초에 범위를 잴 값 자체가 없어 여기 안 온다.
+	if in.OverlapsObserved && in.OverlapsPartial {
+		lines = append(lines, "겹침: "+overlapsPartialNote)
 	}
 
 	if strings.TrimSpace(in.Banner) != "" {

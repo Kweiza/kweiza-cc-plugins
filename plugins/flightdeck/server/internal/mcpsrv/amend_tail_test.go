@@ -172,3 +172,53 @@ func TestAmendBodyAndTailAgreeWhenOverlapsAreNonZero(t *testing.T) {
 		t.Errorf("겹침이 있는데 없다거나 못 셌다고 말한다:\n%s", body)
 	}
 }
+
+// TestAmendBodyAndTailAgreeWhenRosterFails 는 **셋째 상태**(덜 쟀다)를 실제 tools/call
+// 왕복으로 잰다 — ①~④(위 네 시험)와 나란히 다섯째 상태를 채운다: paths 를 고쳤고
+// 이 프로젝트 안의 겹침 계산은 성공했는데, 형제 프로젝트 명부(workspace 축) 조회가
+// 실패한 경우다.
+//
+// project_member 표를 지워 Roster 만 부순다(③ 시험이 쓰는 signal 표와는 다른 표다 —
+// 그 표를 지우면 sessionCards 까지 죽어 이 프로젝트 것도 못 세게 되고, 그러면 재려는
+// 상태(이 프로젝트는 세고 형제만 못 봄)에 안 닿는다).
+func TestAmendBodyAndTailAgreeWhenRosterFails(t *testing.T) {
+	srv, svc, repo := setupAmendServer(t)
+	ctx := context.Background()
+
+	other, err := svc.OpenSession(ctx, service.OpenSessionInput{
+		Project: "repo", ProjectPath: repo, MachineID: "m1", Hostname: "h",
+		Worktree: repo, CCSessionID: "cc-other",
+	})
+	if err != nil {
+		t.Fatalf("남 세션 열기 실패: %v", err)
+	}
+	if err := svc.Beat(ctx, other.Session.ID, model.SignalTool, []string{"shared/x.go"}); err != nil {
+		t.Fatalf("남 세션 신호 실패: %v", err)
+	}
+
+	if _, err := svc.Store().DB().ExecContext(ctx, "DROP TABLE project_member"); err != nil {
+		t.Fatalf("project_member 표 제거 실패: %v", err)
+	}
+
+	frames := serve(t, srv, call("amend", map[string]any{
+		"item_id": "it1", "paths": []string{"shared/x.go"}, "reason": "명부 조회 실패 시연",
+	}))
+	body, isErr := toolText(t, frames[0])
+	if isErr {
+		t.Fatalf("amend 가 실패했다 — 명부 조회 실패가 결과를 죽이면 안 된다:\n%s", body)
+	}
+	// 본문·꼬리 둘 다 같은 셋째 사실을 말해야 한다 — 없음도 못 셈도 아니다.
+	if strings.Count(body, "형제 프로젝트는 못 봤다") < 2 {
+		t.Errorf("본문·꼬리 둘 다 덜 쟀다는 사실을 말해야 한다(리뷰 I-1 과 같은 규율):\n%s", body)
+	}
+	if !strings.Contains(body, "1건") {
+		t.Errorf("이 프로젝트 안의 겹침 개수(1건)를 안 말한다:\n%s", body)
+	}
+	// 완전 실패(못 셌다)·완전 관측(없음)과는 갈려야 한다.
+	if strings.Contains(body, "못 셌다") {
+		t.Errorf("덜 쟀다인데 완전히 못 센 것처럼 말한다:\n%s", body)
+	}
+	if strings.Contains(body, "겹침: 없음") {
+		t.Errorf("이 프로젝트 안에 실제 겹침이 있는데 '없음'을 말한다:\n%s", body)
+	}
+}

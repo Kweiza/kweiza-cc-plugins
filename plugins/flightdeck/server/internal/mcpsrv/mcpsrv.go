@@ -884,7 +884,15 @@ func (s *Server) toolPick(ctx context.Context, sessionID string, raw json.RawMes
 		}
 		return textResult(s.withTail(ctx, s.errText("pick", err), tailOpts{}), true)
 	}
-	tail := s.tail(ctx, tailOpts{overlaps: res.Overlaps, observed: true})
+	// ★ liveOverlapSessions(board.go)를 AmendItem 과 공유한다 — 명부(workspace 축)
+	// 조회가 실패하면 이 프로젝트 것만 세고 형제는 놓친다(**덜 쟀다**). res.Overlaps 는
+	// 그 좁은 범위의 진짜 값이라 observed:true 로 그대로 내고, overlapsPartial 로
+	// 범위가 좁았다는 사실만 얹는다 — toolAmend 의 같은 갈래와 같은 이유다.
+	pickTail := tailOpts{overlaps: res.Overlaps, observed: true}
+	if hasFailureAxis(res.Derived, "workspace") {
+		pickTail.overlapsPartial = true
+	}
+	tail := s.tail(ctx, pickTail)
 	// ★ **보낸 것과 돌아온 것을 대조한다.** 이 자리가 요청(a.ItemIDs)과 응답(res)을
 	// 둘 다 보는 유일한 지점이다 — 백엔드가 in-process 서비스든 원격 서버를 치는
 	// cmd/fd 프록시든 똑같이 지난다.
@@ -1119,7 +1127,7 @@ func (s *Server) toolAmend(ctx context.Context, sessionID string, raw json.RawMe
 		}
 		return textResult(s.withTail(ctx, s.errText("amend", err), tailOpts{}), true)
 	}
-	// ★ 꼬리는 본문과 **같은 사실**을 말해야 한다(리뷰 I-1). 네 상태를 가른다:
+	// ★ 꼬리는 본문과 **같은 사실**을 말해야 한다(리뷰 I-1). 다섯 상태를 가른다:
 	//
 	//  1. paths 를 안 고쳤다 — 이 도구는 정말 경로 축을 안 읽었다. tailOpts{}
 	//     (observed:false) 그대로.
@@ -1135,6 +1143,10 @@ func (s *Server) toolAmend(ctx context.Context, sessionID string, raw json.RawMe
 	//     부딪힌다. 그래서 observed:false 로 두되 이유를 밝힌다 — mcpsrv.go 의 board
 	//     무세션 갈래(overlapsNote: "내 세션이 없어…")와 같은 관용구다.
 	//  4. paths 를 고쳤고 새 경로가 있고 계산도 성공했다 — 있는 그대로 낸다.
+	//  5. paths 를 고쳤고 새 경로가 있고 이 프로젝트 계산은 성공했는데, 형제 프로젝트
+	//     명부(workspace 축) 조회가 실패했다 — **덜 쟀다**(2026-09-17 재리뷰). 3 과
+	//     다른 사실이다: res.Overlaps 는 진짜 값이지 빈 자리표가 아니다. observed:true
+	//     로 그 값을 그대로 내고, overlapsPartial 로 범위가 좁았다는 사실만 얹는다.
 	tail := tailOpts{}
 	switch {
 	case !containsAxis(res.Changed, "paths"):
@@ -1143,6 +1155,9 @@ func (s *Server) toolAmend(ctx context.Context, sessionID string, raw json.RawMe
 		// ③ 새 경로가 있는데 못 셌다.
 		tail = tailOpts{observed: false,
 			overlapsNote: "이 수정으로 겹치게 된 세션을 못 셌다(overlaps 축 파생 실패) — 0 이라는 뜻이 아니다"}
+	case hasFailureAxis(res.Derived, "workspace"):
+		// ⑤ 이 프로젝트 것은 셌는데 형제 프로젝트를 못 봤다 — 덜 쟀다.
+		tail = tailOpts{overlaps: res.Overlaps, observed: true, overlapsPartial: true}
 	default:
 		// ② 새 경로가 비어 계산을 안 돌린 경우(res.Overlaps == nil)와
 		// ④ 계산이 성공한 경우 둘 다 여기로 온다 — 둘 다 "읽었다"가 참이기 때문이다.
@@ -1218,6 +1233,11 @@ type tailOpts struct {
 	observed     bool   // 이 도구가 경로 축을 **실제로** 읽었나
 	overlapsNote string // 안 읽었으면 왜
 
+	// overlapsPartial 은 **덜 쟀다** — observed 는 참이지만(이 프로젝트 것은 실제로
+	// 읽었다) 명부(workspace 축) 조회가 실패해 형제 프로젝트 세션이 빠졌다. board·
+	// AmendItem·Pick 이 공유하는 TailInput.OverlapsPartial 로 그대로 넘어간다.
+	overlapsPartial bool
+
 	// notes·haveNote — 이 도구가 알림 축을 **이미 읽어 왔다면** 그 값이다.
 	// board 가 그렇다: 같은 보드 응답에 실려 오므로 다시 부르면 조정 서버가
 	// 같은 파생을 두 번 한다. haveNote 를 불리언으로 따로 두는 이유는
@@ -1257,6 +1277,7 @@ func (s *Server) tail(ctx context.Context, o tailOpts) string {
 		Overlaps:         o.overlaps,
 		OverlapsObserved: o.observed,
 		OverlapsNote:     o.overlapsNote,
+		OverlapsPartial:  o.overlapsPartial,
 	}
 	if o.haveNote {
 		// 이 도구가 이미 읽어 온 것이다. 같은 값을 다시 부르지 않는다.
