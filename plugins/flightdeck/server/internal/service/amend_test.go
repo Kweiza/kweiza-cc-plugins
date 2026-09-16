@@ -69,6 +69,14 @@ func TestAmendReportsActualChange(t *testing.T) {
 	if res.Rev != 1 {
 		t.Errorf("rev 가 %d다 — 변화가 없어도 개정 행은 쌓인다(사유가 원장에 남아야 한다)", res.Rev)
 	}
+	// Before·Item 을 지워도(할당 자체를 빼도) 위 두 단정은 여전히 초록이다 —
+	// 이 값들이 실제로 채워지는지는 따로 재야 한다.
+	if res.Before.Title != "원래 제목" || res.Before.Body != "원래 본문" {
+		t.Errorf("Before 가 %+v다 — 고치기 직전의 값이어야 한다", res.Before)
+	}
+	if res.Item.Title != "원래 제목" || res.Item.Body != "원래 본문" {
+		t.Errorf("Item 이 %+v다 — 되읽은 값이어야 한다", res.Item)
+	}
 }
 
 // TestAmendPathsReportsOverlaps 는 경로를 고쳤을 때 겹치게 된 세션이 응답에 오는지 본다.
@@ -128,5 +136,127 @@ func TestAmendPathsUnchangedReportsNoOverlaps(t *testing.T) {
 	}
 	if len(res.Overlaps) != 0 {
 		t.Errorf("Overlaps 가 %+v다 — paths 를 안 건드렸으니 비어야 한다", res.Overlaps)
+	}
+}
+
+// TestAmendPathsReportsSiblingProjectOverlap 은 **형제 프로젝트**의 살아 있는 세션도
+// 겹침에 잡히는지 본다(board.go 의 liveOverlapSessions 안 siblingLive 블록).
+//
+// TestAmendPathsReportsOverlaps·TestAmendPathsUnchangedReportsNoOverlaps 둘 다 같은
+// 프로젝트 안의 세션만 쓴다 — 그래서 siblingLive 블록을 통째로 지워도 그 둘은
+// 초록으로 남는다(리뷰 I-2). 워크스페이스 명부(newWSFixture, workspace_behavior_test.go)
+// 위에서 형제 프로젝트의 세션이 실제로 겹침에 실리는지를 이 시험이 잠근다.
+func TestAmendPathsReportsSiblingProjectOverlap(t *testing.T) {
+	f := newWSFixture(t)
+
+	// 형제 프로젝트(search-api, 디렉토리는 member-a) 세션이 자기 좌표로 파일을 만진다.
+	if err := f.svc.Beat(ctx(), f.memberASes, model.SignalTool,
+		[]string{filepath.Join(f.root, "member-a", "server", "foo.go")}); err != nil {
+		t.Fatalf("비트 실패: %v", err)
+	}
+	addItem(t, f.svc, "repo", "i1", []string{"old/"}, nil)
+
+	// 루트 좌표계에서 형제 세션이 만진 자리로 옮긴다(PathAsSeenFrom 의 그 변환 —
+	// TestOverlapCrossesTheWorkspace 가 같은 변환을 처방 경로에서 이미 확인했다).
+	paths := []string{"member-a/"}
+	res, err := f.svc.AmendItem(ctx(), AmendInput{
+		Project: "repo", SessionID: f.rootSess, ItemID: "i1", Paths: &paths, Reason: "형제 겹침 시험",
+	})
+	if err != nil {
+		t.Fatalf("고치지 못했다: %v", err)
+	}
+	found := false
+	for _, ov := range res.Overlaps {
+		if ov.SessionID == f.memberASes {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("형제 프로젝트 세션(%s)과의 겹침이 안 잡혔다: %+v", f.memberASes, res.Overlaps)
+	}
+}
+
+// TestAmendExcludesSiblingCardFromOverlap 은 **같은 대화(cc)의 다른 카드**를 겹침에서
+// 빼는지 본다(board.go 의 liveOverlapSessions 안 selfCCOf(cards, self) 호출).
+//
+// TestAmendPathsReportsOverlaps 는 self 카드가 하나뿐이라 selfCC 를 `""` 로 되돌려도
+// 초록이다(리뷰 I-3) — 그 mutant 를 실제로 잡으려면 같은 cc 로 카드 두 장을 만들어야
+// 한다. 재현하는 모양은 pick_test.go 의 TestPickDoesNotReportSiblingCardAsOverlap 과
+// 같다(cc 표류·워크트리 갈림으로 한 대화가 카드 두 장이 된 실측 상태).
+func TestAmendExcludesSiblingCardFromOverlap(t *testing.T) {
+	s, _ := newSvc(t)
+	repo, wt := newRepoWithWorktree(t, "feat")
+
+	me := openSession(t, s, "p1", repo, wt, "cc-1", "내 카드")
+	sibling := openSession(t, s, "p1", repo, repo, "cc-1", "같은 대화의 다른 카드")
+	other := openSession(t, s, "p1", repo, repo, "cc-2", "진짜 남")
+
+	// 형제와 남이 같은 경로를 만진다 — selfCC 판정이 안 돌면 둘 다 겹침으로 나온다.
+	for _, id := range []string{sibling.Session.ID, other.Session.ID} {
+		if err := s.Beat(ctx(), id, model.SignalTool,
+			[]string{filepath.Join(repo, "server", "internal", "api", "x.go")}); err != nil {
+			t.Fatalf("비트 실패: %v", err)
+		}
+	}
+	addItem(t, s, "p1", "i1", []string{"old/"}, nil)
+
+	paths := []string{"server/internal/api/"}
+	res, err := s.AmendItem(ctx(), AmendInput{
+		Project: "p1", SessionID: me.Session.ID, ItemID: "i1", Paths: &paths, Reason: "겹침 재기",
+	})
+	if err != nil {
+		t.Fatalf("고치지 못했다: %v", err)
+	}
+	for _, ov := range res.Overlaps {
+		if ov.SessionID == sibling.Session.ID {
+			t.Fatalf("형제 카드가 겹침으로 나왔다 — 세션이 자기 자신과 조율하라는 화면이다: %+v", res.Overlaps)
+		}
+	}
+	// ★ 형제를 뺀 것과 축을 통째로 꺼서 아무도 안 걸린 것을 가른다 — 진짜 남은 남아야 한다.
+	if len(res.Overlaps) != 1 || res.Overlaps[0].SessionID != other.Session.ID {
+		t.Fatalf("진짜 남과의 겹침이 사라졌다 — 형제를 빼면서 축을 통째로 껐다: %+v", res.Overlaps)
+	}
+}
+
+// TestAmendOverlapsDeriveFailureUsesTheOverlapsAxis 는 겹침 계산이 실패했을 때
+// Derived.Failures 의 축 이름이 정확히 "overlaps" 인지 잠근다.
+//
+// 이 이름은 다음 태스크(렌더러)가 deriveFailed(res.Derived, "overlaps") 로 읽을
+// 이름이다 — 이름이 조용히 바뀌면 렌더가 "못 셌다"를 "0건"으로 찍는데 아무도 안
+// 잡는다(0 과 못 잼을 가르는 것이 이 축의 요점이다, 리뷰 M-3).
+//
+// 실패는 실물로 만든다: signal 표를 지운다. sessionCards→ListLive 가 그 표를
+// 직접 질의문에 넣어 쓰므로 표가 없으면 하드 에러가 난다. item·item_revision·
+// project 는 안 건드리므로 **쓰기와 되읽기는 그대로 성공한다** — 겹침 축만 골라
+// 실패시키는 것이 이 시험의 핵심이다(item 축까지 같이 죽으면 재려던 것을 못 가른다).
+func TestAmendOverlapsDeriveFailureUsesTheOverlapsAxis(t *testing.T) {
+	s, st := newSvc(t)
+	mustAddItem(t, st, model.Item{Project: "p1", ID: "i1", Title: "t", Body: "b", Paths: []string{"old/"}})
+
+	if _, err := st.DB().ExecContext(ctx(), "DROP TABLE signal"); err != nil {
+		t.Fatalf("signal 표 제거 실패: %v", err)
+	}
+
+	paths := []string{"new/"}
+	res, err := s.AmendItem(ctx(), AmendInput{
+		Project: "p1", ItemID: "i1", Paths: &paths, Reason: "파생 실패 축 이름 고정",
+	})
+	if err != nil {
+		t.Fatalf("쓰기까지 실패했다 — 파생 실패가 결과를 죽이면 안 된다: %v", err)
+	}
+	if res.Rev != 1 {
+		t.Fatalf("rev=%d — 쓰기 자체는 성공했어야 한다(signal 표는 item 과 무관하다)", res.Rev)
+	}
+	if res.Item.Title != "t" {
+		t.Fatalf("되읽기(item 축)까지 실패한 것 같다 — 겹침 축만 죽였어야 한다: %+v", res.Item)
+	}
+	found := false
+	for _, f := range res.Derived.Failures {
+		if f.Axis == "overlaps" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("겹침 파생이 실패했는데 축 이름이 'overlaps' 로 안 잡혔다: %+v", res.Derived.Failures)
 	}
 }

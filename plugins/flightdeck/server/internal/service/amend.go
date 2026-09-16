@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/kweiza/flightdeck/internal/judge"
 	"github.com/kweiza/flightdeck/internal/model"
@@ -54,7 +53,11 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 	var res AmendResult
 	in.Project = strings.TrimSpace(in.Project)
 	in.ItemID = strings.TrimSpace(in.ItemID)
-	in.Reason = strings.TrimSpace(in.Reason)
+	// ★ Reason 은 **거절 판정에만** 다듬은 값을 쓴다. in.Reason 자체는 안 건드린다 —
+	//   store/amend.go 가 "저장은 원문 그대로 한다(TrimSpace 한 값이 아니다) … 거절
+	//   판정에만 다듬은 값을 쓴다"고 명시했다. 여기서 in.Reason 을 덮으면 이 층이
+	//   그 결정을 말없이 뒤집는다(양끝 공백만 잃지만 아래 층 계약과 어긋난다).
+	reason := strings.TrimSpace(in.Reason)
 
 	if in.Project == "" {
 		return res, &RefusedError{
@@ -91,7 +94,7 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 				"선행과 상태는 이 동사가 안 고친다.",
 		}
 	}
-	if in.Reason == "" {
+	if reason == "" {
 		return res, &RefusedError{
 			What:   "amend",
 			Reason: "고친 사유가 비었다 — 사유 없는 수정은 나중에 되짚을 수 없다",
@@ -103,6 +106,8 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 	var rec store.AmendRecord
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		var e error
+		// ★ Reason 은 in.Reason(원문)을 그대로 넘긴다 — reason(다듬은 값)이 아니다.
+		//   store.AmendItem 이 원문을 저장하기로 이미 결정했다(store/amend.go:64-65).
 		rec, e = t.AmendItem(in.Project, in.ItemID, store.AmendPatch{
 			Title: in.Title, Body: in.Body, Paths: in.Paths, Reason: in.Reason,
 		}, in.SessionID)
@@ -118,6 +123,10 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 
 	// ★ 여기서부터는 **쓰기 뒤 파생**이다. 실패해도 결과를 버리지 않는다 — 쓰기는
 	//   이미 커밋됐고 되돌리는 코드가 없다(DESIGN §5).
+	//
+	// ★ 시각을 **한 번만** 잡는다(pick.go:337 과 같은 규율) — 되읽기·겹침 계산·
+	//   Derived 계산이 서로 다른 s.now() 를 보게 두면 같은 응답 안에서 "지금"이 갈린다.
+	now := s.now()
 	d := &derive{}
 
 	// 저장된 값을 다시 읽는다 — 요청 값을 그대로 돌려주면 무엇이 저장됐는지가 아니라
@@ -134,8 +143,15 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 	// 이 수정의 결과가 아니라 원래 있던 사실이고, 그것을 여기 내면 고친 사람은
 	// 자기가 방금 만든 겹침이라고 읽는다.
 	if containsString(rec.Changed, "paths") { // ★ 이 헬퍼는 landing.go 에 이미 있다(중복 선언 금지)
-		live, selfCC, lerr := s.liveOverlapSessions(ctx, in.Project, in.SessionID, s.now(), d)
-		if lerr != nil {
+		// ★ live·selfCC 를 얻는 조합은 board.go 의 liveOverlapSessions 다 — pick.go 의
+		//   Pick 과 공유하는 단일 지점이다(사본을 amend.go 안에 다시 두지 않는다).
+		//   Pick 은 이 GetProject 를 이미 진입부에서 했지만 amend 는 쓰기 전에 project
+		//   구조체가 필요 없어서 안 읽어 뒀다 — 그래서 여기서 한 번 더 읽는다.
+		if proj, perr := s.st.GetProject(ctx, in.Project); perr != nil {
+			s.log.WarnContext(ctx, "겹침을 못 셌다 — 수정은 커밋됐다",
+				"project", clip(in.Project, 64), "item", clip(in.ItemID, 64), "error", perr.Error())
+			d.fail("overlaps", perr)
+		} else if live, selfCC, lerr := s.liveOverlapSessions(ctx, proj, in.SessionID, now, d); lerr != nil {
 			s.log.WarnContext(ctx, "겹침을 못 셌다 — 수정은 커밋됐다",
 				"project", clip(in.Project, 64), "item", clip(in.ItemID, 64), "error", lerr.Error())
 			d.fail("overlaps", lerr)
@@ -144,42 +160,6 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 		}
 	}
 
-	res.Derived = d.result(s.now())
+	res.Derived = d.result(now)
 	return res, nil
-}
-
-// liveOverlapSessions 는 겹침 판정에 넣을 살아 있는 세션 목록과, 그 중 내 세션이
-// 속한 대화(cc) id 를 낸다.
-//
-// ★ pick.go 의 Pick 이 겹침 판정 앞에서 여는 경로와 **같은 조합**이다 — 프로젝트를
-// 읽고 → 세션 카드를 뽑고(sessionCards) → judge 좌표계로 옮기고(liveFor) → 형제
-// 프로젝트의 세션을 더한다(Roster 로 얻은 명부 위에서 siblingLive). 이 조합을 amend
-// 안에서 다시 짓지 않고 그대로 재사용한다 — 사람이 다른 자리에서 같은 조합을 또
-// 만들면 두 자리가 조용히 어긋난다(siblingLive 의 머리말이 같은 것을 경고한다).
-//
-// selfCC 를 못 찾으면(카드 목록에 self 가 없으면) 빈 문자열이다 — 그러면 형제 판정이
-// 안 돈다. 반대로 접었다가는 관측이 깨진 순간 진짜 겹침이 조용히 사라진다(selfCCOf 의
-// 머리말과 같은 이유).
-//
-// 명부 조회 실패는 이 함수를 실패시키지 않는다 — pick.go 와 같은 이유로 "형제 없이
-// 진행한다"(d.fail("workspace", …)로만 고백한다). 그 외의 실패(GetProject·sessionCards)는
-// 이 축 전체를 못 낸다는 뜻이라 호출자에게 되돌린다.
-func (s *Service) liveOverlapSessions(ctx context.Context, project, self string, now time.Time, d *derive) (
-	[]judge.LiveSession, string, error) {
-
-	proj, err := s.st.GetProject(ctx, project)
-	if err != nil {
-		return nil, "", err
-	}
-	cards, err := s.sessionCards(ctx, proj, s.cut(now, 0), self, d)
-	if err != nil {
-		return nil, "", err
-	}
-	live := liveFor(cards)
-	if r, rerr := s.Roster(ctx, proj.ID); rerr != nil {
-		d.fail("workspace", rerr)
-	} else {
-		live = append(live, s.siblingLive(ctx, r, proj.ID, s.cut(now, 0), d)...)
-	}
-	return live, selfCCOf(cards, self), nil
 }

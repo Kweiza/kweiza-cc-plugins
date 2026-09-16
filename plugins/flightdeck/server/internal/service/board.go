@@ -729,3 +729,35 @@ func selfCCOf(cards []SessionCard, self string) string {
 	}
 	return ""
 }
+
+// liveOverlapSessions 는 겹침 판정에 넣을 살아 있는 세션 목록과, 그 중 self 가
+// 속한 대화(cc) id 를 낸다. **`Pick`(pick.go) 과 `AmendItem`(amend.go) 이 공유하는
+// 단일 지점**이다 — 세션 카드를 뽑아(sessionCards) judge 좌표계로 옮기고(liveFor),
+// 명부(Roster) 위에서 형제 프로젝트의 세션을 합류시킨다(siblingLive). 이 조합을
+// 호출부마다 다시 지으면 두 자리가 조용히 어긋난다(siblingLive 의 머리말이 같은
+// 것을 경고한다) — 그래서 여기 하나로 묶는다.
+//
+// proj 는 호출부가 이미 들고 있는 값을 그대로 받는다 — 이 함수 안에서 다시 읽지
+// 않는다. `Pick` 은 진입부에서 이미 `GetProject` 를 한 번 했고, 여기서 또 읽으면
+// 같은 프로젝트를 두 번 읽는 것뿐이다.
+//
+// 명부 조회 실패는 이 함수를 실패시키지 않는다 — "형제 없이 진행한다"
+// (`d.fail("workspace", …)`로만 고백한다, `Pick` 이 이미 그렇게 하던 것과 같은
+// 이유). `sessionCards` 실패는 이 축 전체를 못 낸다는 뜻이라 호출자에게 그대로
+// 되돌린다 — 되돌린 뒤 무엇을 하는지(하드 에러로 갚을지, `d.fail` 로 접을지)는
+// 호출부마다 다르다: `Pick` 은 쓰기 **전**이라 갚고, `AmendItem` 은 쓰기 **후**라 접는다.
+func (s *Service) liveOverlapSessions(ctx context.Context, proj model.Project, self string,
+	now time.Time, d *derive) ([]judge.LiveSession, string, error) {
+
+	cards, err := s.sessionCards(ctx, proj, s.cut(now, 0), self, d)
+	if err != nil {
+		return nil, "", err
+	}
+	live := liveFor(cards)
+	if r, rerr := s.Roster(ctx, proj.ID); rerr != nil {
+		d.fail("workspace", rerr)
+	} else {
+		live = append(live, s.siblingLive(ctx, r, proj.ID, s.cut(now, 0), d)...)
+	}
+	return live, selfCCOf(cards, self), nil
+}

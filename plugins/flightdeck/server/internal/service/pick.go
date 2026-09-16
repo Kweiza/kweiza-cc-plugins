@@ -356,19 +356,12 @@ func (s *Service) Pick(ctx context.Context, in PickInput) (PickResult, error) {
 	if err != nil {
 		return PickResult{}, err
 	}
-	cards, err := s.sessionCards(ctx, proj, s.cut(now, 0), in.SessionID, d)
+	// 살아 있는 세션 목록과 내 대화 id — board.go 의 liveOverlapSessions 가 이 조합을
+	// AmendItem 과 공유한다(형제 프로젝트 겹침 포함, board.go 의 그 머리말).
+	live, selfCC, err := s.liveOverlapSessions(ctx, proj, in.SessionID, now, d)
 	if err != nil {
 		return PickResult{}, err
 	}
-	live := liveFor(cards)
-	// ★ 형제 프로젝트의 세션도 겹침 후보다 — 처방 경로와 같은 판정, 같은 이유다
-	//   (service/prescribe.go 의 그 자리). 명부를 못 읽으면 형제 없이 간다.
-	if r, rerr := s.Roster(ctx, proj.ID); rerr != nil {
-		d.fail("workspace", rerr)
-	} else {
-		live = append(live, s.siblingLive(ctx, r, proj.ID, s.cut(now, 0), d)...)
-	}
-	selfCC := selfCCOf(cards, in.SessionID)
 
 	var res PickResult
 	switch {
