@@ -1,7 +1,9 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -49,6 +51,22 @@ type AmendRecord struct {
 func (t *Tx) AmendItem(project, itemID string, p AmendPatch, sessionID string) (AmendRecord, error) {
 	var out AmendRecord
 
+	// ★ 사유의 **1차 방어는 여기다.** AddJudgment 가 빈 판단 본문에 대해 같은 자리에서
+	// 같은 일을 하고, 그 주석이 이유를 적었다 — "스키마 CHECK 가 최후 방어이지 1차 방어가
+	// 아니다." 이 표에서는 그 말이 두 겹으로 참이다:
+	//
+	//   ① 공백만 든 사유("   ")는 CHECK(reason <> '') 를 **통과해 그대로 저장된다.**
+	//      되짚을 수 없는 개정이 추가 전용 표에 남는데, 사유를 남기는 것이 이 표의 존재 이유다.
+	//   ② 정말 빈 사유가 CHECK 까지 닿으면 JudgeConstraintCode 가 CHECK 를 **일부러 안 접어**
+	//      500 으로 나간다(1차 방어가 앞에 있다는 전제다). 호출자가 고칠 거리인데 등급이 틀리고,
+	//      500 은 멱등 표에 안 남아 재시도가 계속 하류로 들어간다.
+	//
+	// 저장은 **원문 그대로** 한다(TrimSpace 한 값이 아니다) — AddJudgment 가 j.Body 에
+	// 하는 것과 같다. 거절 판정에만 다듬은 값을 쓴다.
+	if strings.TrimSpace(p.Reason) == "" {
+		return out, errors.New("개정 사유가 비었다 — 무엇을 왜 고쳤는지가 item_revision 의 존재 이유다")
+	}
+
 	before, err := t.GetItem(project, itemID)
 	if err != nil {
 		return out, err
@@ -68,9 +86,11 @@ func (t *Tx) AmendItem(project, itemID string, p AmendPatch, sessionID string) (
 	out.After = after
 	out.Changed = amendChanged(before, after)
 
-	// ★ 개정 행을 **UPDATE 앞에** 넣는다. 순서가 뒤집히면 옛 값을 읽을 자리가 이미
-	//   사라져 있다 — before 를 변수에 들고 있더라도, 실패 시 어느 쪽이 남는지가
-	//   순서로 결정된다. 같은 트랜잭션이라 둘 다 커밋되거나 둘 다 안 된다.
+	// 개정 번호를 먼저 뽑는다. nextItemRev 는 item_revision 만 보므로 UPDATE 와 순서가
+	// 무관하고, 아래 INSERT 가 그 값을 필요로 한다 — 이 순서의 이유는 그것뿐이다.
+	//
+	// ★ **어느 쪽이 남는지를 순서로 정하는 것이 아니다.** INSERT 와 UPDATE 는 같은
+	//   트랜잭션이고 Store.Tx 가 오류에 Rollback 하므로, 실패하면 **어느 쪽도 안 남는다.**
 	rev, err := t.nextItemRev(project, itemID)
 	if err != nil {
 		return out, err
@@ -89,8 +109,21 @@ func (t *Tx) AmendItem(project, itemID string, p AmendPatch, sessionID string) (
 		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		project, itemID, rev, fmtTime(nowStamp()), nullStr(sessionID),
 		before.Title, before.Body, beforePathsJSON, p.Reason); err != nil {
-		return out, fmt.Errorf("개정 이력 적재 실패(project=%q id=%q rev=%d): %w",
-			clip(project, 64), clip(itemID, 64), rev, err)
+		// ★ 맨 오류로 올리면 안 된다. 여기로 오는 갈래 둘이 전부 호출자가 고칠 거리다 —
+		//   등록 안 된 세션 id → FK 787(ClaimItem 이 이미 같은 형태로 접는다) ·
+		//   두 세션의 동시 amend 로 rev 가 겹침 → PK 1555(nextItemRev 주석이 적은 그 갈래).
+		//   접지 않으면 둘 다 500 이 되고, 500 은 멱등 표에 안 남아 재시도가 계속 하류로
+		//   들어간다(constraint.go 머리말).
+		//
+		// ★ 대상은 **TargetItem** 이다. item_revision 용 대상을 새로 만들지 않는다 —
+		//   ConflictTargets() 는 표면이 대상마다 문구를 갖는지 전수로 재는 목록이라,
+		//   대상을 늘리면 그 문구를 함께 넣어야 하고 여기서 할 일이 아니다.
+		return out, writeErr(err, writeTarget{
+			Target: TargetItem, Project: project, ID: itemID,
+			RefHint: fmt.Sprintf("항목 %s/%s · 세션 %s · 개정 %d",
+				clip(project, 64), clip(itemID, 64), clip(sessionID, 64), rev),
+		}, "개정 이력 적재 실패(project=%q id=%q rev=%d)",
+			clip(project, 64), clip(itemID, 64), rev)
 	}
 
 	afterPathsJSON, err := marshalStrings(after.Paths)
@@ -101,8 +134,10 @@ func (t *Tx) AmendItem(project, itemID string, p AmendPatch, sessionID string) (
 		`UPDATE item SET title = ?, body = ?, paths = ? WHERE project = ? AND id = ?`,
 		after.Title, after.Body, afterPathsJSON, project, itemID)
 	if err != nil {
-		return out, fmt.Errorf("항목 본문 갱신 실패(project=%q id=%q): %w",
-			clip(project, 64), clip(itemID, 64), err)
+		return out, writeErr(err, writeTarget{
+			Target: TargetItem, Project: project, ID: itemID,
+			RefHint: fmt.Sprintf("항목 %s/%s", clip(project, 64), clip(itemID, 64)),
+		}, "항목 본문 갱신 실패(project=%q id=%q)", clip(project, 64), clip(itemID, 64))
 	}
 	if err := affectedOne(res, NFItem, project, itemID); err != nil {
 		return out, err

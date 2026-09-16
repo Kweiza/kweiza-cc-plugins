@@ -351,7 +351,10 @@ func TestAmendSurfaceIsNamedInDesign(t *testing.T) {
 	for _, want := range []string{
 		"항목 본문(`title`·`body`) 수정", // §11 표의 그 행이 아직 거기 있는가
 		"열었다 (2026-09-16)",         // 그 행의 **지위** — 이제 열렸다
-		"item_revision",            // 무엇이 그 값을 받치는가
+		// 무엇이 그 값을 받치는가. **§11 행에만 있는 조각이어야 한다** — 맨
+		// "item_revision" 은 §3 의 표 선언 목록에도 걸려서, §11 행에서 통째로 사라져도
+		// 초록이 된다(앵커가 공허해지는 전형이다).
+		"옛 값은 `item_revision`(증분 016, 추가 전용)에",
 	} {
 		if strings.Contains(design, want) {
 			continue

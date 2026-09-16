@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kweiza/flightdeck/internal/model"
 )
@@ -59,10 +62,11 @@ func TestAmendItemWritesPreviousValueToRevision(t *testing.T) {
 	}
 
 	// ★ 이 단정이 이 시험의 전부다. 개정 행은 옛 값을 담아야 한다.
-	var gotTitle, gotReason string
+	var gotTitle, gotReason, gotSession, gotAt string
 	row := st.db.QueryRowContext(ctx,
-		`SELECT title, reason FROM item_revision WHERE project=? AND item_id=? AND rev=1`, "p1", "i1")
-	if err := row.Scan(&gotTitle, &gotReason); err != nil {
+		`SELECT title, reason, COALESCE(session_id, ''), at
+		   FROM item_revision WHERE project=? AND item_id=? AND rev=1`, "p1", "i1")
+	if err := row.Scan(&gotTitle, &gotReason, &gotSession, &gotAt); err != nil {
 		t.Fatalf("개정 행을 못 읽었다: %v", err)
 	}
 	if gotTitle != "원래 제목" {
@@ -71,6 +75,149 @@ func TestAmendItemWritesPreviousValueToRevision(t *testing.T) {
 	}
 	if gotReason != "오타" {
 		t.Errorf("사유가 %q다 — 요청한 것이어야 한다", gotReason)
+	}
+
+	// ★ **누가 언제 고쳤나도 잰다.** 안 재면 session_id 를 nil 로 박아도 위 단정들이
+	// 전부 초록이다 — 실재하는 세션을 여는 픽스처의 비용만 치르고 그 값을 아무도 안 본다.
+	// "복구 경로가 0이 아니다"는 무엇이 남았나뿐 아니라 **누구의 수정인가**에도 걸린다.
+	if gotSession != sess {
+		t.Errorf("개정 행의 session_id 가 %q다 — 고친 세션 %q 여야 한다", gotSession, sess)
+	}
+	if _, perr := time.Parse(timeLayout, gotAt); perr != nil {
+		t.Errorf("개정 행의 at 이 %q라 저장 표기(timeLayout)로 안 읽힌다: %v — "+
+			"폭이 흔들리면 사전순 정렬이 시간순과 어긋난다(store.go 의 timeLayout 주석)", gotAt, perr)
+	}
+}
+
+// TestAmendItemWritesLedger 는 원장이 **store 계층에서** 남는지, 그리고 페이로드 키가
+// 전부 실렸는지 본다.
+//
+// ★ 페이로드를 푼다. Kind 와 SessionID 만 보면 LogEvent 에서 changed 나 reason 이 사라져도
+// 이 시험이 조용히 통과한다 — TestSetLabelsWritesLedgerWithBeforeAndAfter 가 같은 이유로
+// 같은 일을 한다. 원장을 여기서 남기는 이유도 그쪽과 같다: before 를 아는 것은 같은
+// 트랜잭션 안에서 읽은 쪽뿐이라, API 로 올려 보내면 원장의 정확성이 응답 왕복에 의존한다.
+func TestAmendItemWritesLedger(t *testing.T) {
+	st, ctx, sess := amendFixture(t)
+
+	err := st.Tx(ctx, func(tx *Tx) error {
+		_, e := tx.AmendItem("p1", "i1", AmendPatch{
+			Title:  strp("고친 제목"),
+			Paths:  pathsp([]string{"web/"}),
+			Reason: "리네임 추종",
+		}, sess)
+		return e
+	})
+	if err != nil {
+		t.Fatalf("고치지 못했다: %v", err)
+	}
+
+	evs, err := st.ListEvents(ctx, "item.amend", time.Time{}, 20)
+	if err != nil {
+		t.Fatalf("원장 조회 실패: %v", err)
+	}
+	var found bool
+	for _, e := range evs {
+		if e.Kind != "item.amend" {
+			continue
+		}
+		found = true
+		if e.SessionID != sess {
+			t.Errorf("이벤트의 세션이 %q다 — %q 여야 한다", e.SessionID, sess)
+		}
+		var payload struct {
+			Item    string   `json:"item"`
+			Rev     int      `json:"rev"`
+			Changed []string `json:"changed"`
+			Reason  string   `json:"reason"`
+		}
+		if uerr := json.Unmarshal([]byte(e.Payload), &payload); uerr != nil {
+			t.Fatalf("이벤트 페이로드를 못 읽었다: %v (원문 %q)", uerr, e.Payload)
+		}
+		if payload.Item != "i1" {
+			t.Errorf("원장의 item 이 %q다 — i1 이어야 한다", payload.Item)
+		}
+		if payload.Rev != 1 {
+			t.Errorf("원장의 rev 가 %d다 — 1이어야 한다", payload.Rev)
+		}
+		if got := strings.Join(payload.Changed, ","); got != "title,paths" {
+			t.Errorf("원장의 changed 가 %q다 — title,paths 여야 한다", got)
+		}
+		if payload.Reason != "리네임 추종" {
+			t.Errorf("원장의 reason 이 %q다 — 요청한 것이어야 한다", payload.Reason)
+		}
+	}
+	if !found {
+		t.Error("원장에 item.amend 가 없다 — 이 쓰기는 되돌리는 코드가 없고 " +
+			"무엇이 있었는지가 바꾸는 순간 사라진다. 그 흔적이 통째로 빈다")
+	}
+}
+
+// TestAmendItemWithUnknownSessionIsMissingRef 는 개정 이력의 FK 위반이 **타입 있는
+// 오류**로 접히는지 본다.
+//
+// ★ 이 단정이 없으면 writeErr 를 맨 fmt.Errorf 로 되돌려도 아무것도 안 빨개진다.
+// 접히지 않으면 표면이 500 을 내는데, 등록 안 된 세션 id 는 호출자가 고칠 거리이고
+// 500 은 멱등 표에 안 남아 재시도가 계속 하류로 들어간다(constraint.go 머리말).
+// 선점에 대해 TestClaimWithUnknownSessionIsMissingRef 가 이미 못박은 형태다.
+func TestAmendItemWithUnknownSessionIsMissingRef(t *testing.T) {
+	st, ctx, _ := amendFixture(t)
+
+	err := st.Tx(ctx, func(tx *Tx) error {
+		_, e := tx.AmendItem("p1", "i1", AmendPatch{Title: strp("x"), Reason: "r"}, "없는세션")
+		return e
+	})
+	if err == nil {
+		t.Fatal("없는 세션으로 고치는 것이 성공했다 — item_revision.session_id FK 가 안 물고 있다")
+	}
+	var c *ConflictError
+	if !errors.As(err, &c) {
+		t.Fatalf("FK 위반이 타입 있는 오류로 안 올라왔다: %T %v", err, err)
+	}
+	if c.Kind != ConflictMissingRef {
+		t.Errorf("Kind 가 %q다 — %q 여야 한다(사유: %s)", c.Kind, ConflictMissingRef, c.Reason)
+	}
+	if c.Target != TargetItem {
+		t.Errorf("Target 이 %q다 — %q 여야 한다", c.Target, TargetItem)
+	}
+	if !strings.Contains(c.RefHint, "없는세션") {
+		t.Errorf("무엇을 가리켰는지가 안 실렸다: %q", c.RefHint)
+	}
+}
+
+// TestAmendItemRefusesEmptyReason 은 사유의 **1차 방어**가 store 에 있는지 본다.
+//
+// ★ 공백만 든 사유가 핵심 갈래다. 그것은 스키마의 CHECK(reason <> ”) 를 **통과해**
+// 그대로 저장된다 — 되짚을 수 없는 개정이 추가 전용 표에 남는데, 사유를 남기는 것이
+// 이 표의 존재 이유다. 빈 문자열 쪽은 CHECK 가 잡기는 하지만 JudgeConstraintCode 가
+// CHECK 를 일부러 안 접어 500(서버 결함)으로 나간다 — 호출자가 고칠 거리인데 등급이 틀린다.
+// AddJudgment 가 빈 판단 본문에 대해 같은 자리에서 같은 일을 한다.
+func TestAmendItemRefusesEmptyReason(t *testing.T) {
+	for _, reason := range []string{"", "   ", "\t\n"} {
+		st, ctx, sess := amendFixture(t)
+		err := st.Tx(ctx, func(tx *Tx) error {
+			_, e := tx.AmendItem("p1", "i1", AmendPatch{Title: strp("x"), Reason: reason}, sess)
+			return e
+		})
+		if err == nil {
+			t.Errorf("사유 %q 로 고치는 것이 성공했다 — 되짚을 수 없는 개정이 원장에 남는다", reason)
+		}
+
+		// 거절이면 아무것도 안 남아야 한다. 개정 행만 남거나 항목만 바뀌면 그게 더 나쁘다.
+		var n int
+		if qerr := st.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM item_revision WHERE project=? AND item_id=?`, "p1", "i1").Scan(&n); qerr != nil {
+			t.Fatalf("개정 행 수를 못 셌다: %v", qerr)
+		}
+		if n != 0 {
+			t.Errorf("사유 %q 가 거절됐는데 개정 행이 %d개 남았다", reason, n)
+		}
+		it, gerr := st.GetItem(ctx, "p1", "i1")
+		if gerr != nil {
+			t.Fatalf("되읽기 실패: %v", gerr)
+		}
+		if it.Title != "원래 제목" {
+			t.Errorf("사유 %q 가 거절됐는데 제목이 %q로 바뀌었다", reason, it.Title)
+		}
 	}
 }
 
@@ -161,6 +308,23 @@ func TestAmendItemSameValueIsNoChange(t *testing.T) {
 	if len(rec.Changed) != 0 {
 		t.Errorf("Changed 가 %v다 — 같은 값 재지정은 변화가 아니다", rec.Changed)
 	}
+
+	// ★ 그래도 **개정 행은 남고 rev 는 오른다.** 추가 전용 표에 대한 결정이라 나중에
+	// 바꾸기 어렵다 — 어느 쪽으로도 안 못박아 두면 다음 사람이 "변화 0이면 건너뛰자"를
+	// 최적화로 넣고, 그 순간 "누가 언제 무엇을 시도했나"가 원장에서 사라진다.
+	// 고쳤다고 말하지 않는 것(Changed 가 빈 것)과 시도를 안 남기는 것은 다른 일이다.
+	if rec.Rev != 1 {
+		t.Errorf("rev 가 %d다 — 변화가 없어도 개정은 쌓인다(1이어야 한다)", rec.Rev)
+	}
+	var n int
+	if qerr := st.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM item_revision WHERE project=? AND item_id=? AND rev=1`,
+		"p1", "i1").Scan(&n); qerr != nil {
+		t.Fatalf("개정 행 수를 못 셌다: %v", qerr)
+	}
+	if n != 1 {
+		t.Errorf("개정 행이 %d개다 — 같은 값 재지정도 1개를 남긴다", n)
+	}
 }
 
 // TestAmendItemRevStacks 는 두 번 고치면 rev 가 쌓이고 역순 복원이 원문을 내는지 본다.
@@ -226,6 +390,12 @@ func TestAmendItemUnknownItem(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("없는 항목을 고쳤다고 답했다")
+	}
+	// ★ 센티넬로 잰다. 문구에 id 가 들었는지만 보면 아무 fmt.Errorf 나 통과하고,
+	// 그러면 표면이 404 로 접을 근거가 사라진 것을 이 시험이 못 본다
+	// (labels_test.go 의 TestSetLabelsRefusesMissingItem 과 같은 판정).
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("오류가 %v다 — ErrNotFound 여야 한다", err)
 	}
 	if !strings.Contains(err.Error(), "없는거") {
 		t.Errorf("거절에 항목 id 가 없다: %v", err)
