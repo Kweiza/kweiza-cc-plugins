@@ -156,7 +156,7 @@ InputSchema: item_id(필수) · title? · body? · paths? · reason(필수) · p
 ### CLI
 
 ```
-fd amend --item <id> --title … --body … --path … --reason … [--item-project …]
+fd amend <item-id> --title … --body … --path … --reason …
 ```
 
 `--body` 는 기존 `bodyFlagHelp` 의 stdin 규율(`-` 이면 stdin)을 그대로 쓴다. `--path` 는
@@ -179,11 +179,20 @@ fd amend --item <id> --title … --body … --path … --reason … [--item-proj
 담는 것이 이 기능의 최악 실패다. §11 이 "선점의 오프라인 재생"을 안 만든 것과 같은 결이다 —
 재생 시 충돌 판정이 필요한 것에 재생 기구를 만들지 않는다.
 
-### 멱등 키
+### 멱등 키는 고정하지 않는다
 
-내용 해시로 안정화한다. 같은 세션이 같은 수정을 두 번 보내면 재생으로 접혀 `rev` 가 헛돌지
-않는다. 대가는 **거절당한 뒤 같은 본문으로 재시도하면 같은 거절이 재생되는 것**이고, 응답이
-그 자리에서 그렇게 말한다(관측된 함정이다 — `finish` 관문에서 같은 일이 있었다).
+**★ 이 절은 초안에서 반대로 적혀 있었다.** 초안은 "내용 해시로 안정화한다 — `rev` 가 헛돌지
+않는다"고 했는데, `cmd/fd/outbox.go` 의 `IdempotencyStable` 표를 읽어 보니 이 저장소는 같은
+부류 셋(`CmdMove`·`CmdAfterCut`·`CmdLabel`)을 **전부 false** 로 판정했고 그 사유가 amend 에
+그대로 적용된다.
+
+고정하면 이렇게 된다: 제목을 고쳤다가 다른 경로로 도로 돌린 뒤 **같은 본문**으로 다시
+부르면, 고정 키가 그때와 같은 값을 내 서버는 실제로 쓰지 않고 옛 성공 응답을 재생한다 —
+**화면은 "고쳤다"는데 항목은 그대로이고, 개정 이력에도 아무것도 안 쌓인다.**
+
+초안이 막으려던 것(`rev` 헛돌이)은 더 가볍고 이미 다른 수단이 있다 — 같은 값 재지정은
+`Changed` 가 비어 응답이 "아무것도 안 바뀌었다"고 말한다. 개정 행 하나가 더 쌓이지만 그 행도
+사유를 갖고, 원장이 조금 느는 것과 **거짓 성공**은 견줄 값이 아니다.
 
 ---
 
@@ -299,6 +308,7 @@ fd amend --item <id> --title … --body … --path … --reason … [--item-proj
 | 응답이 **실제 변화분**을 낸다(같은 값 재지정은 변화 0) | `mcpsrv/render_amend_test.go` |
 | `paths` 를 고치면 겹침 세션 수가 응답에 온다 / 못 세면 그 사실이 온다 | `mcpsrv/render_amend_test.go` |
 | 오프라인에서 거절하고 아웃박스에 **안 쌓는다** | `cmd/fd/offline_test.go` |
+| 멱등 키를 **고정하지 않는다**(표의 default 로도 안 떨어진다) | `cmd/fd/offline_test.go` |
 
 단정은 소비자의 좌표계로 쓴다 — MCP 응답 문자열·CLI stdout 실물이다(§12 시험 규율).
 

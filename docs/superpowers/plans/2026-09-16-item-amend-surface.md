@@ -1326,13 +1326,12 @@ cd plugins/flightdeck/server && go test ./internal/api/ -run 'TestAmend' -v
 //
 // 필드 이름이 cmd/fd 의 amendReq 와 어긋나면 서버가 조용히 0값을 받는다(이음매 시험이 잠근다).
 type amendRequest struct {
-	Project     string    `json:"project"`
-	SessionID   string    `json:"session_id"`
-	Title       *string   `json:"title"`
-	Body        *string   `json:"body"`
-	Paths       *[]string `json:"paths"`
-	Reason      string    `json:"reason"`
-	ItemProject string    `json:"item_project"`
+	Project   string    `json:"project"`
+	SessionID string    `json:"session_id"`
+	Title     *string   `json:"title"`
+	Body      *string   `json:"body"`
+	Paths     *[]string `json:"paths"`
+	Reason    string    `json:"reason"`
 }
 
 func (s *server) handleAmendItem(w http.ResponseWriter, r *http.Request) {
@@ -1361,7 +1360,7 @@ func (s *server) handleAmendItem(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-**`ItemProject` 는 지금 안 쓴다.** `service.AmendInput` 에 그 축이 없기 때문이다 — 필드만 받아 두고 넘기지 않으면 조용한 무시가 된다. **둘 중 하나를 골라라:** ⓐ 필드를 지운다(권장 — 이 동사는 프로젝트를 cwd 로 정한다), ⓑ `service.AmendInput` 에 축을 더하고 `resolveItemProject` 를 태운다. ⓐ 를 고르면 위 구조체에서 그 줄과 아래 CLI 의 `--item-project` 플래그를 함께 뺀다.
+**`item_project` 축은 없다 — 이것이 확정이다(사전 룰링 3).** `labelRequest` 도 그 축이 없고(`Project`·`SessionID`·`Add`·`Rm` 뿐), 남의 프로젝트 항목을 만지는 길은 `--project`(워크스페이스 멤버 지정)로 이미 열려 있다. `service.AmendInput` 에 축을 더하면 `resolveItemProject` 를 태워야 하고 그것은 이 스펙이 안 정한 설계다. **CLI 에도 `--item-project` 플래그를 만들지 마라.**
 
 - [ ] **Step 4: 라우트를 등록한다**
 
@@ -1377,7 +1376,11 @@ func (s *server) handleAmendItem(w http.ResponseWriter, r *http.Request) {
 cd plugins/flightdeck/server && go test ./internal/api/ -run 'TestAmend|TestDesignRouteTable' -v
 ```
 
-`TestDesignRouteTable` 이 빨개지면 DESIGN §6 의 REST 표에 이 라우트를 더해야 한다는 뜻이다. 그 시험의 메시지가 어느 좌표를 요구하는지 읽고 거기에 적어라.
+**DESIGN §6 의 REST 표에 이 라우트를 적는 것은 필수다**(사전 룰링 2). `design_route_table_test.go` 는 **양방향 대조**라 — 코드에 있는데 표에 없으면 그 자리에서 빨갛다. `POST /items/{id}/label` 행 근처에 같은 꼴로 적어라(표의 실제 열 구성을 먼저 읽고 맞춰라):
+
+```markdown
+| `POST /items/{id}/amend` | 항목의 제목·본문·경로를 고친다 — 준 것만 고치고 응답은 **실제 변화분** + 개정 번호를 낸다. 옛 값은 `item_revision` 에 쌓인다(§11) |
+```
 
 - [ ] **Step 6: 관문 + 커밋**
 
@@ -1786,6 +1789,52 @@ type amendReq struct {
 		return OfflineVerdict{OfflineRefuse,
 			"본문 수정은 읽고-고치는 쓰기다 — 재생 시점의 현재 값이 쌓을 때와 다르면 " +
 				"개정 이력이 거짓 이전값을 담는다. 옛 값을 지키려 만든 표가 거짓을 담는 것이 최악이다"}
+```
+
+- [ ] **Step 4-b: `outbox.go` 의 `IdempotencyStable` 표에 등록한다**
+
+**계획 초안이 이 단계를 빠뜨렸고, 스펙 §5 의 판정도 뒤집는다(사전 룰링 1).**
+
+스펙 §5 「멱등 키」는 "내용 해시로 안정화한다"고 적었다. **그렇게 하지 마라.** 이 저장소는
+같은 부류 셋(`CmdMove`·`CmdAfterCut`·`CmdLabel`)을 전부 **false** 로 판정했고 그 사유가
+amend 에 그대로 적용된다 — 제목을 고쳤다가 다른 경로로 도로 돌린 뒤 같은 본문으로 다시
+부르면, 고정 키가 실제 쓰기 없이 옛 성공 응답을 재생해 **화면은 "고쳤다"는데 항목은
+그대로**가 된다.
+
+`CmdLabel` 가지 **바로 뒤**에 같은 꼴로 넣는다:
+
+```go
+	case CmdAmend:
+		// ★ CmdLabel·CmdMove·CmdAfterCut 과 같은 위험이다. 제목을 고쳤다가 다른 경로로
+		//   도로 돌린 뒤 **같은 본문**으로 다시 부르면, 고정 키가 그때와 같은 값을 내
+		//   서버는 실제로 쓰지 않고 옛 성공 응답을 재생한다. 화면은 "고쳤다"고 말하는데
+		//   항목의 본문은 그대로이고, 개정 이력에도 아무것도 안 쌓인다.
+		return false, "응답이 지금 상태다(그 순간의 before·실제 변화분·개정 번호) — 고정하면 " +
+			"본문이 그 사이 도로 바뀐 뒤 같은 본문으로 다시 불러도 실제 쓰기 없이 " +
+			"옛 성공 응답이 재생된다"
+```
+
+**관문 둘이 이것을 강제한다:** `TestWriteCommandsAppearInJudgeOfflineTable` 과
+`TestWriteCommandsAppearInIdempotencyStableTable`(`cmd/fd/write_cmd_table_coverage_test.go`).
+새 쓰기 명령이 두 표에 안 오르면 `default` 로 떨어지는데, 그 기본값이 하필 안전한 방향
+(거절 · 새 키)이라 **아무도 안 아프고 그래서 아무도 못 본다.**
+
+시험도 함께 쓴다(`cmd/fd/offline_test.go`, `TestAmendIsRefusedOffline` 옆):
+
+```go
+// TestAmendKeyIsNotStable 은 amend 가 멱등 키를 고정하지 않는지 본다.
+//
+// 고정하면 본문이 그 사이 도로 바뀐 뒤 같은 요청을 다시 보낼 때 실제 쓰기 없이 옛 성공이
+// 재생된다 — label·move·after_cut 이 전부 같은 이유로 false 다.
+func TestAmendKeyIsNotStable(t *testing.T) {
+	stable, reason := IdempotencyStable(CmdAmend)
+	if stable {
+		t.Fatal("amend 의 멱등 키를 고정했다 — 도로 바뀐 뒤 재호출이 옛 성공을 재생한다")
+	}
+	if strings.Contains(reason, "모르는 명령") {
+		t.Error("표의 default 로 떨어졌다 — 아는 명령은 자기 사유를 가져야 한다")
+	}
+}
 ```
 
 - [ ] **Step 5: `runAmend` 를 쓴다**
