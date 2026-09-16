@@ -235,8 +235,21 @@ fd amend --item <id> --title … --body … --path … --reason … [--item-proj
 | DESIGN §6 MCP `note` 행 | 인자 `kind, body, item_id?` | `supersedes` 추가 — **코드에 이미 있는데 표에 없었다** |
 | DESIGN §6 CLI 목록 | `… add finish …` | `… add amend finish …` |
 | `mcpsrv/protocol_test.go` | `TestToolTableIsEight` | `TestToolTableIsNine` (이름과 목록 둘 다 하드코딩이다) |
-| `store/backup.go` | 표 목록에 `item_revision` 없음 | 추가 — 빠뜨리면 기기 이동 때 개정 이력만 조용히 사라진다 |
+| `store/backup.go` | — | **안 고친다.** 초안은 여기에 `item_revision` 을 넣으라고 적었는데 **틀렸다**(바로 아래 「백업 폐포는 안 건드린다」) |
 | `store/schema_table_count_test.go` | `want` 목록 26개 | 27개 — **정렬 순서대로** 넣는다(`item` 과 `item_after` 사이). 이름 목록을 통째로 못박는 시험이라 수만 맞추면 안 된다 |
+
+### 백업 폐포는 안 건드린다 — 초안의 오류
+
+초안은 "`store/backup.go` 에 새 표를 넣는다, 빠뜨리면 기기 이동 때 개정 이력만 조용히
+사라진다"고 적었다. **`ledgerTables` 를 실제로 읽어 보니 틀렸다.**
+
+그 목록은 **판단 원장의 FK 폐포 여섯**이다 — `machine`·`project`·`session`·`judgment`·
+`judgment_link`·`snapshot`. **`item` 자체가 거기 없다.** 그러니 `item_revision` 만 넣으면
+`FOREIGN KEY (project, item_id) REFERENCES item` 이 되쓰기에서 안 닫힌다.
+
+**개정 이력은 항목과 같은 운명이다.** 항목이 export 를 안 타면 그 개정도 안 탄다. 그것이
+일관이고, 여기서 한 표만 폐포에 끼우는 것이 오히려 새 어긋남이다. 항목을 폐포에 넣는 것은
+별개의 판정이고 이 문서의 범위가 아니다.
 
 **§6 `note` 행은 이 작업과 무관하게 이미 낡아 있었다.** `land` 구가 2026-08-12 에 코드로만
 들어가고 문서에 안 온 것과 같은 모양이라, 발견한 김에 함께 맞춘다.
@@ -286,7 +299,6 @@ fd amend --item <id> --title … --body … --path … --reason … [--item-proj
 | 응답이 **실제 변화분**을 낸다(같은 값 재지정은 변화 0) | `mcpsrv/render_amend_test.go` |
 | `paths` 를 고치면 겹침 세션 수가 응답에 온다 / 못 세면 그 사실이 온다 | `mcpsrv/render_amend_test.go` |
 | 오프라인에서 거절하고 아웃박스에 **안 쌓는다** | `cmd/fd/offline_test.go` |
-| export → import 왕복에서 개정 이력이 보존된다 | `store/backup_test.go` |
 
 단정은 소비자의 좌표계로 쓴다 — MCP 응답 문자열·CLI stdout 실물이다(§12 시험 규율).
 
