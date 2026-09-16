@@ -1119,7 +1119,24 @@ func (s *Server) toolAmend(ctx context.Context, sessionID string, raw json.RawMe
 		}
 		return textResult(s.withTail(ctx, s.errText("amend", err), tailOpts{}), true)
 	}
-	return textResult(s.withTail(ctx, RenderAmend(res), tailOpts{}), false)
+	// ★ 꼬리는 본문과 **같은 사실**을 말해야 한다(리뷰 I-1). paths 를 안 고쳤으면
+	// 이 도구는 정말 경로 축을 안 읽은 것이라 tailOpts{}(observed:false) 그대로 둔다.
+	// paths 를 고쳤는데 겹침 계산이 실패했으면(overlaps 축 파생 실패) res.Overlaps 는
+	// 비어 있을 뿐 "0 건"이 아니다 — 그때 observed:true 로 넘기면 꼬리가 "겹침: 없음"을
+	// 내고, 본문(RenderAmend)의 "못 셌다"와 정면으로 부딪힌다. 그래서 그 경우도
+	// observed:false 로 두되 이유를 밝힌다 — mcpsrv.go 의 board 무세션 갈래
+	// (overlapsNote: "내 세션이 없어…")와 같은 관용구다.
+	tail := tailOpts{}
+	switch {
+	case !containsAxis(res.Changed, "paths"):
+		// 안 고쳤다 — tailOpts{} 그대로.
+	case hasFailureAxis(res.Derived, "overlaps"):
+		tail = tailOpts{observed: false,
+			overlapsNote: "이 수정으로 겹치게 된 세션을 못 셌다(overlaps 축 파생 실패) — 0 이라는 뜻이 아니다"}
+	default:
+		tail = tailOpts{overlaps: res.Overlaps, observed: true}
+	}
+	return textResult(s.withTail(ctx, RenderAmend(res), tail), false)
 }
 
 // toAfter 는 인자의 선행 조건을 도메인 타입으로 옮긴다.

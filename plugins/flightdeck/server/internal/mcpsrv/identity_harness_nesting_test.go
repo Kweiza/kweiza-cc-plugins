@@ -29,7 +29,7 @@ func nested(t *testing.T) Identity {
 // 이미 세운 기준("익명으로 진행하면 그 행이 거짓이 된다")이 그대로 적용된다.
 func TestNestedHarnessRejectsSessionBoundTools(t *testing.T) {
 	id := nested(t)
-	for _, tool := range []string{"pick", "note", "add", "finish", "land", "label"} {
+	for _, tool := range []string{"pick", "note", "add", "finish", "land", "label", "amend"} {
 		t.Run(tool, func(t *testing.T) {
 			ok, reason := GateTool(tool, id)
 			if ok {

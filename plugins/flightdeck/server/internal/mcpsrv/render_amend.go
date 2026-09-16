@@ -32,17 +32,25 @@ func RenderAmend(res service.AmendResult) string {
 		fmt.Fprintf(&b, "제목: %s\n", res.Item.Title)
 	}
 	if containsAxis(res.Changed, "paths") {
-		fmt.Fprintf(&b, "경로 %d: %s\n", len(res.Item.Paths), strings.Join(res.Item.Paths, ", "))
-		// ★ 이 축은 **남의 화면을 움직인다.** 고친 사람이 그 사실을 알 다른 경로가 없다.
-		switch {
-		case hasFailureAxis(res.Derived, "overlaps"):
-			b.WriteString("겹침: 이 수정으로 겹치게 된 세션을 **못 셌다** — 0이라는 뜻이 아니다. " +
-				"`board` 가 그 축을 다시 읽는다\n")
-		case len(res.Overlaps) == 0:
-			b.WriteString("겹침: 지금 이 경로를 만지는 다른 세션은 없다\n")
-		default:
-			fmt.Fprintf(&b, "겹침: 이 수정으로 **세션 %d개와 경로가 겹친다** — "+
-				"경로는 겹침 판정의 입력이라 남의 화면도 함께 움직였다\n", len(res.Overlaps))
+		if len(res.Item.Paths) == 0 {
+			// ★ RenderAdd(render.go) 와 같은 문구, 같은 이유 — 같은 상태(경로 없음)는
+			// 같은 진실을 말해야 한다(리뷰 I-4). 여기서 "겹침: 지금 이 경로를 만지는
+			// 다른 세션이 없다"를 내면 겹침을 실제로 세어 0건이 나온 것과 구분되지
+			// 않는다 — 진짜 이유는 이 항목이 **겹침 축 자체에서 빠졌다**는 것이다.
+			b.WriteString("경로 0 — 경로가 없으면 이 항목은 겹침 축에 안 잡힌다.\n")
+		} else {
+			fmt.Fprintf(&b, "경로 %d: %s\n", len(res.Item.Paths), strings.Join(res.Item.Paths, ", "))
+			// ★ 이 축은 **남의 화면을 움직인다.** 고친 사람이 그 사실을 알 다른 경로가 없다.
+			switch {
+			case hasFailureAxis(res.Derived, "overlaps"):
+				b.WriteString("겹침: 이 수정으로 겹치게 된 세션을 **못 셌다** — 0이라는 뜻이 아니다. " +
+					"`board` 가 그 축을 다시 읽는다\n")
+			case len(res.Overlaps) == 0:
+				b.WriteString("겹침: 지금 이 경로를 만지는 다른 세션은 없다\n")
+			default:
+				fmt.Fprintf(&b, "겹침: 이 수정으로 **세션 %d개와 경로가 겹친다** — "+
+					"경로는 겹침 판정의 입력이라 남의 화면도 함께 움직였다\n", len(res.Overlaps))
+			}
 		}
 	}
 
