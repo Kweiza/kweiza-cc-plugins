@@ -3335,7 +3335,7 @@ codex 배너의 session id 가 전부 `01a05309-1c42-7891-ad49-10c06b7b0aa4` 였
 |---|---|---|
 | 세션 카드 · 발자국 · 신호 | ✅ | ✅ 훅이 낸다 |
 | Stop 처방 배달 | ✅ | ⚠️ 훅이 배달하는데 **없는 도구 이름을 부른다**(`land()`·`note(kind=…)`) |
-| `board`·`pick`·`note`·`finish`·`land` 표면 | ✅ 도구 9개 | ❌ **`fd` 가 안 깔린다** |
+| `board`·`pick`·`note`·`finish`·`land` 표면 | ✅ 도구 10개 | ❌ **`fd` 가 안 깔린다** |
 | 응답 꼬리(겹침·미확인·정체 배너) | ✅ | ❌ CLI 에 0건 |
 | `finish` 의 followups · `land` 의 resources · `pick` 의 leave | ✅ | ❌ CLI 플래그가 없다 |
 

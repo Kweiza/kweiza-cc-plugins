@@ -69,8 +69,14 @@ func TestAddResponseNamesTheProjectAndTheWayBack(t *testing.T) {
 // ★ 이 항목은 move 를 도구로 더하지 않고 응답 문구로 푸는 쪽으로 판정했다 — 그 판정이
 // 여기서 못박는 전부다. 도구 **개수**의 정본은 protocol_test.go 의 TestToolTableIsTen
 // 하나여야 한다(정본이 둘이면 하나만 고쳐진 날 조용히 갈린다) — 그래서 개수는 여기서 안 잰다.
-// ★ 다만 그 "하나"는 아직 의도지 사실이 아니다 — 지금 개수를 실제로 세는 시험은 셋이다:
-// TestToolTableIsTen · TestInitializeAndToolsListRoundTrip · TestPickGainsItemIDsWithoutGrowingToolCount.
+// ★ 다만 그 "하나"는 아직 의도지 사실이 아니다 — 지금 개수를 실제로 세는 시험은 **넷**이다:
+// TestToolTableIsTen · TestInitializeAndToolsListRoundTrip ·
+// TestPickGainsItemIDsWithoutGrowingToolCount · TestPickGainsLeaveWithoutGrowingToolCount.
+// (이 줄은 적어도 한 회차 전부터 "셋"이라 거짓이었다 — `b905f6b` 에 이미 넷이 있었다.
+//
+//	위 ★ 가 이 파일의 규율로 적은 것이 정확히 이 실패다: 이름 하나가 빠진 인용은
+//	grep 하는 사람을 빈손으로 만든다.)
+//
 // 여기서 안 재는 판정은 그대로 옳지만, 넷째를 만들지 않는 것만으로 "정본 하나"가 되지는 않는다.
 func TestFixingMisregistrationDidNotGrowTheToolTable(t *testing.T) {
 	for _, n := range ToolNames() {
