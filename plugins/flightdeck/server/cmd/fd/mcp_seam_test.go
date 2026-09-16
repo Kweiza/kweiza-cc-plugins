@@ -378,6 +378,14 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 		if it.ID == "t9-offline" && it.State != "open" {
 			t.Errorf("오프라인 finish 가 거절됐는데 항목 상태가 %s 다", it.State)
 		}
+		// ★ amend 는 거절 근거 자체가 "몰래 쓰면 개정 이력이 거짓이 된다"라(offline.go
+		//   의 CmdAmend 판정) 이 원장 단정이 특히 값이 있다 — 응답 문자열이 거절을
+		//   말해도 실제로는 썼을 수 있다는 것이 바로 이 표의 존재 이유였다(재리뷰 M-1).
+		//   warm 절에서 이 항목을 title:"제목" 으로 만들었다 — 그대로여야 한다.
+		if it.ID == "t9-offline" && it.Title != "제목" {
+			t.Errorf("오프라인 amend 가 거절됐는데 제목이 %q 다 — 거절했다고 말하면서 "+
+				"몰래 썼을 수 있다", it.Title)
+		}
 	}
 }
 

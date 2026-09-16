@@ -1726,6 +1726,13 @@ func TestRenderPickCarriesBundleScopeWhenMembersExist(t *testing.T) {
 // 본문 자체를 고치고(옛 값은 item_revision 에 남는다), `note` 는 그 위에 판단을 얹는다
 // (원문은 그대로, 집을 때 전문으로 온다). 되돌리는 길 셋(프로젝트·본문 두 수단)이
 // **한 화면에** 있어야 "무엇을 고칠 수 있나"가 안 갈린다.
+//
+// ★★ 표기·긴급성(2026-09-16 재리뷰) — amend·note 두 줄이 **같은 의사-호출 표기**
+// (`동사(축: 값)`)를 쓰는지도 잠근다. amend 를 리터럴 `fd amend …`로 두면 MCP 세션은
+// 자기가 못 치는 셸 명령을 안내받고 note 만 의사-호출이면 CLI 사용자는 셸에 없는
+// 문법을 안내받는다 — amend 가 아홉째 MCP 도구가 된 지금은 `fd move`(MCP 도구가
+// 없어 리터럴이 유일한 표현인 예외)와 처지가 다르다. 그리고 "지금 고쳐라" 같은 급함도
+// 안 써야 한다 — amend 는 move 와 달리 기한이 없다(닫힌 항목에도 열린다).
 func TestRenderAddSaysHowToFixTheBody(t *testing.T) {
 	got := RenderAdd(model.Item{
 		Project: "proj", ID: "fd-x", Title: "제목", State: model.ItemOpen,
@@ -1737,9 +1744,22 @@ func TestRenderAddSaysHowToFixTheBody(t *testing.T) {
 			"이제 거짓이다:\n%s", got)
 	}
 
-	// 본문 자체를 고치는 수단(amend) — 실제 id 와 함께 나와야 한다.
-	if !strings.Contains(got, "`fd amend fd-x --title/--body/--path … --reason <사유>`") {
-		t.Errorf("본문을 고치는 수단(amend)이 이 항목의 id 와 함께 안 나온다:\n%s", got)
+	// 본문 자체를 고치는 수단(amend) — 실제 id 와 함께, note 와 같은 의사-호출
+	// 표기(`동사(축: 값)`)로 나와야 한다. 리터럴 `fd amend …`로 되돌아가면(M-3 재발)
+	// 이 단정이 잡는다.
+	if !strings.Contains(got, `amend(item_id: "fd-x", reason: <사유>, …)`) {
+		t.Errorf("본문을 고치는 수단(amend)이 이 항목의 id 와 함께, note 와 같은 표기로 "+
+			"안 나온다:\n%s", got)
+	}
+	if strings.Contains(got, "`fd amend") {
+		t.Errorf("amend 가 아직 리터럴 셸 명령(`fd amend …`)으로 나온다 — note 는 의사-호출인데 "+
+			"amend 만 셸 명령이면 표면마다 다른 답이 된다:\n%s", got)
+	}
+
+	// 긴급성을 옮겨 붙이지 않는다 — amend 는 move 와 달리 기한이 없다(닫힌 항목에도 연다).
+	if strings.Contains(got, "본문이 틀렸으면 지금 고쳐라") {
+		t.Errorf("amend 줄이 '지금 고쳐라'라고 말한다 — move 의 긴급성을 복사한 것이고, "+
+			"amend 에는 기한이 없다:\n%s", got)
 	}
 
 	// 판단을 얹는 수단(note) — 여전히 유효하다. 실제 id 와 함께 낸다 — 수단 이름만
@@ -1759,7 +1779,7 @@ func TestRenderAddSaysHowToFixTheBody(t *testing.T) {
 	other := RenderAdd(model.Item{
 		Project: "proj", ID: "fd-y", Title: "제목", State: model.ItemOpen,
 	})
-	if !strings.Contains(other, "fd amend fd-y") {
+	if !strings.Contains(other, `amend(item_id: "fd-y"`) {
 		t.Errorf("amend 수단의 id 가 항목을 안 따라간다 — 남의 항목을 가리키는 지시가 된다:\n%s", other)
 	}
 	if !strings.Contains(other, `note(item_id: "fd-y")`) {

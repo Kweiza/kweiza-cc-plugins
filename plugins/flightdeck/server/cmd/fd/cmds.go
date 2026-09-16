@@ -464,7 +464,7 @@ func (a *App) runAdd(ctx context.Context, args []string, out io.Writer) int {
 	//
 	// 앞선 판은 여기서 한 줄("항목 X 등록 — 제목 (선행 N · 경로 M)")을 손으로 짰고,
 	// 그래서 `fd add` 를 친 사람은 RenderAdd 가 내는 것을 **하나도 못 봤다**:
-	// 어느 프로젝트에 들어갔는지 · 되돌리는 명령(`fd move`) · 본문을 고치는 수단(`fd amend`).
+	// 어느 프로젝트에 들어갔는지 · 되돌리는 명령(`fd move`) · 본문을 고치는 수단(`amend`).
 	// 그 셋은 RenderAdd 의 주석이 실측 사고로 적어 둔 것이다 — 항목 10건이 남의
 	// 프로젝트에 등록됐고 그중 하나는 id 가 전역 유일이라 이름이 영구히 죽었다.
 	// MCP 세션은 그 경고를 받고 사람은 못 받는 비대칭이 정확히 그 사고의 조건이다.
@@ -2042,7 +2042,9 @@ const labelHelp = "fd label <item-id> --add <꼬리표> --rm <꼬리표>  — �
 // runLabel 은 이미 있는 항목의 꼬리표를 고친다.
 //
 // ★ 고칠 수 있는 축은 **꼬리표 하나뿐**이다 — move 가 프로젝트 한 축으로 못박은 것과
-// 같은 좁기다. 본문·제목·선행의 사후 수정은 DESIGN §11 이 "안 만든다"로 판정했다.
+// 같은 좁기다. 본문·제목은 이 동사가 아니라 `fd amend` 가 고친다(축 셋으로 못박혀
+// 있다, 2026-09-16 에 열렸다) — 이 동사는 그 축을 안 건드린다. 선행의 사후 수정은
+// 여전히 DESIGN §11 이 "안 만든다"로 판정했다.
 func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("label")
 	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
@@ -2127,7 +2129,13 @@ func (a *App) runAmend(ctx context.Context, args []string, out io.Writer) int {
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
-	req := amendReq{Reason: strings.TrimSpace(*reason)}
+	// ★ Reason 은 **판정에만** 다듬은 값을 쓴다. 전송은 원문 그대로 한다(재리뷰 M-2) —
+	//   store/amend.go 가 "저장은 원문 그대로, 거절 판정에만 다듬은 값"으로 못박았고
+	//   service/amend.go 는 그 계약을 지키려 일부러 in.Reason 을 안 덮었다("여기서
+	//   덮으면 이 층이 그 결정을 말없이 뒤집는다"). 가장 바깥 층인 CLI 가 다듬어
+	//   보내면 그 계약이 여기서부터 깨진다 — 양끝 공백이 사유에서 사라진 채로 저장된다.
+	trimmedReason := strings.TrimSpace(*reason)
+	req := amendReq{Reason: *reason}
 	if given["title"] {
 		t := *title
 		req.Title = &t
@@ -2137,7 +2145,13 @@ func (a *App) runAmend(ctx context.Context, args []string, out io.Writer) int {
 		req.Body = &text
 	}
 	if given["path"] {
-		p := []string(paths)
+		// ★ nonBlankPositionals(:111) 로 거른다(재리뷰 I-3) — 안 그러면 `--path ""` 는
+		//   `[]` 가 아니라 `[""]` 를 그대로 보내고 store 가 빈 경로 한 칸을 저장한다.
+		//   서버는 paths:[] 를 이미 일급으로 다룬다(겹침 계산 자체를 안 돌린다,
+		//   커밋 4b796b7) — CLI 만 그 자리에 못 갔던 결함이었다. 이 필터가
+		//   "한 번이라도 주면 목록 전체를 바꾼다"와 "공백만 든 경로는 뺀다"를
+		//   동시에 지킨다 — `--path ""` 하나만 주면 목록이 정말 비워진다.
+		p := nonBlankPositionals(paths)
 		req.Paths = &p
 	}
 
@@ -2148,7 +2162,7 @@ func (a *App) runAmend(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, "  "+amendHelp)
 		return 2
 	}
-	if req.Reason == "" {
+	if trimmedReason == "" {
 		fmt.Fprintln(out, "고친 사유를 줘라(--reason) — 사유 없는 수정은 나중에 되짚을 수 없다.")
 		fmt.Fprintln(out, "  한 구절이면 된다: --reason '경로 리네임 추종'")
 		return 2
