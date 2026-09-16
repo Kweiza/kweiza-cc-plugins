@@ -1439,8 +1439,9 @@ type AddItemInput struct {
 // service·store·cmd/fd 를 걸쳐 있어 한 패키지 시험으로 못 잡으므로 소스 전수 가드가
 // 따로 있다 — indexnotation_test.go. 새로 %d번째 를 쓰면 그 가드가 걸린다.
 //
-// add(item.paths)와 finish(followup.paths)가 이 헬퍼를 공유한다. 둘 다 사람/에이전트가
-// 대화형으로 등록하는 경로이고, 훅이 자동으로 보내는 발자국과 달리 스펙 §4.2 의
+// add(item.paths)·finish(followup.paths)·amend(고쳐 넣는 paths) **셋이** 이 헬퍼를
+// 공유한다(amend 는 2026-09-16 에 합류했다). 셋 다 사람/에이전트가 대화형으로 등록하는
+// 경로이고, 훅이 자동으로 보내는 발자국과 달리 스펙 §4.2 의
 // "사람이 넣으면 거절" 기준에 정확히 해당한다. 오류를 RefusedError 로 감싸는 것과
 // What·Guidance 는 호출부마다 다르므로 여기서는 안 한다 — 순수하게 판정만 나른다.
 func judgeItemPathsCoordinate(paths []string) error {
@@ -1486,15 +1487,17 @@ func (s *Service) AddItem(ctx context.Context, in AddItemInput) (model.Item, err
 	// 들어온다. 통과시키면 그 항목의 겹침 축이 **조용히** 죽는다 — 오류가 아니라
 	// '겹침 없음'이라 정상 응답과 구분되지 않는다.
 	//
-	// ★ finish 의 followup 경로(finish.go)도 judgeItemPathsCoordinate 를 그대로 쓴다.
-	// finish 는 t.AddItem 을 직접 불러 이 함수의 검증을 거치지 않으므로, 거기서 따로
-	// 부르지 않으면 같은 사람이 같은 세션에서 add 는 거절당하고 finish 는 조용히
-	// 통과하는 반쪽 관문이 된다 — 반쪽 발화는 균일한 부재보다 나쁘다.
+	// ★ finish 의 followup 경로(finish.go)와 amend(service/amend.go)도
+	// judgeItemPathsCoordinate 를 그대로 쓴다. 둘 다 이 함수를 안 거치고 store 를 직접
+	// 무므로(finish 는 tx 안 t.AddItem, amend 는 t.AmendItem), 거기서 따로 부르지 않으면
+	// 같은 사람이 같은 세션에서 add 는 거절당하고 그쪽은 조용히 통과하는 반쪽 관문이
+	// 된다 — 반쪽 발화는 균일한 부재보다 나쁘다.
 	//
-	// ★ item.paths 로 가는 문은 **셋**이다. 이 주석은 오래 둘만 세고 있었다.
-	// 세 번째는 레거시 이관(legacy/apply.go 의 tx.AddItem)이고, 그 관문은 여기가
-	// 아니라 계획 쪽(legacy/plan.go, code="bad_path_coordinate")에 있다.
-	// 규율도 다르다 — add·finish 는 **거절**하고 이관은 **그 경로만 버리고 남긴다.**
+	// ★ item.paths 로 가는 문은 **넷**이다. 이 주석은 오래 둘만 세다가 셋이 됐고,
+	// 2026-09-16 에 amend 가 그 컬럼을 **만들어진 뒤에 덮는 첫 문**으로 합류했다(앞 셋은
+	// 전부 만들 때 쓴다). 네 번째로 세는 레거시 이관(legacy/apply.go 의 tx.AddItem)은
+	// 관문이 여기가 아니라 계획 쪽에 있다(legacy/plan.go, code="bad_path_coordinate").
+	// 규율도 다르다 — add·finish·amend 는 **거절**하고 이관은 **그 경로만 버리고 남긴다.**
 	// 갈린 이유는 고칠 사람이 그 자리에 있느냐다(legacy/plan.go 의 그 주석을 보라).
 	if err := judgeItemPathsCoordinate(in.Paths); err != nil {
 		return model.Item{}, &RefusedError{What: "add",

@@ -102,6 +102,31 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 				"이 값은 개정 이력에 남고, 되짚을 사람이 그 표를 여는 유일한 이유가 그것이다.",
 		}
 	}
+	// ★ 좌표계 관문을 **여기서도** 태운다. `item.paths` 로 가는 문마다 같은 판정이 서야 한다 —
+	//   AddItem(pick.go)과 finish 의 followup(finish.go)이 이미 judgeItemPathsCoordinate 를
+	//   공유하고, 그 헬퍼 주석이 이유를 적었다: 한 문만 빠지면 "같은 사람이 같은 세션에서
+	//   add 는 거절당하고 이쪽은 조용히 통과하는" 반쪽 관문이 된다. **반쪽 발화는 균일한
+	//   부재보다 나쁘다.** 그리고 이 동사에서 그것이 특히 나쁜 이유는, 표면마다 무엇을 할 수
+	//   있나가 갈리는 것이 정확히 §11 이 경계한 실패이고 이 동사가 그 경계 위에서 열렸기
+	//   때문이다 — 막으려던 것을 스스로 만들면 안 된다.
+	//
+	// ★ paths 를 안 준 호출(nil)은 이 관문을 **안 거친다.** 고칠 축이 아닌 것을 재면
+	//   생략이 곧 거절이 되어 포인터로 받은 의미가 사라진다. 빈 배열은 통과한다 —
+	//   "경로를 비워라"는 유효한 요청이고(루프가 0회 돈다),
+	//   TestAmendSkipsOverlapComputationWhenPathsAreEmptied 가 그 갈래를 이미 잠근다.
+	//
+	// ★ 위치는 AddItem 과 같다 — 다른 입력 판정을 다 통과한 **뒤, 쓰기 직전**이다.
+	//   MCP 에서 정상 도달 가능한 갈래라 RefusedError 여야 한다(paths 는 선택 인자다).
+	if in.Paths != nil {
+		if err := judgeItemPathsCoordinate(*in.Paths); err != nil {
+			return res, &RefusedError{
+				What:   "amend",
+				Reason: err.Error(),
+				Guidance: "경로는 저장소 상대(internal/api/x.go) 또는 POSIX 절대경로여야 한다 — " +
+					"좌표계가 다르면 이 항목의 겹침 축이 조용히 죽는다.",
+			}
+		}
+	}
 
 	var rec store.AmendRecord
 	err := s.st.Tx(ctx, func(t *store.Tx) error {

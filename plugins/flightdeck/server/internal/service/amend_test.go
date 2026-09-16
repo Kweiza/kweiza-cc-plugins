@@ -305,3 +305,91 @@ func TestAmendSkipsOverlapComputationWhenPathsAreEmptied(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 좌표계 관문 — add 가 거절하는 것을 amend 도 거절한다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestAmendRejectsNonSlashCoordinatePaths 는 `add` 가 막는 좌표계를 이 동사도 막는지 본다.
+//
+// ★ 입력 표는 `TestAddItemRejectsNonSlashCoordinatePaths`(pick_test.go)의 것과 **글자
+// 그대로 같다.** 그래야 "두 표면이 같은 것을 거절한다"가 시험 코드에서 눈으로 드러난다.
+// 갈리면 그것이 §11 이 경계한 실패 — 표면마다 무엇을 할 수 있나가 다른 것 — 이고,
+// 이 동사는 **그 경계 위에서 열렸으므로** 갈리는 순간 자기가 막으려던 것을 자기가 만든다.
+//
+// ★ 왜 조용한가. paths 는 겹침 판정의 입력이라, 좌표계가 어긋나면 오류가 아니라
+// **"겹침 없음"** 이 나온다 — 정상 응답과 구분되지 않는다. 이 저장소는 그 부류로 증분
+// 005·006 백필까지 쳤다.
+func TestAmendRejectsNonSlashCoordinatePaths(t *testing.T) {
+	cases := []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"드라이브 절대경로", []string{`C:\repo\x.go`}, "드라이브 절대경로"},
+		{"UNC", []string{`\\host\share\x.go`}, "UNC"},
+		{"상대 백슬래시", []string{`internal\api\x.go`}, "백슬래시"},
+		{"정상 경로 뒤에 섞여 있어도", []string{"internal/api/x.go", `b\c.go`}, "백슬래시"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, st := newSvc(t)
+			mustAddItem(t, st, model.Item{Project: "p1", ID: "i1", Title: "제목", Body: "본문"})
+
+			paths := c.paths
+			_, err := s.AmendItem(ctx(), AmendInput{
+				Project: "p1", ItemID: "i1", Paths: &paths, Reason: "경로 리네임 추종",
+			})
+			// RefusedError 여야 한다 — 이 갈래는 MCP 에서 정상 도달 가능하다(paths 는
+			// 선택 인자다). 평범한 error 면 400 이 아니라 500 "서버 내부 오류다"가 나간다.
+			var re *RefusedError
+			if !errors.As(err, &re) {
+				t.Fatalf("RefusedError 가 아니다: %#v", err)
+			}
+			if !strings.Contains(re.Reason, c.want) {
+				t.Fatalf("사유 %q 가 원인(%q)을 안 짚는다", re.Reason, c.want)
+			}
+			if re.Guidance == "" {
+				t.Error("Guidance 가 비었다 — 이 저장소는 거절에 처방을 함께 낸다")
+			}
+
+			// ★ 관문이 **쓰기 전에** 서야 한다. 거절 문구만 맞고 쓰기가 이미 났으면
+			//   항목은 나쁜 좌표계를 가진 채 남고 개정 이력에 행 하나가 헛되이 쌓인다.
+			it, gerr := st.GetItem(ctx(), "p1", "i1")
+			if gerr != nil {
+				t.Fatalf("항목 되읽기 실패: %v", gerr)
+			}
+			if len(it.Paths) != 0 {
+				t.Fatalf("거절했는데 경로가 쓰였다 — 관문이 쓰기 뒤에 섰다: %v", it.Paths)
+			}
+		})
+	}
+}
+
+// TestAmendWithoutPathsSkipsTheCoordinateGate 는 paths 를 **안 준** 호출이 이 관문에
+// 안 걸리는지 본다.
+//
+// 항목이 이미 나쁜 좌표계의 경로를 갖고 있어도 그렇다 — 레거시 이관은 그런 경로를
+// 거절하지 않고 **그 경로만 버리거나 남기므로**(legacy/plan.go) 실제로 있을 수 있는
+// 상태다. 생략된 축까지 재면 그런 항목은 제목 하나도 영영 못 고친다: 고칠 축이 아닌 것이
+// 거절 사유가 되는 순간 포인터로 받은 의미(nil = 안 건드린다)가 사라진다.
+func TestAmendWithoutPathsSkipsTheCoordinateGate(t *testing.T) {
+	s, st := newSvc(t)
+	mustAddItem(t, st, model.Item{Project: "p1", ID: "i1", Title: "제목", Body: "본문",
+		Paths: []string{`legacy\windows\x.go`}})
+
+	title := "고친 제목"
+	res, err := s.AmendItem(ctx(), AmendInput{
+		Project: "p1", ItemID: "i1", Title: &title, Reason: "제목만 고친다",
+	})
+	if err != nil {
+		t.Fatalf("paths 를 안 줬는데 좌표계 관문에 걸렸다: %v", err)
+	}
+	if res.Item.Title != title {
+		t.Fatalf("제목이 안 고쳐졌다: %q", res.Item.Title)
+	}
+	// 안 준 축은 그대로 있어야 한다 — 나쁜 좌표계인 채로.
+	if len(res.Item.Paths) != 1 || res.Item.Paths[0] != `legacy\windows\x.go` {
+		t.Fatalf("생략한 paths 축이 움직였다: %v", res.Item.Paths)
+	}
+}
