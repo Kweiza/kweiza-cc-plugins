@@ -1119,21 +1119,33 @@ func (s *Server) toolAmend(ctx context.Context, sessionID string, raw json.RawMe
 		}
 		return textResult(s.withTail(ctx, s.errText("amend", err), tailOpts{}), true)
 	}
-	// ★ 꼬리는 본문과 **같은 사실**을 말해야 한다(리뷰 I-1). paths 를 안 고쳤으면
-	// 이 도구는 정말 경로 축을 안 읽은 것이라 tailOpts{}(observed:false) 그대로 둔다.
-	// paths 를 고쳤는데 겹침 계산이 실패했으면(overlaps 축 파생 실패) res.Overlaps 는
-	// 비어 있을 뿐 "0 건"이 아니다 — 그때 observed:true 로 넘기면 꼬리가 "겹침: 없음"을
-	// 내고, 본문(RenderAmend)의 "못 셌다"와 정면으로 부딪힌다. 그래서 그 경우도
-	// observed:false 로 두되 이유를 밝힌다 — mcpsrv.go 의 board 무세션 갈래
-	// (overlapsNote: "내 세션이 없어…")와 같은 관용구다.
+	// ★ 꼬리는 본문과 **같은 사실**을 말해야 한다(리뷰 I-1). 네 상태를 가른다:
+	//
+	//  1. paths 를 안 고쳤다 — 이 도구는 정말 경로 축을 안 읽었다. tailOpts{}
+	//     (observed:false) 그대로.
+	//  2. paths 를 고쳤고 새 경로가 **비었다** — service.AmendItem 이 이 상태에서는
+	//     겹침 계산 자체를 안 돌린다(재리뷰 4번째 상태, amend.go 의 가드 주석 참고).
+	//     그래서 hasFailureAxis 는 거짓이고 res.Overlaps 는 nil 이라 아래 default 로
+	//     떨어진다 — 그것이 옳다: 경로가 없으면 "읽었고 0건"이 맞는 말이다(읽을 게
+	//     없으니 0이다). 꼬리가 "겹침: 없음"을 내면 본문의 "경로가 없으면 겹침 축에
+	//     안 잡힌다"와 결론이 일치한다(부딪히지 않는다).
+	//  3. paths 를 고쳤고 새 경로가 있는데 겹침 계산이 실패했다(overlaps 축 파생
+	//     실패) — res.Overlaps 는 비어 있을 뿐 "0 건"이 아니다. observed:true 로
+	//     넘기면 꼬리가 "겹침: 없음"을 내 본문(RenderAmend)의 "못 셌다"와 정면으로
+	//     부딪힌다. 그래서 observed:false 로 두되 이유를 밝힌다 — mcpsrv.go 의 board
+	//     무세션 갈래(overlapsNote: "내 세션이 없어…")와 같은 관용구다.
+	//  4. paths 를 고쳤고 새 경로가 있고 계산도 성공했다 — 있는 그대로 낸다.
 	tail := tailOpts{}
 	switch {
 	case !containsAxis(res.Changed, "paths"):
-		// 안 고쳤다 — tailOpts{} 그대로.
+		// ① 안 고쳤다 — tailOpts{} 그대로.
 	case hasFailureAxis(res.Derived, "overlaps"):
+		// ③ 새 경로가 있는데 못 셌다.
 		tail = tailOpts{observed: false,
 			overlapsNote: "이 수정으로 겹치게 된 세션을 못 셌다(overlaps 축 파생 실패) — 0 이라는 뜻이 아니다"}
 	default:
+		// ② 새 경로가 비어 계산을 안 돌린 경우(res.Overlaps == nil)와
+		// ④ 계산이 성공한 경우 둘 다 여기로 온다 — 둘 다 "읽었다"가 참이기 때문이다.
 		tail = tailOpts{overlaps: res.Overlaps, observed: true}
 	}
 	return textResult(s.withTail(ctx, RenderAmend(res), tail), false)

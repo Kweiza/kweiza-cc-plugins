@@ -137,3 +137,35 @@ func TestRenderAmendSaysPathsExcludedFromOverlapAxis(t *testing.T) {
 		t.Errorf("경로가 없는데 겹침 줄을 따로 낸다 — 위 한 줄로 충분해야 한다:\n%s", got)
 	}
 }
+
+// TestRenderAmendGenuineZeroAndPathsEmptiedDoNotContradict 는 재리뷰가 지적한
+// "약한 버전"을 닫는다 — **진짜 0건**(경로에 값이 있고 계산이 성공해 0건)과
+// **경로가 비어 겹침 축에서 빠진 경우**는 서로 다른 근거를 갖지만(하나는 "셌더니
+// 0", 하나는 "셀 것이 없다") 그 근거가 **서로를 부정하지는 않는지**를 나란히 본다.
+//
+// 부정한다면 이런 모양일 것이다: 진짜 0건 쪽이 "겹침 축에 안 잡힌다"고 말하거나,
+// 경로 없음 쪽이 "다른 세션은 없다"(계산했다는 뜻)고 말하는 것 — 각자의 말이
+// 상대의 자리에 나오면 그것이 곧 두 상태가 안 갈린다는 뜻이다.
+func TestRenderAmendGenuineZeroAndPathsEmptiedDoNotContradict(t *testing.T) {
+	genuineZero := RenderAmend(service.AmendResult{
+		Item: model.Item{ID: "i1", Paths: []string{"a"}}, Rev: 1, Changed: []string{"paths"},
+		// Overlaps 는 nil — 계산은 성공했고 결과가 0건이다.
+	})
+	pathsEmptied := RenderAmend(service.AmendResult{
+		Item: model.Item{ID: "i1", Paths: nil}, Rev: 1, Changed: []string{"paths"},
+	})
+
+	if !strings.Contains(genuineZero, "지금 이 경로를 만지는 다른 세션은 없다") {
+		t.Errorf("진짜 0건이 그 문구를 안 낸다:\n%s", genuineZero)
+	}
+	if strings.Contains(genuineZero, "겹침 축에 안 잡힌다") {
+		t.Errorf("진짜 0건인데(경로가 있는데) '겹침 축에 안 잡힌다'를 낸다 — 경로 없음 쪽의 근거를 빌려 쓴다:\n%s", genuineZero)
+	}
+
+	if !strings.Contains(pathsEmptied, "경로 0 — 경로가 없으면 이 항목은 겹침 축에 안 잡힌다") {
+		t.Errorf("경로 없음이 그 문구를 안 낸다:\n%s", pathsEmptied)
+	}
+	if strings.Contains(pathsEmptied, "다른 세션은 없다") {
+		t.Errorf("경로가 없는데 '다른 세션은 없다'(계산했다는 뜻)를 낸다 — 진짜 0건 쪽의 근거를 빌려 쓴다:\n%s", pathsEmptied)
+	}
+}

@@ -142,7 +142,17 @@ func (s *Service) AmendItem(ctx context.Context, in AmendInput) (AmendResult, er
 	// ★ 겹침은 paths 를 **실제로 바꿨을 때만** 센다. 안 바꿨으면 이 항목의 겹침은
 	// 이 수정의 결과가 아니라 원래 있던 사실이고, 그것을 여기 내면 고친 사람은
 	// 자기가 방금 만든 겹침이라고 읽는다.
-	if containsString(rec.Changed, "paths") { // ★ 이 헬퍼는 landing.go 에 이미 있다(중복 선언 금지)
+	//
+	// ★★ **새 경로가 비었으면 계산 자체를 안 돌린다**(재리뷰 4번째 상태, 2026-09-16).
+	// 경로가 없는 항목은 겹칠 대상이 원리적으로 없다 — RenderAdd 가 이미 그렇게
+	// 말한다("경로가 없으면 이 항목은 겹침 축에 안 잡힌다"). 그런데 liveOverlapSessions
+	// (board.go)는 paths 를 인자로 안 받는다 — 세션 카드·로스터 조회일 뿐이라 그
+	// 실패는 **경로 개수와 무관하게** 일어난다. 그 실패를 "overlaps" 축에 적으면
+	// 본문은 "볼 것도 없다"(경로 0)를 말하는데 꼬리는 "몰라서 못 봤다, 0이라고
+	// 넘겨짚지 마라"를 말해 한 응답 안에서 부딪힌다 — 검사 순서를 바꾸는 미봉이
+	// 아니라 계산을 원인에서 없앤다. 이 갈래에서는 Overlaps 가 nil 로 남고
+	// Derived 에도 실패가 안 남는다 — "셀 것이 없다"는 근거를 본문·꼬리가 함께 갖는다.
+	if containsString(rec.Changed, "paths") && len(res.Item.Paths) > 0 { // ★ 이 헬퍼는 landing.go 에 이미 있다(중복 선언 금지)
 		// ★ live·selfCC 를 얻는 조합은 board.go 의 liveOverlapSessions 다 — pick.go 의
 		//   Pick 과 공유하는 단일 지점이다(사본을 amend.go 안에 다시 두지 않는다).
 		//   Pick 은 이 GetProject 를 이미 진입부에서 했지만 amend 는 쓰기 전에 project

@@ -260,3 +260,48 @@ func TestAmendOverlapsDeriveFailureUsesTheOverlapsAxis(t *testing.T) {
 		t.Fatalf("겹침 파생이 실패했는데 축 이름이 'overlaps' 로 안 잡혔다: %+v", res.Derived.Failures)
 	}
 }
+
+// TestAmendSkipsOverlapComputationWhenPathsAreEmptied 는 새 경로가 **빈 목록**이면
+// 겹침 계산 자체를 안 돌리는지 본다(재리뷰 4번째 상태, 2026-09-16).
+//
+// 경로가 없는 항목은 겹칠 대상이 원리적으로 없다(RenderAdd 가 이미 그렇게 말한다).
+// 그런데 liveOverlapSessions(board.go)는 paths 를 인자로 안 받는다 — 세션 카드·
+// 로스터 조회일 뿐이라 그 실패는 **경로 개수와 무관하게** 일어난다. 계산을 안
+// 막으면 "paths: []" 상태에서도 이 실패가 날 수 있고, 그러면 렌더 응답이 본문
+// ("경로가 없으니 볼 것도 없다")과 꼬리("몰라서 못 봤다, 0이라고 넘겨짚지 마라")로
+// 갈려 부딪힌다 — 이 시험은 그 갈래에 애초에 안 들어가는 것을 잠근다.
+//
+// signal 표를 지워 **계산을 실제로 시도하면 반드시 실패하는** 상태를 만든다
+// (TestAmendOverlapsDeriveFailureUsesTheOverlapsAxis 와 같은 실패 실물) — 그런데도
+// Derived.Failures 에 "overlaps" 가 없으면 계산이 아예 안 돈 것이 증명된다(축이
+// 실패 없이 조용히 넘어간 것이 아니라, 시도조차 안 했다는 뜻이다).
+func TestAmendSkipsOverlapComputationWhenPathsAreEmptied(t *testing.T) {
+	s, st := newSvc(t)
+	mustAddItem(t, st, model.Item{Project: "p1", ID: "i1", Title: "t", Body: "b", Paths: []string{"old/"}})
+
+	if _, err := st.DB().ExecContext(ctx(), "DROP TABLE signal"); err != nil {
+		t.Fatalf("signal 표 제거 실패: %v", err)
+	}
+
+	empty := []string{}
+	res, err := s.AmendItem(ctx(), AmendInput{
+		Project: "p1", ItemID: "i1", Paths: &empty, Reason: "경로를 비운다",
+	})
+	if err != nil {
+		t.Fatalf("쓰기까지 실패했다 — signal 표 제거는 item 과 무관해야 한다: %v", err)
+	}
+	if len(res.Item.Paths) != 0 {
+		t.Fatalf("경로가 실제로 안 비었다: %v", res.Item.Paths)
+	}
+	if !containsString(res.Changed, "paths") {
+		t.Fatalf("paths 가 바뀐 축으로 안 잡혔다: %v", res.Changed)
+	}
+	if res.Overlaps != nil {
+		t.Fatalf("경로가 없는데 Overlaps 가 nil 이 아니다 — 계산을 돌린 흔적이다: %+v", res.Overlaps)
+	}
+	for _, f := range res.Derived.Failures {
+		if f.Axis == "overlaps" {
+			t.Fatalf("경로가 없는데 overlaps 축 실패가 남았다 — 계산 자체를 안 돌렸어야 한다: %+v", f)
+		}
+	}
+}
