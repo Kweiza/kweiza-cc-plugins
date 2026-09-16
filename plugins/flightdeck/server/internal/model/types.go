@@ -257,6 +257,27 @@ type Item struct {
 	After       []After
 }
 
+// ItemRevision 은 항목 본문의 개정 이력 한 행이다(증분 016, 추가 전용).
+//
+// ★ 여기 든 Title·Body·Paths 는 **고치기 직전의 값**이지 새 값이 아니다
+// (migrations/016_item_revision.sql 머리말 — 현재 값은 item 한 곳에만 있어서
+// 두 표가 어긋날 자리가 원리적으로 없다).
+type ItemRevision struct {
+	Rev int
+	At  time.Time
+	// SessionID 는 누가 고쳤나다. **빈 문자열일 수 있다** — 세션을 못 얻어도 개정은
+	// 남긴다(증분 016 의 컬럼 주석). 0값을 "세션 0번"으로 읽으면 안 된다.
+	SessionID string
+	Title     string // ★ 고치기 직전의 값
+	Body      string
+	Paths     []string
+	Reason    string
+	// Changed 는 **이 개정이 실제로 바꾼 축**이다. 표에는 없고 사슬로 복원한다 —
+	// 이 행의 옛 값과 다음 행의 옛 값(마지막 행이면 지금 값)을 비교한 결과다.
+	// 채우는 것은 store.MarkItemRevisionChanges 이고, 안 채우면 nil 이다.
+	Changed []string
+}
+
 // After 는 선행 조건이다. 셋 중 **정확히 하나**만 채운다(스키마 CHECK).
 // 브랜치 이름을 담을 자리가 없다 — 랜딩이 끝나면 브랜치가 지워져
 // 조건이 충족되는 바로 그 순간 판정이 해석 불가가 되기 때문이다.

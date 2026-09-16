@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -165,6 +167,85 @@ func (t *Tx) nextItemRev(project, itemID string) (int, error) {
 			clip(project, 64), clip(itemID, 64), err)
 	}
 	return n + 1, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 개정 이력을 **읽는** 자리
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ★ 이 표는 2026-09-16 에 생기고 2026-09-17 까지 **읽는 경로가 레포 전체에 0건**이었다.
+// RenderAmend 는 "개정 3 — 옛 값은 그대로 남는다"고 좌표를 약속하는데 그 좌표를 열 문이
+// 없었다. 쌓기만 하고 못 읽는 표는 복구 경로가 0인 것과 화면에서 구분되지 않는다.
+
+// ItemRevisions 는 항목 하나의 개정 이력이다. **rev 오름차순**(오래된 것부터)이다.
+//
+// ★ 행이 없으면 빈 슬라이스다 — 오류가 아니다. "한 번도 안 고친 항목"은 정상이고,
+// 그것을 실패로 접으면 화면이 「없다」와 「못 읽었다」를 가를 근거를 잃는다.
+// 그 둘을 가르는 것은 호출부다(service.ShowItem 이 Derived 로 고백한다).
+//
+// ★ Changed 는 여기서 안 채운다. 그 값은 **지금 값**을 함께 봐야 정해지는데, 이 함수가
+// 지금 값을 또 읽으면 호출부가 이미 읽은 것과 두 벌이 된다 — MarkItemRevisionChanges 가 채운다.
+func (s *Store) ItemRevisions(ctx context.Context, project, itemID string) ([]model.ItemRevision, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT rev, at, COALESCE(session_id, ''), title, body, paths, reason
+		   FROM item_revision WHERE project = ? AND item_id = ? ORDER BY rev`,
+		project, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("개정 이력 조회 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	defer rows.Close()
+
+	out := []model.ItemRevision{}
+	for rows.Next() {
+		var r model.ItemRevision
+		var at, pathsRaw string
+		if err := rows.Scan(&r.Rev, &at, &r.SessionID, &r.Title, &r.Body, &pathsRaw, &r.Reason); err != nil {
+			return nil, fmt.Errorf("개정 이력 행 해석 실패(project=%q item=%q): %w",
+				clip(project, 64), clip(itemID, 64), err)
+		}
+		if r.At, err = parseTime(at); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(pathsRaw), &r.Paths); err != nil {
+			return nil, fmt.Errorf("개정 이력 paths 해석 실패(project=%q item=%q rev=%d): %w",
+				clip(project, 64), clip(itemID, 64), r.Rev, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("개정 이력 순회 실패(project=%q item=%q): %w",
+			clip(project, 64), clip(itemID, 64), err)
+	}
+	return out, nil
+}
+
+// MarkItemRevisionChanges 는 개정 사슬에 "이 개정이 무엇을 바꿨나"를 채운다. 순수 함수다.
+//
+// item_revision 은 **고치기 직전의 값**만 담으므로 "무엇이 바뀌었나"는 표에 없다.
+// 사슬로 복원한다: rev N 의 다음 상태는 rev N+1 이 담은 옛 값이고, 마지막 rev 의 다음
+// 상태는 지금 값(current)이다. 그래서 이 값은 **파생이지 기록이 아니다**.
+//
+// ★ event 표의 `item.amend` 페이로드에도 같은 값이 있지만 그것을 안 쓴다 — 그쪽은 FK 도
+// NOT NULL 도 없는 관측 로그라 정본이 아니고, 행이 빠져도 아무도 안 아프다. 사슬은
+// 추가 전용 표 자신에서 복원되므로 그 결손이 원리적으로 없다.
+//
+// ★ revs 는 **rev 오름차순**이어야 한다(ItemRevisions 가 그렇게 낸다). 역순으로 주면
+// 조용히 거짓을 채운다 — 그래서 정렬을 여기서 다시 하지 않고 계약으로 둔다.
+//
+// ★ current 를 revs 보다 먼저 읽고 그 사이 새 개정이 들어오면 **마지막 행의 축이 한 칸
+// 낡는다**(그 개정분이 마지막 행에 합쳐져 보인다). 읽기 전용 화면의 한 칸 오차라
+// 트랜잭션을 열지 않는다 — `_txlock=immediate` 는 쓰기 잠금이고, 이 조회 때문에 그것을
+// 잡으면 읽기 하나가 모든 쓰기를 세운다.
+func MarkItemRevisionChanges(revs []model.ItemRevision, current model.Item) {
+	for i := range revs {
+		before := model.Item{Title: revs[i].Title, Body: revs[i].Body, Paths: revs[i].Paths}
+		after := model.Item{Title: current.Title, Body: current.Body, Paths: current.Paths}
+		if i+1 < len(revs) {
+			after = model.Item{Title: revs[i+1].Title, Body: revs[i+1].Body, Paths: revs[i+1].Paths}
+		}
+		revs[i].Changed = amendChanged(before, after)
+	}
 }
 
 // amendChanged 는 실제로 값이 달라진 축이다. 순수 함수이고 순서는 title·body·paths 로 고정한다.
