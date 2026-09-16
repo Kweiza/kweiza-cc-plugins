@@ -1706,35 +1706,50 @@ func TestRenderPickCarriesBundleScopeWhenMembersExist(t *testing.T) {
 	}
 }
 
-// TestRenderAddSaysBodyCannotBeAmended 는 add 응답이 **본문이 여기서 마지막**임을
-// 말하는지 못박는다.
+// TestRenderAddSaysHowToFixTheBody 는 add 응답이 본문을 고치는 **두 수단**(amend·note)을
+// 둘 다 말하는지 못박는다.
 //
-// ★ 왜 응답인가. 항목 본문을 고치는 표면은 이 저장소에 전수로 없다(DESIGN §11).
-// 그런데 그 사실을 배울 자리가 없었다 — `add` 도구 설명은 90자 상한이고(§6),
-// `fd-handoff` SKILL.md 는 60줄 예산에 §6 이 "규율 산문을 스킬에 넣지 않는다"를
-// 못박았다. 남는 자리가 §6 이 정한 바로 그 자리다: **"규율은 응답에 싣는다 —
-// 필요할 때만, 그 자리에서."** 본문을 쓰는 순간이 그 "필요할 때"다.
+// ★ 왜 응답인가. `add` 도구 설명은 90자 상한이고(§6), `fd-handoff` SKILL.md 는 60줄
+// 예산에 §6 이 "규율 산문을 스킬에 넣지 않는다"를 못박았다. 남는 자리가 §6 이 정한
+// 바로 그 자리다: **"규율은 응답에 싣는다 — 필요할 때만, 그 자리에서."** 본문을 쓰는
+// 순간이 그 "필요할 때"다.
 //
-// ★ 되돌리는 길 둘이 **한 화면에** 있어야 한다. 프로젝트 축은 고칠 수 있고(`fd move`)
-// 본문 축은 못 고친다 — 한쪽만 보이면 "무엇을 고칠 수 있나"가 갈리고, 그 차이를
-// 아무도 못 따라간다는 것이 `service/move.go` 가 amend 를 안 연 이유 자체다.
-func TestRenderAddSaysBodyCannotBeAmended(t *testing.T) {
+// ★★ 실측(2026-09-16) — 이 시험은 원래 이름이 TestRenderAddSaysBodyCannotBeAmended 였고
+// "본문은 나중에 못 고친다"를 단정했다. 항목 본문 수정 표면(amend)이 열리며 그 문장이
+// 거짓이 됐는데, 이 시험은 그 거짓을 계속 초록으로 통과시키고 있었다 — 코디네이터가
+// `fd add` 를 쳐서 그 거짓 줄을 실제로 받고서야 잡혔다. §11 이 경고한 "부재를 주장하는
+// 문장은 코드가 바뀌면 조용히 거짓이 된다"가 이 시험 자체에서 실현된 사례다. 지운 것이
+// 아니라 **전환**한다 — `item_body_immutable_test.go` 를 지우지 않고
+// `item_body_single_writer_test.go` 로 바꾼 것과 같은 결이다.
+//
+// ★ amend 와 note 는 **다른 일**이라 하나만 단정하면 반대쪽이 사라진다: `amend` 는
+// 본문 자체를 고치고(옛 값은 item_revision 에 남는다), `note` 는 그 위에 판단을 얹는다
+// (원문은 그대로, 집을 때 전문으로 온다). 되돌리는 길 셋(프로젝트·본문 두 수단)이
+// **한 화면에** 있어야 "무엇을 고칠 수 있나"가 안 갈린다.
+func TestRenderAddSaysHowToFixTheBody(t *testing.T) {
 	got := RenderAdd(model.Item{
 		Project: "proj", ID: "fd-x", Title: "제목", State: model.ItemOpen,
 	})
 
-	if !strings.Contains(got, "본문은 나중에 못 고친다") {
-		t.Errorf("add 응답이 본문 불변을 말하지 않는다 — 세션은 나중에 고칠 수 있다고 믿고 "+
-			"대충 쓰게 되고, 틀린 전제가 큐에 남아 다음 사람이 그것을 조사로 되짚는다:\n%s", got)
+	// ★ 회귀 방지의 본체 — 거짓이 된 옛 문장이 다시는 안 나와야 한다.
+	if strings.Contains(got, "본문은 나중에 못 고친다") {
+		t.Errorf("add 응답이 여전히 본문을 못 고친다고 말한다 — amend 표면이 열려 "+
+			"이제 거짓이다:\n%s", got)
 	}
 
-	// 정정 수단을 **실제 id 와 함께** 낸다. 수단 이름만 적으면 세션이 그것을 어디에
-	// 거는지 몰라 결국 안 건다.
+	// 본문 자체를 고치는 수단(amend) — 실제 id 와 함께 나와야 한다.
+	if !strings.Contains(got, "`fd amend fd-x --title/--body/--path … --reason <사유>`") {
+		t.Errorf("본문을 고치는 수단(amend)이 이 항목의 id 와 함께 안 나온다:\n%s", got)
+	}
+
+	// 판단을 얹는 수단(note) — 여전히 유효하다. 실제 id 와 함께 낸다 — 수단 이름만
+	// 적으면 세션이 그것을 어디에 거는지 몰라 결국 안 건다.
 	if !strings.Contains(got, `note(item_id: "fd-x")`) {
-		t.Errorf("정정 수단이 이 항목의 id 를 안 달고 나온다 — 어디에 거는지가 화면에 없다:\n%s", got)
+		t.Errorf("판단을 얹는 수단(note)이 이 항목의 id 를 안 달고 나온다 — 어디에 거는지가 "+
+			"화면에 없다:\n%s", got)
 	}
 
-	// 고칠 수 있는 축과 못 고치는 축이 함께 있어야 한다.
+	// 고칠 수 있는 축 셋(프로젝트·본문)이 함께 있어야 한다.
 	if !strings.Contains(got, "fd move fd-x") {
 		t.Errorf("프로젝트 축의 되돌리는 길이 사라졌다 — 두 축이 한 화면에 있어야 "+
 			"'무엇을 고칠 수 있나'가 안 갈린다:\n%s", got)
@@ -1744,8 +1759,11 @@ func TestRenderAddSaysBodyCannotBeAmended(t *testing.T) {
 	other := RenderAdd(model.Item{
 		Project: "proj", ID: "fd-y", Title: "제목", State: model.ItemOpen,
 	})
+	if !strings.Contains(other, "fd amend fd-y") {
+		t.Errorf("amend 수단의 id 가 항목을 안 따라간다 — 남의 항목을 가리키는 지시가 된다:\n%s", other)
+	}
 	if !strings.Contains(other, `note(item_id: "fd-y")`) {
-		t.Errorf("정정 수단의 id 가 항목을 안 따라간다 — 남의 항목을 가리키는 지시가 된다:\n%s", other)
+		t.Errorf("note 수단의 id 가 항목을 안 따라간다 — 남의 항목을 가리키는 지시가 된다:\n%s", other)
 	}
 }
 
