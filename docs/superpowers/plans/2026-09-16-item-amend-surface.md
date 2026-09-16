@@ -178,9 +178,11 @@ CREATE TRIGGER item_revision_no_delete BEFORE DELETE ON item_revision
 BEGIN SELECT RAISE(ABORT, 'item_revision 은 추가 전용이다 — 지우면 복구 경로가 0이 된다'); END;
 ```
 
-- [ ] **Step 4: `schema.sql` 에 같은 선언을 넣는다**
+- [x] ~~**Step 4: `schema.sql` 에 같은 선언을 넣는다**~~ — **이 단계는 폐기됐다(실행 중 Ruling 4).**
 
-증분은 기존 DB 를, `schema.sql` 은 신규 설치를 담당한다. **둘이 갈리면 새 설치와 기존 설치가 다른 DB 가 된다.** 위 SQL 에서 머리말 주석만 줄여 `CREATE TABLE item (` 블록 **뒤**, `CREATE TABLE item_after (` **앞**에 넣는다.
+이 계획이 틀렸다. 신규 설치는 `schema.sql`(v1) **+ 증분 전부**를 순서대로 타므로, 양쪽에 선언하면 `table already exists` 로 즉시 깨진다. 증분이 만든 표는 전부 `schema.sql` 에 없다(`idempotency`/002 · `landing_queue`/003 · `landing_queue_resource`/008 · `project_member`/014). `store.go` 의 `BaseSchemaVersion` 주석이 그 규율을 이미 명문으로 적어 뒀다 — 계획이 그것을 안 읽었다. **정의는 증분 한 자리에만 둔다.**
+
+대신 이 자리에서 따라오는 것이 셋 있다(계획이 열거하지 못했고 구현자가 찾았다): `store.go` 의 증분 등록과 `SchemaVersion` 상향 · `store_test.go` 의 비멱등 되돌리기 목록 · `project_ref_counts_test.go` 의 `knownProjectRefTables`.
 
 - [ ] **Step 5: 표 목록 시험을 고친다**
 
