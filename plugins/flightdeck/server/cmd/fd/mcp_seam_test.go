@@ -276,12 +276,13 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 	warm := mcpServe(t, rig,
 		mcpCall("board", map[string]any{}),
 		mcpCall("add", map[string]any{"id": "t9-offline", "title": "제목", "body": "본문"}),
-		mcpCall("pick", map[string]any{}), // 추천은 읽기다 — 캐시가 채워져야 아래 cache 처방이 돈다
+		mcpCall("pick", map[string]any{}),                        // 추천은 읽기다 — 캐시가 채워져야 아래 cache 처방이 돈다
+		mcpCall("show", map[string]any{"item_id": "t9-offline"}), // show 도 읽기다 — 같은 이유로 데운다
 	)
-	if len(warm) != 3 {
+	if len(warm) != 4 {
 		t.Fatalf("준비 응답이 %d개다", len(warm))
 	}
-	for i, name := range []string{"board", "add", "pick(추천)"} {
+	for i, name := range []string{"board", "add", "pick(추천)", "show"} {
 		if txt, isErr := mcpText(t, warm[i]); isErr {
 			t.Fatalf("전제가 깨졌다 — 온라인에서 %s 가 실패했다:\n%s", name, txt)
 		}
@@ -324,6 +325,11 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 		// (offline.go 의 CmdLabel 판정, CmdAfterCut·CmdMove 와 같은 결).
 		{"label", map[string]any{"item_id": "t9-offline", "add": []string{"x"}}, true,
 			"실시간으로", "하지 않았다"},
+		// show 는 **읽기다.** 이 표에서 쓰기 넷(add·amend·label·finish)과 갈리는 자리이고,
+		// 그 갈림이 이 행의 요점이다 — 닫힌 항목을 되짚는 일은 서버가 죽어도 값이 있다
+		// (그 항목은 이미 안 움직인다). 거절로 바뀌면 여기가 빨개진다.
+		{"show", map[string]any{"item_id": "t9-offline"}, false,
+			"읽기다", "캐시된 마지막 응답을 냈다"},
 		// 본문 제자리 수정도 재생 대상이 아니다 — amend 는 읽고-고치는 쓰기라, 아웃박스가
 		// 재생하는 시점의 현재 값이 쌓을 때와 다르면 item_revision 이 거짓 이전값을
 		// 담는다(offline.go 의 CmdAmend 판정).

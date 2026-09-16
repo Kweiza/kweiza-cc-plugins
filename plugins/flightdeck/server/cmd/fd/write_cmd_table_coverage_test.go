@@ -440,6 +440,9 @@ var judgeOfflineGhostExceptions = map[string]ghostException{
 		"이 표의 사유를 재사용한다."},
 	"doctor": {"읽기다(위 status 와 같은 사정) — 지금은 board·next 처럼 직접 재사용하는 자리는 " +
 		"없지만 같은 범주(OfflineCache 처방)라 이 표에서 읽기 넷을 따로 취급하지 않는다."},
+	"show": {"읽기다(CmdShow). 항목 하나의 이력을 GET /items/{id} 로 읽는다 — cmds.go 의 runShow 는 " +
+		"a.cli.Read 로 나가고, mcpbackend.go 의 ShowItem 이 b.read(ctx, CmdShow, CmdShow, …) 로 불러 " +
+		"캐시 열화 사유를 JudgeOffline(cmd).Reason 에서 그대로 재사용한다(board·next 와 같은 자리)."},
 	"open": {"OpenSession 오프라인 경로(app.go 의 openSession)는 a.cli.Write 표준 경로를 안 타고 " +
 		"자체 캐시 로직을 쓴다 — app.go 의 Rekey 주석이 그 이유를 설명한다(\"Write 는 모르는 " +
 		"명령을 거절하므로 세션류는 애초에 그 경로를 안 쓴다\"). 다만 사유 문구는 " +

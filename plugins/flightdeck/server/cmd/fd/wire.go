@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kweiza/flightdeck/internal/service"
 )
@@ -286,6 +287,22 @@ type labelReq struct {
 // amendPath 는 POST /api/v1/items/{id}/amend 의 경로다.
 func amendPath(itemID string) string {
 	return "/api/v1/items/" + urlPath(itemID) + "/amend"
+}
+
+// showPath 는 GET /api/v1/items/{id} 의 경로다 — 질의 인자까지 포함한다.
+//
+// ★ **한 자리에 둔다.** 소비자가 둘(runShow · mcpBackend.ShowItem)이고, 읽기 경로는
+// 이 문자열이 그대로 **캐시 키**다(Client.Read 가 path 로 캐시한다) — 두 벌이 갈리면
+// 같은 조회가 캐시를 공유하지 않아 오프라인에서 한쪽만 답한다.
+//
+// ★ session_id 는 비면 안 싣는다. 서버가 이 축을 선택으로 받고(워크스페이스 관문에만
+// 쓴다) 빈 값을 실으면 캐시 키가 갈려 세션이 있을 때와 없을 때가 다른 항목이 된다.
+func showPath(itemID, project, sessionID string) string {
+	p := "/api/v1/items/" + urlPath(itemID) + "?project=" + urlValue(project)
+	if strings.TrimSpace(sessionID) != "" {
+		p += "&session_id=" + urlValue(sessionID)
+	}
+	return p
 }
 
 // amendReq 는 그 본문이다.

@@ -36,6 +36,8 @@ const usage = `fd — flightdeck 클라이언트/서버
   fd open [--label …]                     세션 등록(재호출은 재개다)
   fd beat --kind prompt|tool|mcp [--path] 생존 신호
   fd next [--workspace]                   추천 1건 + 탈락 사유 전부. **선점하지 않는다**
+  fd show <item-id>                       항목 하나의 지금 본문 + 개정 이력 + 걸린 판단 전문.
+                                          **닫힌 항목도 읽는다** — 선점이 아니라 읽기다
   fd pick <item-id> [<item-id>…]          선점(여럿이면 첫째가 선두 · 오프라인에서는 거절된다)
   fd add --id … --title … --body …        큐 항목 등록
   fd finish <item-id> --body … [--close]  판단+후속+종료+반납을 한 번에. --close 면 세션도 닫는다
@@ -157,6 +159,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runLabel(ctx, args[1:], stdout)
 	case "amend":
 		return app.runAmend(ctx, args[1:], stdout)
+	case "show":
+		return app.runShow(ctx, args[1:], stdout)
 	case "after":
 		return app.runAfter(ctx, args[1:], stdout)
 	case "land":

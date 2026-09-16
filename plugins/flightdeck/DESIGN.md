@@ -55,7 +55,7 @@
 성공 지표는 **세션당 쓰기 호출 수**와 **대체되는 규율 산문의 분량**이다.
 도구가 늘면 규율의 뒤쪽(핸드오프·후속 등록·해제)이 먼저 빠지는 같은 붕괴가 새 이름으로 재현된다.
 
-MCP 도구는 9개, 스킬은 4개, 에이전트·커맨드는 0개다.
+MCP 도구는 10개, 스킬은 4개, 에이전트·커맨드는 0개다.
 
 **⚠ 이 줄의 도구 수가 아홉 날 낡아 있었다(2026-08-12 → 08-21).** `label` 이 들어와 여덟이
 됐는데 이 줄만 일곱으로 남았고, 그동안 같은 문서 §6 머리줄은 여덟이라 적고 있었다 —
@@ -720,7 +720,7 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 
 ## 6. 표면
 
-### MCP 도구 9개
+### MCP 도구 10개
 
 전체 이름은 `mcp__plugin_flightdeck_fd__<도구>` 다.
 
@@ -735,22 +735,29 @@ B 와 C 를 가르는 것은 "빈 값이 거짓말을 하나"다. 목록·집계
 | `land` | `result?`, `detail?`, `leave?`, `release?`, `resources?` | 인자 없으면 랜딩 레인 줄에 서거나(재진입 안전) 내 차례를 재확인 — `turn`\|`waiting`(앞사람·순번)\|`reclaimed`(회수 사유). `resources` 는 **줄 서기에만** 성립한다(비면 기존 단일 레인 `landing`, 경로 자원은 `path:<경로>`, 그 밖의 `<종류>:<이름>` 은 프로젝트가 정한다 — 파일을 안 고쳐서 겹침이 못 보는 배타가 이 축의 자리다, §3 `resource_hold`) — `result`·`leave` 와 같이 주면 거절한다(보고·이탈은 줄 행 전체에 걸리는 all-or-nothing 이라 자원 부분집합이 무의미하다). `result` 로 다 쓰고 보고+반납(`ok`\|`fail`), `leave` 로 줄에서 이탈. `release` 는 **이 서버가 거절한다**(레인 회수는 사람만, §4) |
 | `label` | `item_id`, `add?`, `rm?` | 이미 있는 항목의 꼬리표를 고친다 — **고칠 수 있는 축은 그 하나뿐**이다(본문·제목은 이 동사가 아니라 바로 아래 `amend` 가 고친다. 선행은 여전히 §11 이 "안 만든다"로 판정했다). 응답은 요청한 것이 아니라 **실제 변화분**을 낸다(이미 있는 것을 더해도 거절하지 않지만 "더했다"고만 말하면 안 바뀐 것을 바뀐 줄 안다). `tickler` 가 붙으면 그 뜻과 **선두 규칙**을 그 자리에서 낸다 |
 | `amend` | `item_id`, `title?`, `body?`, `paths?`, `reason` | 이미 있는 항목의 **제목·본문·경로**를 고친다 — 고칠 수 있는 축은 그 셋뿐이다(꼬리표는 `label`, 선행·상태는 못 바꾼다, §11). 준 것만 고치고 응답은 요청이 아니라 **실제 변화분**을 낸다. 옛 값은 `item_revision` 에 **고치기 직전의 값**으로 쌓이고 그 표는 추가 전용이다. `paths` 를 고치면 **겹침 판정의 입력이 바뀌므로** 그 파급(겹치게 된 세션 수 · 또는 못 셌다는 사실)을 그 자리에서 낸다 |
+| `show` | `item_id` | 항목 하나의 **지금 본문 + 개정 이력 + 걸린 판단 전문**을 낸다. **닫힌 항목도 준다** — 선점이 아니라 읽기라 `state` 를 안 본다. 그것이 이 동사의 존재 이유다: `judgment_link` 를 역방향으로 읽는 경로가 `pick` 하나뿐인데 그쪽은 `state='open'` 만 주고, `GET /judgments?q=` 에는 항목 필터가 없다(전문 검색뿐) — 실측 2026-09-17 로 닫힌 항목에 걸린 판단 **1,985건**(열린 항목은 125건)이 도달 불가였고 그중 ask 가 5건이다. 개정 이력은 `item_revision` 을 `rev` 순으로 내고 각 행의 사유와 **바뀐 축**을 함께 낸다(그 축은 표에 없고 사슬로 복원한 값이다). 판단은 최신 먼저 · 전문이고, **출력 예산 6,000토큰**을 넘기면 오래된 것부터 제목만 내며 **잘랐다는 사실과 건수**를 찍는다. 개정·판단 두 축은 0건과 «못 읽었다»를 다른 문장으로 낸다 |
 
 **도구 수를 예산 안에 묶는 이유는 컨텍스트다.** 세션 시작에는 도구 이름과 서버 instructions 만 실리고,
 스킬 목록은 컨텍스트의 1%·항목당 1,536자에서 절단되며 덜 쓰는 것부터 버려진다(**측정 전
 잠정이다** — §13 「아직 아님」 6. 절단되는 것이 `description` 인지 본문까지인지도 그 줄에 있다).
 **그래서 규율 산문을 도구 설명이나 스킬에 넣지 않는다.** 6개에서 7개(`land`)로 늘어난 것은 이 예산을
 안 건드린다 — 늘어난 것은 세션 시작 목록에 실리는 고정비, 즉 도구 **이름** 하나뿐이고, 그 설명도
-도구별 90자 상한(`mcpsrv/protocol_test.go` 의 `TestToolTableIsNine`)을 그대로 지킨다.
+도구별 90자 상한(`mcpsrv/protocol_test.go` 의 `TestToolTableIsTen`)을 그대로 지킨다.
 7개에서 8개(`label`)도 같다 — 늘어난 것은 이름 하나이고, 그 설명도 90자 상한
-(`mcpsrv/protocol_test.go` 의 `TestToolTableIsNine`)을 그대로 지킨다. 이 도구가
+(`mcpsrv/protocol_test.go` 의 `TestToolTableIsTen`)을 그대로 지킨다. 이 도구가
 나르는 규율(티클러의 뜻·선두 규칙)은 도구 설명이 아니라 **응답**(`RenderLabel`)에만 있다.
 `land` 가 나르는 규율(레인 상태 다섯 갈래·회수 거절 사유)은 스킬이나 도구 설명이 아니라 그 도구의
 **응답**(`RenderLand`)에만 있다 — 다른 여섯이 이미 그렇듯, 여기서도 규율은 필요할 때 그 자리에서만 실린다.
 8개에서 9개(`amend`)도 같다 — 늘어난 것은 이름 하나이고, 그 설명도 90자 상한
-(`mcpsrv/protocol_test.go` 의 `TestToolTableIsNine`)을 그대로 지킨다. 이 도구가 나르는
+(`mcpsrv/protocol_test.go` 의 `TestToolTableIsTen`)을 그대로 지킨다. 이 도구가 나르는
 규율(실제 변화분 · 되돌릴 좌표 · 경로 수정의 겹침 파급)은 도구 설명이 아니라 **응답**
 (`RenderAmend`)에만 있다.
+9개에서 10개(`show`)도 같다 — 늘어난 것은 이름 하나이고, 그 설명도 90자 상한
+(`mcpsrv/protocol_test.go` 의 `TestToolTableIsTen`)을 그대로 지킨다. 이 도구가 나르는
+규율(닫힌 항목도 읽는다 · 개정 사유와 바뀐 축 · 예산을 넘겨 잘랐다는 사실 · 0과 못 잼의
+구분)은 도구 설명이 아니라 **응답**(`RenderShow`)에만 있다. 여는 근거는 예산이 아니라
+**도달 불가**다: 저 1,985건을 읽는 문이 원장에 한 개도 없었고, `item_revision`(증분 016)도
+쌓기만 하고 읽는 경로가 레포 전체에 0건이었다.
 서버 instructions 는 300자 고정(실측 182):
 
 > 작업은 `pick`, 판단은 `note`, 끝나면 `finish`, 랜딩 전에 `land` 로 줄을 선다. 락은 없다.
@@ -791,6 +798,7 @@ GET    /sessions?id=<카드>             (카드 id 로 지목 — 좌표 해석
 POST   /sessions/{id}/signals       POST   /sessions/{id}/workspaces  ← 클라이언트 0건(아래)
 POST   /sessions/{id}/rekey         (훅 전용 — /clear·compact 로 갈린 대화의 새 cc 를 카드에 반영)
 GET    /items/next                  POST   /items
+GET    /items/{id}?project&session_id  (항목 하나를 **읽는다** — 지금 본문 + 개정 이력 + 걸린 판단. 닫힌 항목도 준다, 자르지 않는다. session_id 는 선택 — 워크스페이스 관문에만 쓴다)
 POST   /items/{id}/claim            POST   /items/{id}/finish
 POST   /items/{id}/claim/release    (사람의 선점 회수 — 대시보드 폼·CLI 와 같은 함수)
 POST   /claims/leave                (세션이 **자기** 선점을 놓는다 — `pick(leave:…)`. 항목 id 가 선택이라 경로에 없다)
@@ -898,7 +906,7 @@ TLS 뒤에서만 `Secure`)를 굽고, `JudgeAuth` 는 **`/` · `/actions/*` · `
 **`Stop` 의 "발화 5조건"은 `judge.Prescribe` 가 부르는 생성기 다섯이다** —
 `lane-turn` · `overlap` · `outside` · `unclaimed` · `silent`(`judge/prescribe.go` 의 상수 다섯).
 넷에서 다섯이 된 것은 랜딩 레인의 **차례 통지**(`lane-turn`)가 들어오면서다.
-★ **이 수를 잠그는 시험은 없다.** 도구 수(`mcpsrv/protocol_test.go` 의 `TestToolTableIsNine`)나
+★ **이 수를 잠그는 시험은 없다.** 도구 수(`mcpsrv/protocol_test.go` 의 `TestToolTableIsTen`)나
 테이블 수(`store/schema_table_count_test.go` 의 `TestDeclaredTablesMatchDesign`)와 달리,
 여섯째 조건을 더하는 사람에게 빨간불이 날 자리가 한 군데도 없다 — 그래서 이 숫자는
 넷에서 다섯으로 갈 때 그랬듯 다음에도 조용히 표류할 수 있다.
@@ -1177,7 +1185,7 @@ flightdeck 안쪽(이벤트 여섯의 async·이름·SessionEnd 의 폭)을 계�
 
 ### CLI `bin/fd`
 
-`status open beat note next pick add amend move label finish alloc project doctor export import watch`
+`status open beat note next pick show add amend move label finish alloc project doctor export import watch`
 
 **`serve`·`mcp`·`hook` 처럼 사람이 직접 안 부르는 서브명령이 이 목록 밖에 있다.**
 `selfcheck` 가 그중 하나다 — 자동 갱신 축이 새 바이너리를 **자식으로 돌려 검증**할 때만 쓴다(§7).

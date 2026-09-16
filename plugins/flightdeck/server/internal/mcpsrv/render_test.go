@@ -1002,7 +1002,7 @@ func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 	}
 	// ★ MCP board 도구는 window 인자를 받지 않는다(tools.go) — 없는 손잡이를
 	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 아홉으로 눌러 잡는다 —
-	//   그 수는 protocol_test.go 의 TestToolTableIsNine 이 잠근다).
+	//   그 수는 protocol_test.go 의 TestToolTableIsTen 이 잠근다).
 	if strings.Contains(got, "window=") {
 		t.Fatalf("존재하지 않는 window 인자를 돌리라고 한다:\n%s", got)
 	}

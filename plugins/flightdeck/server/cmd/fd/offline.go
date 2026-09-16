@@ -100,6 +100,15 @@ const (
 
 	// CmdAmend 는 이미 있는 항목의 본문을 고치는 것이다(`fd amend`).
 	CmdAmend = "amend"
+
+	// CmdShow 는 항목 하나의 이력을 읽는 것이다(`fd show`). **쓰기가 아니다** —
+	// 이 표의 다른 상수들과 달리 Client.Write 로 안 나가고 Client.Read 를 탄다.
+	//
+	// ★ 그래도 상수를 두는 이유는 mcpbackend.go 의 read 가 캐시 열화 사유를
+	// `JudgeOffline(cmd).Reason` 에서 그대로 재사용하기 때문이다(board·next 와 같은
+	// 자리). 이름이 한 글자만 어긋나면 그 사유가 default 의 "정책이 정의돼 있지
+	// 않다"로 바뀌는데, 그 문구는 "이 명령은 설계가 안 됐다 = 서버 결함"으로 읽힌다.
+	CmdShow = "show"
 )
 
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
@@ -117,7 +126,10 @@ func JudgeOffline(cmd string) OfflineVerdict {
 	case "note":
 		return OfflineVerdict{OfflineOutbox,
 			"판단은 원리적으로 파생 불가한 유일한 자산이다 — 아웃박스에 쌓고 재연결 시 멱등 재생한다"}
-	case "status", "board", "next", "doctor":
+	// ★ show 가 여기 있는 것이 이 동사의 축이다 — **읽기**다. 쓰기 넷(add·amend·label·
+	//   finish)이 전부 거절인 옆줄과 갈리는 자리이고, 닫힌 항목을 되짚는 일은 서버가
+	//   죽었을 때도 값이 있다(그 항목은 이미 안 움직인다 — 낡을 여지가 가장 작은 조회다).
+	case "status", "board", "next", "doctor", CmdShow:
 		return OfflineVerdict{OfflineCache,
 			"읽기다 — 마지막 성공 응답을 낡음 배너와 함께 낸다. 침묵하면 낡은 값이 현재 사실인 척한다"}
 	case "beat":

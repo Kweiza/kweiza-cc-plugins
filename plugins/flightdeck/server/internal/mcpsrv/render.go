@@ -26,6 +26,14 @@ import (
 // detail=true 일 때만 이 상한을 푼다.
 const BoardTokenBudget = 1200
 
+// judgmentBodyClip 은 판단 본문 하나를 화면에 낼 때의 글자 상한이다.
+//
+// ★ **한 자리에 둔다.** 같은 판단 본문을 같은 소비자(에이전트)에게 내는 표면이 둘이고
+// (RenderPick 의 전문 · RenderShow 의 전문) 값이 갈리면 같은 판단이 표면마다 다른
+// 길이로 보인다. 실측(2026-09-17): 판단 본문 중앙값 1,420자 · 최대 12,257자 —
+// 이 상한은 거의 모든 본문을 통째로 통과시키고 이상치만 자른다.
+const judgmentBodyClip = 4000
+
 // EstimateTokens 는 문자열의 토큰 수 **상한**을 어림한다. 순수 함수다.
 //
 // ★ 호스트의 토크나이저가 아니다. 그것을 정확히 재려면 의존을 하나 더 넣어야 하고,
@@ -1539,7 +1547,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 			fmt.Fprintf(&b, "  [%s] %s · %s\n", j.Kind,
 				j.At.UTC().Format("2006-01-02 15:04"), clip(firstLine(j.Title, j.Body), 100))
 			if full && strings.TrimSpace(j.Body) != "" {
-				b.WriteString(indent(clip(j.Body, 4000), "    ") + "\n")
+				b.WriteString(indent(clipBody(j.Body), "    ") + "\n")
 			}
 		}
 	}
@@ -1704,7 +1712,7 @@ func renderBundle(bi *service.BundleInfo, bundleAt time.Time) string {
 				fmt.Fprintf(&b, "      [%s] %s · %s\n", j.Kind,
 					j.At.UTC().Format("2006-01-02 15:04"), clip(firstLine(j.Title, j.Body), 100))
 				if strings.TrimSpace(j.Body) != "" {
-					b.WriteString(indent(clip(j.Body, 4000), "        ") + "\n")
+					b.WriteString(indent(clipBody(j.Body), "        ") + "\n")
 				}
 			}
 		}

@@ -23,7 +23,7 @@ import (
 //  2. 세션이 10개면 이 프로세스도 10개이고 전부 같은 파일에 `_txlock=immediate` 로 썼다.
 //     쓰기 주체를 서버 하나로 모으면 그 경합이 사라진다.
 //
-// **넓히지 않는다.** 여기 있는 것은 도구 9개와 세션 귀속이 실제로 부르는 메서드뿐이다.
+// **넓히지 않는다.** 여기 있는 것은 도구 10개와 세션 귀속이 실제로 부르는 메서드뿐이다.
 
 // Backend 는 조정 서버 한 대에 붙는 통로다.
 //
@@ -45,6 +45,13 @@ type Backend interface {
 	// AmendItem 은 항목의 제목·본문·경로를 고치고 옛 값을 개정 이력에 남긴다.
 	// 고칠 수 있는 축은 그 셋뿐이다(DESIGN §11).
 	AmendItem(ctx context.Context, in service.AmendInput) (service.AmendResult, error)
+
+	// ShowItem 은 항목 하나의 지금 본문 + 개정 이력 + 걸린 판단을 읽는다.
+	//
+	// ★ Pick 과 축이 다르다 — 그쪽은 **선점**이고 이쪽은 **읽기**라 닫힌 항목도 준다.
+	// 그것이 이 메서드가 존재하는 이유다(실측: 닫힌 항목에 걸린 판단 1,985건이
+	// judgment_link 를 역방향으로 읽는 경로가 pick 하나뿐이라 도달 불가였다).
+	ShowItem(ctx context.Context, in service.ShowInput) (service.ShowResult, error)
 
 	// LeaveClaim 은 이 세션이 **자기** 선점을 놓는다(pick 의 leave 인자).
 	// 회수(ReclaimClaim)는 여기 없다 — 그것은 세션의 도구가 아니라 사람의 표면이고,

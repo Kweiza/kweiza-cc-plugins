@@ -331,7 +331,7 @@ cd server && go run ./cmd/fd serve --addr :7420 --db ~/.flightdeck/fd.db
 | `PreCompact` 훅 | 압축 직전 좌표를 초안 판단으로 남긴다 |
 | `Stop` 훅 | 턴이 끝날 때 처방을 물어 `additionalContext` 로 주입한다 |
 | `SessionEnd`(clear) 훅 | `/clear` 로 대화가 떠난 것을 관측으로 남긴다 |
-| MCP 도구 9개 | `board` `pick` `note` `add` `finish` `alloc` `land` `label` `amend` |
+| MCP 도구 10개 | `board` `pick` `note` `add` `finish` `alloc` `land` `label` `amend` `show` |
 | 스킬 4개 | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 **훅은 전부 fail-open 이다.** `bin/fd` 는 셸 런처고, 첫 훅이 `server/` 를 빌드해
@@ -425,7 +425,7 @@ codex -c sandbox_workspace_write.network_access=true
 | 응답 꼬리(겹침·미확인) | ✅ 쓰기 명령 전부에 붙는다 |
 | `pick --leave` · `finish --followups` · `land --resource` | ✅ 있다 |
 | 처방문의 도구 문법 | ✅ codex 카드에는 `fd …` 로 나온다 |
-| MCP 도구 9개 | ❌ **안 만든다**(설계 판정) |
+| MCP 도구 10개 | ❌ **안 만든다**(설계 판정) |
 
 ##### PATH 를 넣어야 한다 — 이것만 사람이 한다
 
@@ -471,7 +471,7 @@ codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고 **세션 
 
 ## 쓰는 법
 
-### 세션 안에서 — MCP 도구 9개
+### 세션 안에서 — MCP 도구 10개
 
 외워야 할 것은 넷이다: **집고(`pick`) · 남기고(`note`) · 끝내고(`finish`) · 줄 선다(`land`).**
 
@@ -488,6 +488,7 @@ codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고 **세션 
 | `land` | `resources` `result` `detail` `leave` | 랜딩 줄에 선다 / 내 차례를 본다 / 보고하고 반납한다 |
 | `label` | `item_id` `add` `rm` | 표시 전용 꼬리표. `tickler` 만 굶김 축에서 빠진다 |
 | `amend` | `item_id` `title` `body` `paths` `reason` | 항목의 **제목·본문·경로**를 제자리에서 고친다 — 고치는 축은 그 셋뿐이다. 준 것만 바뀌고 옛 값은 개정 이력에 남는다 |
+| `show` | `item_id` | 항목 하나를 읽는다 — 지금 본문 + 개정 이력 + 걸린 판단 전문. **닫힌 항목도 된다**: 선점이 아니라 읽기다. 그것이 이 동사의 전부다 — `judgment_link` 를 역방향으로 읽던 것이 `pick` 하나였고 그쪽은 `state='open'` 만 줘서, 닫힌 항목에 걸린 판단 1,985건이 도달 불가였다(그중 `ask` 5건). 출력은 6,000토큰 상한이고 넘치면 오래된 판단부터 제목만 내며 **그 사실을 말한다** |
 
 세 가지 규율이 이 표에 숨어 있다.
 

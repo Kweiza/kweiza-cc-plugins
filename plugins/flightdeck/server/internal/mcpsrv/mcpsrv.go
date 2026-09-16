@@ -500,6 +500,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		res = s.toolLabel(ctx, sessionID, args)
 	case "amend":
 		res = s.toolAmend(ctx, sessionID, args)
+	case "show":
+		res = s.toolShow(ctx, sessionID, args)
 	default:
 		// KnownTool 을 통과했는데 여기 오면 도구 표와 디스패치가 어긋난 것이다.
 		res = textResult(fmt.Sprintf("도구 %q 가 표에는 있는데 디스패치에 없다 — 서버 결함이다", clip(name, 64)), true)
@@ -1182,6 +1184,44 @@ func toAfter(in []afterArgs) []model.After {
 		})
 	}
 	return out
+}
+
+// toolShow 는 항목 하나의 이력을 읽는다.
+//
+// ★ **읽기다.** 선점하지 않고 상태를 안 건드린다 — 그래서 닫힌 항목도 준다.
+// 그것이 이 도구의 존재 이유다(backend.go 의 ShowItem 주석에 실측이 있다).
+//
+// ★ 꼬리는 `tailOpts{}` 그대로다 — 이 도구는 **경로 축을 안 읽는다.** 항목의 paths 를
+// 화면에 내기는 하지만 그것은 저장된 값을 옮긴 것이고, 겹침 판정(살아 있는 세션 조회)은
+// 한 번도 안 돈다. observed:true 로 넘기면 꼬리가 "겹침: 없음"을 내는데 그것은 **재고
+// 0건**이라는 뜻이라, 아예 안 잰 이 응답에서는 거짓이 된다(toolAmend 의 ③ 갈래와 같은 규율).
+func (s *Server) toolShow(ctx context.Context, sessionID string, raw json.RawMessage) toolResult {
+	var a showArgs
+	if err := decodeArgs(raw, &a); err != nil {
+		return textResult(s.withTail(ctx, s.errText("show", err), tailOpts{}), true)
+	}
+	res, err := s.be.ShowItem(ctx, service.ShowInput{
+		Project: s.target(a.Project), SessionID: sessionID,
+		ItemID: strings.TrimSpace(a.ItemID),
+	})
+	// ★ 읽기라 **값과 열화가 함께** 올 수 있다(캐시로 답한 경우). toolBoard 와 같은
+	//   모양이다 — 값을 버리면 서버가 죽은 날 되짚을 길이 0이 되고, 열화를 버리면
+	//   낡은 스냅숏이 지금 사실인 척한다.
+	notice := ""
+	if deg, ok := AsDegraded(err); ok && DegradedUsable(deg.Mode) {
+		notice, err = RenderDegraded(deg), nil
+	}
+	if err != nil {
+		if r, ok := s.degradedResult(ctx, "show", err); ok {
+			return r
+		}
+		return textResult(s.withTail(ctx, s.errText("show", err), tailOpts{}), true)
+	}
+	body := RenderShow(res, s.now())
+	if notice != "" {
+		body = notice + "\n" + body
+	}
+	return textResult(s.withTail(ctx, body, tailOpts{}), false)
 }
 
 // decodeArgs 는 도구 인자를 읽는다. 모르는 필드는 **거절한다** —

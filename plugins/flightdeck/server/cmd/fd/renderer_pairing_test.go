@@ -57,6 +57,7 @@ var toolRenderer = map[string]struct {
 	"land":   {renderer: "RenderLand"},
 	"label":  {renderer: "RenderLabel"},
 	"amend":  {renderer: "RenderAmend"},
+	"show":   {renderer: "RenderShow"},
 
 	// ★ 유일한 예외. `fd alloc <counter>` 는 **숫자 한 줄만** 낸다(`fmt.Fprintf(out, "%d\n", …)`).
 	//   `RenderAlloc` 은 "alloc · x = 3" + 산문 한 줄을 내는데, 그것을 CLI 가 쓰면

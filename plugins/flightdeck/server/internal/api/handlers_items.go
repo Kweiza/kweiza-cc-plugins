@@ -84,6 +84,39 @@ func (s *server) handleNextItem(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, res)
 }
 
+// handleShowItem 은 항목 하나의 지금 본문 + 개정 이력 + 걸린 판단을 낸다.
+//
+// ★ **읽기다.** 선점하지 않고 상태를 안 건드린다 — 그래서 **닫힌 항목도 준다**.
+// 그것이 이 표면의 존재 이유다: `judgment_link` 를 역방향으로 읽는 길이 `pick` 하나뿐이었고
+// 그쪽은 `state='open'` 만 준다. 실측 2026-09-17 — 닫힌 항목에 걸린 판단 1,985건(열린 것은
+// 125건)이 그래서 도달 불가였고 그중 ask 가 5건이다.
+//
+// ★ 자르지 않는다. REST 는 정본이고 예산은 표시 계층(mcpsrv.RenderShow)이 건다 —
+// 여기서 자르면 잘렸다는 사실을 아는 계층이 화면 하나로 줄어든다.
+func (s *server) handleShowItem(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.requireQuery(w, r, "project",
+		"항목 id 는 프로젝트마다 독립이라 어느 프로젝트인지 없이는 좌표가 없다.")
+	if !ok {
+		return
+	}
+	// ★ session_id 는 **선택**이다. 이 축이 하는 일은 워크스페이스 관문 하나뿐이고
+	//   (service.GateTargetProject), 그 관문은 세션을 모르면 판정 근거가 없어 통과시킨다.
+	//   읽기라 원장에 귀속할 행도 없다 — `/items/next` 처럼 필수로 두면 세션 없이 셸에서
+	//   되짚으려는 사람만 막힌다.
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID != "" {
+		infoFrom(r.Context()).setSession(sessionID)
+	}
+	res, err := s.svc.ShowItem(r.Context(), service.ShowInput{
+		Project: project, SessionID: sessionID, ItemID: r.PathValue("id"),
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, res)
+}
+
 type addItemRequest struct {
 	Project   string       `json:"project"`
 	SessionID string       `json:"session_id"`

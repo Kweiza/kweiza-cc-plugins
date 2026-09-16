@@ -526,6 +526,31 @@ func (b *mcpBackend) AmendItem(ctx context.Context, in service.AmendInput) (serv
 	return res, nil
 }
 
+// ShowItem 은 항목 하나의 이력을 REST 로 읽는다.
+//
+// ★ **읽기라 b.read 다**(b.write 가 아니다). 그래서 캐시로 답한 경우 값과 열화가 함께
+// 온다 — board·next 와 같은 자리다. 쓰기로 보내면 오프라인에서 거절이 되는데, 이
+// 조회는 낡아도 값이 있고(닫힌 항목은 애초에 안 움직인다) 그 값이 없으면 서버가 죽은
+// 날 항목 하나를 되짚을 길이 0이 된다.
+//
+// ★ `b.app.cli.Session` 을 **안 갈아 쓴다.** 이 경로는 멱등 키를 안 만들고(읽기다)
+// 세션 좌표는 질의 인자로 실려 간다 — 갈아 쓰면 이 파일 머리의 "순차 전제"에 자리를
+// 하나 더 얹으면서 얻는 것이 없다.
+func (b *mcpBackend) ShowItem(ctx context.Context, in service.ShowInput) (service.ShowResult, error) {
+	var res service.ShowResult
+	raw, deg, err := b.read(ctx, CmdShow, CmdShow, showPath(in.ItemID, in.Project, in.SessionID))
+	if err != nil {
+		return res, err
+	}
+	if uerr := json.Unmarshal(raw, &res); uerr != nil {
+		return res, fmt.Errorf("항목 이력 응답 해석 실패: %w", uerr)
+	}
+	if deg != nil {
+		return res, deg
+	}
+	return res, nil
+}
+
 func toAfterWire(in []model.After) []afterWire {
 	if len(in) == 0 {
 		return nil

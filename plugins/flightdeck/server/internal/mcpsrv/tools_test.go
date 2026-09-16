@@ -32,13 +32,13 @@ func TestJudgmentNowConstantSurvives(t *testing.T) {
 }
 
 // pick 에 item_ids 를 더해도 도구 수는 늘지 않는다 — 세션 시작 컨텍스트 예산이
-// 그 이유다(설계 §6). ★ 9개인 이유: 랜딩 순서 큐 설계가 6→7 로(land), 항목 꼬리표
-// 표면이 7→8 로(label), 항목 본문 수정 표면이 8→9 로(amend) 눌러 잡았다(tools.go
-// 상단 주석 참고) — 이 시험이 다른 수를 단정하면 그 사실과 어긋나 원래 목적
-// (도구 수 상한)과 무관하게 FAIL 한다.
+// 그 이유다(설계 §6). ★ 10개인 이유: 랜딩 순서 큐 설계가 6→7 로(land), 항목 꼬리표
+// 표면이 7→8 로(label), 항목 본문 수정 표면이 8→9 로(amend), 항목 이력 읽기 표면이
+// 9→10 으로(show) 눌러 잡았다(tools.go 상단 주석 참고) — 이 시험이 다른 수를 단정하면
+// 그 사실과 어긋나 원래 목적(도구 수 상한)과 무관하게 FAIL 한다.
 func TestPickGainsItemIDsWithoutGrowingToolCount(t *testing.T) {
-	if got := len(Tools()); got != 9 {
-		t.Fatalf("도구가 %d개다 — 9개여야 한다(land·label·amend 포함)", got)
+	if got := len(Tools()); got != 10 {
+		t.Fatalf("도구가 %d개다 — 10개여야 한다(land·label·amend·show 포함)", got)
 	}
 	var pick *Tool
 	for i := range tools {
@@ -67,8 +67,8 @@ func TestPickGainsItemIDsWithoutGrowingToolCount(t *testing.T) {
 // 이름이 leave 인 것도 임의가 아니다 — land 가 이미 leave(자기 이탈) / release(3자 회수, 거절)
 // 로 두 축을 갈라 뒀다. pick 의 회수 축은 steal_reason(거절)이므로 남은 칸이 leave 다.
 func TestPickGainsLeaveWithoutGrowingToolCount(t *testing.T) {
-	if got := len(Tools()); got != 9 {
-		t.Fatalf("도구가 %d개다 — 반납은 인자로 얹혔으므로 9개 그대로여야 한다", got)
+	if got := len(Tools()); got != 10 {
+		t.Fatalf("도구가 %d개다 — 반납은 인자로 얹혔으므로 10개 그대로여야 한다", got)
 	}
 	var pick *Tool
 	for i := range tools {

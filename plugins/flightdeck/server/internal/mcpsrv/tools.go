@@ -1,9 +1,13 @@
 package mcpsrv
 
-// 도구 9개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
+// 도구 10개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
 // land 를, 항목 꼬리표 표면(2026-08-12-item-label-surface-design.md)이 label 을,
-// 항목 본문 수정 표면(2026-09-16-item-amend-surface)이 amend 를 더했다.
-// 더는 늘리지 않는다.
+// 항목 본문 수정 표면(2026-09-16-item-amend-surface)이 amend 를, 항목 이력 읽기 표면
+// (2026-09-17)이 show 를 더했다. 더는 늘리지 않는다.
+//
+// ★ show 를 더한 근거는 **도달 불가**다(실측, 운영 원장 2026-09-17): 닫힌 항목에 걸린
+// 판단 1,985건을 읽는 경로가 pick 하나뿐인데 pick 은 state='open' 만 준다. 그중 ask 가
+// 5건이다. 늘어난 고정비는 이름 하나이고, 설명도 90자 상한 안이다.
 //
 // ★ 설명 문구를 짧게 유지하는 것이 이 파일의 규율이다. 세션 시작에 실리는 것은
 // 도구 이름과 설명, 그리고 서버 instructions 뿐이고 그 예산이 도구 수를 눌러 잡는
@@ -213,6 +217,14 @@ var tools = []Tool{
 			"project": projectArg(),
 		}, "item_id", "reason"),
 	},
+	{
+		Name:        "show",
+		Description: "항목 하나의 지금 본문·개정 이력·걸린 판단 전문. **닫힌 항목도 읽는다.**",
+		InputSchema: obj(map[string]any{
+			"item_id": str("읽을 항목 id. **닫힌 항목도 된다** — 선점이 아니라 읽기다"),
+			"project": projectArg(),
+		}, "item_id"),
+	},
 }
 
 // Tools 는 tools/list 가 내는 목록의 사본이다.
@@ -344,4 +356,11 @@ type amendArgs struct {
 	Paths   *[]string `json:"paths"`
 	Reason  string    `json:"reason"`
 	Project string    `json:"project"`
+}
+
+// showArgs 는 읽기 하나의 인자다. **고칠 축이 없다** — 그것이 이 동사가 닫힌 항목을
+// 줄 수 있는 근거다(state·close_reason 을 안 건드린다).
+type showArgs struct {
+	ItemID  string `json:"item_id"`
+	Project string `json:"project"`
 }

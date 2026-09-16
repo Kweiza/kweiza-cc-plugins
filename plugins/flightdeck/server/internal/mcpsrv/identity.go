@@ -353,10 +353,10 @@ func (id Identity) Banner() string {
 		// 돼야 한다 — 없던 결함이 아니라 **잠자던 것에 이빨이 달린** 자리다.
 		if containsAxis(id.Missing, axisProject) {
 			b.WriteString("   되는 것: 없다 — 프로젝트 좌표가 없으면 board 도 못 낸다(어느 프로젝트의 보드인지 모른다).\n")
-			b.WriteString("   안 되는 것: 전부. 이 축은 다른 결손과 급이 달라 읽기(board)·발번(alloc)까지 막는다.\n")
+			b.WriteString("   안 되는 것: 전부. 이 축은 다른 결손과 급이 달라 읽기(board·show)·발번(alloc)까지 막는다.\n")
 			b.WriteString("   고치는 법: git 저장소 안에서 부르거나, FD_PROJECT 로 프로젝트를 명시해라.\n")
 		} else {
-			b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
+			b.WriteString("   되는 것: 읽기(board·show)·발번(alloc).\n")
 			b.WriteString("   안 되는 것: pick·note·add·finish·land·label·amend — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
 		}
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
@@ -367,7 +367,7 @@ func (id Identity) Banner() string {
 	if len(id.HarnessConflict) > 0 {
 		fmt.Fprintf(&b, "⚠ 하네스가 부딪힌다 — %s 가 동시에 관측됐는데 선언이 없다\n",
 			strings.Join(id.HarnessConflict, " · "))
-		b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
+		b.WriteString("   되는 것: 읽기(board·show)·발번(alloc).\n")
 		b.WriteString("   안 되는 것: pick·note·add·finish·land·label·amend — " +
 			"이 카드가 어느 창의 것인지 정할 수 없다.\n")
 		b.WriteString("   고치는 법: --harness " + strings.Join(HarnessNames(), "|") +
@@ -396,8 +396,8 @@ func axisWhy(axis string) string {
 
 // 세션 귀속이 필요한 도구. 여기 있는 것은 원장에 세션 id 로 행을 남긴다.
 //
-// board·alloc 은 빠져 있다 — 전자는 읽기이고, 후자의 원장 행은 프로젝트 귀속이다.
-// 정체가 반쪽이어도 그 둘은 답할 수 있고, 답할 수 있는 것까지 막으면
+// board·show·alloc 은 빠져 있다 — 앞 둘은 읽기이고, 뒤의 원장 행은 프로젝트 귀속이다.
+// 정체가 반쪽이어도 그 셋은 답할 수 있고, 답할 수 있는 것까지 막으면
 // 배너가 "서버가 통째로 죽었다"로 읽힌다.
 //
 // ★ 표에 없는 도구는 거절이 아니라 **통과**다(GateTool 의 `if !sessionBoundTools[tool]`).
@@ -419,6 +419,14 @@ func axisWhy(axis string) string {
 //	개정은 남긴다") land 처럼 크래시로 드러나지 않는다 — label 과 같은 조용한 갈래다.
 //	그래서 기준은 같다: 세션 없이 불러도 되는가가 아니라 "원장에 세션 id 로 행을
 //	남기는가" 뿐이고, amend 는 그 기준을 그대로 만족한다.
+//
+//	show 는 **안 넣는다.** 같은 기준을 그대로 적용한 결과다 — 이 도구는 원장에 아무것도
+//	안 쓴다(SELECT 셋뿐이고 state·close_reason·item_revision 어느 것도 안 건드린다).
+//	board 와 같은 자리다. 세션 신호(mcp beat)는 도구를 안 가리고 callTool 이 모든 호출에
+//	거는 것이라 이 표의 기준이 아니다 — 그것을 기준으로 삼으면 board·alloc 도 함께
+//	들어와야 하고, 그러면 이 표가 "전부"가 되어 판별력이 0이 된다.
+//	세션을 요구하면 잃는 것이 구체적이다: 닫힌 항목을 되짚는 것은 세션 밖(셸·다른 머신)
+//	에서 하는 일이 잦은데, 그 자리를 막으면 이 표면을 연 근거(도달 불가)가 절반 남는다.
 var sessionBoundTools = map[string]bool{
 	"pick": true, "note": true, "add": true, "finish": true, "land": true, "label": true,
 	"amend": true,

@@ -2193,3 +2193,58 @@ func (a *App) runAmend(ctx context.Context, args []string, out io.Writer) int {
 	fmt.Fprint(out, mcpsrv.RenderAmend(got))
 	return 0
 }
+
+const showHelp = "fd show <item-id>  — 항목 하나의 지금 본문·개정 이력·걸린 판단을 낸다(닫힌 항목도 된다)"
+
+// runShow 는 `fd show` 다. **읽기다** — 선점하지 않고 아무것도 안 고친다.
+//
+// ★ 그래서 닫힌 항목도 낸다. 그것이 이 동사의 존재 이유다: judgment_link 를 역방향으로
+// 읽는 경로가 pick 하나뿐이었고 그쪽은 열린 항목만 준다(실측 2026-09-17 — 닫힌 항목에
+// 걸린 판단 1,985건이 도달 불가였고 그중 ask 가 5건이다).
+//
+// ★ 오프라인이면 **캐시 + 배너**다(status·next 와 같은 갈래, JudgeOffline 의 CmdShow).
+// 거절이 아니다 — 낡아도 값이 있고, 닫힌 항목은 애초에 안 움직인다.
+func (a *App) runShow(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("show")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트의 항목을 본다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "읽을 항목 id 를 줘라:")
+		fmt.Fprintln(out, "  "+showHelp)
+		return 2
+	}
+	a.cli.Flush(ctx)
+	// ★ 세션을 못 얻어도 진행한다. 이 축이 하는 일은 워크스페이스 관문 하나뿐이고
+	//   (서버의 GateTargetProject), 조회는 세션 없이도 성립한다 — runStatus 와 같은 규율이다.
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+
+	rr, err := a.cli.Read(ctx, showPath(itemID, a.TargetProject(*project), sess))
+	if err != nil {
+		if rr.Banner != "" {
+			fmt.Fprintln(out, rr.Banner)
+		}
+		fmt.Fprintf(out, "항목을 못 읽었다: %v\n", err)
+		return 1
+	}
+	if !rr.Fresh {
+		fmt.Fprintln(out, rr.Banner)
+		fmt.Fprintln(out, "아래는 캐시된 스냅숏이다 — 그 뒤에 얹힌 판단·개정은 여기 없다.")
+	}
+	// ★ mcpsrv.RenderShow 로 낸다 — 손으로 다시 짜면 예산 절단 문구나 "못 읽었다"를
+	//   CLI 사용자만 못 보는 결함이 난다(label 이 정확히 그 결함을 겪었다).
+	var got service.ShowResult
+	if uerr := json.Unmarshal(rr.Body, &got); uerr != nil {
+		fmt.Fprintf(out, "읽었으나 응답을 못 해석했다: %v\n", uerr)
+		return 1
+	}
+	fmt.Fprint(out, mcpsrv.RenderShow(got, a.now()))
+	return 0
+}

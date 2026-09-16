@@ -349,7 +349,7 @@ Enabling it attaches all of the following.
 | `PreCompact` hook | Leaves the coordinates as a draft judgment just before compaction |
 | `Stop` hook | Asks for prescriptions at end of turn and injects them as `additionalContext` |
 | `SessionEnd`(clear) hook | Records, as an observation, that `/clear` ended that conversation |
-| 9 MCP tools | `board` `pick` `note` `add` `finish` `alloc` `land` `label` `amend` |
+| 10 MCP tools | `board` `pick` `note` `add` `finish` `alloc` `land` `label` `amend` `show` |
 | 4 skills | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 **Every hook is fail-open.** `bin/fd` is a shell launcher; the first hook builds `server/` and caches
@@ -443,7 +443,7 @@ Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know wha
 | Response tail (overlap/unacked) | ✅ on every write command |
 | `pick --leave` · `finish --followups` · `land --resource` | ✅ present |
 | Prescription syntax | ✅ codex cards get `fd …`, not MCP call syntax |
-| The 9 MCP tools | ❌ **deliberately not built** (design ruling) |
+| The 10 MCP tools | ❌ **deliberately not built** (design ruling) |
 
 ##### You add it to PATH — that is the one manual step
 
@@ -490,7 +490,7 @@ introduce a new falsehood (identity-less cards) in exchange. So it is not built 
 
 ## Using it
 
-### Inside a session — 9 MCP tools
+### Inside a session — 10 MCP tools
 
 There are four to remember: **claim (`pick`) · record (`note`) · close (`finish`) · queue (`land`).**
 
@@ -507,6 +507,7 @@ There are four to remember: **claim (`pick`) · record (`note`) · close (`finis
 | `land` | `resources` `result` `detail` `leave` | Join the landing queue / check your turn / report and release |
 | `label` | `item_id` `add` `rm` | Display-only labels. Only `tickler` is exempt from the starvation axis |
 | `amend` | `item_id` `title` `body` `paths` `reason` | Fixes an item's **title, body and paths** in place — those three axes and no others. Only what you pass changes; the old values survive in the revision history |
+| `show` | `item_id` | Reads one item — its current body, its revision history and the judgments linked to it, in full. **Closed items too**: this is a read, not a claim. That is the whole point — the only reverse reader of `judgment_link` was `pick`, which only serves `state='open'`, so the 1,985 judgments hanging off closed items were unreachable (5 of them `ask`). Output is capped at 6,000 tokens; past that the oldest judgments come back as titles only **and the response says so** |
 
 Three disciplines hide in that table.
 

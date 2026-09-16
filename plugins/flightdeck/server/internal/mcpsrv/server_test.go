@@ -246,12 +246,12 @@ func TestInitializeAndToolsListRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(frames[1].Result, &list); err != nil {
 		t.Fatalf("tools/list 결과를 못 읽었다: %v", err)
 	}
-	if len(list.Tools) != 9 {
+	if len(list.Tools) != 10 {
 		names := []string{}
 		for _, tl := range list.Tools {
 			names = append(names, tl.Name)
 		}
-		t.Fatalf("도구가 %d개다(%v) — 항목 본문 수정 표면이 amend 를 더해 9개다", len(list.Tools), names)
+		t.Fatalf("도구가 %d개다(%v) — 항목 이력 읽기 표면이 show 를 더해 10개다", len(list.Tools), names)
 	}
 	for _, tl := range list.Tools {
 		if tl.Description == "" || tl.InputSchema == nil {
