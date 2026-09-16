@@ -60,6 +60,13 @@ var toolRenderer = map[string]struct {
 	//   MCP 쪽은 사람(에이전트)이 읽으므로 RenderAlloc 을 그대로 쓴다 — 표면마다 소비자가
 	//   다르다는 것이 이 예외의 근거이고, 그것은 "같은 답을 준다"의 위반이 아니다.
 	"alloc": {why: "fd alloc 은 숫자만 낸다 — $(fd alloc x) 파이프 계약이다. 소비자가 셸이지 사람이 아니다"},
+
+	// ★ 임시 예외 — 위 alloc 과 결이 다르다. 항목 본문 수정 표면(2026-09-16)이 MCP 쪽
+	//   amend·RenderAmend 를 이 태스크에서 열었지만, cmd/fd 의 CLI 명령·REST 배선은
+	//   다음 태스크의 범위다(mcpbackend.go 의 AmendItem 주석 참고). 그때 `fd amend` 가
+	//   생기면 이 행은 `{renderer: "RenderAmend"}` 로 바뀌어야 한다 — why 를 지우지 않은
+	//   채로 두면 CLI 가 생긴 뒤에도 이 예외가 조용히 남는다.
+	"amend": {why: "cmd/fd 에 대응 명령이 아직 없다 — CLI 배선은 다음 태스크의 범위다"},
 }
 
 // cmdFDRendererCalls 는 cmd/fd 의 **살아 있는** 코드가 부르는 mcpsrv.RenderX 이름들이다.

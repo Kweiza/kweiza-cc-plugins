@@ -23,7 +23,7 @@ import (
 //  2. 세션이 10개면 이 프로세스도 10개이고 전부 같은 파일에 `_txlock=immediate` 로 썼다.
 //     쓰기 주체를 서버 하나로 모으면 그 경합이 사라진다.
 //
-// **넓히지 않는다.** 여기 있는 것은 도구 8개와 세션 귀속이 실제로 부르는 메서드뿐이다.
+// **넓히지 않는다.** 여기 있는 것은 도구 9개와 세션 귀속이 실제로 부르는 메서드뿐이다.
 
 // Backend 는 조정 서버 한 대에 붙는 통로다.
 //
@@ -41,6 +41,10 @@ type Backend interface {
 
 	// SetLabels 는 이미 있는 항목의 꼬리표를 고친다. 고칠 수 있는 축은 그 하나뿐이다.
 	SetLabels(ctx context.Context, in service.LabelInput) (service.LabelResult, error)
+
+	// AmendItem 은 항목의 제목·본문·경로를 고치고 옛 값을 개정 이력에 남긴다.
+	// 고칠 수 있는 축은 그 셋뿐이다(DESIGN §11).
+	AmendItem(ctx context.Context, in service.AmendInput) (service.AmendResult, error)
 
 	// LeaveClaim 은 이 세션이 **자기** 선점을 놓는다(pick 의 leave 인자).
 	// 회수(ReclaimClaim)는 여기 없다 — 그것은 세션의 도구가 아니라 사람의 표면이고,

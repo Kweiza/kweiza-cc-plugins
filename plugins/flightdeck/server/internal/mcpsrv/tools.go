@@ -1,7 +1,8 @@
 package mcpsrv
 
-// 도구 8개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
-// land 를, 항목 꼬리표 표면(2026-08-12-item-label-surface-design.md)이 label 을 더했다.
+// 도구 9개 — 설계 §6 표에 랜딩 순서 큐 설계(2026-08-05-landing-order-queue-design.md)가
+// land 를, 항목 꼬리표 표면(2026-08-12-item-label-surface-design.md)이 label 을,
+// 항목 본문 수정 표면(2026-09-16-item-amend-surface)이 amend 를 더했다.
 // 더는 늘리지 않는다.
 //
 // ★ 설명 문구를 짧게 유지하는 것이 이 파일의 규율이다. 세션 시작에 실리는 것은
@@ -200,6 +201,18 @@ var tools = []Tool{
 			"project": projectArg(),
 		}, "item_id"),
 	},
+	{
+		Name:        "amend",
+		Description: "항목의 제목·본문·경로를 고친다. 옛 값은 개정 이력에 남는다.",
+		InputSchema: obj(map[string]any{
+			"item_id": str("고칠 항목 id"),
+			"title":   str("새 제목(안 주면 안 고친다)"),
+			"body":    str("새 본문(안 주면 안 고친다)"),
+			"paths":   strArr("새 경로 목록 — **통째로 교체한다**. 겹침 판정의 입력이라 남의 화면도 움직인다"),
+			"reason":  str("왜 고치나. 개정 이력에 남는다"),
+			"project": projectArg(),
+		}, "item_id", "reason"),
+	},
 }
 
 // Tools 는 tools/list 가 내는 목록의 사본이다.
@@ -322,4 +335,13 @@ type labelArgs struct {
 	Add     []string `json:"add"`
 	Rm      []string `json:"rm"`
 	Project string   `json:"project"`
+}
+
+type amendArgs struct {
+	ItemID  string    `json:"item_id"`
+	Title   *string   `json:"title"`
+	Body    *string   `json:"body"`
+	Paths   *[]string `json:"paths"`
+	Reason  string    `json:"reason"`
+	Project string    `json:"project"`
 }

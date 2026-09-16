@@ -357,7 +357,7 @@ func (id Identity) Banner() string {
 			b.WriteString("   고치는 법: git 저장소 안에서 부르거나, FD_PROJECT 로 프로젝트를 명시해라.\n")
 		} else {
 			b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
-			b.WriteString("   안 되는 것: pick·note·add·finish·land·label — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
+			b.WriteString("   안 되는 것: pick·note·add·finish·land·label·amend — 귀속할 세션이 없으면 원장이 거짓이 된다.\n")
 		}
 		b.WriteString("   지어내지 않는다. `fd doctor` 가 이 축들을 실제로 잰다.\n")
 	}
@@ -368,7 +368,7 @@ func (id Identity) Banner() string {
 		fmt.Fprintf(&b, "⚠ 하네스가 부딪힌다 — %s 가 동시에 관측됐는데 선언이 없다\n",
 			strings.Join(id.HarnessConflict, " · "))
 		b.WriteString("   되는 것: 읽기(board)·발번(alloc).\n")
-		b.WriteString("   안 되는 것: pick·note·add·finish·land·label — " +
+		b.WriteString("   안 되는 것: pick·note·add·finish·land·label·amend — " +
 			"이 카드가 어느 창의 것인지 정할 수 없다.\n")
 		b.WriteString("   고치는 법: --harness " + strings.Join(HarnessNames(), "|") +
 			" 를 실어라. 선언이 관측을 이긴다.\n")
@@ -412,8 +412,16 @@ func axisWhy(axis string) string {
 //	조용히 성공하고 귀속이 빈 원장 행이 그대로 쌓인다. 크래시가 없다는 것은 조용해도
 //	된다는 뜻이 아니다: 이 표의 기준은 "원장에 세션 id 로 행을 남기는가" 하나뿐이고
 //	label 은 그 기준을 그대로 만족한다.
+//
+//	amend 도 같은 자리다 — store.AmendItem 이 item_revision 행(session_id 컬럼)과
+//	event 표의 item.amend 행을 함께 남긴다(store/amend.go). item_revision.session_id 는
+//	FK 는 있어도 NOT NULL 이 아니라(migrations/016_item_revision.sql: "세션을 못 얻어도
+//	개정은 남긴다") land 처럼 크래시로 드러나지 않는다 — label 과 같은 조용한 갈래다.
+//	그래서 기준은 같다: 세션 없이 불러도 되는가가 아니라 "원장에 세션 id 로 행을
+//	남기는가" 뿐이고, amend 는 그 기준을 그대로 만족한다.
 var sessionBoundTools = map[string]bool{
 	"pick": true, "note": true, "add": true, "finish": true, "land": true, "label": true,
+	"amend": true,
 }
 
 // GateTool 은 이 정체로 그 도구를 부를 수 있는지 판정한다. 순수 함수다.

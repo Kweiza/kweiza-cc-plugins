@@ -349,7 +349,7 @@ Enabling it attaches all of the following.
 | `PreCompact` hook | Leaves the coordinates as a draft judgment just before compaction |
 | `Stop` hook | Asks for prescriptions at end of turn and injects them as `additionalContext` |
 | `SessionEnd`(clear) hook | Records, as an observation, that `/clear` ended that conversation |
-| 8 MCP tools | `board` `pick` `note` `add` `finish` `alloc` `land` `label` |
+| 9 MCP tools | `board` `pick` `note` `add` `finish` `alloc` `land` `label` `amend` |
 | 4 skills | `fd-pickup` · `fd-handoff` · `fd-setup` · `fd-update` |
 
 **Every hook is fail-open.** `bin/fd` is a shell launcher; the first hook builds `server/` and caches
@@ -443,7 +443,7 @@ Or pin it in `~/.codex/config.toml`. This opens your sandbox policy — know wha
 | Response tail (overlap/unacked) | ✅ on every write command |
 | `pick --leave` · `finish --followups` · `land --resource` | ✅ present |
 | Prescription syntax | ✅ codex cards get `fd …`, not MCP call syntax |
-| The 8 MCP tools | ❌ **deliberately not built** (design ruling) |
+| The 9 MCP tools | ❌ **deliberately not built** (design ruling) |
 
 ##### You add it to PATH — that is the one manual step
 
@@ -490,7 +490,7 @@ introduce a new falsehood (identity-less cards) in exchange. So it is not built 
 
 ## Using it
 
-### Inside a session — 8 MCP tools
+### Inside a session — 9 MCP tools
 
 There are four to remember: **claim (`pick`) · record (`note`) · close (`finish`) · queue (`land`).**
 
@@ -506,6 +506,7 @@ There are four to remember: **claim (`pick`) · record (`note`) · close (`finis
 | `alloc` | `counter_name` | Atomic allocation (logical counters such as a revision number) |
 | `land` | `resources` `result` `detail` `leave` | Join the landing queue / check your turn / report and release |
 | `label` | `item_id` `add` `rm` | Display-only labels. Only `tickler` is exempt from the starvation axis |
+| `amend` | `item_id` `title` `body` `paths` `reason` | Fixes the body in place. The old value survives in the revision history |
 
 Three disciplines hide in that table.
 
