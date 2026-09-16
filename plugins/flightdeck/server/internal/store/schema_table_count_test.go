@@ -77,6 +77,7 @@ func TestDeclaredTablesMatchDesign(t *testing.T) {
 		"item",
 		"item_after",
 		"item_dependents",
+		"item_revision",
 		"job",
 		"judgment",
 		"judgment_fts", // CREATE VIRTUAL TABLE

@@ -229,3 +229,70 @@ func TestWriteErrPassesThroughNonConstraintErrors(t *testing.T) {
 		t.Fatal("nil 오류를 감쌌다")
 	}
 }
+
+// TestItemRevisionIsAppendOnly 는 개정 이력이 고쳐지거나 지워지지 않는지 본다.
+//
+// 이 표의 존재 이유가 「본문을 제자리에서 고치는 대신 옛 값이 사라지지 않는다」는
+// 보장 하나다. 그 보장이 트리거 없이 주석으로만 있으면, 고치는 코드가 생기는 날
+// 아무도 그것을 못 본다 — judgment 가 같은 이유로 같은 트리거를 갖는다.
+func TestItemRevisionIsAppendOnly(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p1")
+	mustItem(t, s, "p1", "i1")
+
+	err := s.Tx(ctx, func(tx *Tx) error {
+		_, err := tx.tx.ExecContext(ctx,
+			`INSERT INTO item_revision(project, item_id, rev, at, session_id, title, body, paths, reason)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			"p1", "i1", 1, "2026-09-16T00:00:00Z", nil, "옛 제목", "옛 본문", "[]", "오타")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("개정 행을 못 넣었다: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"UPDATE", `UPDATE item_revision SET body = ? WHERE project = ? AND item_id = ? AND rev = ?`,
+			[]any{"덮어씀", "p1", "i1", 1}},
+		{"DELETE", `DELETE FROM item_revision WHERE project = ? AND item_id = ? AND rev = ?`,
+			[]any{"p1", "i1", 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.Tx(ctx, func(tx *Tx) error {
+				_, e := tx.tx.ExecContext(ctx, tc.sql, tc.args...)
+				return e
+			})
+			if err == nil {
+				t.Fatalf("%s 가 통과했다 — 개정 이력은 추가 전용이어야 한다", tc.name)
+			}
+			if !strings.Contains(err.Error(), "추가 전용") {
+				t.Errorf("거절은 됐는데 사유가 이 트리거의 것이 아니다: %v\n"+
+					"다른 제약이 잡은 것이면 이 시험은 재려던 것을 안 재고 있다", err)
+			}
+		})
+	}
+}
+
+// TestItemRevisionRequiresReason 은 사유 없는 개정을 CHECK 가 막는지 본다.
+func TestItemRevisionRequiresReason(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seed(t, s, "p1")
+	mustItem(t, s, "p1", "i1")
+
+	err := s.Tx(ctx, func(tx *Tx) error {
+		_, e := tx.tx.ExecContext(ctx,
+			`INSERT INTO item_revision(project, item_id, rev, at, session_id, title, body, paths, reason)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			"p1", "i1", 1, "2026-09-16T00:00:00Z", nil, "t", "b", "[]", "")
+		return e
+	})
+	if err == nil {
+		t.Fatal("빈 사유가 통과했다 — 되짚을 수 없는 개정을 남기게 된다")
+	}
+}

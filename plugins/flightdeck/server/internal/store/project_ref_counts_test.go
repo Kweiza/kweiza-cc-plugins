@@ -98,6 +98,12 @@ var knownProjectRefTables = map[string]string{
 	"item_after": "(project, item_id) 로 item(project, id) 를 ON DELETE CASCADE 로 " +
 		"참조한다 — item 삭제에 자동으로 딸려 사라진다. claim 과 달리 session 을 안 봐서 " +
 		"session 삭제 순서에도 안 걸린다(claim 은 그래서 이번에 목록에 들어왔다).",
+	"item_revision": "(project, item_id) 로 item(project, id) 를 CASCADE 없이 참조하고, " +
+		"그 FK 가 NOT NULL 이라 이 표에 행이 있으려면 그 item 행이 **지금도** 있어야 한다. " +
+		"JudgeProjectRemoval 은 이 프로젝트에 item 이 한 건이라도(종료 포함) 있으면 이미 " +
+		"거절하므로, 이 루프가 도는 시점엔 item 이 0건이고 그러면 item_revision 도 0건이다 " +
+		"— 지울 행이 원리적으로 없다. item_revision 은 추가 전용 트리거까지 있어(judgment 와 " +
+		"같은 규율) 혹시 행이 남아 있었다면 DELETE 자체가 트리거로 막혔을 것이다.",
 }
 
 // TestProjectRefTablesCoverEveryProjectColumn 은 project 컬럼을 가진 표 전부가

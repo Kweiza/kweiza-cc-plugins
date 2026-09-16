@@ -231,7 +231,7 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 ---
 
-## 3. 데이터 모델 — SQLite 파일 하나, 테이블 26개, 계층 셋
+## 3. 데이터 모델 — SQLite 파일 하나, 테이블 27개, 계층 셋
 
 계층이 곧 쓰기 권한이다.
 
@@ -313,6 +313,11 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 - `item_after` — `CHECK ((dep_item IS NOT NULL) + (dep_job IS NOT NULL) + (dep_sha IS NOT NULL) = 1)`.
   **브랜치 이름을 담을 컬럼이 없다.** 랜딩이 끝나면 브랜치가 지워져 조건이 충족되는 바로 그 순간
   해석 불가가 되는 결함을, 쓸 수 없게 만들어 막는다.
+- `item_revision` — 항목 본문의 개정 이력. **추가 전용** — `BEFORE UPDATE`·`BEFORE DELETE`
+  트리거가 `RAISE(ABORT)` 한다. 담는 것은 **고치기 직전의 값**이라 현재 값은 `item` 한 곳에만
+  있고, `rev` 를 역순으로 이으면 원문까지 복원된다. `reason` 은 `CHECK (reason <> '')` 로
+  강제한다 — 사유 없는 수정은 되짚을 수 없고, 되짚을 사람이 이 표를 여는 유일한 이유가 그것이다.
+  설계 정본은 `docs/superpowers/specs/2026-09-16-item-amend-surface-design.md`.
 - `item_dependents` — **2026-08-23 에 걷혔다(증분 `011`). 아래는 왜 죽었는지의 기록이다.**
   010 이 값을 비우고(143행→0행) 011 이 구조를 걷는 두 단계였다. 011 이 가능해진 것은 같은
   회차가 §7 처방 ⒜·⒞(`fd migrate` · `--rollback`)를 먼저 지었기 때문이다 — `DROP TABLE` 은
