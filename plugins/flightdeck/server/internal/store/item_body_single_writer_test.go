@@ -15,43 +15,37 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 항목 본문(title·body)은 생성 뒤 안 바뀐다 — 그리고 그 사실이 설계에 있어야 한다
+// 항목 본문(title·body·paths)을 고치는 자리는 **하나뿐이다**
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// `item` 표에 title·body 를 쓰는 자리는 AddItem 의 INSERT 하나뿐이다. UPDATE 는
-// state·close_reason·closed_at·landed_ref·project·labels 계열이고, REST(`/items` 8라우트)·
-// MCP 8도구·CLI 어디에도 본문을 고치는 경로가 없다.
+// 2026-09-16 이전 이 파일은 "그런 자리가 **없다**"를 지켰다. DESIGN §11 이 그 부재를
+// 판정으로 적었고 이 관문이 그 문장을 지켰다. 그 판정이 열렸다(설계 정본:
+// docs/superpowers/specs/2026-09-16-item-amend-surface-design.md).
 //
-// ★ labels 가 그 목록에 든 것은 2026-08-12 다(`fd label` · POST /items/{id}/label ·
-// MCP label). **이 시험은 그때 안 깨졌다** — 무는 컬럼이 title·body 뿐이라서다.
-// 그것이 이 주석을 손으로 고쳐야 했던 이유이고, 여기 적어 두는 이유이기도 하다:
-// 이 파일이 지키는 것은 "부재를 주장하는 문장"인데, 정작 **이 주석 자체가**
-// 코드가 바뀌어도 안 깨지는 문장이다.
+// **그래서 이 파일을 지우지 않았다.** §11 이 경고한 실패는 "본문을 못 고치는 것"이 아니라
+// **"표면마다 무엇을 고칠 수 있나가 갈리는 것"**이고, 그 경고는 표면이 열린 뒤에 오히려
+// 더 유효하다. 지키는 명제만 바꾼다:
 //
-// ★★ 라우트 수는 여기서도 한 번 더 낡아 있었다 — 이 주석은 오래 "REST 6라우트" 라고
-// 적었는데(`move`·`after/cut` 등 이 기능과 무관한 라우트가 이미 여럿 끼어 있었다),
-// `label` 을 빼도 실제 라우트는 7개였다. 세는 문장은 손으로 고칠 때마다 다시 세라 —
-// 옛 숫자에 1만 더하면 그 옛 숫자가 이미 거짓이었던 채로 새 거짓이 된다.
+//   전: title·body 를 무는 `UPDATE item SET` 은 0건이다
+//   후: 그 UPDATE 는 store/amend.go 의 AmendItem 한 곳이고, **같은 함수 안에
+//       `INSERT INTO item_revision` 이 있다**
 //
-// ★ 이 관문이 지키는 것은 **부재를 주장하는 문장**이다. DESIGN §11 이 "지금 표면은
-// 전수로 없다"고 적는 순간, 그 문장은 코드가 바뀌면 **조용히 거짓이 된다** — 부재는
-// 아무도 검색하지 않기 때문이다. 이 관문을 낳은 항목이 정확히 그 비용을 치렀다:
-// 오염된 항목을 정정하려던 세션이 경로 셋을 전부 평가하고서야 "수단이 없다"에
-// 도달했고, 그 조사가 작업의 상당 부분이었다.
+// 둘째 절이 핵심이다. 이력 없는 수정 경로가 조용히 생기는 것이 item_revision 의 값을
+// 통째로 무효로 만드는 유일한 길이고, 그 경로는 UPDATE 하나만 세는 그물에 안 걸린다.
 //
-// **부재가 의도라는 근거는 코드에 이미 있었다** — `service/move.go` 가 move 의 범위를
-// 프로젝트 한 축으로 못박으며 "일반 amend 로 번지면 무엇을 고칠 수 있나가 표면마다
-// 달라지고 그 차이를 아무도 못 따라간다"고 적었다. 다만 그 판단이 코드 주석에만
-// 있었고 설계에 없었다. 이 관문은 그 둘을 같은 커밋에 묶어 둔다.
+// paths 가 감시 목록에 들어온 것도 이때다 — 이제 수정 축이고, 무엇보다 **겹침 판정의
+// 입력**이라 몰래 고쳐지면 남의 화면이 조용히 움직인다.
 //
-// 방향은 **양쪽 다**다. close_declaration_doc_test.go 는 코드 → 문서 한 방향인데,
-// 여기는 주장이 "없다"라서 반대쪽도 필요하다:
-//   ① 코드에 본문 쓰기가 생기면  → §11 이 거짓이므로 빨간불
-//   ② §11 에서 그 문장이 사라지면 → 관문의 좌표가 밀린 것이므로 빨간불
+// 방향은 여전히 양쪽이다:
+//   ① 허용된 자리 밖에서 본문을 고치면        → 빨간불
+//   ② §11 에서 이 표면의 이름이 사라지면      → 관문의 좌표가 밀린 것이므로 빨간불
 //
 // 같은 규율의 선례: signal_is_not_history_test.go(전수 walk) ·
 // close_declaration_doc_test.go(DESIGN 앵커) · schema_table_count_test.go(선언 표 수) ·
 // migrate_guard_test.go(파괴적 조작).
+
+// amendWriterFile 은 본문을 고쳐도 되는 **유일한** 파일이다.
+const amendWriterFile = "plugins/flightdeck/server/internal/store/amend.go"
 
 // itemSetClauseRe 는 `UPDATE item SET <절>` 의 SET 절을 통째로 집는다.
 //
@@ -74,8 +68,8 @@ var itemUpdateHeadRe = regexp.MustCompile(`(?is)UPDATE\s+item\s+SET\s+`)
 // itemInsertRe 는 정본이다 — 생성이 title·body 를 쓰는 유일한 자리.
 var itemInsertRe = regexp.MustCompile(`(?is)INSERT\s+INTO\s+item\s*\(`)
 
-// itemBodyColumns 는 "본문"이다. 이 둘이 UPDATE 대상이 되면 §11 이 거짓이 된다.
-var itemBodyColumns = []string{"title", "body"}
+// itemBodyColumns 는 "본문"이다. 이 셋을 허용된 자리 밖에서 UPDATE 하면 §11 이 거짓이 된다.
+var itemBodyColumns = []string{"title", "body", "paths"}
 
 // setColumnRe 는 SET 절 조각 하나에서 대입 대상 컬럼 이름을 뽑는다.
 var setColumnRe = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=`)
@@ -193,13 +187,13 @@ func itemBodyOffenders(setClause string) []string {
 	return hit
 }
 
-// TestItemBodyHasNoUpdateSurface 는 살아 있는 SQL 전수에서 item 표의 본문을 고치는
-// 문장을 찾는다. DESIGN §11 이 주장하는 부재가 실제로 부재인지 재는 것이다.
-func TestItemBodyHasNoUpdateSurface(t *testing.T) {
+// TestItemBodyHasSingleWriter 는 살아 있는 SQL 전수에서 item 표의 본문을 고치는 문장을
+// 찾아, 그것이 **허용된 한 자리뿐인지** 잰다. 전에는 같은 walk 로 "0건"을 쟀다.
+func TestItemBodyHasSingleWriter(t *testing.T) {
 	root := itemBodyGuardRoot(t)
 
 	var offenders []string
-	var scanned, inserts, updates int
+	var scanned, inserts, updates, writerHits int
 
 	werr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -231,9 +225,17 @@ func TestItemBodyHasNoUpdateSurface(t *testing.T) {
 		clauses := itemSetClauseRe.FindAllStringSubmatch(sql, -1)
 		updates += len(clauses)
 		for _, m := range clauses {
-			for _, col := range itemBodyOffenders(m[1]) {
-				offenders = append(offenders, fmt.Sprintf("%s  UPDATE item SET … %s = …",
-					filepath.ToSlash(rel), col))
+			cols := itemBodyOffenders(m[1])
+			if len(cols) == 0 {
+				continue
+			}
+			rels := filepath.ToSlash(rel)
+			if rels == amendWriterFile {
+				writerHits += len(cols)
+				continue
+			}
+			for _, col := range cols {
+				offenders = append(offenders, fmt.Sprintf("%s  UPDATE item SET … %s = …", rels, col))
 			}
 		}
 		// WHERE 로 안 끝나는 UPDATE 는 위 정규식이 통째로 못 본다 — 컬럼을 읽을 수
@@ -262,22 +264,83 @@ func TestItemBodyHasNoUpdateSurface(t *testing.T) {
 		t.Fatalf("`UPDATE item SET` 을 한 건도 못 봤다(파일 %d개를 훑었다) — 그물이 죽었다. "+
 			"state·landed_ref 계열이 걸려야 정상이다", scanned)
 	}
+	if writerHits == 0 {
+		t.Fatalf("허용된 자리(%s)에서 본문 UPDATE 를 한 건도 못 봤다(파일 %d개를 훑었다) — "+
+			"그물이나 좌표가 밀렸다. 이 상태의 offenders 0 은 '깨끗하다'가 아니라 '아무것도 안 봤다'다",
+			amendWriterFile, scanned)
+	}
 
 	if len(offenders) > 0 {
-		t.Errorf("항목 본문을 고치는 SQL 이 %d 곳이다(파일 %d개, UPDATE %d건을 훑었다):\n  %s\n\n"+
-			"이 저장소는 항목 본문(title·body)을 생성 뒤 안 고친다 — 정정은 note(item_id=…) 를 "+
-			"새로 얹는 방식이다(J 계층과 같다).\n"+
-			"그 부재를 **DESIGN §11 이 문장으로 주장한다.** 본문 수정 표면을 정말로 여는 것이라면 "+
-			"그 줄을 함께 고쳐라 — 안 고치면 설계가 조용히 거짓이 된다.",
-			len(offenders), scanned, updates, strings.Join(offenders, "\n  "))
+		t.Errorf("허용된 자리 밖에서 항목 본문을 고치는 SQL 이 %d 곳이다(파일 %d개, UPDATE %d건을 훑었다):\n  %s\n\n"+
+			"이 저장소에서 item 의 title·body·paths 를 고치는 자리는 %s 의 AmendItem 하나다 — "+
+			"거기서만 개정 이력(item_revision)이 함께 쌓이기 때문이다.\n"+
+			"새 수정 경로가 정말로 필요하면 그 함수를 부르게 하고, 표면을 늘리는 것이라면 "+
+			"**DESIGN §11 을 함께 고쳐라** — 안 고치면 설계가 조용히 거짓이 된다.",
+			len(offenders), scanned, updates, strings.Join(offenders, "\n  "), amendWriterFile)
 	}
 }
 
-// TestItemBodyImmutabilityIsNamedInDesign 은 §11 이 이 부재를 이름으로 부르는지 본다.
+// TestAmendWriterAlsoWritesRevision 은 본문 UPDATE 와 개정 INSERT 가 **같은 함수** 안에
+// 있는지 본다. 파일 단위로 세면 통과하는 구멍이 있다 — 같은 파일의 다른 함수가 이력
+// 없이 UPDATE 만 치는 경우다.
+func TestAmendWriterAlsoWritesRevision(t *testing.T) {
+	root := itemBodyGuardRoot(t)
+	path := filepath.Join(root, filepath.FromSlash(amendWriterFile))
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("%s 를 파싱 못 했다: %v", amendWriterFile, err)
+	}
+
+	var checked int
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		var sql strings.Builder
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			lit, ok := m.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			s, uerr := strconv.Unquote(lit.Value)
+			if uerr != nil {
+				s = lit.Value
+			}
+			sql.WriteString(s)
+			sql.WriteString("\n")
+			return true
+		})
+		body := sql.String()
+		if len(itemBodyGuardHits(body)) == 0 {
+			return true
+		}
+		checked++
+		if !regexp.MustCompile(`(?is)INSERT\s+INTO\s+item_revision\s*\(`).MatchString(body) {
+			t.Errorf("%s 의 %s 가 항목 본문을 고치면서 개정 이력을 안 쌓는다.\n"+
+				"이력 없는 수정 경로는 item_revision 의 값을 통째로 무효로 만든다 — "+
+				"같은 함수 안에서 INSERT INTO item_revision 을 함께 해라",
+				amendWriterFile, fn.Name.Name)
+		}
+		return true
+	})
+
+	if checked == 0 {
+		t.Fatalf("%s 에서 본문을 고치는 함수를 한 개도 못 찾았다 — "+
+			"이 시험이 아무것도 안 보고 있다(함수가 옮겨졌거나 그물이 죽었다)", amendWriterFile)
+	}
+}
+
+// TestAmendSurfaceIsNamedInDesign 은 §11 이 이 표면을 이름으로 부르는지 본다.
+//
+// 전에는 같은 자리에서 **부재**를 물었다(TestItemBodyImmutabilityIsNamedInDesign).
+// 방향 ② 는 그대로이고 무엇을 찾느냐만 바뀐다 — 부재가 아니라 열린 사실이다.
 //
 // 아래 문자열은 **앵커**다. 문서의 표현을 바꾸려면 이 시험도 같이 고쳐라 —
 // 그 한 번의 수고가 이 관문의 전부이고, 그것이 없으면 관문이 조용히 눈이 먼다.
-func TestItemBodyImmutabilityIsNamedInDesign(t *testing.T) {
+func TestAmendSurfaceIsNamedInDesign(t *testing.T) {
 	p := filepath.Join("..", "..", "..", "DESIGN.md")
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -286,16 +349,16 @@ func TestItemBodyImmutabilityIsNamedInDesign(t *testing.T) {
 	design := string(b)
 
 	for _, want := range []string{
-		"항목 본문(`title`·`body`) 수정", // §11 표의 왼쪽 칸 — 무엇이 없는가
-		"영구 결정으로 못박지 않는다",          // 그 부재의 **지위** — 미결이지 확정이 아니다
+		"항목 본문(`title`·`body`) 수정", // §11 표의 그 행이 아직 거기 있는가
+		"열었다 (2026-09-16)",         // 그 행의 **지위** — 이제 열렸다
+		"item_revision",            // 무엇이 그 값을 받치는가
 	} {
 		if strings.Contains(design, want) {
 			continue
 		}
-		t.Errorf("코드에 항목 본문 수정 표면이 없는데 DESIGN 에 %q 가 없다 — "+
-			"§11 이 그 부재를 이름으로 부르고, 그것이 확정인지 미결인지까지 말해야 한다. "+
-			"안 적으면 다음 사람이 경로를 전부 평가하고서야 '수단이 없다'에 도달한다 "+
-			"(이 관문을 낳은 항목이 정확히 그 비용을 치렀다)", want)
+		t.Errorf("코드에 항목 본문 수정 표면이 있는데 DESIGN 에 %q 가 없다 — "+
+			"§11 이 무엇이 열렸고 무엇은 여전히 안 열렸는지를 말해야 한다. "+
+			"안 적으면 다음 사람이 경로를 전부 평가하고서야 답에 도달한다", want)
 	}
 }
 
@@ -306,6 +369,7 @@ func TestItemBodyGuardActuallyCatches(t *testing.T) {
 		`UPDATE item SET body = ? WHERE project = ? AND id = ?`,
 		`UPDATE item SET title = ?, body = ? WHERE project = ? AND id = ?`,
 		`UPDATE item SET state = ?, title = ? WHERE project = ? AND id = ?`,
+		`UPDATE item SET paths = ? WHERE project = ? AND id = ?`,
 		"update item\n\t\t\tset  Body = ?\n\t\t\twhere id = ?", // 줄 넘김·대소문자 섞임
 	}
 	for _, s := range caught {

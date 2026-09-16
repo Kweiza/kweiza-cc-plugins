@@ -14,21 +14,6 @@ import (
 // landing_test.go 의 것을 그대로 쓴다 — 이 파일은 openTestStore 를 따로 두지 않는다
 // (project_view_test.go 의 같은 결정과 같은 이유: newStore 가 이미 로그를 버린다).
 
-// equalStrings 는 이 파일에만 필요한 얕은 비교다. slices.Equal 을 안 쓰는 이유는
-// 이 패키지의 다른 파일이 아직 "slices" 를 안 쓰기 때문 — import 하나를 새로 들이는
-// 대신 세 줄로 충분하다.
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func TestEnqueueLandingCarriesItsResourceSet(t *testing.T) {
 	s := newStore(t)
 	seed(t, s, "p")
@@ -44,7 +29,7 @@ func TestEnqueueLandingCarriesItsResourceSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 정렬해 저장·반환된다 — 집합 대조(service)가 순서에 흔들리면 안 된다.
-	if got, want := row.Resources, []string{"landing", "path:x.go"}; !equalStrings(got, want) {
+	if got, want := row.Resources, []string{"landing", "path:x.go"}; !sameStrings(got, want) {
 		t.Fatalf("자원 집합이 %v 다 — want %v", got, want)
 	}
 }
@@ -79,7 +64,7 @@ func TestEnqueueLandingReentryReturnsTheSameRowWithItsOriginalResources(t *testi
 	if first.ID != second.ID {
 		t.Fatalf("재진입이 새 행을 만들었다: 처음 id=%d 재진입 id=%d", first.ID, second.ID)
 	}
-	if got, want := second.Resources, []string{"landing"}; !equalStrings(got, want) {
+	if got, want := second.Resources, []string{"landing"}; !sameStrings(got, want) {
 		t.Fatalf("재진입이 자원 집합을 바꿨다: got=%v want=%v(기존 집합 그대로여야 한다 — "+
 			"요청 집합과 다른지의 판정은 service 몫이다)", got, want)
 	}
@@ -211,10 +196,10 @@ func TestListLandingQueueAttachesResources(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("큐 길이가 2 여야 하는데 %d 다: %+v", len(got), got)
 	}
-	if !equalStrings(got[0].Resources, []string{"landing"}) {
+	if !sameStrings(got[0].Resources, []string{"landing"}) {
 		t.Fatalf("a 의 자원 집합이 %v 다 — want [landing]", got[0].Resources)
 	}
-	if !equalStrings(got[1].Resources, []string{"path:x.go", "path:y.go"}) {
+	if !sameStrings(got[1].Resources, []string{"path:x.go", "path:y.go"}) {
 		t.Fatalf("b 의 자원 집합이 %v 다 — want [path:x.go path:y.go](정렬)", got[1].Resources)
 	}
 }

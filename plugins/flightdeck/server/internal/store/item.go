@@ -392,6 +392,14 @@ func (s *Store) DependentItems(ctx context.Context, project, itemID string) ([]s
 // ★ **역인덱스를 손으로 되돌리던 자리였다. 이제 없다** — 항목이 사라지면 그 항목의
 // item_after 행이 FK CASCADE 로 함께 사라지고, Dependents 는 그 표에서 파생으로 세므로
 // 수가 저절로 맞는다. 맞출 두 번째 값이 없다는 것이 이 삭제의 요점이다.
+//
+// ★ **개정 이력이 있는 항목은 이 삭제가 거절된다**(증분 016, 2026-09-16). `item_revision`
+// 은 CASCADE **없이** `(project, item_id) → item(project, id)` 를 잡으므로 FK 위반이 나고,
+// 설령 CASCADE 를 걸더라도 `item_revision_no_delete` 트리거가 ABORT 한다 — 이력을 지울 수
+// 있으면 이력이 아니기 때문이다. 이것은 `judgment_no_delete` + `judgment.project` FK 가
+// 판단 있는 프로젝트의 삭제를 막는 것과 **같은 규율**이고, DESIGN §6 이 그 선례를
+// 「② 판단이 있으면 원장이 거절한다」로 명문화했다. 여기 안 적으면 다음 사람이 FK 위반
+// 원문을 보고 원인을 처음부터 찾는다.
 func (t *Tx) DeleteItem(project, itemID string) error {
 	res, err := t.tx.ExecContext(t.ctx,
 		`DELETE FROM item WHERE project = ? AND id = ?`, project, itemID)
