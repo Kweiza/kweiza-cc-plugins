@@ -1217,7 +1217,7 @@ func (s *Server) toolShow(ctx context.Context, sessionID string, raw json.RawMes
 		}
 		return textResult(s.withTail(ctx, s.errText("show", err), tailOpts{}), true)
 	}
-	body := RenderShow(res, s.now())
+	body := RenderShow(res, ShowRenderOptions{Now: s.now()})
 	if notice != "" {
 		body = notice + "\n" + body
 	}

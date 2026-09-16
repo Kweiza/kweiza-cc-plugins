@@ -79,8 +79,13 @@ func (s *Service) ShowItem(ctx context.Context, in ShowInput) (ShowResult, error
 	in.ItemID = strings.TrimSpace(in.ItemID)
 
 	// ★ errors.New 가 아니라 RefusedError 다 — api.ClassifyError 는 화이트리스트라
-	//   errors.New 는 아무 갈래에도 안 걸리고 500 internal 로 나간다. 두 갈래 다 MCP 에서
-	//   정상 도달 가능하다(show 의 필수 인자는 item_id 하나뿐이고 project 는 선택이다).
+	//   errors.New 는 아무 갈래에도 안 걸리고 500 internal 로 나간다.
+	//
+	// ★ 도달 가능성은 **두 갈래가 다르다.** 빈 item_id 는 MCP 에서 그대로 온다(스키마가
+	//   required 로 두어도 빈 문자열은 통과한다). 빈 project 는 MCP 에서 **도달 불가**다 —
+	//   GateTool 의 둘째 갈래가 프로젝트 좌표 없는 호출을 먼저 막고, s.target() 은 빈 값을
+	//   안 낸다. 그래도 거절을 두는 이유는 REST 가 무인증 루프백으로 열려 있고 이 계층이
+	//   그 표면의 하류라서다 — 관문이 표면마다 서야 한다는 것이 §11 의 경고 그대로다.
 	if in.Project == "" {
 		return res, &RefusedError{
 			What:     "show",

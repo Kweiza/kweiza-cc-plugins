@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kweiza/flightdeck/internal/mcpsrv"
 	"github.com/kweiza/flightdeck/internal/service"
 )
 
@@ -295,10 +296,15 @@ func amendPath(itemID string) string {
 // 이 문자열이 그대로 **캐시 키**다(Client.Read 가 path 로 캐시한다) — 두 벌이 갈리면
 // 같은 조회가 캐시를 공유하지 않아 오프라인에서 한쪽만 답한다.
 //
+// ★★ 몸통은 **mcpsrv.ShowRESTPath** 다. 화면(RenderShow 의 절단 줄)이 "전문은 이 경로가
+// 낸다"고 주는 문자열과 이 클라이언트가 실제로 치는 문자열이 두 벌이면 반드시 갈리고,
+// 갈린 날 화면은 사람이 못 쓰는 경로를 준다(리뷰 Minor: 그쪽이 이스케이프를 안 하고 있었다).
+//
 // ★ session_id 는 비면 안 싣는다. 서버가 이 축을 선택으로 받고(워크스페이스 관문에만
 // 쓴다) 빈 값을 실으면 캐시 키가 갈려 세션이 있을 때와 없을 때가 다른 항목이 된다.
+// 화면은 이 인자를 안 낸다 — 되짚는 사람에게 남의 세션 id 는 좌표가 아니다.
 func showPath(itemID, project, sessionID string) string {
-	p := "/api/v1/items/" + urlPath(itemID) + "?project=" + urlValue(project)
+	p := mcpsrv.ShowRESTPath(project, itemID)
 	if strings.TrimSpace(sessionID) != "" {
 		p += "&session_id=" + urlValue(sessionID)
 	}

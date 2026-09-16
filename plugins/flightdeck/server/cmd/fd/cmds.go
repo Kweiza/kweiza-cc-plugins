@@ -2245,6 +2245,6 @@ func (a *App) runShow(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "읽었으나 응답을 못 해석했다: %v\n", uerr)
 		return 1
 	}
-	fmt.Fprint(out, mcpsrv.RenderShow(got, a.now()))
+	fmt.Fprint(out, mcpsrv.RenderShow(got, mcpsrv.ShowRenderOptions{Now: a.now()}))
 	return 0
 }
