@@ -101,6 +101,39 @@ func TestJudgeOfflineAlwaysGivesReason(t *testing.T) {
 	}
 }
 
+// TestAmendIsRefusedOffline 은 amend 가 아웃박스에 안 쌓이는지 본다.
+//
+// ★ note 와 다르다. amend 는 읽고-고치는 쓰기라, 아웃박스가 재생하는 시점의 현재 값이
+// 쌓을 때와 다르면 item_revision 이 **거짓 이전값**을 담는다. 옛 값을 지키려 만든 표가
+// 거짓을 담는 것이 이 기능의 최악 실패다.
+func TestAmendIsRefusedOffline(t *testing.T) {
+	v := JudgeOffline(CmdAmend)
+	if v.Mode != OfflineRefuse {
+		t.Fatalf("열화 처방이 %q다 — 거절이어야 한다", v.Mode)
+	}
+	if !strings.Contains(v.Reason, "이전값") && !strings.Contains(v.Reason, "옛 값") {
+		t.Errorf("사유가 %q다 — 왜 재생이 위험한지를 말해야 한다", v.Reason)
+	}
+	// 둘째 방어도 같은 답을 내야 한다 — 두 정책이 어긋나면 그 자체가 사고다.
+	if ok, _ := OutboxEligible(CmdAmend, "/api/v1/items/i1/amend"); ok {
+		t.Error("아웃박스 적격으로 판정했다 — 적격은 note 하나뿐이다")
+	}
+}
+
+// TestAmendKeyIsNotStable 은 amend 가 멱등 키를 고정하지 않는지 본다.
+//
+// 고정하면 본문이 그 사이 도로 바뀐 뒤 같은 요청을 다시 보낼 때 실제 쓰기 없이 옛 성공이
+// 재생된다 — label·move·after_cut 이 전부 같은 이유로 false 다.
+func TestAmendKeyIsNotStable(t *testing.T) {
+	stable, reason := IdempotencyStable(CmdAmend)
+	if stable {
+		t.Fatal("amend 의 멱등 키를 고정했다 — 도로 바뀐 뒤 재호출이 옛 성공을 재생한다")
+	}
+	if strings.Contains(reason, "모르는 명령") {
+		t.Error("표의 default 로 떨어졌다 — 아는 명령은 자기 사유를 가져야 한다")
+	}
+}
+
 func TestUnreachableSeparatesTransportFromStatus(t *testing.T) {
 	cases := []struct {
 		name   string

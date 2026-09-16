@@ -235,6 +235,9 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	//   cwd 가 정하므로(a.proj.ID) 저쪽 저장소로 cd 하는 것이 유일한 우회로였고,
 	//   그 우회로는 저쪽 프로젝트에 세션 카드를 하나 연다.
 	itemProject := fs.String("item-project", "", "그 항목이 다른 프로젝트의 것일 때만 쓴다(평소엔 비운다)")
+	// ★ REST·MCP 에는 있었고 여기만 없었다. 판단은 추가 전용이라 덮어쓰기가 아니라
+	//   새 행이 옛 행을 가리키는 방식이다(DESIGN §3 J 계층).
+	supersedes := fs.String("supersedes", "", "정정 대상 판단 id. 덮어쓰기는 없다 — 새 행이 옛 행을 가리킨다")
 	session := fs.String("cc-session", "", "Claude Code 세션 id")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -250,6 +253,7 @@ func (a *App) runNote(ctx context.Context, args []string, out io.Writer) int {
 	res, err := a.cli.Write(ctx, "note", "/api/v1/judgments", noteReq{
 		Project: a.proj.ID, SessionID: sess, Kind: *kind,
 		Title: *title, Body: text, ItemID: *item, ItemProject: *itemProject,
+		Supersedes: strings.TrimSpace(*supersedes),
 	})
 	if err != nil {
 		fmt.Fprintf(out, "판단을 못 남겼다: %v\n", err)
@@ -2085,5 +2089,87 @@ func (a *App) runLabel(ctx context.Context, args []string, out io.Writer) int {
 		return 1
 	}
 	fmt.Fprint(out, mcpsrv.RenderLabel(got))
+	return 0
+}
+
+const amendHelp = "fd amend <item-id> --title <제목> --body <본문> --path <경로> --reason <사유>"
+
+// runAmend 는 `fd amend` 다.
+//
+// ★ 고칠 수 있는 축은 title·body·paths **셋**이다(DESIGN §11, 2026-09-16 에 열렸다).
+// 꼬리표는 `fd label` 이고 선행·상태는 이 동사가 안 고친다.
+//
+// ★ 오프라인에서 거절된다 — 재생 시점의 값이 달라지면 개정 이력이 거짓을 담는다.
+func (a *App) runAmend(ctx context.Context, args []string, out io.Writer) int {
+	fs := newFlagSet("amend")
+	project := fs.String("project", "", "워크스페이스 멤버 프로젝트에 건다(비면 이 세션의 것). 명부 밖 이름은 서버가 거절한다")
+	title := fs.String("title", "", "새 제목(안 주면 안 고친다)")
+	body := fs.String("body", "", "새 본문(- 이면 stdin 에서 읽는다. 안 주면 안 고친다)")
+	var paths stringList
+	fs.Var(&paths, "path", "새 경로(반복 지정 가능). **한 번이라도 주면 목록 전체를 이것으로 바꾼다**")
+	reason := fs.String("reason", "", "왜 고치나(필수). 개정 이력에 남는다")
+	session := fs.String("cc-session", "", "Claude Code 세션 id")
+	itemID, rest := TakeFirstPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if itemID == "" {
+		itemID = fs.Arg(0)
+	}
+	if strings.TrimSpace(itemID) == "" {
+		fmt.Fprintln(out, "고칠 항목 id 를 줘라:")
+		fmt.Fprintln(out, "  "+amendHelp)
+		return 2
+	}
+
+	// ★ 어느 플래그가 **실제로 주어졌는가**를 본다. fs.Visit 는 준 것만 돈다 —
+	//   기본값 비교로 가르면 `--title ""`(빈 제목으로 바꿔라)가 생략과 안 갈린다.
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	req := amendReq{Reason: strings.TrimSpace(*reason)}
+	if given["title"] {
+		t := *title
+		req.Title = &t
+	}
+	if given["body"] {
+		text := a.resolveBody(*body) // `-` 면 stdin
+		req.Body = &text
+	}
+	if given["path"] {
+		p := []string(paths)
+		req.Paths = &p
+	}
+
+	// ★ 빈 요청과 빈 사유를 **여기서** 막는다. 서버도 거절하지만 그 왕복은 오프라인에서
+	//   미도달 오류가 되어 사용자에게 "서버에 못 닿았다"로 보인다 — 실제 원인은 인자다.
+	if req.Title == nil && req.Body == nil && req.Paths == nil {
+		fmt.Fprintln(out, "고칠 축을 하나는 줘라 — --title·--body·--path 중 하나 이상:")
+		fmt.Fprintln(out, "  "+amendHelp)
+		return 2
+	}
+	if req.Reason == "" {
+		fmt.Fprintln(out, "고친 사유를 줘라(--reason) — 사유 없는 수정은 나중에 되짚을 수 없다.")
+		fmt.Fprintln(out, "  한 구절이면 된다: --reason '경로 리네임 추종'")
+		return 2
+	}
+
+	sess, _ := a.sessionID(ctx, *session)
+	a.cli.Session = sess
+	req.Project, req.SessionID = a.TargetProject(*project), sess
+
+	res, err := a.cli.Write(ctx, CmdAmend, amendPath(itemID), req)
+	if err != nil {
+		fmt.Fprintf(out, "못 고쳤다: %v\n", err)
+		return 1
+	}
+	// ★ mcpsrv.RenderAmend 로 낸다 — 손으로 다시 짜면 겹침 파급 문구를 CLI 사용자만
+	//   못 보는 결함이 난다(label 이 정확히 그 결함을 겪었다).
+	var got service.AmendResult
+	if uerr := json.Unmarshal(res.Body, &got); uerr != nil {
+		fmt.Fprintf(out, "고쳤으나 응답을 못 읽었다: %v\n", uerr)
+		return 1
+	}
+	fmt.Fprint(out, mcpsrv.RenderAmend(got))
 	return 0
 }

@@ -503,18 +503,27 @@ func (b *mcpBackend) SetLabels(ctx context.Context, in service.LabelInput) (serv
 	return res, nil
 }
 
-// AmendItem 은 아직 이 배선을 안 탄다.
+// AmendItem 은 항목의 제목·본문·경로를 REST 로 고친다.
 //
-// ★ 항목 본문 수정 표면(2026-09-16)의 MCP 도구·렌더러는 이 태스크에서 열렸지만,
-// `fd mcp` 가 REST 로 이 호출을 나르는 배선(CmdAmend·offline.go 의 열화 정책·
-// outbox.go 의 멱등 판정·wire.go 의 경로·요청 꼴)은 다음 태스크의 범위다 — label 이
-// 그랬듯 그 축마다 실측된 판단(무엇이 재생 가능한가·무엇이 실시간 확인이 필요한가)이
-// 필요하고, 이 자리에서 대충 흉내 내면 그 판단을 건너뛴 채 굳는다. 이 메서드는
-// `mcpsrv.Backend` 를 만족시켜 컴파일만 살리고, `fd mcp` 로 amend 를 부르면 이 사실을
-// 그대로 오류로 낸다 — 조용히 성공한 척하지 않는다.
+// ★ SetLabels 와 같은 모양이다 — CmdAmend 로 이름을 실어 보내면 offline.go 의 열화
+// 정책(거절)과 outbox.go 의 멱등 판정(고정하지 않음)이 그 이름 하나로 이 경로에도 그대로
+// 적용된다. 이 백엔드도 (label·note·add·finish·land·pick 과 같이) `b.app.cli.Session` 을
+// 갈아 쓴다 — 이 파일 머리의 "순차 전제" 절이 그 안전 조건이다.
 func (b *mcpBackend) AmendItem(ctx context.Context, in service.AmendInput) (service.AmendResult, error) {
-	return service.AmendResult{}, fmt.Errorf(
-		"amend 는 아직 fd mcp 의 REST 배선이 없다 — 항목 본문 수정 표면의 CLI/오프라인 배선 태스크가 잇는다")
+	b.app.cli.Session = in.SessionID
+	var res service.AmendResult
+	raw, err := b.write(ctx, CmdAmend, amendPath(in.ItemID), amendReq{
+		Project: in.Project, SessionID: in.SessionID,
+		Title: in.Title, Body: in.Body, Paths: in.Paths,
+		Reason: in.Reason,
+	})
+	if err != nil {
+		return res, err
+	}
+	if uerr := json.Unmarshal(raw, &res); uerr != nil {
+		return res, fmt.Errorf("본문 고침 응답 해석 실패: %w", uerr)
+	}
+	return res, nil
 }
 
 func toAfterWire(in []model.After) []afterWire {

@@ -97,6 +97,9 @@ const (
 	// ★ 값이 hookStop 안 a.cli.Write 호출부와 글자 그대로 같아야 한다 — 위 CmdMove 와
 	// 같은 이유·같은 시험이 지킨다.
 	CmdPrescriptions = "prescriptions"
+
+	// CmdAmend 는 이미 있는 항목의 본문을 고치는 것이다(`fd amend`).
+	CmdAmend = "amend"
 )
 
 // JudgeOffline 은 서버 미도달일 때 이 명령을 어떻게 처리할지 정한다. 순수 함수다.
@@ -131,6 +134,10 @@ func JudgeOffline(cmd string) OfflineVerdict {
 		return OfflineVerdict{OfflineRefuse,
 			"항목 id 는 전역 유일해야 하고 그 유일성은 서버만 보장한다 — " +
 				"오프라인에서 만들면 두 세션이 같은 브랜치 이름을 쓴다"}
+	case CmdAmend:
+		return OfflineVerdict{OfflineRefuse,
+			"본문 수정은 읽고-고치는 쓰기다 — 재생 시점의 현재 값이 쌓을 때와 다르면 " +
+				"개정 이력이 거짓 이전값을 담는다. 옛 값을 지키려 만든 표가 거짓을 담는 것이 최악이다"}
 	case "finish":
 		return OfflineVerdict{OfflineRefuse,
 			"마무리는 판단·후속·종료·자원 반납을 한 트랜잭션으로 한다 — " +

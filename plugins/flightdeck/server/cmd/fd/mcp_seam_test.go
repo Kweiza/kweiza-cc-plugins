@@ -237,9 +237,9 @@ func containsStr(xs []string, s string) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ② 서버 미도달 — 도구 여덟이 각각 무엇을 하는가. **조용히 성공하지 않는다**
+// ② 서버 미도달 — 도구 아홉이 각각 무엇을 하는가. **조용히 성공하지 않는다**
 //
-// ★ 표는 도구 여덟을 다 덮지만 **갈래를 다 덮지는 않는다.** pick 은 인자에 따라 두 축이라
+// ★ 표는 도구 아홉을 다 덮지만 **갈래를 다 덮지는 않는다.** pick 은 인자에 따라 두 축이라
 //   두 행이고, land 는 인자 없는 취득 한 갈래만 여기 있다 — 보고·이탈·회수의 사유는
 //   land_seam_test.go 의 TestLandDegradeReasonsAreDistinct 가 순수 함수 쪽에서 가른다.
 //   여기서 재는 것은 그 판정이 **MCP 응답까지 건너오는가**이지 판정 자체가 아니다.
@@ -259,12 +259,13 @@ func containsStr(xs []string, s string) bool {
 //   같은 부류의 남은 결손은 여전히 있다(api/errors.go 의 "그 수를 잠그는 시험은 없다",
 //   DESIGN.md 의 "이 수를 잠그는 시험은 없다").
 //
-//   ★★ **실측(2026-09-16) — 그 예언이 그대로 맞았고, 지금 이 자리가 그 빨간불이다.**
-//   항목 본문 수정 표면이 amend 를 아홉째 도구로 더했는데, 아래 표에는 아직 그 행이
-//   없다 — cmd/fd 의 REST 배선(`CmdAmend`·offline.go 열화 정책·outbox.go 멱등 판정)이
-//   그 도구를 아직 안 태우기 때문이다(mcpbackend.go 의 `AmendItem` 주석). 그 배선을
-//   놓는 태스크가 이 표에 amend 행을 더하고 나서야 TestDegradeTableCoversEveryTool 이
-//   다시 초록이 된다 — 손으로 지우지 말고 그 태스크에서 채워라.
+//   ★★ **실측(2026-09-16) — 그 예언이 그대로 맞았었다.** 항목 본문 수정 표면이 amend 를
+//   아홉째 도구로 더한 판은 이 표에 그 행을 안 채운 채로 남겨 TestDegradeTableCoversEveryTool
+//   이 빨갛게 잡았다 — cmd/fd 의 REST 배선(`CmdAmend`·offline.go 열화 정책·outbox.go
+//   멱등 판정)이 아직 그 도구를 안 태웠기 때문이었다(mcpbackend.go 의 옛 `AmendItem` 주석).
+//   이 태스크가 그 배선을 놓고 아래에 amend 행을 채워 다시 초록으로 돌려놨다 — amend 도
+//   label 과 같은 결로 아웃박스가 아니라 거절이다: 읽고-고치는 쓰기라 재생 시점의
+//   현재 값이 쌓을 때와 다르면 개정 이력이 거짓 이전값을 담는다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
@@ -323,6 +324,11 @@ func TestMCPToolsDegradeExplicitlyWhenServerIsDown(t *testing.T) {
 		// (offline.go 의 CmdLabel 판정, CmdAfterCut·CmdMove 와 같은 결).
 		{"label", map[string]any{"item_id": "t9-offline", "add": []string{"x"}}, true,
 			"실시간으로", "하지 않았다"},
+		// 본문 제자리 수정도 재생 대상이 아니다 — amend 는 읽고-고치는 쓰기라, 아웃박스가
+		// 재생하는 시점의 현재 값이 쌓을 때와 다르면 item_revision 이 거짓 이전값을
+		// 담는다(offline.go 의 CmdAmend 판정).
+		{"amend", map[string]any{"item_id": "t9-offline", "title": "오프라인 제목", "reason": "오프라인에서 고쳐 본다"}, true,
+			"이전값", "하지 않았다"},
 		// 반납도 재생 대상이 아니다 — 재생 시점엔 이미 놓았거나 남이 집었을 수 있고,
 		// 그러면 남의 선점을 놓는다(offline.go 의 CmdClaimLeave 판정).
 		// ★ 이 행은 pick 을 **반납 갈래로** 부른다 — 인자 없는 pick 은 읽기라 열화가 다르다.

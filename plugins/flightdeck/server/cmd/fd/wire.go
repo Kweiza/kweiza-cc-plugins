@@ -282,3 +282,23 @@ type labelReq struct {
 	Add       []string `json:"add"`
 	Rm        []string `json:"rm"`
 }
+
+// amendPath 는 POST /api/v1/items/{id}/amend 의 경로다.
+func amendPath(itemID string) string {
+	return "/api/v1/items/" + urlPath(itemID) + "/amend"
+}
+
+// amendReq 는 그 본문이다.
+// 필드 이름이 internal/api 의 amendRequest 와 어긋나면 서버가 조용히 0값을 받는다
+// (amend_seam_test.go 가 잠근다).
+//
+// ★ 포인터 셋은 **생략과 빈 값을 가르기 위한 것**이다. omitempty 를 붙이지 마라 —
+// 빈 문자열을 가리키는 포인터가 통째로 사라져 "본문을 비워라"가 원리적으로 불가능해진다.
+type amendReq struct {
+	Project   string    `json:"project"`
+	SessionID string    `json:"session_id"`
+	Title     *string   `json:"title"`
+	Body      *string   `json:"body"`
+	Paths     *[]string `json:"paths"`
+	Reason    string    `json:"reason"`
+}

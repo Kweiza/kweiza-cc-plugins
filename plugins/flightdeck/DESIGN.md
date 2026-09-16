@@ -1165,7 +1165,7 @@ flightdeck 안쪽(이벤트 여섯의 async·이름·SessionEnd 의 폭)을 계�
 
 ### CLI `bin/fd`
 
-`status open beat note next pick add finish alloc project doctor export import watch`
+`status open beat note next pick add amend finish alloc project doctor export import watch`
 
 **`serve`·`mcp`·`hook` 처럼 사람이 직접 안 부르는 서브명령이 이 목록 밖에 있다.**
 `selfcheck` 가 그중 하나다 — 자동 갱신 축이 새 바이너리를 **자식으로 돌려 검증**할 때만 쓴다(§7).

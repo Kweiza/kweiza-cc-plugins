@@ -43,9 +43,15 @@ const usage = `fd — flightdeck 클라이언트/서버
                                           **되돌릴 수 있다** — 다음 신호가 오면 카드가 살아난다.
                                           --session 은 보드 배너가 내는 카드 id 다 — /clear 로
                                           cc 가 갈려 손이 안 닿는 카드를 그 축으로 지목한다
-  fd note --kind … --body …               판단 기록(오프라인이면 아웃박스)
+  fd note --kind … --body … [--supersedes <판단 id>]
+                                          판단 기록(오프라인이면 아웃박스). --supersedes 는 정정이다 —
+                                          덮어쓰기가 아니라 새 행이 옛 행을 가리킨다
   fd move <item-id> --project <대상>      항목을 다른 프로젝트로 옮긴다(고칠 수 있는 것은 이 한 축뿐)
   fd label <item-id> --add/--rm <꼬리표>  이미 있는 항목의 꼬리표를 고친다(둘 다 반복 지정 가능)
+  fd amend <item-id> --title/--body/--path … --reason <사유>
+                                          이미 있는 항목의 제목·본문·경로를 제자리에서 고친다
+                                          (고칠 수 있는 축은 이 셋뿐이다). --reason 은 필수이고
+                                          개정 이력에 남는다. 오프라인에서는 거절된다
   fd after cut <item-id> --item <dep>     걸린 선행 하나를 끊는다(--job·--sha 도 된다).
                                           선행이 폐기됐거나 sha 가 해석 불가일 때의 **유일한 탈출구**
   fd land [--ok|--fail <사유>|--leave <사유>]
@@ -149,6 +155,8 @@ func run(args []string, env func(string) (string, bool), stdin io.Reader, stdout
 		return app.runMove(ctx, args[1:], stdout)
 	case "label":
 		return app.runLabel(ctx, args[1:], stdout)
+	case "amend":
+		return app.runAmend(ctx, args[1:], stdout)
 	case "after":
 		return app.runAfter(ctx, args[1:], stdout)
 	case "land":
