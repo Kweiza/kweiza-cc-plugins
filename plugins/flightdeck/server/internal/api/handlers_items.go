@@ -413,3 +413,47 @@ func (s *server) handleLabelItem(w http.ResponseWriter, r *http.Request) {
 	})
 	s.writeJSON(w, r, http.StatusOK, res)
 }
+
+// amendRequest 는 항목 본문을 고치는 요청이다.
+//
+// label·move·after/cut 과 같은 규율로 **전용 동사**다 — 일반 PATCH 를 열면 "무엇까지
+// 고칠 수 있나"가 다시 열린 질문이 된다. 이 동사가 무는 축은 셋으로 못박혀 있고
+// (DESIGN §11, 2026-09-16 에 열렸다) 그 좁기를 store 의 유일 작성자 관문이 지킨다.
+//
+// ★ 포인터 셋이 핵심이다. **생략과 "빈 값으로 바꿔라"를 가른다** — 값 타입으로 받으면
+// title 만 고치려던 요청이 본문을 통째로 지운다.
+//
+// 필드 이름이 cmd/fd 의 amendReq 와 어긋나면 서버가 조용히 0값을 받는다(이음매 시험이 잠근다).
+type amendRequest struct {
+	Project   string    `json:"project"`
+	SessionID string    `json:"session_id"`
+	Title     *string   `json:"title"`
+	Body      *string   `json:"body"`
+	Paths     *[]string `json:"paths"`
+	Reason    string    `json:"reason"`
+}
+
+func (s *server) handleAmendItem(w http.ResponseWriter, r *http.Request) {
+	var req amendRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	infoFrom(r.Context()).setSession(req.SessionID)
+	res, err := s.svc.AmendItem(r.Context(), service.AmendInput{
+		Project: req.Project, SessionID: req.SessionID,
+		ItemID: r.PathValue("id"),
+		Title:  req.Title, Body: req.Body, Paths: req.Paths,
+		Reason: req.Reason,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// ★ SSE 알림용이다. 원장 행 자체는 store 가 트랜잭션 안에서 남긴다(item.amend) —
+	// before 를 아는 것이 거기뿐이기 때문이다. 여기서 다시 publish 하면 같은 사실이
+	// 원장에 두 줄이 되므로, 이 호출은 **알림 축만** 태운다.
+	s.publish(r, "item.amend", req.Project, req.SessionID, map[string]any{
+		"item": clip(res.Item.ID, 100), "rev": res.Rev, "changed": res.Changed,
+	})
+	s.writeJSON(w, r, http.StatusOK, res)
+}

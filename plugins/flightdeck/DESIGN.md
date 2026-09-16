@@ -780,6 +780,7 @@ POST   /claims/leave                (세션이 **자기** 선점을 놓는다 �
 POST   /items/{id}/after/cut        (선행 하나를 끊는다 — `after-dropped-dep`·`after-bad-ref` 의 유일한 탈출구)
 POST   /items/{id}/move             (고칠 수 있는 축은 프로젝트 하나뿐 — 본문·제목은 못 바꾼다)
 POST   /items/{id}/label            (고칠 수 있는 축은 꼬리표 하나뿐 — 본문·제목·선행은 못 바꾼다)
+POST   /items/{id}/amend            (제목·본문·경로를 제자리에서 고친다 — 준 것만 고치고 응답은 실제 변화분 + 개정 번호를 낸다. 옛 값은 item_revision 에 쌓인다, §11)
 POST   /landing                     (줄 서기·보고·이탈 셋이 한 표면 — 셋 다 자기 줄 행 하나를 다룬다)
 POST   /landing/rows/{id}/release   (물린 줄 행을 사람이 회수 — 남의 점유를 끊는 일이라 위와 갈랐다)
 GET    /landing/queue               (줄 전체의 읽기 전용 조회 — 취득 판정은 여전히 POST 하나다)

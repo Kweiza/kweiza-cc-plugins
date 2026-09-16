@@ -301,6 +301,20 @@ func envelopeCases() []envelopeCase {
 			return sess
 		},
 	}, {
+		name: "item.amend",
+		kind: "item.amend",
+		prepare: func(t *testing.T, e *env, project, sess string) {
+			e.addItemIn(t, project, sess, itemID("env-amend", project), nil)
+		},
+		fire: func(t *testing.T, e *env, project, sess string) string {
+			e.okBody(t, e.write(http.MethodPost,
+				"/api/v1/items/"+itemID("env-amend", project)+"/amend", map[string]any{
+					"project": project, "session_id": sess,
+					"title": "고친 제목", "reason": "봉투 시험",
+				}), "본문 고침")
+			return sess
+		},
+	}, {
 		name: "item.after.cut",
 		kind: "item.after.cut",
 		prepare: func(t *testing.T, e *env, project, sess string) {
