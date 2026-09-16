@@ -438,9 +438,12 @@ func TestRefuseIneligibleFollowupSaysWhichOfTheThreeReasons(t *testing.T) {
 
 // TestFinishLinksAnExistingItemInsteadOfCreatingIt 은 이 기능의 본체다.
 //
-// id 만 실은 기존 항목은 **새로 만들지 않고** 판단에 잇는다. 항목의 제목·본문은 그대로다 —
-// store 에 항목 본문을 고치는 메서드가 아예 없고, 있어도 안 고칠 것이다(다른 세션이 그 항목의
-// 본문을 근거로 계획을 세운다).
+// id 만 실은 기존 항목은 **새로 만들지 않고** 판단에 잇는다. 항목의 제목·본문은 그대로다.
+//
+// ★ 이 주석은 원래 "store 에 항목 본문을 고치는 메서드가 아예 없고, **있어도 안 고칠
+// 것이다**"라고 적었다. 2026-09-16 에 그 메서드가 생겼고(`store.AmendItem`), 그래서 지금
+// 이 시험이 잠그는 것은 뒤쪽 절이다 — finish 는 그것을 안 부른다. 다른 세션이 그 항목의
+// 본문을 근거로 계획을 세우고, 본문 고침은 사유와 개정 이력을 요구하는데 잇기에는 둘 다 없다.
 func TestFinishLinksAnExistingItemInsteadOfCreatingIt(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithWorktree(t, "feat")

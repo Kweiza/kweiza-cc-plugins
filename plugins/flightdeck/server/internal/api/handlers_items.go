@@ -344,7 +344,9 @@ func (s *server) handleMoveItem(w http.ResponseWriter, r *http.Request) {
 //
 // move 와 같은 규율으로 **전용 동사**다 — item_after 에 일반 PATCH/DELETE 를 열면
 // "무엇까지 고칠 수 있나"가 다시 열린 질문이 되고, 그 질문은 항목 본문까지 번진다.
-// 본문이 만들어진 시점의 사진이라는 규율은 DESIGN §11 이 적고 store 의 관문이 지킨다.
+// 항목 본문은 일반 PATCH 가 아니라 **전용 동사 `amend`** 가 고친다(DESIGN §11 이
+// 2026-09-16 에 열었고, 축은 title·body·paths 셋으로 못박혀 있다). 전용 동사라는 것이
+// 핵심이다 — 그래야 "무엇을 고칠 수 있나"가 표면마다 안 갈린다.
 type cutAfterRequest struct {
 	Project   string     `json:"project"`
 	SessionID string     `json:"session_id"`
@@ -379,7 +381,9 @@ func (s *server) handleCutAfter(w http.ResponseWriter, r *http.Request) {
 //
 // move·after/cut 과 같은 규율으로 **전용 동사**다 — 일반 PATCH 를 열면 "무엇까지
 // 고칠 수 있나"가 다시 열린 질문이 되고, 그 질문은 항목 본문까지 번진다.
-// 본문이 만들어진 시점의 사진이라는 규율은 DESIGN §11 이 적고 store 의 관문이 지킨다.
+// 항목 본문은 일반 PATCH 가 아니라 **전용 동사 `amend`** 가 고친다(DESIGN §11 이
+// 2026-09-16 에 열었고, 축은 title·body·paths 셋으로 못박혀 있다). 전용 동사라는 것이
+// 핵심이다 — 그래야 "무엇을 고칠 수 있나"가 표면마다 안 갈린다.
 //
 // 필드 이름이 cmd/fd 의 labelReq 와 어긋나면 서버가 조용히 0값을 받는다 —
 // add·rm 이 둘 다 빈 채 닿으면 "하나는 줘라"로 거절되는데, 사람은 자기가 방금 친

@@ -245,8 +245,13 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		return FinishResult{}, refused
 	}
 	// ③ 제목·본문·경로 좌표는 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 본문을
-	//    안 덮으므로(store 에 그럴 메서드가 아예 없다) 다시 적게 할 이유가 없다 —
-	//    적게 하고 버리는 것이 조용한 거짓이다.
+	//    안 덮으므로 다시 적게 할 이유가 없다 — 적게 하고 버리는 것이 조용한 거짓이다.
+	//
+	//    ★ **근거가 2026-09-16 에 바뀌었다.** 옛 근거는 "store 에 그럴 메서드가 아예 없다"
+	//    였는데 이제 있다(`store.AmendItem`). 그래도 결론은 그대로다 — finish 가 그것을
+	//    안 부르고, **불러서도 안 된다.** 본문 고침은 `reason` 을 요구하고 옛 값을
+	//    item_revision 에 쌓는데, finish 에 얹혀 나가는 덮어쓰기에는 둘 다 없다. 사유 없이
+	//    남의 본문을 갈아 끼우는 것이 정확히 그 표면이 막으려고 만들어진 것이다.
 	for _, c := range plan.Create {
 		f := c.Item
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Body) == "" {
@@ -265,7 +270,8 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// 다른 문에서 배신한다).
 		//
 		// ★ 이제 **새로 만드는 것에만** 건다. 잇기는 기존 항목의 경로를 안 건드리므로
-		// 통과시킬 우회 문 자체가 없다(store 에 그 항목의 paths 를 덮을 메서드가 없다).
+		// 통과시킬 우회 문 자체가 없다 — finish 의 어느 갈래도 만들어진 뒤의 paths 를
+		// 안 덮는다. (덮는 자리는 `amend` 하나뿐이고 이 동사는 그것을 안 부른다.)
 		if err := judgeItemPathsCoordinate(f.Paths); err != nil {
 			s.logFinishRefused(ctx, in, GateFollowupPaths)
 			return FinishResult{}, &RefusedError{What: "finish",
@@ -279,8 +285,9 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, err
 		// required 가 없어 클라이언트가 빈 객체를 막지 못한다).
 		//
 		// **잇기에는 안 건다** — 위 ③ 과 같은 논거다. 잇기는 기존 항목의 선행을 안 덮으므로
-		// (store 에 그 항목의 after 를 바꿀 메서드가 없다) 통과시킬 우회 문 자체가 없고,
-		// 적게 하고 버리는 것이 조용한 거짓이다.
+		// 통과시킬 우회 문 자체가 없고, 적게 하고 버리는 것이 조용한 거짓이다.
+		// (만들어진 뒤의 item_after 를 무는 자리는 `store.RemoveAfter` 하나이고 그것은 **끊기만**
+		// 한다 — 거는 문은 AddItem 밖에 없다. `amend` 도 이 축은 안 건드린다, DESIGN §11.)
 		for k, a := range f.After {
 			if err := store.ValidateAfter(a); err != nil {
 				s.logFinishRefused(ctx, in, GateFollowupAfter)

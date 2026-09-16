@@ -1429,8 +1429,9 @@ func TestRenderBoardLaneNeverFoldsAWarningResource(t *testing.T) {
 // ★ `"안 썼다"` 가 이 화면의 **정직성 관문**이다. 오늘까지 followupSchema 가 id·title·body 를
 //
 //	셋 다 필수로 받았으므로(tools.go:67) 돌고 있는 세션은 예외 없이 셋을 다 싣는다.
-//	잇기 갈래는 그 title·body 를 읽지도 저장하지도 않는다 — followupPlan.Link 가 []string 이고,
-//	store 에 항목 본문을 고치는 메서드가 아예 없다(store/item.go 전수). 게다가 이 변경
+//	잇기 갈래는 그 title·body 를 읽지도 저장하지도 않는다 — followupPlan.Link 가 []string 이라
+//	id 말고는 담을 자리가 없고, 만들어진 뒤의 본문을 무는 자리는 `store.AmendItem` 하나뿐인데
+//	(2026-09-16) finish 는 그것을 안 부른다. 게다가 이 변경
 //	**전에는** 같은 입력이 "후속 N건은 안 넣었다"로 시끄럽게 나왔다(render.go:1349).
 //	화면이 여기서 침묵하면 그 신호가 조용해지는 쪽으로 퇴행하고, 세션은 자기가 적어 보낸
 //	본문이 어딘가 반영됐다고 믿고 떠난다 — **설계 §0** 이 이름 붙인 부류다:

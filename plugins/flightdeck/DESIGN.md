@@ -247,12 +247,22 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 사람이 선언한 것 = `schema.sql` 의 `CREATE TABLE` 21 + `CREATE VIRTUAL TABLE` 1(`judgment_fts`) +
 증분 5(`idempotency` 002 · `landing_queue` 003 · `landing_queue_resource` 008 ·
 `project_member` 014 · `item_revision` 016) = 27
-반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **32** 가 나온다 — FTS5 가 `judgment_fts`
-하나마다 그림자 표 넷(`judgment_fts_config`·`_data`·`_docsize`·`_idx`)을 만들고, 거기에
-`AUTOINCREMENT` 가 있는 표마다 공유하는 `sqlite_sequence` 하나가 더해진다(27 + 4 + 1 = 32).
-다섯 다 SQLite 엔진이 만드는 부산물이라 이 절이 말하는 데이터 모델이 아니다 — 그래서 이 절은
-27 을 쓴다. 산식의 검산은 `store/schema_table_count_test.go` 가 **이름 목록 27개로** 잠근다
-(수만 맞추는 시험이 아니다 — 하나를 지우고 하나를 더하면 거기서 빨개진다). 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
+반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **31** 이 나온다. 축이 **둘** 어긋난다:
+
+- **⊖ 증분 011 이 `item_dependents` 를 DROP 한다.** 선언은 `schema.sql` 에 그대로 남아 있지만
+  (정의를 두 자리에 두지 않는다는 규율 — `BaseSchemaVersion` 주석) **어떤 DB 에도 그 표는
+  없다.** 빈 DB 도 "schema.sql → 증분 전부"를 거치므로 만들었다가 지운다.
+- **⊕ SQLite 가 다섯을 더 만든다.** FTS5 가 `judgment_fts` 하나마다 그림자 표 넷
+  (`judgment_fts_config`·`_data`·`_docsize`·`_idx`), 거기에 `AUTOINCREMENT` 가 있는 표마다
+  공유하는 `sqlite_sequence` 하나.
+
+합치면 27 − 1 + 4 + 1 = 31. 다섯은 SQLite 엔진이 만드는 부산물이고 `item_dependents` 는
+은퇴한 선언이라 **둘 다 이 절이 말하는 데이터 모델이 아니다** — 그래서 이 절은 27 을 쓴다.
+산식의 검산은 `store/schema_table_count_test.go` 가 **이름 목록 27개로** 잠근다(수만 맞추는
+시험이 아니다 — 하나를 지우고 하나를 더하면 거기서 빨개진다).
+
+**실측(2026-09-16, 운영 원장 `mode=ro` 사본):** 판 15 에서 `sqlite_master` 30개
+(선언 25 + 그림자 4 + `sqlite_sequence` 1), 증분 016 을 얹어 **31개**. 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
 관측해 넘겨 온 적이 있다(판단 `01KZ7DKQ3QHKH75X4XY0YDPFMC`) — 두 축을 같은 이름으로 부르면
 그 혼동이 반복된다.
 

@@ -274,9 +274,11 @@ func (t *Tx) RemoveAfter(project, itemID string, a model.After, sessionID string
 		return notFoundNote(NFItemAfter, fmt.Sprintf("항목 %s/%s 의 item=%q job=%q sha=%q 에 해당하는",
 			clip(project, 64), clip(itemID, 64), clip(a.Item, 64), clip(a.Job, 64), clip(a.SHA, 40)))
 	}
-	// ★ 원장에 남긴다. 이 쓰기는 되돌리는 코드가 없고, 항목 본문은 만들어진 시점의 사진이라
-	// **무엇이 걸려 있었는지가 끊는 순간 사라진다.** 안 남기면 "이 항목이 왜 지금 적격인가"에
-	// 답할 자리가 어디에도 없다 — 그리고 그것이 원래 이 결함을 만든 공백과 같은 모양이다.
+	// ★ 원장에 남긴다. 이 쓰기는 되돌리는 코드가 없고, **무엇이 걸려 있었는지를 담는 자리는
+	// item_after 행 하나뿐인데 절단이 그 행을 지운다.** 항목 본문은 그 조건을 안 적는다 —
+	// `amend` 가 본문을 열어도(2026-09-16) 달라지지 않는다. 본문은 선행의 사본이 아니다.
+	// 안 남기면 "이 항목이 왜 지금 적격인가"에 답할 자리가 어디에도 없다 — 그리고 그것이
+	// 원래 이 결함을 만든 공백과 같은 모양이다.
 	// 축 이름을 값과 함께 싣는다(dep_item·dep_job·dep_sha 는 처방이 서로 다르다).
 	axis, dep := "item", a.Item
 	switch {

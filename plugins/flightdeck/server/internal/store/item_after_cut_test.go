@@ -302,9 +302,11 @@ func TestDependentItemsNamesOnlyTheLivingOnes(t *testing.T) {
 
 // 끊은 사실이 **원장에** 남는다. SSE 발행으로 대신할 수 없다.
 //
-// 선행 절단은 되돌리는 코드가 없는 파괴적 쓰기다. 그런데 항목 본문은 만들어진 시점의 사진이라
-// 무엇이 걸려 있었는지는 **끊는 순간 사라진다** — 원장에 안 남기면 "이 항목이 왜 지금 적격인가"에
-// 답할 자리가 어디에도 없다. item.move 가 같은 이유로 원장을 쓴다(그쪽은 SSE 만 부르다 걸렸다).
+// 선행 절단은 되돌리는 코드가 없는 파괴적 쓰기다. 그런데 **무엇이 걸려 있었는지를 담는 자리는
+// item_after 행 하나뿐이라 끊는 순간 사라진다** — 항목 본문은 그 조건을 안 적고(`amend` 가
+// 본문을 열어도 그렇다. 본문은 선행의 사본이 아니다), 원장에 안 남기면 "이 항목이 왜 지금
+// 적격인가"에 답할 자리가 어디에도 없다. item.move 가 같은 이유로 원장을 쓴다(그쪽은 SSE 만
+// 부르다 걸렸다).
 func TestRemoveAfterLeavesTheCutInTheLedger(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

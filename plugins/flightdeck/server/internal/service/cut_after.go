@@ -38,9 +38,11 @@ type CutAfterResult struct {
 // 화면에는 "고쳐라"만 계속 뜬다. 실측 피해 2건(image-model-8b-swap · t3-gpu-perf-measure)이
 // 그 모양으로 멈춰 있었고, 그 전에도 같은 벽이 두 번 나와 둘 다 close_reason 으로 우회됐다.
 //
-// ★ **범위는 선행 한 축이다.** 항목 본문(title·body)은 만들어진 시점의 사진이고 변경은 판단으로
-// 나른다 — 그 규율은 DESIGN §11 이 적고 store 의 관문이 지킨다. 여기서 본문 수정으로 번지면
-// 그 관문이 지키던 문장이 거짓이 된다. 고쳐야 할 것은 본문이 아니라 걸린 조건이다.
+// ★ **범위는 선행 한 축이다.** 항목 본문(title·body·paths)은 전용 동사 `amend` 가 고친다
+// (DESIGN §11 이 2026-09-16 에 열었고 축 셋으로 못박혔다) — 이 동사는 그 셋을 안 건드린다.
+// 그때 **부재를 지키던 관문은 유일 작성자 관문으로 전환됐다**: 지금 지켜지는 문장은 "본문을
+// 못 고친다"가 아니라 "본문을 무는 자리가 한 곳이다"이고, 여기서 본문 수정으로 번지면
+// 깨지는 것이 그 문장이다. 고쳐야 할 것은 본문이 아니라 걸린 조건이다.
 func (s *Service) CutAfter(ctx context.Context, in CutAfterInput) (CutAfterResult, error) {
 	var res CutAfterResult
 	in.Project = strings.TrimSpace(in.Project)

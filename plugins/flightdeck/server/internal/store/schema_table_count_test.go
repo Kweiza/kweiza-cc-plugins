@@ -62,10 +62,14 @@ func declaredTables(t *testing.T) []string {
 func TestDeclaredTablesMatchDesign(t *testing.T) {
 	// DESIGN §3 — "SQLite 파일 하나, 테이블 N개, 계층 셋".
 	//
-	// 살아 있는 DB 의 `sqlite_master` 는 이보다 5 큰 수를 낸다:
-	// FTS5 가 judgment_fts 뒤에 자동 생성하는 그림자 표 4개(_config·_data·_docsize·_idx)와,
-	// AUTOINCREMENT 이 있으면 생기는 sqlite_sequence 1개다.
-	// **그 5개는 우리가 정한 값이 아니다** — fts5 옵션이나 SQLite 판이 바뀌면 조용히 달라진다.
+	// 살아 있는 DB 의 `sqlite_master` 는 이보다 **4 큰** 수를 낸다(2026-09-16 운영 원장
+	// mode=ro 사본 실측: 판 16 에서 31). 축이 **둘** 어긋나기 때문이다:
+	//   ⊕ SQLite 가 다섯을 더 만든다 — FTS5 가 judgment_fts 뒤에 자동 생성하는 그림자 표
+	//     4개(_config·_data·_docsize·_idx)와, AUTOINCREMENT 이 있으면 생기는 sqlite_sequence 1개.
+	//   ⊖ 증분 011 이 item_dependents 를 DROP 해서 하나가 빠진다. 그런데도 아래 목록이 그
+	//     이름을 계속 세는 이유는 **선언이 schema.sql 에 남아 있어서**다(정의를 두 자리에
+	//     두지 않는다는 규율). 세는 축이 "선언"이지 "살아 있는 DB"가 아니라는 뜻이다.
+	// **그 다섯은 우리가 정한 값이 아니다** — fts5 옵션이나 SQLite 판이 바뀌면 조용히 달라진다.
 	// 데이터 모델은 사람이 선언한 것이므로 여기서 세는 것은 아래 목록뿐이다.
 	want := []string{
 		"change_set",
