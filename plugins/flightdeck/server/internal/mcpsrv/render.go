@@ -2269,7 +2269,15 @@ type TailInput struct {
 // overlapsPartialNote 는 "덜 쟀다"(OverlapsPartial) 상태의 공통 사유문이다.
 // RenderTail 의 기본값과 RenderAmend 의 본문이 같은 문구를 쓴다 — 문구가 갈리면
 // 본문과 꼬리가 같은 사실을 다르게 말하는 것처럼 읽힌다(리뷰 I-1 과 같은 이유).
-const overlapsPartialNote = "형제 프로젝트는 못 봤다(명부 조회 실패, workspace 축) — 이 프로젝트 것만 셌다, 덜 쟀다"
+//
+// ★ **처방까지 준다**(2026-09-17 재리뷰의 Minor). 옆 상태인 "못 셌다"(overlaps 축 실패)는
+// 이미 "`board` 가 그 축을 다시 읽는다"로 다음 손을 가리키는데 이쪽은 사실만 말했다 —
+// 사실만 말하는 고백은 읽는 쪽이 할 수 있는 것이 없어 결국 무시된다.
+// 처방이 성립하는 근거: `board` 는 옵션과 무관하게 `Roster` 를 **독립적으로 다시**
+// 조회한다(service/board.go 의 "명부는 언제나 읽는다" 절). 즉 이 축의 실패는 그 호출에서
+// 재시도되는 것이지 영영 못 보는 것이 아니다.
+const overlapsPartialNote = "형제 프로젝트는 못 봤다(명부 조회 실패, workspace 축) — " +
+	"이 프로젝트 것만 셌다, 덜 쟀다. `board` 가 그 명부를 다시 읽는다"
 
 // tailOverlapLimit 은 꼬리가 **줄을 내는** 겹침 세션 수다. 건수는 머리줄이 전부 센다.
 //

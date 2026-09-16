@@ -146,6 +146,37 @@ func TestRenderAmendSaysOverlapPartialWhenWorkspaceFails(t *testing.T) {
 	}
 }
 
+// TestOverlapPartialNoteCarriesAPrescriptionEverywhereItIsUsed 는 "덜 쟀다" 문구가
+// **사실만 말하고 끝나지 않는지**를 잰다.
+//
+// ★ 왜 이것이 결함이었나(2026-09-17 재리뷰의 Minor). 바로 옆 상태인 "못 셌다"(overlaps
+// 축 실패)는 이미 "0이라는 뜻이 아니다. `board` 가 그 축을 다시 읽는다"로 다음 손을
+// 가리키는데, `workspace` 축 실패는 사실만 말했다. 처방 없는 고백은 읽는 쪽이 할 수
+// 있는 것이 없어 결국 무시되고, 무시되는 경고는 참인 날에도 안 읽힌다.
+//
+// ★ 처방이 성립하는 근거는 board 가 Roster 를 **독립적으로 다시** 조회한다는 것이다
+// (service/board.go 의 "명부는 언제나 읽는다" — 옵션과 무관하다).
+//
+// ★ **두 자리를 함께 잰다.** 상수를 공유하므로 본문(RenderAmend)과 꼬리(RenderTail)가
+// 같이 움직여야 하고, 한쪽만 재면 다른 쪽이 문구를 따로 들고 갈라져도 초록이 된다.
+func TestOverlapPartialNoteCarriesAPrescriptionEverywhereItIsUsed(t *testing.T) {
+	const prescription = "`board` 가 그 명부를 다시 읽는다"
+
+	res := service.AmendResult{
+		Item: model.Item{ID: "i1", Paths: []string{"shared/x.go"}}, Rev: 1, Changed: []string{"paths"},
+		Overlaps: []judge.Overlap{{SessionID: "01OTHERSESSION"}},
+	}
+	res.Failures = append(res.Failures, service.DerivedFailure{Axis: "workspace", Detail: "명부 조회 실패"})
+	if body := RenderAmend(res); !strings.Contains(body, prescription) {
+		t.Errorf("본문이 사실만 말하고 처방이 없다 — 옆 상태(\"못 셌다\")는 처방까지 준다:\n%s", body)
+	}
+
+	tail := RenderTail(TailInput{NotesObserved: true, OverlapsObserved: true, OverlapsPartial: true})
+	if !strings.Contains(tail, prescription) {
+		t.Errorf("꼬리가 사실만 말하고 처방이 없다 — 상수를 공유하므로 본문과 함께 움직여야 한다:\n%s", tail)
+	}
+}
+
 // TestRenderAmendSaysPathsExcludedFromOverlapAxis 는 경로를 빈 목록으로 고쳤을 때
 // (paths 축은 바뀌었지만 결과가 0개인 경우) 그 사실을 RenderAdd 와 같은 문구로
 // 말하는지 본다(리뷰 I-4).
