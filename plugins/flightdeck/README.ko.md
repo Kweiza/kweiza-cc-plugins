@@ -487,7 +487,7 @@ codex 는 MCP 자식에게 코어 13개(HOME·PATH·PWD 등)만 주고 **세션 
 | `alloc` | `counter_name` | 원자 발번(개정 차수 같은 논리 카운터) |
 | `land` | `resources` `result` `detail` `leave` | 랜딩 줄에 선다 / 내 차례를 본다 / 보고하고 반납한다 |
 | `label` | `item_id` `add` `rm` | 표시 전용 꼬리표. `tickler` 만 굶김 축에서 빠진다 |
-| `amend` | `item_id` `title` `body` `paths` `reason` | 본문을 제자리에서 고친다. 옛 값은 개정 이력에 남는다 |
+| `amend` | `item_id` `title` `body` `paths` `reason` | 항목의 **제목·본문·경로**를 제자리에서 고친다 — 고치는 축은 그 셋뿐이다. 준 것만 바뀌고 옛 값은 개정 이력에 남는다 |
 
 세 가지 규율이 이 표에 숨어 있다.
 

@@ -243,14 +243,16 @@ GHE push 도 이 구현 어디에도 없고, 그 셋을 어떻게 쪼갤지는 �
 
 정본은 `server/internal/store/schema.sql`. 아래는 그 요지와 **각 제약이 막는 사고**다.
 
-**★ 25 는 세는 축을 밝혀 둔다 — 안 밝히면 다음 사람이 다른 축을 세고 어긋났다고 판단한다.**
+**★ 27 은 세는 축을 밝혀 둔다 — 안 밝히면 다음 사람이 다른 축을 세고 어긋났다고 판단한다.**
 사람이 선언한 것 = `schema.sql` 의 `CREATE TABLE` 21 + `CREATE VIRTUAL TABLE` 1(`judgment_fts`) +
-증분 3(`idempotency` · `landing_queue` · `landing_queue_resource`) = 25
-반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **30** 이 나온다 — FTS5 가 `judgment_fts`
+증분 5(`idempotency` 002 · `landing_queue` 003 · `landing_queue_resource` 008 ·
+`project_member` 014 · `item_revision` 016) = 27
+반면 살아 있는 DB 에서 `sqlite_master` 를 그대로 세면 **32** 가 나온다 — FTS5 가 `judgment_fts`
 하나마다 그림자 표 넷(`judgment_fts_config`·`_data`·`_docsize`·`_idx`)을 만들고, 거기에
-`AUTOINCREMENT` 가 있는 표마다 공유하는 `sqlite_sequence` 하나가 더해진다(25 + 4 + 1 = 30).
+`AUTOINCREMENT` 가 있는 표마다 공유하는 `sqlite_sequence` 하나가 더해진다(27 + 4 + 1 = 32).
 다섯 다 SQLite 엔진이 만드는 부산물이라 이 절이 말하는 데이터 모델이 아니다 — 그래서 이 절은
-25 를 쓴다. 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
+27 을 쓴다. 산식의 검산은 `store/schema_table_count_test.go` 가 **이름 목록 27개로** 잠근다
+(수만 맞추는 시험이 아니다 — 하나를 지우고 하나를 더하면 거기서 빨개진다). 실제로 다른 세션이 `sqlite_master` 값(28, 그때 `landing_queue` 전)을 "테이블 수"로
 관측해 넘겨 온 적이 있다(판단 `01KZ7DKQ3QHKH75X4XY0YDPFMC`) — 두 축을 같은 이름으로 부르면
 그 혼동이 반복된다.
 
@@ -1165,7 +1167,7 @@ flightdeck 안쪽(이벤트 여섯의 async·이름·SessionEnd 의 폭)을 계�
 
 ### CLI `bin/fd`
 
-`status open beat note next pick add amend finish alloc project doctor export import watch`
+`status open beat note next pick add amend move label finish alloc project doctor export import watch`
 
 **`serve`·`mcp`·`hook` 처럼 사람이 직접 안 부르는 서브명령이 이 목록 밖에 있다.**
 `selfcheck` 가 그중 하나다 — 자동 갱신 축이 새 바이너리를 **자식으로 돌려 검증**할 때만 쓴다(§7).
@@ -1784,7 +1786,7 @@ counters: [contract_revision]
 `fires:` 접두 + 고정 표기라 `judge.FiresOn` 이 정확히 파싱하는데, 자유 산문인 본문에
 박으면 꺼낼 때 자연어를 다시 해석해야 하고 그 파싱이 실패하는 날 이 표시 축이 조용히
 죽는다. 그리고 `label` 은 그 축 하나만 건드리는 좁은 동사라 재측 한 번이 본문의 다른
-내용을 건드릴 위험도 없다 — `amend` 로 옮기면 title·paths 가 같은 호출에 함께 얹힌다.
+내용을 건드릴 위험도 없다.
 **이것은 표시-전용 규약의 예외가 아니다** — 배제·추천·겹침
 어디에도 안 쓰고, 기한이 지나도 아무것도 안 막고 안 승격시킨다. 예외는 `tickler`
 하나뿐이라는 위 문장이 그대로 유효하다. 못 읽는 값은 조용히 무시한다(근사 금지).

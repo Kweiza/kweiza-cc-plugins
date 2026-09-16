@@ -133,9 +133,14 @@ PK `(project, item_id, rev)` 가 그래도 새면 그때는 조용한 덮어쓰�
 
 ```
 POST /api/v1/items/{id}/amend
-{"title"?: string, "body"?: string, "paths"?: []string, "reason": string, "item_project"?: string}
+{"project": string, "session_id": string,
+ "title"?: string, "body"?: string, "paths"?: []string, "reason": string}
 ```
 
+- **★ 이 절은 초안에서 `"item_project"?: string` 을 적었다 — 구현은 `project` + `session_id` 다.**
+  `label` 과 같은 모양이고, 형제 프로젝트는 별도 칸이 아니라 `GateTargetProject` 가
+  워크스페이스 명부로 연다(명부 밖 이름은 거기서 끊긴다). 같은 뜻의 칸을 표면마다 다른
+  이름으로 두면 "무엇을 어디에 싣나"가 갈린다 — 이 문서가 막으려던 바로 그 부류다.
 - `title`·`body`·`paths` 는 **준 것만 고친다.** 생략과 "빈 값으로 바꿔라"가 갈리므로 포인터로
   받는다. 셋 다 안 주면 거절한다.
 - 응답은 요청한 것이 아니라 **실제 변화분**을 낸다. 같은 값을 다시 써도 거절하지 않지만

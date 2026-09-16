@@ -506,7 +506,7 @@ There are four to remember: **claim (`pick`) · record (`note`) · close (`finis
 | `alloc` | `counter_name` | Atomic allocation (logical counters such as a revision number) |
 | `land` | `resources` `result` `detail` `leave` | Join the landing queue / check your turn / report and release |
 | `label` | `item_id` `add` `rm` | Display-only labels. Only `tickler` is exempt from the starvation axis |
-| `amend` | `item_id` `title` `body` `paths` `reason` | Fixes the body in place. The old value survives in the revision history |
+| `amend` | `item_id` `title` `body` `paths` `reason` | Fixes an item's **title, body and paths** in place — those three axes and no others. Only what you pass changes; the old values survive in the revision history |
 
 Three disciplines hide in that table.
 

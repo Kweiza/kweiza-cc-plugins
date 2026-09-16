@@ -1878,8 +1878,10 @@ func (a *App) runAfter(ctx context.Context, args []string, out io.Writer) int {
 // 처방도 다르다 — 한 칸으로 받으면 서버가 어느 축인지 추측해야 하고, 추측이 틀리면
 // "그런 선행이 없다"가 나가는데 진짜 사유는 축을 틀린 것이 된다.
 //
-// ★ 고칠 수 있는 것은 **선행 한 축뿐이다.** 항목 본문(title·body)은 만들어진 시점의 사진이고
-// 변경은 판단으로 나른다(DESIGN §11). 일반 amend 로 번지지 않게 여기서 막는다 — move 와 같은 규율이다.
+// ★ 고칠 수 있는 것은 **선행 한 축뿐이다.** 항목 본문은 이 동사가 아니라 `fd amend` 가
+// 고친다(title·body·paths 축 셋으로 못박혀 있다, 2026-09-16 에 열렸다, DESIGN §11) —
+// 이 동사는 그 셋을 안 건드린다. 한 축을 두 동사가 물면 "무엇을 고칠 수 있나"가 표면마다
+// 갈리고 그 차이를 아무도 못 따라간다 — move 가 프로젝트 한 축으로 못박은 것과 같은 규율이다.
 func (a *App) runAfterCut(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("after cut")
 	depItem := fs.String("item", "", "끊을 선행 항목 id(after-dropped-dep 이 가리키는 것)")
@@ -1975,10 +1977,14 @@ func afterOneLine(a model.After) string {
 //
 // 왜 이 명령이 있나: 항목을 잘못된 프로젝트에 등록하면 되돌릴 길이 **0** 이었다.
 // move 가 없고, drop 후 같은 id 재등록은 "id 는 전역 유일" 규칙이 409 로 막으며,
-// 본문·경로를 고치는 명령도 없다. 그래서 fd 항목 10건이 context-platform 에 갇혀
-// **fd 레포에서 `fd next` 가 그것을 하나도 못 보는** 상태가 실제로 났다.
+// 본문·경로를 고치는 명령도 **그때는** 없었다. 그래서 fd 항목 10건이 context-platform 에
+// 갇혀 **fd 레포에서 `fd next` 가 그것을 하나도 못 보는** 상태가 실제로 났다.
+// (셋째 조건은 2026-09-16 에 풀렸다 — `fd amend` 가 title·body·paths 를 고친다. 그래도
+// 프로젝트 축은 amend 의 축이 아니라서 이 명령이 그 자리를 그대로 지킨다. 이 문단을
+// 지우지 않고 과거형으로 남기는 이유는 여기가 **왜 이 명령이 생겼는지**를 적는 자리라서다.)
 //
-// 고칠 수 있는 것은 **프로젝트 한 축뿐이다.** 일반 amend 로 번지지 않게 여기서 막는다.
+// 고칠 수 있는 것은 **프로젝트 한 축뿐이다.** amend 의 세 축으로 번지지 않게 여기서 막는다 —
+// 그 셋은 `fd amend` 의 몫이고, 한 축을 두 동사가 물면 "무엇을 고칠 수 있나"가 갈린다.
 func (a *App) runMove(ctx context.Context, args []string, out io.Writer) int {
 	fs := newFlagSet("move")
 	to := fs.String("project", "", "대상 프로젝트 id")

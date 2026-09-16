@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -18,9 +19,13 @@ import (
 // (평범한 error 가 화이트리스트를 못 타고 500 이 되던 것)를 고치고 이 방식으로 잠갔다.
 // `claim_bundle_test.go` 의 `TestClaimBundleLeadMismatchRefuses` 도 같은 패턴이다.
 //
-// 이 파일이 덮는 여섯 자리는 `service/{move,cut_after,label}.go` 의 입력 거절이고,
-// 그중 label 의 빈-요청 하나는 **MCP 에서 정상 도달 가능**하다(도구 스키마의 required 가
-// `item_id` 하나뿐이라 add·rm 을 둘 다 안 준 호출이 그대로 service 까지 온다).
+// 이 파일이 덮는 것은 `service/{move,cut_after,label,amend}.go` 의 입력 거절이다
+// (시험 일곱 — 세는 축은 **이 파일의 Test 함수 수**다. 안 밝히면 다음 사람이 service 쪽
+// 거절 갈래 수를 세고 어긋났다고 판단한다).
+//
+// 그중 셋은 **MCP 에서 정상 도달 가능**하다 — 도구 스키마의 required 가 label 은
+// `item_id` 하나, amend 는 `item_id`·`reason` 둘뿐이라, 나머지 인자를 안 준 호출이
+// 그대로 service 까지 온다: label 의 빈 요청 · amend 의 빈 패치 · amend 의 빈 사유.
 
 // assertRefused 는 응답이 400 refused 이고 처방을 실었는지 본다.
 //
@@ -39,6 +44,24 @@ func assertRefused(t *testing.T, w *httptest.ResponseRecorder, what string) {
 	if g, _ := e["guidance"].(string); g == "" {
 		t.Errorf("%s: 거절에 guidance 가 비었다 — 이 저장소의 거절은 처방을 함께 낸다: %s",
 			what, w.Body.String())
+	}
+}
+
+// assertRefusalSays 는 거절이 **사용자에게 무엇을 말하는지**를 잰다.
+//
+// assertRefused 와 축이 다르다: 그쪽은 배선(400 · refused · 처방이 있음)이고 이쪽은 내용이다.
+// 둘을 가르는 이유는 배선만 재면 **다른** 거절이 400 으로 나가도 초록이기 때문이다 —
+// 그때 사용자는 자기가 하지도 않은 실수의 처방을 받는다.
+func assertRefusalSays(t *testing.T, w *httptest.ResponseRecorder, what string, needles ...string) {
+	t.Helper()
+	e := errorOf(t, w)
+	msg, _ := e["message"].(string)
+	guidance, _ := e["guidance"].(string)
+	said := msg + "\n" + guidance
+	for _, n := range needles {
+		if !strings.Contains(said, n) {
+			t.Errorf("%s: 사용자가 받는 문구에 %q 가 없다 — 받은 것: %s", what, n, said)
+		}
 	}
 }
 
@@ -104,4 +127,46 @@ func TestLabelWithoutProjectIsRefused(t *testing.T) {
 		"session_id": sess, "add": []string{"tickler"},
 	})
 	assertRefused(t, w, "label 빈 project")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// amend — 축을 하나도 안 준 빈 패치 · 빈 사유
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ★ 아래 둘은 `service/amend.go` 가 **스스로 예고한 자리**다: "이 갈래는 MCP 에서 정상
+// 도달 가능하다 — amend 도구의 필수 인자는 item_id·reason 뿐이라 title·body·paths 를 셋 다
+// 안 준 호출이 그대로 여기까지 온다." 그 파일은 그래서 errors.New 가 아니라 RefusedError 를
+// 쓰는데, **그 선택이 실제로 400 으로 나가는지**를 재는 자리는 이 파일뿐이다.
+// `service/amend_test.go` 는 타입만 단정하므로 ClassifyError 의 갈래가 밀려도 안 빨개진다.
+//
+// 빈 패치·빈 사유 거절은 항목을 조회하기 **전에** 선다. 그래서 없는 항목 id 로 불러도
+// 404 가 아니라 400 이어야 한다 — 순서가 뒤집히면 이 시험이 404 로 빨개진다.
+
+func TestAmendEmptyPatchIsRefusedNotInternal(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-1")
+
+	w := e.write(http.MethodPost, "/api/v1/items/nonexistent-item/amend", map[string]any{
+		"project": testProject, "session_id": sess,
+		"reason": "경로 리네임 추종",
+	})
+	assertRefused(t, w, "amend 빈 패치")
+	// 문구가 **무엇을 줘야 하는지**를 말해야 한다. "고칠 축을 하나는 줘라"만 오고 그 셋이
+	// 안 오면 사용자는 label·after 를 다시 뒤진다 — 이 동사가 안 무는 축들이다.
+	assertRefusalSays(t, w, "amend 빈 패치", "title·body·paths", "--title")
+}
+
+func TestAmendEmptyReasonIsRefusedNotInternal(t *testing.T) {
+	e := newEnv(t, nil)
+	sess := e.openSession("cc-1")
+
+	w := e.write(http.MethodPost, "/api/v1/items/nonexistent-item/amend", map[string]any{
+		"project": testProject, "session_id": sess,
+		"title":  "고친 제목",
+		"reason": "   ",
+	})
+	assertRefused(t, w, "amend 빈 사유")
+	// 공백만 준 사유도 빈 사유다 — store 의 CHECK (reason <> '') 가 아니라 여기서 걸려야
+	// 한다. 거기까지 가면 사용자가 받는 것은 처방 없는 제약 위반이다.
+	assertRefusalSays(t, w, "amend 빈 사유", "사유가 비었다", "--reason")
 }
