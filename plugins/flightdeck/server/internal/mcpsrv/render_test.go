@@ -1001,8 +1001,9 @@ func TestBoardSaysWhatTheWindowCutOff(t *testing.T) {
 		t.Fatalf("창 밖 문구에 옛 하드코딩 값(8h, 0113b35 이전 기본값)이 남아 있다:\n%s", got)
 	}
 	// ★ MCP board 도구는 window 인자를 받지 않는다(tools.go) — 없는 손잡이를
-	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 열로 눌러 잡는다 —
-	//   그 수는 protocol_test.go 의 TestToolTableIsTen 이 잠근다).
+	//   돌리라고 하면 그 문구 자체가 결함이다(설계가 도구 수를 컨텍스트 예산 안에 눌러
+	//   잡는다 — 그 수의 정본은 protocol_test.go 의 TestToolTableIsTen 이고, 여기에도
+	//   저쪽 원본 주석에도 수를 적지 않는다: 적으면 도구가 늘 때마다 두 자리가 따로 밀린다).
 	if strings.Contains(got, "window=") {
 		t.Fatalf("존재하지 않는 window 인자를 돌리라고 한다:\n%s", got)
 	}

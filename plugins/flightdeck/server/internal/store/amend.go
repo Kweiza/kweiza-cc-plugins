@@ -233,10 +233,19 @@ func (s *Store) ItemRevisions(ctx context.Context, project, itemID string) ([]mo
 // ★ revs 는 **rev 오름차순**이어야 한다(ItemRevisions 가 그렇게 낸다). 역순으로 주면
 // 조용히 거짓을 채운다 — 그래서 정렬을 여기서 다시 하지 않고 계약으로 둔다.
 //
-// ★ current 를 revs 보다 먼저 읽고 그 사이 새 개정이 들어오면 **마지막 행의 축이 한 칸
-// 낡는다**(그 개정분이 마지막 행에 합쳐져 보인다). 읽기 전용 화면의 한 칸 오차라
-// 트랜잭션을 열지 않는다 — `_txlock=immediate` 는 쓰기 잠금이고, 이 조회 때문에 그것을
-// 잡으면 읽기 하나가 모든 쓰기를 세운다.
+// ★ current 를 revs 보다 **먼저** 읽고 그 사이 새 개정이 들어오면 마지막 행의 축이
+// **빈다.** 합쳐 보이는 것이 아니라 **사라진다** — 그 개정이 쌓은 행의 옛 값이 곧 우리가
+// 읽은 current 라, 마지막 쌍의 before 와 after 가 같아져 Changed 가 빈 슬라이스가 된다.
+// 잃는 것 둘: 그 개정이 무엇을 바꿨는지가 화면에서 사라지고, 화면의 「지금 값」도 그
+// 개정 이전 값이다. (반대 순서로 읽으면 대신 마지막 행이 목록에서 통째로 빠진다 —
+// 어느 순서든 한 칸 오차가 있고, 호출부는 없음 관문이 항목에 걸려 있어 순서를 못 바꾼다.)
+//
+// ★★ 그래서 **화면은 그 빈 축을 단정하지 않는다** — mcpsrv/render_show.go 가
+// "같은 값 재지정이거나, 읽는 사이에 들어온 개정이다"로 두 갈래를 열어 둔다. 여기서
+// "합쳐져 보인다"고 적어 두면 그 화면 문구의 근거가 거짓이 된다(재리뷰 ②).
+//
+// 이 오차를 없애려면 읽기 트랜잭션이 필요한데 열지 않는다 — `_txlock=immediate` 는 쓰기
+// 잠금이고, 이 조회 때문에 그것을 잡으면 읽기 하나가 모든 쓰기를 세운다.
 func MarkItemRevisionChanges(revs []model.ItemRevision, current model.Item) {
 	for i := range revs {
 		before := model.Item{Title: revs[i].Title, Body: revs[i].Body, Paths: revs[i].Paths}
