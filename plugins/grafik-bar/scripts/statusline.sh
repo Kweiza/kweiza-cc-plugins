@@ -51,6 +51,48 @@ week_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empt
 week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 user=$(claude auth status 2>/dev/null | jq -r '.email // empty' 2>/dev/null)
 
+# --- Portable stat/date (macOS ships BSD tools, this repo also runs on Linux) ---
+# `$OSTYPE` is a bash builtin — reading it costs no process — so the branch is
+# decided once and each helper below spawns exactly one `stat`/`date`, same as
+# before. The alternative (try the GNU flag, fall back to BSD on failure) would
+# spawn two processes per call on every single macOS render, forever, since the
+# GNU form always fails here; a status line runs on every prompt, so that cost
+# is not hypothetical.
+case "$OSTYPE" in
+  darwin*|*bsd*) STATUSLINE_BSD=1 ;;
+  *)             STATUSLINE_BSD=0 ;;
+esac
+
+stat_mtime() {
+  # $1: file path → mtime as epoch seconds (empty/non-zero exit if missing).
+  # BSD stat (macOS) has no -c; `stat -c %Y` there is rejected outright
+  # ("illegal option -- c"), which is the actual bug: the caller's `|| echo 0`
+  # then always fires, so the cache reads as 1970-old and never as fresh.
+  if [ "$STATUSLINE_BSD" = 1 ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+epoch_from_iso() {
+  # $1: an ISO-8601 timestamp from the usage API. Measured straight from the
+  # live cache file on this Mac (2026-09-18): "2026-09-19T19:00:00.060888+00:00"
+  # — fractional seconds, colon-separated numeric offset, never a trailing Z.
+  # GNU `date -d` parses that natively. BSD `date -j -f` needs an exact
+  # strptime format string: it has no fractional-second spec and wants the
+  # offset as "+0000", not "+00:00" — both are stripped/normalized first. A
+  # bare trailing Z is folded to "+0000" too, in case the API ever sends one.
+  local iso="$1" cleaned
+  [ -z "$iso" ] && return 1
+  if [ "$STATUSLINE_BSD" = 1 ]; then
+    cleaned=$(printf '%s' "$iso" | sed -E 's/\.[0-9]+//; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+    date -j -f "%Y-%m-%dT%H:%M:%S%z" "$cleaned" +%s 2>/dev/null
+  else
+    date -d "$iso" +%s 2>/dev/null
+  fi
+}
+
 # Fable weekly usage: not in the statusline stdin payload — only the claude.ai
 # usage API exposes it, as a weekly_scoped limit with scope.model "Fable".
 # Cache the response and refresh in the background so rendering never blocks.
@@ -65,7 +107,7 @@ fetch_usage() {
     -H "anthropic-beta: oauth-2025-04-20" > "${FABLE_CACHE}.tmp" 2>/dev/null \
     && mv "${FABLE_CACHE}.tmp" "$FABLE_CACHE"
 }
-cache_age=$(( $(date +%s) - $(stat -c %Y "$FABLE_CACHE" 2>/dev/null || echo 0) ))
+cache_age=$(( $(date +%s) - $(stat_mtime "$FABLE_CACHE" || echo 0) ))
 if (( cache_age > FABLE_CACHE_TTL )); then
   if [ -s "$FABLE_CACHE" ]; then
     ( fetch_usage & ) >/dev/null 2>&1
@@ -82,7 +124,7 @@ if [ -s "$FABLE_CACHE" ]; then
     fable_reset_iso=$(jq -r '[.limits[]? | select(.kind == "weekly_scoped"
       and ((.scope.model.display_name // "") | test("fable"; "i")))]
       | first | .resets_at // empty' "$FABLE_CACHE" 2>/dev/null)
-    [ -n "$fable_reset_iso" ] && fable_reset=$(date -d "$fable_reset_iso" +%s 2>/dev/null)
+    [ -n "$fable_reset_iso" ] && fable_reset=$(epoch_from_iso "$fable_reset_iso")
   fi
 fi
 
