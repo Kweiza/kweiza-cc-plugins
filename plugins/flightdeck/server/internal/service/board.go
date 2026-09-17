@@ -24,6 +24,10 @@ type BoardOptions struct {
 	// **생존 판정이 아니다** — 결과에는 각 신호의 시각이 그대로 실린다.
 	Window time.Duration
 	// Self 는 요청한 세션 id 다. 표시 전용이고 **어떤 배제 판정에도 안 쓴다**.
+	//
+	// ★ 예외가 하나 있고 **보호하는 방향뿐이다**: 워크트리가 사라진 카드를 서버가 닫을 때
+	//   요청한 카드 자신은 안 닫는다(judge.MayCloseGoneCard — 지금 부르고 있다는 것이 그 카드가
+	//   살아 있다는 관측이다). 이 값이 무엇을 **빼거나 닫는** 쪽으로 쓰이는 자리는 여전히 없다.
 	Self string
 	// IncludeQueue 는 열린 항목을 함께 낸다.
 	IncludeQueue bool
@@ -210,6 +214,14 @@ type BoardView struct {
 	// 파생하면 보드 한 번이 저장소를 수십 번 친다 — 겹침의 본체는 «누가 무엇을 만지나»이고
 	// 규모는 정렬용 부가 정보다(SortOverlapsBySize 가 못 읽은 것을 맨 위로 올린다).
 	SiblingLive []judge.LiveSession `json:"sibling_live,omitempty"`
+	// ClosedGoneWorktree 는 **이 조회가** 닫은 카드다 — 워크트리가 git 목록에서 사라지고
+	// 서버에서도 없는 카드(service/gone_worktree.go, 설계 §4 셋째 닫힘 경로).
+	//
+	// ★ 침묵하지 않으려고 둔다. 그 카드는 Sessions 에서 빠지므로 이 필드가 없으면 카드가
+	// 조용히 사라지고, 사람은 창 밖으로 밀려난 것과 서버가 닫은 것을 못 가린다.
+	// **이 조회에서 닫은 것만** 싣는다 — 앞선 조회가 닫은 카드는 원장
+	// (event kind `session.close.worktree_gone`)이 나른다.
+	ClosedGoneWorktree []GoneWorktreeClosure `json:"closed_gone_worktree,omitempty"`
 	Derived
 }
 
@@ -260,12 +272,12 @@ func (s *Service) Board(ctx context.Context, project string, opt BoardOptions) (
 	if window <= 0 {
 		window = s.window
 	}
-	cards, roots, err := s.sessionCardsAndRoots(ctx, proj, s.cut(now, window), opt.Self, d)
+	cards, roots, closed, err := s.sessionCardsAndRoots(ctx, proj, s.cut(now, window), opt.Self, d)
 	if err != nil {
 		return BoardView{}, err
 	}
 
-	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards}
+	view := BoardView{Project: proj, At: now, Window: window, Sessions: cards, ClosedGoneWorktree: closed}
 	// ★ 침묵하지 않는다. 루트를 못 읽었거나 어느 트리에도 못 붙인 카드가 있으면
 	//   그 사실을 파생 기록에 남긴다 — 안 남기면 "갈림 없음"과 "판정을 못 했다"가
 	//   화면에서 같아진다.
@@ -498,7 +510,10 @@ func (s *Service) RecentNotes(ctx context.Context, project string, limit int) ([
 //
 // 붙이는 것은 셋이다 — 브랜치·HEAD(워크트리 목록) · ahead(기본 브랜치 대비) ·
 // 경로(footprint ∪ change_set ∪ 미커밋). 셋 다 실패해도 세션 행은 남는다.
-func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, error) {
+//
+// 셋째 반환값은 **이 호출이 닫은 카드**다 — 워크트리가 git 목록에서 사라진 카드는 파생 앞에서
+// 닫고 카드 목록에서 뺀다(gone_worktree.go 머리말이 자리와 근거를 적는다).
+func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, []string, []GoneWorktreeClosure, error) {
 	// ★ 이 함수가 이 서버에서 가장 비싼 일이다 — `git worktree list` 한 번 + 살아 있는
 	//   세션마다 ChangedPaths·UncommittedPaths·UncommittedDelta. 그 비용을 세는 자리를 여기 둔다.
 	//   호출부에 두면 호출부가 늘 때마다 계측이 조용히 빠진다(실제로 그 모양으로
@@ -511,7 +526,7 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 
 	live, err := s.st.ListLive(ctx, proj.ID, cut)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	s.deriveCards.Add(uint64(len(live)))
 
@@ -519,11 +534,12 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 	var wts map[string]string // 워크트리 경로 → 브랜치
 	var heads map[string]string
 	var roots []string
+	var wl worktreeList // ok=false 가 0값이다 — git 을 안 불렀으면 부재를 말할 근거도 없다
 	if strings.TrimSpace(proj.Path) == "" {
 		d.note("project-path", "프로젝트 경로가 비어 있다 — git 파생을 아예 시도하지 않았다")
 	} else {
 		g = s.git(proj.Path)
-		wts, heads = s.worktreeIndex(ctx, g, d)
+		wts, heads, wl = s.worktreeIndex(ctx, g, d)
 		roots = make([]string, 0, len(wts))
 		for wt := range wts {
 			roots = append(roots, wt)
@@ -540,7 +556,17 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 	}
 
 	cards := make([]SessionCard, 0, len(live))
+	var closed []GoneWorktreeClosure
 	for _, v := range live {
+		// ★ 워크트리가 사라진 카드는 **파생 앞에서** 닫는다. 뒤에서 닫으면 그 카드가 아래
+		//   미커밋 두 축(uncommitted·uncommitted-delta)을 이미 실패로 남긴 뒤라, 방금 닫힌
+		//   카드가 같은 응답에 파생 실패로 뜬다. 닫는 조건과 근거는 gone_worktree.go 다.
+		if g != nil && s.closeIfWorktreeGone(ctx, proj, v, self, wl) {
+			closed = append(closed, GoneWorktreeClosure{
+				SessionID: v.Session.ID, Label: v.Session.Label, Worktree: v.Session.Worktree,
+			})
+			continue
+		}
 		card := SessionCard{View: v, IsSelf: v.Session.ID == self}
 		var fails []string
 
@@ -621,7 +647,7 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 		card.View.HasFootprint = len(card.View.Paths) > 0
 
 		if note, err := s.lastNote(ctx, v.Session.ID); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		} else if note != nil {
 			card.View.LastNote = note
 		}
@@ -629,7 +655,7 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 		card.DeriveError = strings.Join(fails, " · ")
 		cards = append(cards, card)
 	}
-	return cards, roots, nil
+	return cards, roots, closed, nil
 }
 
 // sessionCards 는 루트가 필요 없는 호출부를 위한 껍데기다(finish.go · pick.go).
@@ -638,25 +664,34 @@ func (s *Service) sessionCardsAndRoots(ctx context.Context, proj model.Project, 
 //
 //	(다른 세션이 미랜딩으로 잡고 있다). 로직은 sessionCardsAndRoots 하나뿐이다.
 func (s *Service) sessionCards(ctx context.Context, proj model.Project, cut time.Time, self string, d *derive) ([]SessionCard, error) {
-	cards, _, err := s.sessionCardsAndRoots(ctx, proj, cut, self, d)
+	// ★ 닫은 카드 목록은 여기서 버린다 — 이 껍데기의 호출부(pick·note 수신자·amend)는 카드를
+	//   화면에 안 내므로 "사라진 카드"를 말할 자리가 없다. 닫기 자체는 원장 이벤트와 INFO 로그가
+	//   나른다(gone_worktree.go). 닫기를 보드에서만 돌리지 않는 이유도 거기 적었다.
+	cards, _, _, err := s.sessionCardsAndRoots(ctx, proj, cut, self, d)
 	return cards, err
 }
 
-// worktreeIndex 는 워크트리 경로 → 브랜치·HEAD 두 색인을 만든다.
-func (s *Service) worktreeIndex(ctx context.Context, g GitReader, d *derive) (branches, heads map[string]string) {
+// worktreeIndex 는 워크트리 경로 → 브랜치·HEAD 두 색인과 **목록 그 자체**를 만든다.
+//
+// ★ 셋째 반환값이 왜 따로 있나. 색인 맵은 실패 시 빈 맵이라 "못 읽었다"와 "비었다"가 같다 —
+// 브랜치 표시에는 그래도 되지만(BranchKnown 이 가른다) 워크트리가 사라진 카드를 닫는 판정에는
+// 안 된다. 목록을 못 읽었으면 ok=false 로 나가고, 그 판정은 거기서 멈춘다(judge.WorktreeGone ①).
+func (s *Service) worktreeIndex(ctx context.Context, g GitReader, d *derive) (branches, heads map[string]string, list worktreeList) {
 	branches, heads = map[string]string{}, map[string]string{}
 	wts, err := g.Worktrees(ctx)
 	if err != nil {
 		d.fail("worktrees", err)
-		return branches, heads
+		return branches, heads, worktreeList{}
 	}
 	d.ok()
+	list.ok = true
 	for _, w := range wts {
 		p := filepath.Clean(w.Path)
 		branches[p] = w.ShortBranch()
 		heads[p] = w.HEAD
+		list.paths = append(list.paths, p)
 	}
-	return branches, heads
+	return branches, heads, list
 }
 
 // lastNote 는 세션이 마지막으로 남긴 판단이다. 없으면 nil.

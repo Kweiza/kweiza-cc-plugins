@@ -310,6 +310,36 @@ func (s *Store) SetSessionState(ctx context.Context, id string, state model.Sess
 	return s.Tx(ctx, func(t *Tx) error { return t.SetSessionState(id, state, why) })
 }
 
+// CloseSessionIfActiveUnclaimed 는 카드가 **지금 active 이고 풀리지 않은 선점이 0건일 때만**
+// done 으로 내린다. 내렸으면 true, 조건이 안 서서 안 내렸으면 false 다(오류가 아니다).
+//
+// ★ 워크트리가 사라진 카드를 서버가 닫는 경로(service/gone_worktree.go) 전용이다. 사람이 치는
+// `fd close` 는 SetSessionState 를 그대로 쓴다 — 그쪽은 사람이 선점을 보고 판단한 뒤에 온다.
+//
+// ★ 조건을 **UPDATE 한 문장 안에** 둔다. 판정(judge.MayCloseGoneCard)은 ListLive 로 읽은
+// 스냅숏을 보는데, 그 읽기와 이 쓰기 사이에 사람이 blocked 를 걸거나 세션이 항목을 집을 수
+// 있다. 여기서 다시 읽고 나서 쓰면 그 사이가 또 창이 된다 — 한 문장이면 창이 없다.
+//
+// ★ state 만 바꾼다. blocked_why 를 안 건드리는 이유: 되살리기(Tx.OpenSession)는 state 만
+// active 로 돌리므로, 여기서 사유 칸에 무엇을 적으면 되살아난 카드에 옛 닫기 사유가 남는다.
+// 왜 닫았는지는 원장 이벤트가 나른다.
+func (t *Tx) CloseSessionIfActiveUnclaimed(id string) (bool, error) {
+	res, err := t.tx.ExecContext(t.ctx, `
+		UPDATE session SET state = ?
+		WHERE id = ? AND state = ?
+		  AND NOT EXISTS (SELECT 1 FROM claim c
+		                  WHERE c.session_id = session.id AND c.released_at IS NULL)`,
+		string(model.SessionDone), id, string(model.SessionActive))
+	if err != nil {
+		return false, fmt.Errorf("세션 조건부 닫기 실패(session_id=%q): %w", clip(id, 64), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("세션 조건부 닫기 결과 확인 실패(session_id=%q): %w", clip(id, 64), err)
+	}
+	return n == 1, nil
+}
+
 // Rekey 는 카드의 cc_session_id 만 갈아끼운다.
 //
 // ★ 이것이 "카드 두 장을 하나로 합치기"의 전부다. 선점·판단·발자국·자원이 전부
