@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -37,9 +36,11 @@ import (
 //	같은 구멍을 스스로 적었다).
 //
 //	읽기 경로가 쓰기를 하는 비용은 이렇게 갚는다: ① 이 파일의 쓰기는 **조건이 다 선 카드에만**
-//	돈다 — 평시 보드는 쓰기가 0이고, 추가 비용은 카드당 lstat·stat 두 번이다(git 호출은 0).
-//	② 쓰기는 카드 한 장당 짧은 트랜잭션 하나이고, 판정의 안전 조건(active · 선점 0)을 UPDATE
-//	한 문장 안에서 다시 건다(store.Tx.CloseSessionIfActiveUnclaimed). ③ 실패해도 조회를 안
+//	돈다 — 평시 보드는 쓰기가 0이고, 추가 비용도 문자열 비교뿐이다(아래 closeIfWorktreeGone 의
+//	순서: 목록에 있는 카드는 stat 도 원장 조회도 안 탄다. git 호출은 0).
+//	② 쓰기는 카드 한 장당 짧은 트랜잭션 하나이고, 판정의 안전 조건(active · 선점 0 · 카드당 한 번)을
+//	UPDATE 한 문장 안에서 다시 걸며 원장 행도 **같은 트랜잭션**에서 쓴다
+//	(store.Tx.CloseSessionWhoseWorktreeIsGone 머리말이 관례에서 벗어난 근거를 적는다). ③ 실패해도 조회를 안
 //	죽인다 — 그 카드는 지금까지처럼 파생되어 나가고(파생 실패도 그대로 뜬다) WARN 이 남는다.
 //	같은 파일이 이미 읽기 중에 관측을 쓴다(board.go 의 rememberRef·rememberChangeSet) —
 //	다른 점은 이것이 상태 전이라는 것이고, 그래서 판정을 순수 함수로 떼고 원장에 남긴다.
@@ -51,14 +52,6 @@ import (
 //	카드 파생 한 자리에 두는 이유: 보드뿐 아니라 pick·note(수신자)·amend 가 같은 함수를
 //	지난다(board.go 의 sessionCards·liveOverlapSessions). 유령은 보드 카드로도 뜨지만
 //	**겹침 표에도** 뜨고, 겹침은 pick 응답 꼬리가 낸다 — 보드에서만 닫으면 그 표면이 남는다.
-
-// eventSessionWorktreeGone 은 이 경로가 원장에 남기는 kind 다.
-//
-// ★ `session.state`(fd close·SessionEnd 훅이 PATCH 로 남기는 것)와 **다른 kind** 다.
-// 사람이 나중에 "왜 이 카드가 닫혔지"를 물을 때 사람이 닫은 것과 서버가 닫은 것이 한 kind 로
-// 섞이면 payload 를 뒤져야 갈린다. 상수로 두는 이유는 발화부와 한도 조회(priorAutoClose)가
-// 같은 문자열을 봐야 해서다 — 리터럴 둘이면 한쪽만 고칠 때 카드당 한 번 한도가 조용히 풀린다.
-const eventSessionWorktreeGone = "session.close.worktree_gone"
 
 // GoneWorktreeClosure 는 **이 조회가** 닫은 카드 한 장이다.
 type GoneWorktreeClosure struct {
@@ -85,42 +78,44 @@ type worktreeList struct {
 func (s *Service) closeIfWorktreeGone(ctx context.Context, proj model.Project, v model.SessionView,
 	self string, wl worktreeList) bool {
 
-	tree, home := judge.GoneWorktreeCoords(v.Session.Worktree, wl.paths)
+	// ★ 싼 것부터 잰다. 순서가 곧 평시 비용이다:
+	//   ① 문자열(목록 비교·관례 자리) — 살아 있는 카드는 거의 전부 여기서 끝난다
+	//   ② ListLive 가 이미 실어 온 필드(state·선점·mcp 신호·요청자) — 조회 0
+	//   ③ 서버 파일시스템(stat·lstat)                               — 시스템 호출 둘
+	//   ④ 원장(앞선 자동 닫기)                                       — DB 조회 하나
+	//   ⑤ 쓰기 — 위 조건을 한 문장 안에서 다시 건다
+	// 선점·blocked 를 든 유령이 남아 있는 동안에도 ②에서 끝나므로 파생마다 원장을 안 친다.
+	cand := judge.WorktreeGoneCandidate(v.Session.Worktree, wl.ok, wl.paths)
+	if !cand.OK {
+		return false
+	}
+	_, hasMCP := v.Signals[model.SignalMCP]
+	if ok, why := judge.MayCloseGoneCard(judge.GoneCardGuards{
+		State: v.Session.State, Claims: len(v.Claims), IsSelf: v.Session.ID == self, HasMCPSignal: hasMCP,
+	}); !ok {
+		s.skipGone(ctx, v, why)
+		return false
+	}
 	gone := judge.WorktreeGone(judge.GoneWorktreeFacts{
 		Worktree:     v.Session.Worktree,
 		ListOK:       wl.ok,
 		Listed:       wl.paths,
-		TreePresence: lstatPresence(tree),
-		HomePresence: dirPresence(home),
+		TreePresence: lstatPresence(cand.Tree),
+		HomePresence: dirPresence(cand.Home),
 	})
 	if !gone.Gone {
+		s.skipGone(ctx, v, gone.Reason)
 		return false
 	}
-	// ★ 원장 조회는 좌표가 사라진 카드에만 돈다 — 평시 카드는 이 줄에 안 온다.
-	ok, why := judge.MayCloseGoneCard(judge.GoneCardGuards{
-		State:  v.Session.State,
-		Claims: len(v.Claims),
-		IsSelf: v.Session.ID == self,
-		Prior:  s.priorAutoClose(ctx, v.Session.ID),
-	})
-	if !ok {
-		// Debug 인 이유: 조건이 풀리지 않는 한 **조회마다** 같은 줄이 나온다(선점을 든 유령 등).
-		// 그 카드는 보드에 그대로 뜨고 파생 실패도 그대로 뜬다 — 화면이 이미 말하고 있다.
-		s.log.DebugContext(ctx, "워크트리가 사라진 카드를 안 닫는다",
-			"session_id", clip(v.Session.ID, 64), "worktree", clip(v.Session.Worktree, 200),
-			"reason", why)
+	if ok, why := judge.PriorAutoCloseAllows(s.priorAutoClose(ctx, v.Session.ID)); !ok {
+		s.skipGone(ctx, v, why)
 		return false
 	}
 
 	var closed bool
 	err := s.st.Tx(ctx, func(t *store.Tx) error {
 		var e error
-		if closed, e = t.CloseSessionIfActiveUnclaimed(v.Session.ID); e != nil || !closed {
-			// 안 닫혔으면(그 사이 blocked·선점·닫기) 원장에 아무것도 안 남긴다 — 닫지 않은
-			// 닫기를 남기면 한도 조회가 그것을 "이미 닫았다"로 센다.
-			return e
-		}
-		t.LogEvent(eventSessionWorktreeGone, proj.ID, v.Session.ID, map[string]any{
+		closed, e = t.CloseSessionWhoseWorktreeIsGone(v.Session.ID, proj.ID, map[string]any{
 			"worktree": clip(v.Session.Worktree, 200),
 			"tree":     clip(gone.Tree, 200),
 			"home":     clip(gone.Home, 200),
@@ -128,7 +123,7 @@ func (s *Service) closeIfWorktreeGone(ctx context.Context, proj model.Project, v
 			"machine":  clip(v.Session.MachineID, 64),
 			"reason":   clip(gone.Reason, 400),
 		})
-		return nil
+		return e
 	})
 	if err != nil {
 		s.log.WarnContext(ctx, "워크트리가 사라진 카드를 닫으려다 실패했다 — 카드는 그대로 파생한다",
@@ -144,31 +139,32 @@ func (s *Service) closeIfWorktreeGone(ctx context.Context, proj model.Project, v
 	return closed
 }
 
-// priorAutoClose 는 이 카드가 앞서 **커밋된** 자동 닫기를 겪었는지 원장에서 읽는다.
+// skipGone 은 좌표 후보였지만 안 닫은 카드를 Debug 로 남긴다.
 //
-// ★ 롤백된 행은 안 센다 — 예약 이벤트는 롤백 갈래에서도 흘러간다(store 의 TxOutcomeKey).
-// ★ 못 읽거나 payload 를 못 풀면 Unknown 이다. alreadyLoggedProjectMismatch(session.go)는
-// 같은 실패를 "억제 없이 남긴다"로 접는데 여기는 반대다 — 그쪽은 잘못 접어도 이벤트가 한 줄
-// 더 남을 뿐이고, 여기는 잘못 접으면 **카드를 닫는다.**
+// Debug 인 이유: 조건이 풀리지 않는 한 **조회마다** 같은 줄이 나온다(선점을 든 유령 등).
+// 그 카드는 보드에 그대로 뜨고 파생 실패도 그대로 뜬다 — 화면이 이미 말하고 있다.
+func (s *Service) skipGone(ctx context.Context, v model.SessionView, why string) {
+	s.log.DebugContext(ctx, "워크트리가 사라진 카드를 안 닫는다",
+		"session_id", clip(v.Session.ID, 64), "worktree", clip(v.Session.Worktree, 200), "reason", why)
+}
+
+// priorAutoClose 는 이 카드에 앞선 자동 닫기 행이 있는지 원장에서 읽는다.
+//
+// ★ 이 kind 의 행은 닫기와 **같은 트랜잭션**에서만 쓰이므로(store.EventSessionCloseWorktreeGone)
+// 행이 있으면 커밋된 닫기다 — payload 를 안 풀어도 된다.
+// ★ 못 읽으면 Unknown 이다. alreadyLoggedProjectMismatch(session.go)는 같은 실패를 "억제 없이
+// 남긴다"로 접는데 여기는 반대다 — 그쪽은 잘못 접어도 이벤트가 한 줄 더 남을 뿐이고, 여기는
+// 잘못 접으면 **카드를 닫는다.** (쓰기 문장이 같은 조건을 다시 걸지만, 미리 거르기가 오류를
+// "없다"로 읽으면 되살아난 유령마다 파생 때마다 쓰기 잠금을 잡는다.)
 func (s *Service) priorAutoClose(ctx context.Context, sessionID string) judge.PriorAutoClose {
-	evs, err := s.st.ListSessionEvents(ctx, sessionID, eventSessionWorktreeGone, time.Time{})
+	evs, err := s.st.ListSessionEvents(ctx, sessionID, store.EventSessionCloseWorktreeGone, time.Time{})
 	if err != nil {
 		s.log.WarnContext(ctx, "앞선 자동 닫기 조회 실패 — 안 닫는다",
 			"session_id", clip(sessionID, 64), "error", err.Error())
 		return judge.PriorAutoCloseUnknown
 	}
-	for _, e := range evs {
-		var p struct {
-			Tx string `json:"tx"`
-		}
-		if json.Unmarshal([]byte(e.Payload), &p) != nil {
-			s.log.WarnContext(ctx, "자동 닫기 이벤트 payload 해석 실패 — 안 닫는다",
-				"session_id", clip(sessionID, 64), "payload", clip(e.Payload, 200))
-			return judge.PriorAutoCloseUnknown
-		}
-		if p.Tx == store.TxCommitted {
-			return judge.PriorAutoCloseSeen
-		}
+	if len(evs) > 0 {
+		return judge.PriorAutoCloseSeen
 	}
 	return judge.PriorAutoCloseNone
 }

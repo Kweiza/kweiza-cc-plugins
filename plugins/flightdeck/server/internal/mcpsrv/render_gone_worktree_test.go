@@ -29,8 +29,9 @@ func TestBoardSaysWhichCardsThisCallClosedBecauseTheirWorktreeIsGone(t *testing.
 		if !strings.Contains(got, "사라진 카드 1장을 이 조회가 닫았다") || !strings.Contains(got, ShortID("01GHOSTCARD00")) {
 			t.Fatalf("detail=%v: 이 조회가 닫은 카드를 안 말한다:\n%s", detail, got)
 		}
-		if !strings.Contains(got, "신호가 오면 다시 열린다") {
-			t.Fatalf("detail=%v: 닫기가 되돌릴 수 있는 관측이라는 사실을 안 말한다:\n%s", detail, got)
+		// "다시 열린다"는 mcp 카드를 안 닫는다는 전제 위에서만 참이다 — 문장이 그 전제를 말해야 한다.
+		if !strings.Contains(got, "mcp 신호가 없는 카드만 닫으므로") || !strings.Contains(got, "다시 열린다") {
+			t.Fatalf("detail=%v: 되열림과 그 전제(mcp 카드는 안 닫는다)를 함께 말하지 않는다:\n%s", detail, got)
 		}
 		if strings.Contains(got, "죽") {
 			t.Fatalf("detail=%v: 생존 판정 낱말이 들어갔다 — 설계 §4 위반:\n%s", detail, got)

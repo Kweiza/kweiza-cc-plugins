@@ -16,8 +16,8 @@ import (
 // 워크트리가 사라진 카드를 서버가 닫는다 — **실물 저장소**로 잰다(설계 §4 셋째 닫힘 경로).
 //
 // ★ 조건 하나씩의 잠금은 judge/gone_worktree_test.go 에 있다. 여기서는 조건 여럿이 서로를
-// 가리므로(살아 있는 카드는 디렉토리가 실제로 있어서 목록 비교가 틀려도 lstat 이 먼저 막는다)
-// **배선과 결말**을 잰다 — 닫혔나 · 원장에 남았나 · 같은 응답이 모순되지 않나 · 되살아나나.
+// 가리므로(살아 있는 카드는 대개 목록에 있어서 목록 비교가 먼저 막고, 목록 비교가 틀려도 뒤의
+// lstat 이 막는다) **배선과 결말**을 잰다 — 닫혔나 · 원장에 남았나 · 같은 응답이 모순되지 않나 · 되살아나나.
 
 // newRepoWithConventionWorktree 는 저장소 하나와 **관례 자리**의 워크트리 하나를 만든다.
 //
@@ -127,14 +127,14 @@ func TestBoardRecordsTheGoneWorktreeCloseInTheLedger(t *testing.T) {
 	var found []model.Event
 	for _, e := range evs {
 		switch e.Kind {
-		case eventSessionWorktreeGone:
+		case store.EventSessionCloseWorktreeGone:
 			found = append(found, e)
 		case "session.state":
 			t.Fatalf("서버의 자동 닫기가 사람의 닫기와 같은 kind(session.state)로 남았다: %s", e.Payload)
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("%s 이벤트가 %d건이다 — 정확히 1건이어야 한다(전체 %+v)", eventSessionWorktreeGone, len(found), evs)
+		t.Fatalf("%s 이벤트가 %d건이다 — 정확히 1건이어야 한다(전체 %+v)", store.EventSessionCloseWorktreeGone, len(found), evs)
 	}
 	if found[0].Kind != "session.close.worktree_gone" || found[0].Project != "p" {
 		t.Fatalf("원장 좌표가 틀렸다: kind=%q project=%q", found[0].Kind, found[0].Project)
@@ -274,8 +274,9 @@ func TestBoardKeepsGoneWorktreeCardMarkedBlocked(t *testing.T) {
 
 // 경로 꼴이 달라도 같은 살아 있는 워크트리면 안 닫는다.
 //
-// ★ 대소문자 꼴은 macOS(대소문자 무시 파일시스템)에서는 lstat 이 먼저 "있다"로 막고, 리눅스
-// 에서는 목록 비교(대소문자 무시)가 막는다 — 어느 머신에서 돌든 한쪽은 선다.
+// ★ 판정 순서상 **목록 비교가 먼저** 막는다(Clean + 대소문자 무시). lstat 은 그 뒤의 층이라,
+// 목록 비교만 망가뜨리면 이 시험은 초록이고(macOS 에서는 대소문자만 다른 꼴도 lstat 이 "있다"로
+// 본다) 두 층을 함께 꺼야 빨갛다 — 층 하나씩은 judge 시험과 아래 lstat·prunable 시험이 잠근다.
 func TestBoardKeepsLiveWorktreeCardSpelledDifferently(t *testing.T) {
 	s, st := newSvc(t)
 	repo, wt := newRepoWithConventionWorktree(t, "fd-x")
@@ -350,7 +351,7 @@ func TestGoneWorktreeCardReopensOnTheNextSignalAndIsNotClosedAgain(t *testing.T)
 			cardIDs(view), view.ClosedGoneWorktree)
 	}
 	if n := countRows(t, st, `SELECT COUNT(*) FROM event WHERE kind = ? AND session_id = ?`,
-		eventSessionWorktreeGone, ghostID); n != 1 {
+		store.EventSessionCloseWorktreeGone, ghostID); n != 1 {
 		t.Fatalf("자동 닫기 이벤트가 %d건이다 — 카드당 한 번이어야 한다", n)
 	}
 }
@@ -366,5 +367,104 @@ func TestPickAlsoClosesGoneWorktreeCards(t *testing.T) {
 	}
 	if got := sessionState(t, st, ghostID); got.State != model.SessionDone {
 		t.Fatalf("pick 이 같은 파생을 지났는데 유령 카드가 %q 다 — 겹침 표에 남는다", got.State)
+	}
+}
+
+// ★ I-1: MCP 카드는 닫지 않는다 — 닫으면 되살릴 길이 없다.
+//
+// 닫히던 입력: 세션을 관례 워크트리 **안에서** 띄우면 `fd mcp` 가 그 cwd 로 카드를 연다. 그 세션이
+// 랜딩하고 워크트리를 지운 뒤 main 에서 계속 일하면 훅은 main 3중키라 다른 카드이고, MCP 카드는
+// 지운 자리에 남는다. 그 카드를 닫으면 ① ensureSession 은 프로세스당 한 번만 열고 ② 도구마다
+// 찍는 mcp 신호는 state 를 안 건드리며 ③ 훅은 그 카드를 안 연다 — 그 사이 그 세션이 pick 하면
+// done 카드가 선점을 쥔다. 여기서는 그 모양(mcp 신호가 찍힌 카드 + 지운 워크트리 + 남의 보드)을 만든다.
+func TestBoardDoesNotCloseAnMCPCardWhoseWorktreeIsGone(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithConventionWorktree(t, "fd-x")
+	mainID := openSession(t, s, "p", repo, repo, "cc-main", "주 트리").Session.ID
+	mcpID := openSession(t, s, "p", repo, wt, "cc-mcp", "워크트리에서 띄운 세션").Session.ID
+	// callTool 이 ensureSession 뒤에 찍는 바로 그 신호다(mcpsrv.go).
+	if err := s.Beat(ctx(), mcpID, model.SignalMCP, nil); err != nil {
+		t.Fatalf("mcp 신호 실패: %v", err)
+	}
+	removeWorktree(t, repo, wt)
+
+	view, err := s.Board(ctx(), "p", BoardOptions{Self: mainID})
+	if err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if got := sessionState(t, st, mcpID); got.State != model.SessionActive {
+		t.Fatalf("mcp 신호가 있는 카드를 %q 로 닫았다 — MCP 는 그 카드를 다시 안 열고, 그 세션의 pick 이 done 카드에 선점을 쥐인다", got.State)
+	}
+	if !contains(cardIDs(view), mcpID) || len(view.ClosedGoneWorktree) != 0 {
+		t.Fatalf("MCP 카드가 보드에서 빠졌거나 닫았다고 말한다: cards=%v closed=%+v", cardIDs(view), view.ClosedGoneWorktree)
+	}
+}
+
+// ★ I-3: **목록에는 없는데 디렉토리는 살아 있는** 워크트리의 카드를 안 닫는다.
+//
+// 이 모양에서 카드를 막는 층은 서버의 lstat 하나뿐이다. git 은 gitdir 를 못 읽는 워크트리를
+// 목록에서 조용히 빼고 0으로 끝난다 — 관리 디렉토리(.git/worktrees/<이름>)가 치워졌거나
+// repair·move 가 그것을 다시 쓰는 순간이 그렇다. 여기서는 관리 디렉토리만 치운다.
+func TestBoardKeepsCardWhoseLiveWorktreeGitStoppedListing(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithConventionWorktree(t, "fd-x")
+	mainID := openSession(t, s, "p", repo, repo, "cc-main", "주 트리").Session.ID
+	liveID := openSession(t, s, "p", repo, wt, "cc-live", "살아 있는 워크트리").Session.ID
+	if err := os.RemoveAll(filepath.Join(repo, ".git", "worktrees", "fd-x")); err != nil {
+		t.Fatalf("관리 디렉토리 치우기 실패: %v", err)
+	}
+	// 전제 둘을 실물로 잰다 — 목록에서는 빠졌고, 디렉토리는 살아 있다.
+	wts, err := gitreader.New(repo).Worktrees(ctx())
+	if err != nil {
+		t.Fatalf("목록 읽기 실패: %v", err)
+	}
+	for _, w := range wts {
+		if filepath.Clean(w.Path) == wt {
+			t.Fatalf("전제가 깨졌다 — git 이 아직 %s 를 목록에 낸다: %+v", wt, w)
+		}
+	}
+	if _, err := os.Lstat(wt); err != nil {
+		t.Fatalf("전제가 깨졌다 — 워크트리 디렉토리가 없다: %v", err)
+	}
+
+	if _, err := s.Board(ctx(), "p", BoardOptions{Self: mainID}); err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if got := sessionState(t, st, liveID); got.State != model.SessionActive {
+		t.Fatalf("디렉토리가 살아 있는 워크트리의 카드를 %q 로 닫았다 — git 목록에서 빠진 것만 보고 부재로 읽었다", got.State)
+	}
+}
+
+// git 목록에 prunable 로 남은 워크트리는 **있는 것**이다 — 디렉토리가 없어도 안 닫는다.
+//
+// 컨테이너 서버에서 마운트 밖 워크트리가 정확히 이 모양이다(git 은 기록을 갖고 있는데 서버에서는
+// 디렉토리가 안 보인다). 여기서는 `git worktree remove` 없이 디렉토리만 지워 같은 목록을 만든다.
+func TestBoardKeepsCardWhoseWorktreeGitStillListsAsPrunable(t *testing.T) {
+	s, st := newSvc(t)
+	repo, wt := newRepoWithConventionWorktree(t, "fd-x")
+	mainID := openSession(t, s, "p", repo, repo, "cc-main", "주 트리").Session.ID
+	ghostID := openSession(t, s, "p", repo, wt, "cc-prunable", "prunable").Session.ID
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("워크트리 디렉토리 지우기 실패: %v", err)
+	}
+	wts, err := gitreader.New(repo).Worktrees(ctx())
+	if err != nil {
+		t.Fatalf("목록 읽기 실패: %v", err)
+	}
+	prunable := false
+	for _, w := range wts {
+		if filepath.Clean(w.Path) == wt && w.Prunable {
+			prunable = true
+		}
+	}
+	if !prunable {
+		t.Fatalf("전제가 깨졌다 — git 이 %s 를 prunable 로 안 낸다: %+v", wt, wts)
+	}
+
+	if _, err := s.Board(ctx(), "p", BoardOptions{Self: mainID}); err != nil {
+		t.Fatalf("보드 실패: %v", err)
+	}
+	if got := sessionState(t, st, ghostID); got.State != model.SessionActive {
+		t.Fatalf("git 이 prunable 로 아직 기록하는 워크트리의 카드를 %q 로 닫았다 — 마운트 밖 워크트리가 전부 닫힌다", got.State)
 	}
 }

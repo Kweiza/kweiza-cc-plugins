@@ -86,17 +86,22 @@ const (
 	//     기각 근거는 "되살리는 경로가 Tx.OpenSession 하나뿐이고 Tx.Beat 는 state 를 안
 	//     건드린다. 오판당한 세션은 신호를 계속 보내면서도 다음 SessionStart 까지 보드에서
 	//     사라진다. claim 자동만료를 실측 2회로 기각한 것과 같은 부류다"였다. 그 둘을 다시 쟀다:
-	//     ① **"다음 SessionStart 까지"는 사실이 아니었다.** UserPromptSubmit·PostToolUse 훅이
-	//     매번 `POST /api/v1/sessions`(= Service.OpenSession)를 먼저 지나고 신호는 그 뒤다
-	//     (cmd/fd 의 beatFromHook) — 다음 프롬프트나 편집에서 되살아난다.
+	//     ① **"다음 SessionStart 까지"는 훅 카드에 대해서는 사실이 아니었고, MCP 카드에 대해서는
+	//     사실이다.** UserPromptSubmit·PostToolUse 훅은 그때(c27e70f)도 지금도 매번
+	//     `POST /api/v1/sessions`(= Service.OpenSession)를 신호보다 먼저 지난다(cmd/fd 의
+	//     beatFromHook) — 훅 카드는 다음 프롬프트나 편집에서 되살아난다. 그런데 MCP 카드는
+	//     ensureSession 이 프로세스당 한 번만 열고 도구마다 찍는 mcp 신호(Tx.Beat)는 state 를 안
+	//     건드려서 **신호를 보내면서도 안 되살아난다** — 옛 문장이 정확히 그 카드를 말한다. 그래서
+	//     mcp 신호가 있는 카드는 닫기 대상에서 뺐다(judge.MayCloseGoneCard).
 	//     ② **같은 부류가 아니다.** claim 자동만료와 두 오판은 세션의 **행동**(나이·무응답)에서
-	//     죽음을 추론했고, 이 경로는 서버가 git 에서 직접 관측하는 **좌표의 부재**를 본다 —
-	//     나이·pid·무응답을 한 글자도 안 본다. 조건과 한도(목록을 못 읽으면 안 닫는다 · 관례
-	//     자리만 · active·선점 0·요청자 아님 · 카드당 한 번)는 service/gone_worktree.go 와
-	//     judge/gone_worktree.go, 근거는 설계 §4 「세션은 어떻게 닫히나」가 적는다.
+	//     죽음을 추론했고, 이 경로의 근거는 서버가 git 에서 직접 관측하는 **좌표의 부재**다 —
+	//     나이·pid·무응답을 한 글자도 안 본다(그 관측에서 "닫는다"로 넘어가는 걸음은 판정이다).
+	//     조건과 한도(목록을 못 읽으면 안 닫는다 · 관례 자리만 · active·선점 0·mcp 카드 아님·요청자
+	//     아님 · 카드당 한 번)는 service/gone_worktree.go 와 judge/gone_worktree.go, 근거는 설계 §4
+	//     「세션은 어떻게 닫히나」가 적는다.
 	//     그래서 위 표의 "worktree 없음" 행은 이제 창 크기와 함께 자라지 않는다 — **관례 자리
 	//     (.flightdeck/worktrees · .claude/worktrees)의 카드만** 그렇다. 저장소 밖 형제 자리
-	//     (`../wt-x`)나 선점·blocked 를 든 유령은 여전히 이 계산에 남으므로 창을 넓히는 사람은
+	//     (`../wt-x`)나 선점·blocked 를 든 유령·MCP 카드 유령은 여전히 이 계산에 남으므로 창을 넓히는 사람은
 	//     여전히 재야 한다.
 	//
 	// ★ 위 표는 **한 시점 관측이고 원장으로 회고가 안 된다.** 파생 실패를 적는 event.kind 가

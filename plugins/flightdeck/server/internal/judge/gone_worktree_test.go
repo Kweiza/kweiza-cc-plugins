@@ -11,7 +11,7 @@ import (
 //
 // ★ 왜 순수 함수 시험이 따로 있나. 실물 저장소 시험(service/gone_worktree_test.go)에서는
 // 조건 여럿이 서로를 가린다 — 살아 있는 카드는 디렉토리가 실제로 있어서, 목록 비교가 틀려도
-// 서버 lstat 이 먼저 막는다. 그러면 목록 비교를 망가뜨려도 초록이다. 여기서는 관측을 값으로
+// 그 뒤의 서버 lstat 이 막는다. 그러면 목록 비교를 망가뜨려도 초록이다. 여기서는 관측을 값으로
 // 넣으므로 조건 하나만 틀어 그 조건이 잡는지 볼 수 있다.
 
 const (
@@ -139,15 +139,54 @@ func TestWorktreeNotGoneWhenTheTreeIsPresentOrUnmeasured(t *testing.T) {
 	}
 }
 
+// 앞 다섯 조건이 다 서면 후보이고, 그 후보가 잴 자리(tree·home)를 WorktreeGone 과 **같은 값**으로
+// 낸다. 서비스는 이 값만 stat 하므로 두 자리가 어긋나면 잰 경로와 판정한 경로가 달라진다.
+func TestWorktreeGoneCandidateNamesTheSameCoordsAsTheVerdict(t *testing.T) {
+	f := goneFacts()
+	c := WorktreeGoneCandidate(f.Worktree, f.ListOK, f.Listed)
+	if !c.OK || c.Tree != goneTree || c.Home != goneMain {
+		t.Fatalf("후보 판정이 틀렸다: %+v (기대 tree=%q home=%q)", c, goneTree, goneMain)
+	}
+	if v := WorktreeGone(f); v.Tree != c.Tree || v.Home != c.Home {
+		t.Fatalf("후보와 판정이 다른 자리를 말한다: 후보 %+v · 판정 %+v", c, v)
+	}
+	// 목록에 있으면 후보가 아니다 — 서비스는 여기서 멈추고 stat 을 안 한다(평시 비용 0).
+	if c := WorktreeGoneCandidate(goneMain, true, f.Listed); c.OK {
+		t.Fatalf("목록에 있는 주 워크트리가 후보로 나왔다 — 살아 있는 카드마다 stat 을 한다: %+v", c)
+	}
+}
+
+// 중첩 배치에서는 **가장 안쪽** 관례 루트를 잰다 — 워크트리 안에서 하네스가 자기 워크트리를
+// 만든 경우다(judge 의 conventionRoots 가 전부를 내는 이유와 같은 배치).
+//
+// 바깥 것을 고르면 둘이 다 틀린다: 안쪽 트리가 지워졌는데 바깥이 목록에 있으면 "살아 있는
+// 워크트리의 하위 디렉토리"로 읽혀 영영 안 닫히고, 반대로 바깥이 지워졌는데 안쪽이 살아 있으면
+// 살아 있는 트리를 부재로 잰다.
+func TestWorktreeGoneMeasuresTheInnermostConventionRoot(t *testing.T) {
+	outer := "/srv/repo/.flightdeck/worktrees/fd-x"
+	inner := outer + "/.claude/worktrees/sub"
+	f := goneFacts()
+	f.Worktree = inner
+	f.Listed = []string{goneMain, outer} // 바깥 트리는 살아 있다
+
+	c := WorktreeGoneCandidate(f.Worktree, f.ListOK, f.Listed)
+	if c.Tree != inner || c.Home != outer {
+		t.Fatalf("중첩 배치에서 잰 자리가 틀렸다: tree=%q home=%q (기대 %q · %q)", c.Tree, c.Home, inner, outer)
+	}
+	if v := WorktreeGone(f); !v.Gone {
+		t.Fatalf("안쪽 트리가 목록에 없고 서버에도 없는데 안 닫는다: %s", v.Reason)
+	}
+}
+
 // ── 닫아도 되는 카드인가 ────────────────────────────────────────────────
 
 func okGuards() GoneCardGuards {
-	return GoneCardGuards{State: model.SessionActive, Prior: PriorAutoCloseNone}
+	return GoneCardGuards{State: model.SessionActive}
 }
 
 func TestMayCloseGoneCardBaseline(t *testing.T) {
 	if ok, why := MayCloseGoneCard(okGuards()); !ok {
-		t.Fatalf("active · 선점 0 · 요청자 아님 · 앞선 자동 닫기 없음인데 안 닫는다: %s", why)
+		t.Fatalf("active · 선점 0 · mcp 신호 없음 · 요청자 아님인데 안 닫는다: %s", why)
 	}
 }
 
@@ -169,6 +208,21 @@ func TestMayCloseGoneCardLeavesClaimHolders(t *testing.T) {
 	}
 }
 
+// MCP 카드는 닫으면 되살릴 길이 없다 — ensureSession 은 프로세스당 한 번만 열고, 도구마다 찍는
+// mcp 신호(Tx.Beat)는 state 를 안 건드리며, 그 세션의 훅은 다른 3중키다. 그 사이 그 세션이
+// pick 하면 done 카드가 선점을 쥔다.
+func TestMayCloseGoneCardLeavesMCPCards(t *testing.T) {
+	g := okGuards()
+	g.HasMCPSignal = true
+	ok, why := MayCloseGoneCard(g)
+	if ok {
+		t.Fatal("mcp 신호가 있는 카드를 닫는다 — MCP 는 그 카드를 다시 안 열어 done 카드가 선점을 쥘 수 있다")
+	}
+	if !strings.Contains(why, "mcp") {
+		t.Fatalf("사유가 mcp 카드라는 사실을 말하지 않는다: %s", why)
+	}
+}
+
 func TestMayCloseGoneCardLeavesTheCaller(t *testing.T) {
 	g := okGuards()
 	g.IsSelf = true
@@ -178,12 +232,13 @@ func TestMayCloseGoneCardLeavesTheCaller(t *testing.T) {
 }
 
 // 카드당 한 번이다. 그리고 원장을 못 읽었으면 한도를 지킨다는 근거가 없으므로 안 닫는다.
-func TestMayCloseGoneCardOnlyOncePerCard(t *testing.T) {
+func TestPriorAutoCloseAllowsOnlyOncePerCard(t *testing.T) {
+	if ok, why := PriorAutoCloseAllows(PriorAutoCloseNone); !ok {
+		t.Fatalf("앞선 자동 닫기가 없는데 막는다: %s", why)
+	}
 	for _, p := range []PriorAutoClose{PriorAutoCloseSeen, PriorAutoCloseUnknown} {
-		g := okGuards()
-		g.Prior = p
-		if ok, _ := MayCloseGoneCard(g); ok {
-			t.Fatalf("앞선 자동 닫기 관측이 %v 인데 또 닫는다 — 되살아난 카드와 보드가 열림·닫힘을 오간다", p)
+		if ok, _ := PriorAutoCloseAllows(p); ok {
+			t.Fatalf("앞선 자동 닫기 관측이 %v 인데 또 닫는다 — 되살아난 카드와 파생이 열림·닫힘을 오간다", p)
 		}
 	}
 }

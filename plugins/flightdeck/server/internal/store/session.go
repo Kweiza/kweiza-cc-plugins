@@ -310,26 +310,52 @@ func (s *Store) SetSessionState(ctx context.Context, id string, state model.Sess
 	return s.Tx(ctx, func(t *Tx) error { return t.SetSessionState(id, state, why) })
 }
 
-// CloseSessionIfActiveUnclaimed 는 카드가 **지금 active 이고 풀리지 않은 선점이 0건일 때만**
-// done 으로 내린다. 내렸으면 true, 조건이 안 서서 안 내렸으면 false 다(오류가 아니다).
+// EventSessionCloseWorktreeGone 은 워크트리가 사라진 카드를 서버가 닫을 때 남기는 event kind 다.
 //
-// ★ 워크트리가 사라진 카드를 서버가 닫는 경로(service/gone_worktree.go) 전용이다. 사람이 치는
-// `fd close` 는 SetSessionState 를 그대로 쓴다 — 그쪽은 사람이 선점을 보고 판단한 뒤에 온다.
+// ★ store 가 소유한다. 이 kind 의 행은 **CloseSessionWhoseWorktreeIsGone 이 같은 트랜잭션
+// 안에서만** 쓴다 — 그래서 행이 있다는 것이 곧 그 닫기가 커밋됐다는 뜻이고, 같은 함수의
+// UPDATE 가 그 존재를 한도(카드당 한 번)로 읽는다. `session.state`(fd close·SessionEnd 가
+// PATCH 로 남기는 것)와 다른 kind 라 사람이 닫은 것과 서버가 닫은 것이 원장에서 갈린다.
+const EventSessionCloseWorktreeGone = "session.close.worktree_gone"
+
+// CloseSessionWhoseWorktreeIsGone 은 카드를 done 으로 내리고 **같은 트랜잭션 안에서** 원장 행을
+// 쓴다. 내렸으면 true, 조건이 안 서서 안 내렸으면 false 다(오류가 아니다).
 //
-// ★ 조건을 **UPDATE 한 문장 안에** 둔다. 판정(judge.MayCloseGoneCard)은 ListLive 로 읽은
-// 스냅숏을 보는데, 그 읽기와 이 쓰기 사이에 사람이 blocked 를 걸거나 세션이 항목을 집을 수
-// 있다. 여기서 다시 읽고 나서 쓰면 그 사이가 또 창이 된다 — 한 문장이면 창이 없다.
+// 조건은 셋이고 **UPDATE 한 문장 안에** 둔다:
+//
+//	state = active                              — blocked·paused·done 은 안 건드린다
+//	풀리지 않은 선점 0건                          — 닫힌 카드는 ListLive 에서 빠져 선점이 안 보인다
+//	이 kind 의 원장 행이 없다(카드당 한 번)        — 되살아난 카드는 다시 안 닫는다
+//
+// ★ 판정(judge.MayCloseGoneCard · PriorAutoCloseAllows)은 스냅숏을 보고, 그 읽기와 이 쓰기 사이에
+// 사람이 blocked 를 걸거나 · 세션이 항목을 집거나 · **다른 파생이 먼저 닫고 늦게 온 훅이 되살릴**
+// 수 있다. 마지막 모양이 워크트리를 지운 직후 여러 세션의 훅이 한꺼번에 보드를 치는 순간이고,
+// 이 쓰기는 BEGIN IMMEDIATE 로 잠금을 기다리므로(최대 busy_timeout) 그 창이 실제로 열린다.
+// 조건을 읽고 나서 쓰면 그 사이가 또 창이다 — 한 문장이면 창이 없다.
+//
+// ★★ **원장 행을 Tx.LogEvent(예약)로 안 쓰는 이유 — 이 저장소의 관례에서 일부러 벗어난다.**
+// 예약 이벤트는 커밋 **뒤에** 별도 커넥션으로 흐르고, 롤백돼도 흐르며, 그 INSERT 가 실패하면
+// WARN 한 줄로 삼켜진다(store.go 의 flushDeferred · event.go 의 LogEvent). 감사 원장에는 그게
+// 맞다 — "무엇을 시도했다 실패했나"가 남아야 하니까. 그런데 이 행은 감사 기록이면서 **상태
+// 전이의 가드로 읽힌다.** 예약으로 쓰면 ① UPDATE 는 커밋됐는데 행이 없는 순간·경우가 생겨
+// 한도가 풀리고 "원장에 남긴다"가 깨지며, ② 롤백된 시도도 행을 남겨 닫지 않은 카드가 이미
+// 닫혔다고 읽힌다. **가드로 읽히는 행은 전이와 원자적이어야 한다.** 그래서 같은 트랜잭션에서
+// 직접 INSERT 하고, 그 INSERT 가 실패하면 전이도 롤백된다.
+//
+// payload 의 `tx` 는 store 가 찍는다(TxOutcomeKey) — 이 행은 커밋될 때만 존재하므로 언제나
+// committed 다. 호출자가 같은 키를 실어도 덮는다.
 //
 // ★ state 만 바꾼다. blocked_why 를 안 건드리는 이유: 되살리기(Tx.OpenSession)는 state 만
 // active 로 돌리므로, 여기서 사유 칸에 무엇을 적으면 되살아난 카드에 옛 닫기 사유가 남는다.
-// 왜 닫았는지는 원장 이벤트가 나른다.
-func (t *Tx) CloseSessionIfActiveUnclaimed(id string) (bool, error) {
+func (t *Tx) CloseSessionWhoseWorktreeIsGone(id, project string, payload map[string]any) (bool, error) {
 	res, err := t.tx.ExecContext(t.ctx, `
 		UPDATE session SET state = ?
 		WHERE id = ? AND state = ?
 		  AND NOT EXISTS (SELECT 1 FROM claim c
-		                  WHERE c.session_id = session.id AND c.released_at IS NULL)`,
-		string(model.SessionDone), id, string(model.SessionActive))
+		                  WHERE c.session_id = session.id AND c.released_at IS NULL)
+		  AND NOT EXISTS (SELECT 1 FROM event e
+		                  WHERE e.session_id = session.id AND e.kind = ?)`,
+		string(model.SessionDone), id, string(model.SessionActive), EventSessionCloseWorktreeGone)
 	if err != nil {
 		return false, fmt.Errorf("세션 조건부 닫기 실패(session_id=%q): %w", clip(id, 64), err)
 	}
@@ -337,7 +363,25 @@ func (t *Tx) CloseSessionIfActiveUnclaimed(id string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("세션 조건부 닫기 결과 확인 실패(session_id=%q): %w", clip(id, 64), err)
 	}
-	return n == 1, nil
+	if n != 1 {
+		return false, nil // 조건이 안 섰다 — 원장에도 아무것도 안 남긴다
+	}
+	body := make(map[string]any, len(payload)+1)
+	for k, v := range payload {
+		body[k] = v
+	}
+	body[TxOutcomeKey] = TxCommitted
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return false, fmt.Errorf("자동 닫기 원장 payload 직렬화 실패(session_id=%q): %w", clip(id, 64), err)
+	}
+	if _, err := t.tx.ExecContext(t.ctx,
+		`INSERT INTO event(at, project, session_id, kind, payload) VALUES (?, ?, ?, ?, ?)`,
+		fmtTime(time.Now()), nullStr(project), id, EventSessionCloseWorktreeGone, string(buf)); err != nil {
+		// ★ 돌려주면 호출부의 Tx 가 롤백되고 위 UPDATE 도 같이 사라진다 — 기록 없는 닫기를 안 남긴다.
+		return false, fmt.Errorf("자동 닫기 원장 기록 실패(session_id=%q): %w", clip(id, 64), err)
+	}
+	return true, nil
 }
 
 // Rekey 는 카드의 cc_session_id 만 갈아끼운다.

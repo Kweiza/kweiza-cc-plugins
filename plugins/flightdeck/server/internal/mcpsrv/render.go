@@ -497,14 +497,19 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	// ★ 이 조회가 닫은 카드를 침묵하지 않는다. 그 카드는 v.Sessions 에서 이미 빠졌으므로
 	// 이 줄이 없으면 창 밖으로 밀려난 것과 서버가 닫은 것이 화면에서 같다.
 	// 근거를 문장에 싣는다 — "git 목록에서 사라졌다"는 나이·무응답이 아니라 좌표의 부재다
-	// (설계 §4 셋째 닫힘 경로). 되열림도 함께 말한다: 닫기가 판정이 아니라 관측이라는 뜻이다.
+	// (설계 §4 셋째 닫힘 경로).
+	//
+	// ★ "다시 열린다"는 **전제가 있는 문장**이라 그 전제를 함께 적는다. 서버는 mcp 신호가 있는
+	// 카드를 안 닫는다(judge.MayCloseGoneCard) — MCP 는 프로세스당 한 번만 카드를 열어 닫히면
+	// 되살릴 길이 없기 때문이다. 그래서 여기 나오는 카드는 훅·fd 명령이 여는 카드뿐이고, 그
+	// 카드들은 같은 좌표로 프롬프트·편집 훅이나 fd 명령이 오면 다시 열린다(Tx.OpenSession).
 	if n := len(v.ClosedGoneWorktree); n > 0 {
 		ids := make([]string, 0, n)
 		for _, c := range v.ClosedGoneWorktree {
 			ids = append(ids, ShortID(c.SessionID))
 		}
 		foot = append(foot, fmt.Sprintf(
-			"워크트리가 git 목록과 디스크에서 사라진 카드 %d장을 이 조회가 닫았다(%s) — 그 카드로 신호가 오면 다시 열린다",
+			"워크트리가 git 목록과 디스크에서 사라진 카드 %d장을 이 조회가 닫았다(%s) — mcp 신호가 없는 카드만 닫으므로 같은 좌표로 훅·fd 명령이 오면 다시 열린다",
 			n, strings.Join(ids, ", ")))
 	}
 	if opt.Detail {
