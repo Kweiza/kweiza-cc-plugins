@@ -494,6 +494,19 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 			"창 밖 %d건 %s— 창은 표시 구간이지 생존 판정이 아니다(지금 창 %s)",
 			v.OutOfWindow, age, FormatAge(v.Window)))
 	}
+	// ★ 이 조회가 닫은 카드를 침묵하지 않는다. 그 카드는 v.Sessions 에서 이미 빠졌으므로
+	// 이 줄이 없으면 창 밖으로 밀려난 것과 서버가 닫은 것이 화면에서 같다.
+	// 근거를 문장에 싣는다 — "git 목록에서 사라졌다"는 나이·무응답이 아니라 좌표의 부재다
+	// (설계 §4 셋째 닫힘 경로). 되열림도 함께 말한다: 닫기가 판정이 아니라 관측이라는 뜻이다.
+	if n := len(v.ClosedGoneWorktree); n > 0 {
+		ids := make([]string, 0, n)
+		for _, c := range v.ClosedGoneWorktree {
+			ids = append(ids, ShortID(c.SessionID))
+		}
+		foot = append(foot, fmt.Sprintf(
+			"워크트리가 git 목록과 디스크에서 사라진 카드 %d장을 이 조회가 닫았다(%s) — 그 카드로 신호가 오면 다시 열린다",
+			n, strings.Join(ids, ", ")))
+	}
 	if opt.Detail {
 		foot = append(foot, boardDetailFoot(v)...)
 	} else {
