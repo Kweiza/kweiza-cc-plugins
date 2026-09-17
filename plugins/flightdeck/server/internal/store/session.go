@@ -321,10 +321,11 @@ const EventSessionCloseWorktreeGone = "session.close.worktree_gone"
 // CloseSessionWhoseWorktreeIsGone 은 카드를 done 으로 내리고 **같은 트랜잭션 안에서** 원장 행을
 // 쓴다. 내렸으면 true, 조건이 안 서서 안 내렸으면 false 다(오류가 아니다).
 //
-// 조건은 셋이고 **UPDATE 한 문장 안에** 둔다:
+// 조건은 넷이고 **UPDATE 한 문장 안에** 둔다:
 //
 //	state = active                              — blocked·paused·done 은 안 건드린다
 //	풀리지 않은 선점 0건                          — 닫힌 카드는 ListLive 에서 빠져 선점이 안 보인다
+//	mcp 신호가 없다                              — MCP 카드는 되살릴 길이 없다(judge.MayCloseGoneCard 와 같은 조건)
 //	이 kind 의 원장 행이 없다(카드당 한 번)        — 되살아난 카드는 다시 안 닫는다
 //
 // ★ 판정(judge.MayCloseGoneCard · PriorAutoCloseAllows)은 스냅숏을 보고, 그 읽기와 이 쓰기 사이에
@@ -332,6 +333,14 @@ const EventSessionCloseWorktreeGone = "session.close.worktree_gone"
 // 수 있다. 마지막 모양이 워크트리를 지운 직후 여러 세션의 훅이 한꺼번에 보드를 치는 순간이고,
 // 이 쓰기는 BEGIN IMMEDIATE 로 잠금을 기다리므로(최대 busy_timeout) 그 창이 실제로 열린다.
 // 조건을 읽고 나서 쓰면 그 사이가 또 창이다 — 한 문장이면 창이 없다.
+//
+// ★★ mcp 신호 조건은 state·선점과 **같은 이유로** 여기 다시 선다(2026-09-18) — 그전에는 judge 쪽
+// 스냅숏에만 있어 한 층이었다. 스냅숏을 읽는 시점과 이 UPDATE 사이에 그 세션의 **첫**
+// `Beat(model.SignalMCP)` 가 끼면(`mcpsrv.callTool` 은 `ensureSession` 뒤에 별도로 신호를 찍는다),
+// 판정은 "신호 없음"을 보고 OK 를 냈는데 쓰기 시점엔 이미 신호가 있는 카드가 된다. 이 조건이
+// 없으면 그 늦은 UPDATE 가 신호를 무시하고 되살릴 수 없는 카드를 닫는다 — signal 표는
+// PK(session_id, kind) 라 종류당 upsert 이므로(schema.sql) "신호가 한 번이라도 있었나"를
+// EXISTS 하나로 묻는다.
 //
 // ★★ **원장 행을 Tx.LogEvent(예약)로 안 쓰는 이유 — 이 저장소의 관례에서 일부러 벗어난다.**
 // 예약 이벤트는 커밋 **뒤에** 별도 커넥션으로 흐르고, 롤백돼도 흐르며, 그 INSERT 가 실패하면
@@ -353,9 +362,11 @@ func (t *Tx) CloseSessionWhoseWorktreeIsGone(id, project string, payload map[str
 		WHERE id = ? AND state = ?
 		  AND NOT EXISTS (SELECT 1 FROM claim c
 		                  WHERE c.session_id = session.id AND c.released_at IS NULL)
+		  AND NOT EXISTS (SELECT 1 FROM signal g
+		                  WHERE g.session_id = session.id AND g.kind = ?)
 		  AND NOT EXISTS (SELECT 1 FROM event e
 		                  WHERE e.session_id = session.id AND e.kind = ?)`,
-		string(model.SessionDone), id, string(model.SessionActive), EventSessionCloseWorktreeGone)
+		string(model.SessionDone), id, string(model.SessionActive), string(model.SignalMCP), EventSessionCloseWorktreeGone)
 	if err != nil {
 		return false, fmt.Errorf("세션 조건부 닫기 실패(session_id=%q): %w", clip(id, 64), err)
 	}

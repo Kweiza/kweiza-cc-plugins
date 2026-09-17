@@ -87,6 +87,47 @@ func TestCloseSessionWhoseWorktreeIsGoneRefusesBlockedClaimedAndDone(t *testing.
 	}
 }
 
+// mcp 신호 조건은 state·선점과 같은 자리(UPDATE 한 문장)에 있어야 한다 — judge.MayCloseGoneCard
+// 만 있으면 스냅숏을 읽은 뒤 첫 Beat(mcp) 가 끼는 창에서 이 쓰기가 신호를 무시하고 닫는다
+// (§4 「알고 남기는 구멍」). 이 시험은 그 쓰기 문장을 판정 없이 직접 불러 SQL 층만 잰다.
+func TestCloseSessionWhoseWorktreeIsGoneRefusesMCPSignaled(t *testing.T) {
+	s := newStore(t)
+	seed(t, s, "p")
+	ctx := context.Background()
+
+	// ① mcp 신호가 있는 카드 → 안 닫는다. MCP 는 프로세스당 한 번만 열어 닫히면 되살릴 길이 없다.
+	mcpCard := mustSession(t, s, "p", "cc-mcp")
+	if err := s.Beat(ctx, mcpCard.ID, model.SignalMCP, time.Time{}); err != nil {
+		t.Fatalf("mcp 신호 기록 실패: %v", err)
+	}
+	if closeIfActiveUnclaimed(t, s, mcpCard.ID) {
+		t.Fatal("mcp 신호가 있는 카드를 닫았다 — MCP 는 그 카드를 다시 안 열어 done 카드가 선점을 쥘 수 있다")
+	}
+	if got, _ := s.GetSession(ctx, mcpCard.ID); got.State != model.SessionActive {
+		t.Fatalf("mcp 신호가 있는 카드의 state 가 %q 로 바뀌었다", got.State)
+	}
+
+	// ② mcp 신호가 없는 다른 카드는 그대로 닫힌다 — 서브쿼리가 session.id 상관 참조를
+	//    잃으면(변이) ①의 mcp 신호 한 행이 프로젝트의 모든 카드를 막는다. 이 카드는 그
+	//    신호와 무관하므로 정상 닫기가 여기서 드러난다.
+	plain := mustSession(t, s, "p", "cc-plain")
+	if !closeIfActiveUnclaimed(t, s, plain.ID) {
+		t.Fatal("mcp 신호 없는 카드를 안 닫았다 — 다른 카드의 mcp 신호가 상관 없이 전부를 막았을 수 있다")
+	}
+	if got, _ := s.GetSession(ctx, plain.ID); got.State != model.SessionDone {
+		t.Fatalf("닫혔어야 하는데 state=%q 다", got.State)
+	}
+
+	// ③ mcp 가 아닌 신호(tool)만 있는 카드도 그대로 닫힌다 — kind 조건이 'mcp' 하나만 봐야 한다.
+	toolOnly := mustSession(t, s, "p", "cc-tool")
+	if err := s.Beat(ctx, toolOnly.ID, model.SignalTool, time.Time{}); err != nil {
+		t.Fatalf("tool 신호 기록 실패: %v", err)
+	}
+	if !closeIfActiveUnclaimed(t, s, toolOnly.ID) {
+		t.Fatal("tool 신호만 있는 카드를 안 닫았다 — mcp 아닌 신호까지 막으면 정상 닫기가 깨진다")
+	}
+}
+
 // goneEvents 는 그 카드의 자동 닫기 원장 행 payload 들이다.
 func goneEvents(t *testing.T, s *Store, id string) []map[string]any {
 	t.Helper()
