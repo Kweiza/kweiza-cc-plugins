@@ -86,6 +86,13 @@ func ShortID(id string) string {
 //
 // 설계 §6: 모든 패널에 "(파생: git@14:31, 12초 전)" 이 붙는다.
 // 서버가 죽었을 때 마지막 상태가 현재 사실인 척하는 것을 구조로 막는 축이다.
+//
+// ★ **이 줄은 수만 낸다 — 이름은 안 낸다.** 이 형식은 여러 시험과 훅·배너가 그대로
+// 단정하므로 여기서 늘리지 않는다. 이름·사유가 필요한 자리는 이 줄 다음에
+// renderFailures/RenderFailureAxes 를 **따로** 불러야 한다(실측 2026-09-17: 수만 보고는
+// 무엇을 못 읽었는지 알 길이 없어 board --detail → status --help → 소스 읽기 →
+// dashboard.json curl 을 거쳐서야 세션 하나를 찾았다 — 그 세션은 지운 워크트리를
+// 가리키는 유령 카드였다). RenderBoard(비-detail)·`fd open` 이 이제 그렇게 한다.
 func FormatFreshness(d service.Derived) string {
 	f := d.Freshness
 	state := "최신"
@@ -98,6 +105,20 @@ func FormatFreshness(d service.Derived) string {
 	}
 	return s
 }
+
+// FailureAxisBriefLimit 은 "간단히" 보여줄 때 못 읽은 축 이름을 몇 줄까지 펼칠지다.
+//
+// ★ 판정(2026-09-17): 예전에는 detail=true 일 때만 이름을 냈고, 간단 화면은
+// "detail=true 로 축 이름과 원인을 본다"는 안내만 냈다. 그런데 그 안내를 받은 사람이
+// 실제로 겪은 일은 board --detail 로도 못 찾아(그 세션은 다른 원인으로 잘려 있었다)
+// status --help → 소스 읽기 → dashboard.json curl 을 거친 것이었다 — 안내가 있어도
+// 이름이 없으면 결국 못 찾는다. 그래서 간단 화면에도 **항상** 이름을 낸다.
+//
+// 다만 무한정 펼치면 그 자체가 새 소음이 된다(세션 20개가 전부 실패하면 축 40개).
+// 그래서 자른다 — 값 6은 RenderPick 과 **공유한다**(상수 하나, 리터럴을 안 남긴다).
+// 리터럴로 따로 박으면 한쪽을 바꿀 때 다른 쪽이 말없이 남는다 — 이 레포가 "도구 수를
+// 적은 주석"에서 이미 두 번 겪은 바로 그 함정이다.
+const FailureAxisBriefLimit = 6
 
 // renderFailures 는 파생 실패를 축 이름과 원인 전문으로 낸다.
 // 침묵하면 빈 필드가 "값이 0이다"로 읽힌다.
@@ -119,6 +140,18 @@ func renderFailures(d service.Derived, limit int) []string {
 		out = append(out, "  · "+r)
 	}
 	return out
+}
+
+// RenderFailureAxes 는 renderFailures 를 패키지 밖(cmd/fd)에도 연다.
+//
+// mcpsrv 안의 Renderxxx 함수는 전부 못 읽은 축을 이 함수(내부적으로는 renderFailures)로
+// 나른다. `fd open`(cmd/fd/cmds.go)은 mcpsrv 밖에서 FormatFreshness 만 불렀던 유일한
+// 자리였다 — FormatFreshness 가 수만 내므로 그 화면은 이름 없이 수만 보여줬다. 이 함수를
+// 새로 export 하는 대신 renderFailures 이름을 바꾸지 않는 이유: 그 이름을 그대로 가리키는
+// 주석이 이 파일과 render_lines_test.go·render_partial_test.go 에 이미 여럿이라, 바꾸면
+// 그 주석들이 전부 낡는다.
+func RenderFailureAxes(d service.Derived, limit int) []string {
+	return renderFailures(d, limit)
 }
 
 // foldTwinFailures 는 **한 원인이 낸 실패 둘**을 한 줄로 접는다. 순수 함수다.
@@ -455,11 +488,18 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if v.Lane != nil {
 		foot = append(foot, renderLane(v.Lane, now, opt.Detail)...)
 	}
+	// ★ 판정(2026-09-17): 예전에는 간단 화면(opt.Detail=false)이 수만 내고 이름은
+	// "detail=true 로 보라"로 미뤘다. 그런데 못 읽은 축은 드물어서(대개 0~2개) 그 드묾이
+	// 곧 "다시 detail=true 로 부를 이유가 있다"는 판단 자체를 못 하게 만든다 — 실측이
+	// 그 값을 오늘 치렀다(FormatFreshness 독스트링을 보라). 그래서 간단 화면에도 이름을
+	// 낸다. detail=true 는 여전히 무제한(0)이다 — 그때는 "전부 본다"는 게 이미 계약이다
+	// (pathLimit 도 detail 이면 0 이 되는 것과 같은 결이다). 간단 화면은
+	// FailureAxisBriefLimit 로 자른다 — 세션 다수가 한꺼번에 실패해도 이 절이
+	// 카드 예산을 통째로 먹지 않게 한다.
 	if opt.Detail {
 		foot = append(foot, renderFailures(v.Derived, 0)...)
-	} else if len(v.Derived.Failures) > 0 {
-		foot = append(foot, fmt.Sprintf("파생 %d축을 못 읽었다 — detail=true 로 축 이름과 원인을 본다",
-			len(v.Derived.Failures)))
+	} else {
+		foot = append(foot, renderFailures(v.Derived, FailureAxisBriefLimit)...)
 	}
 
 	if opt.Detail {
@@ -1565,7 +1605,7 @@ func RenderPick(r service.PickResult, now time.Time) string {
 		}
 	}
 
-	if lines := renderFailures(r.Derived, 6); len(lines) > 0 {
+	if lines := renderFailures(r.Derived, FailureAxisBriefLimit); len(lines) > 0 {
 		b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
 	}
 	fmt.Fprintf(&b, "\n%s", FormatFreshness(r.Derived))

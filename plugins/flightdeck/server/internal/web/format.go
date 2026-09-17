@@ -174,6 +174,14 @@ func ActivityOf(now time.Time, sig map[model.SignalKind]time.Time) (bool, string
 //
 // 설계 §6 이 요구하는 전 패널 공통 표기다. 관측 시각이 없으면 **시각을 지어내지 않고**
 // 그 사실을 쓴다 — 지어내면 서버가 죽은 화면이 현재 사실인 척한다.
+//
+// ★ 이 줄은 못 읽은 축의 **수만** 낸다 — 이름은 안 낸다(mcpsrv.FormatFreshness 와 같은
+// 규율: 여러 시험이 이 형식 그대로를 단정한다). 이름·사유는 이 줄이 아니라
+// Panel.Fail 이 나르고, "pfail" 템플릿(dashboard.gohtml)이 축마다 펼쳐 보여준다 —
+// Live·Blocked 패널만 board.Failures 를 Panel.Fail 로 넘긴다(page.go). 나머지
+// 패널(Unacked·Queue·Landing·Search)은 DB 만 읽어 git 파생이 원천적으로 없으므로
+// failures 인자가 항상 0이고, 그래서 Fail 도 항상 비어 있다 — 침묵이 아니라 "이 축이
+// 없다"는 사실이다.
 func DerivedLabel(now time.Time, f model.Freshness, failures int) string {
 	src := strings.TrimSpace(f.Source)
 	if src == "" {

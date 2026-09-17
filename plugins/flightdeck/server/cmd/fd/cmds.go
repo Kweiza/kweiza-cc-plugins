@@ -189,6 +189,12 @@ func (a *App) runOpen(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "이미 쥐고 있는 항목: %s\n", strings.Join(res.Claims, " "))
 	}
 	fmt.Fprintln(out, mcpsrv.FormatFreshness(res.Derived))
+	// ★ FormatFreshness 는 수만 낸다 — 못 읽은 축의 이름은 따로 낸다(그 함수 독스트링을
+	// 보라). `open` 은 세션이 처음 보는 화면이라, 이름이 없으면 유령 카드 같은 결함을
+	// 세션이 이 시점에 못 알아채고 넘어간다.
+	for _, line := range mcpsrv.RenderFailureAxes(res.Derived, mcpsrv.FailureAxisBriefLimit) {
+		fmt.Fprintln(out, line)
+	}
 	a.printTail(ctx, out)
 	return 0
 }
