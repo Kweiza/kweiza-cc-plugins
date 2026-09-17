@@ -398,6 +398,27 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	head = append(head,
 		fmt.Sprintf("보드 · %s · %s · %s",
 			v.Project.ID, v.At.UTC().Format("2006-01-02 15:04 UTC"), FormatFreshness(v.Derived)),
+	)
+	// ★ 판정(2026-09-17, 자리): 이름 절은 머리줄(「못 읽은 축 N개」가 있는 줄) **바로
+	// 다음 줄**에 붙인다. 예전에는 foot 맨 끝(카드·선점·큐 목록을 다 지난 뒤)에 있어서,
+	// 실측 20줄 화면 기준으로 수를 말하는 2번째 줄과 이름을 말하는 19번째 줄이 17줄
+	// 떨어져 있었다 — 첫 화면만 보면 수는 보이고 이름은 안 보인다(실제로 이 항목을
+	// 랜딩한 직후 그렇게 오판할 뻔했다).
+	//
+	// ★ 판정(2026-09-17, 낸다): 예전에는 간단 화면(opt.Detail=false)이 수만 내고 이름은
+	// "detail=true 로 보라"로 미뤘다. 그런데 못 읽은 축은 드물어서(대개 0~2개) 그 드묾이
+	// 곧 "다시 detail=true 로 부를 이유가 있다"는 판단 자체를 못 하게 만든다 — 실측이
+	// 그 값을 오늘 치렀다(FormatFreshness 독스트링을 보라). 그래서 간단 화면에도 이름을
+	// 낸다. detail=true 는 여전히 무제한(0)이다 — 그때는 "전부 본다"는 게 이미 계약이다
+	// (pathLimit 도 detail 이면 0 이 되는 것과 같은 결이다). 간단 화면은
+	// FailureAxisBriefLimit 로 자른다 — 세션 다수가 한꺼번에 실패해도 이 절이
+	// 카드 예산을 통째로 먹지 않게 한다.
+	if opt.Detail {
+		head = append(head, renderFailures(v.Derived, 0)...)
+	} else {
+		head = append(head, renderFailures(v.Derived, FailureAxisBriefLimit)...)
+	}
+	head = append(head,
 		fmt.Sprintf("잡혀 있는 작업 %d건 (선점 기준이다 — 세션의 생사가 아니다)",
 			len(claimed)+len(v.OutsideClaims)),
 	)
@@ -488,19 +509,9 @@ func RenderBoard(v service.BoardView, opt BoardRenderOptions) string {
 	if v.Lane != nil {
 		foot = append(foot, renderLane(v.Lane, now, opt.Detail)...)
 	}
-	// ★ 판정(2026-09-17): 예전에는 간단 화면(opt.Detail=false)이 수만 내고 이름은
-	// "detail=true 로 보라"로 미뤘다. 그런데 못 읽은 축은 드물어서(대개 0~2개) 그 드묾이
-	// 곧 "다시 detail=true 로 부를 이유가 있다"는 판단 자체를 못 하게 만든다 — 실측이
-	// 그 값을 오늘 치렀다(FormatFreshness 독스트링을 보라). 그래서 간단 화면에도 이름을
-	// 낸다. detail=true 는 여전히 무제한(0)이다 — 그때는 "전부 본다"는 게 이미 계약이다
-	// (pathLimit 도 detail 이면 0 이 되는 것과 같은 결이다). 간단 화면은
-	// FailureAxisBriefLimit 로 자른다 — 세션 다수가 한꺼번에 실패해도 이 절이
-	// 카드 예산을 통째로 먹지 않게 한다.
-	if opt.Detail {
-		foot = append(foot, renderFailures(v.Derived, 0)...)
-	} else {
-		foot = append(foot, renderFailures(v.Derived, FailureAxisBriefLimit)...)
-	}
+	// ★ 못 읽은 파생 축 이름 절은 여기가 아니라 head 에 있다(머리줄 바로 다음 줄) —
+	// 위 head 조립부의 판정(2026-09-17)을 보라. foot 끝에 두면 카드·선점·큐 목록만큼
+	// 수(머리줄)와 이름(이 절)이 떨어진다.
 
 	if opt.Detail {
 		return joinAll(head, blocks, foot, opt.Tail)

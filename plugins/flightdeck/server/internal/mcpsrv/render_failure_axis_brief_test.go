@@ -134,3 +134,48 @@ func TestRenderBoardBriefFailureNamesDoNotLeakIntoFirstLine(t *testing.T) {
 		t.Fatalf("축 이름이 어디에도 없다 — 첫 줄 밖에서도 나야 한다:\n%s", got)
 	}
 }
+
+// TestRenderBoardFailureNamesSitRightBelowHeaderLine 은 요구 ⑹이다 — 이름 절이
+// 「못 읽은 축 N개」가 있는 머리줄 **바로 다음 줄**에 붙는지를 줄 번호로 잰다.
+//
+// 실측(2026-09-17): 이름 절이 foot 맨 끝(카드·선점·세션·창 밖·큐 목록을 다 지난 뒤)에
+// 있었다 — 20줄짜리 화면에서 수는 2번째 줄, 이름은 19번째 줄이었다. "출력 어딘가에
+// 있다"만 재면 그 간격도 통과한다 — 이 시험은 정확히 몇 번째 줄인지를 잰다.
+// brief·detail 두 경로 다 잰다: 한쪽만 옮기고 다른 쪽을 그대로 두면 같은 화면이
+// 모드에 따라 다르게 읽힌다.
+func TestRenderBoardFailureNamesSitRightBelowHeaderLine(t *testing.T) {
+	v := briefBoard([]service.DerivedFailure{
+		{Axis: "widget-axis-zzz", Detail: "위젯 원인을 못 읽었다"},
+	})
+
+	for _, tc := range []struct {
+		name string
+		opt  BoardRenderOptions
+	}{
+		{"brief", BoardRenderOptions{Now: t0}},
+		{"detail", BoardRenderOptions{Now: t0, Detail: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RenderBoard(v, tc.opt)
+			lines := strings.Split(got, "\n")
+
+			headerIdx := -1
+			for i, l := range lines {
+				if strings.Contains(l, "못 읽은 축") {
+					headerIdx = i
+					break
+				}
+			}
+			if headerIdx < 0 {
+				t.Fatalf("머리줄(못 읽은 축 N개)이 없다:\n%s", got)
+			}
+			if headerIdx+1 >= len(lines) {
+				t.Fatalf("머리줄 다음 줄이 없다:\n%s", got)
+			}
+			if next := lines[headerIdx+1]; !strings.HasPrefix(next, "못 읽은 파생") {
+				t.Fatalf("머리줄(%d번째 줄) 바로 다음 줄이 이름 절로 시작하지 않는다 — %q:\n%s",
+					headerIdx+1, next, got)
+			}
+		})
+	}
+}
