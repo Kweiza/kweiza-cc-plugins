@@ -1158,6 +1158,16 @@ func TestContainerFilesKeepTheDesignedCoordinates(t *testing.T) {
 		"HEALTHCHECK",
 		"EXPOSE 7420",
 	)
+	// ★ 바인드 마운트 너머의 인덱스 stat 은 컨테이너에서 어긋난다(2026-09-22 실측). 이 두 줄이
+	// 빠지면 git 이 추적 파일 전부를 매번 다시 읽고, 큰 저장소의 미커밋 관측이 제한 시간을 넘긴다
+	// — healthz 는 계속 ok 라서 훅 시간 초과로만 드러난다. 수가 셋이어야 셋째 키까지 읽힌다.
+	mustContain(t, "Dockerfile", string(df),
+		`GIT_CONFIG_COUNT="3"`,
+		`GIT_CONFIG_KEY_1="core.checkStat"`,
+		`GIT_CONFIG_VALUE_1="minimal"`,
+		`GIT_CONFIG_KEY_2="core.trustctime"`,
+		`GIT_CONFIG_VALUE_2="false"`,
+	)
 	cf, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
 	if err != nil {
 		t.Fatalf("compose.yaml 이 없다: %v", err)

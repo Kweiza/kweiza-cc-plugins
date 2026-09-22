@@ -65,9 +65,26 @@ ENV GIT_OPTIONAL_LOCKS="0"
 
 # 컨테이너 uid 와 저장소 소유자가 어긋나면 git 이 `dubious ownership` 으로 거절한다.
 # 파일에 안 쓰고 환경으로 준다 — 이미지에 설정 파일을 남기지 않기 위해서다.
-ENV GIT_CONFIG_COUNT="1" \
+#
+# ★ `core.checkStat=minimal` · `core.trustctime=false` 도 같은 이유로 여기서 준다.
+#   인덱스의 stat 기록(inode·장치·ctime)은 호스트가 적은 값이고, 바인드 마운트 너머의
+#   컨테이너에는 다른 값으로 보인다. 그러면 git 이 추적 파일 **전부를** 바뀐 것으로 보고
+#   매 호출 내용을 다시 읽는다. 마운트가 읽기 전용이고 위의 GIT_OPTIONAL_LOCKS=0 이라
+#   인덱스를 고쳐 둘 수도 없어서 이 비용은 영영 안 줄어든다. minimal 은 mtime 초와 크기만
+#   대조한다 — 호스트에서 한 초 안에 같은 크기로 고친 파일만 놓치는데, 그 파일은 다음
+#   관측에서 잡힌다.
+#   2026-09-22 실측(OrbStack virtiofs, 추적 파일 약 11,000개): `status --porcelain` 이
+#   호스트 0.23초 ↔ 컨테이너 21초(추적 2.4GB)·5초였다. 미커밋 관측 두 번이 각각
+#   gitreader.DefaultTimeout(10초)에 걸려 dashboard 가 20초 걸렸고, 5초 예산의
+#   UserPromptSubmit 훅이 프롬프트마다 시간 초과했다. 두 설정을 넣자 같은 저장소가
+#   컨테이너에서도 1초 안에 끝났다.
+ENV GIT_CONFIG_COUNT="3" \
     GIT_CONFIG_KEY_0="safe.directory" \
-    GIT_CONFIG_VALUE_0="*"
+    GIT_CONFIG_VALUE_0="*" \
+    GIT_CONFIG_KEY_1="core.checkStat" \
+    GIT_CONFIG_VALUE_1="minimal" \
+    GIT_CONFIG_KEY_2="core.trustctime" \
+    GIT_CONFIG_VALUE_2="false"
 
 # ★ 헬스체크가 /healthz 를 친다. 종료코드가 아니라 **그 응답**이 판정 근거다 —
 #   서버 프로세스가 살아 있는 것과 DB 가 열려 있는 것은 다른 사실이고,
