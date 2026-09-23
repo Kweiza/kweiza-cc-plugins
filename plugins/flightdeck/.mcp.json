@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "fd": {
-      "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/fd",
-      "args": ["mcp"]
-    }
-  }
-}

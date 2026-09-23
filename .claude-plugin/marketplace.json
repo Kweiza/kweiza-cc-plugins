@@ -21,8 +21,11 @@
     },
     {
       "name": "flightdeck",
-      "description": "Parallel session coordination — one self-hosted service that many sessions across machines register with: session board, work queue, merge queue, live dashboard",
-      "source": "./plugins/flightdeck",
+      "description": "Parallel session coordination for Claude Code and codex — one self-hosted service that many sessions across machines register with: session board, work queue, merge queue, live dashboard",
+      "source": {
+        "source": "github",
+        "repo": "Kweiza/flightdeck"
+      },
       "category": "productivity"
     }
   ]
